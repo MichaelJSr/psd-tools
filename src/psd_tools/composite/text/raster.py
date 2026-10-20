@@ -306,17 +306,17 @@ def _compose(
     w, h = x1 - x0, y1 - y0
     if w * h > limit:
         raise TextRenderError(f"canvas {w}x{h} exceeds {limit} pixels")
-    alpha = np.zeros((h, w), np.float32)
+    # Coverage is summed in 8-bit units and clipped once at the end.
+    acc = np.zeros((h, w), np.uint32)
     rgb = np.zeros((h, w, 3), np.float32)
     fills = {f for _, _, _, f in items}
-    best = np.zeros((h, w), np.float32) if len(fills) > 1 else None
-    for x, y, cov8, fill in items:
-        cov = cov8.astype(np.float32) / 255
+    best = np.zeros((h, w), np.uint8) if len(fills) > 1 else None
+    for x, y, cov, fill in items:
         ys, xs = (
             slice(y - y0, y - y0 + cov.shape[0]),
             slice(x - x0, x - x0 + cov.shape[1]),
         )
-        alpha[ys, xs] += cov
+        acc[ys, xs] += cov
         if best is None:
             continue
         # Where fills overlap the larger coverage keeps the pixel.
@@ -324,11 +324,12 @@ def _compose(
         rgb[ys, xs][win] = fill
         np.maximum(best[ys, xs], cov, out=best[ys, xs])
     if best is None:
-        rgb[alpha > 0] = fills.pop()
+        rgb[acc > 0] = fills.pop()
     if mode.threshold is not None:
-        alpha = (alpha > mode.threshold).astype(np.float32)
+        alpha = (acc > mode.threshold * 255).astype(np.float32)
     else:
-        np.clip(alpha, 0, 1, out=alpha)
+        alpha = np.minimum(acc, 255).astype(np.float32)
+        alpha /= 255
     rgba = np.concatenate([rgb, alpha[..., None]], axis=-1)
     return rgba, (x0, y0, x1, y1)
 
