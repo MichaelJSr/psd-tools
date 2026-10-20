@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from psd_tools.api.effects import DropShadow
 from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite, effects, utils
@@ -718,18 +719,15 @@ def test_an_unreadable_drop_shadow_is_dropped_and_the_document_renders(
 # Each case is a document, the region around its drop shadows (None for the
 # whole document), the bound the render is held to, and a floor under the
 # error of the same render with the shadows switched off -- which is what
-# shows the region is measuring a shadow at all. Measured with the
-# ``force=False`` render these tests make:
+# shows the region is measuring a shadow at all. The bounds are what the
+# ``force=False`` render these tests make scores, with room for a pixel:
 #
-# - layer_effects.psd: 4.3e-6 against 1.4e-3 without. The region stops short
-#   of the layer below, whose inner shadow is not drawn.
-# - masks.psb, the whole document: 1.3e-5 against 1.8e-4 without.
-# - layer_params.psb: 5.2e-3 against 2.7e-2 without. What is left is the
-#   outer glow on the same layer, which is not drawn; the bound is what pins
-#   spread, since leaving spread out scores 6.6e-3 and shrinking the
-#   silhouette by it, as #679 first did, 9.2e-3.
-# - layer_comps.psb, the whole document: 4.5e-3 against 6.7e-3 without,
-#   the rest being a bevel that is not drawn.
+# - layer_effects.psd: the region stops short of the layer below, whose inner
+#   shadow is not drawn.
+# - layer_params.psb: what is left is the outer glow on the same layer, which
+#   is not drawn. The bound is what pins spread: leaving it out, or shrinking
+#   the silhouette by it as #679 first did, scores above it.
+# - layer_comps.psb: the rest is a bevel that is not drawn.
 _PREVIEWS = [
     ("layer_effects.psd", (60, 215, 620, 296), 1e-5, 1e-3),
     ("masks.psb", None, 3e-5, 1.5e-4),
@@ -777,11 +775,34 @@ def test_drop_shadows_render_to_photoshops_preview(
 
 
 def test_drop_shadows_render_to_photoshops_preview_when_forced() -> None:
-    """``force=True`` redraws masks.psb's cards from their paths: 1.6e-5."""
+    """``force=True`` redraws masks.psb's cards from their paths."""
     assert _error(PSDImage.open(full_name("masks.psb")), None, force=True) <= 3e-5
 
 
+# The gaussian width per pixel of size that best matches Photoshop's previews.
+# Fitted on the fixture corpus (layer_effects.psd, masks.psb, layer_comps.psb,
+# sizes 10 to 100 px) and confirmed on a card corpus of 813 Photoshop renders:
+# the shadows a size of 50 to 250 px casts from a filled silhouette are
+# matched point for point at this width, and a 2 px shadow, the common case,
+# cannot tell widths apart.
+_FITTED_SIGMA_PER_SIZE = 0.45
+
+
+def test_the_blur_width_is_the_fitted_constant() -> None:
+    """The blur's width is a fit, so a change to it is a measured change.
+
+    Photoshop's blur is not a plain gaussian; a gaussian of this width stands
+    in for it. The fidelity cases above hold the fit to Photoshop's previews;
+    this pins the number itself so that it is not retuned on one fixture.
+    """
+    assert effects._SHADOW_SIGMA_PER_SIZE == _FITTED_SIGMA_PER_SIZE
+
+
 # -- Contour, noise, global light and the allocation guard ------------------ #
+
+
+def _drop_shadow(layer: Layer) -> DropShadow:
+    return cast(DropShadow, next(iter(layer.effects.find("dropshadow"))))
 
 
 def _contour(points: list[tuple[float, float]]) -> Descriptor:
@@ -806,7 +827,7 @@ def test_photoshops_linear_contour_is_the_identity() -> None:
     corpus this was built for carries.
     """
     _, card = _masks_card()
-    shadow = next(iter(card.effects.find("dropshadow")))
+    shadow = _drop_shadow(card)
     assert shadow.contour[Key.Name].value.rstrip("\x00") == "Linear"
     assert effects.contour_table(shadow.contour) is None
     assert effects.contour_table(None) is None
@@ -823,7 +844,7 @@ def test_a_contour_table_passes_through_its_points_in_order() -> None:
     """
     psd = PSDImage.open(full_name("layer_params.psb"))
     caption = next(layer for layer in psd.descendants() if layer.name == "Test caption")
-    shadow = next(iter(caption.effects.find("dropshadow")))
+    shadow = _drop_shadow(caption)
     points = [
         (float(point[Key.Horizontal]), float(point[Key.Vertical]))
         for point in shadow.contour[Key.Curve]
@@ -944,7 +965,7 @@ def test_noise_is_read_but_not_applied(caplog: pytest.LogCaptureFixture) -> None
     viewport = _around(layer)
     plain = _alone(layer, viewport)
     _shadow_descriptor(layer)[Key.Noise] = Double(50.0)
-    assert next(iter(layer.effects.find("dropshadow"))).noise == 50.0
+    assert _drop_shadow(layer).noise == 50.0
     with caplog.at_level(logging.DEBUG, logger="psd_tools.composite.composite"):
         noisy = _alone(layer, viewport)
     assert "noise" in caplog.text
@@ -962,7 +983,7 @@ def test_a_shadow_lit_by_the_global_light_follows_the_documents_angle() -> None:
     psd, layer = _masks_card()
     shadow = _forge_shadow(layer, Blur=0.0, Distance=20.0, Opacity=100.0)
     shadow[Key.UseGlobalAngle] = True
-    effect = next(iter(layer.effects.find("dropshadow")))
+    effect = _drop_shadow(layer)
     assert effect.use_global_light
     assert effect.angle == 90
     viewport = _around(layer, 30)

@@ -669,13 +669,9 @@ def draw_stroke_effect_split(
 
 
 # How wide a gaussian stands in for the blur Photoshop gives a drop shadow of a
-# given size. Photoshop's blur is its own, so this is fitted rather than
-# derived. Measured against Photoshop's preview around every drop shadow in
-# the fixture corpus, the three documents whose shadows are wide enough to
-# tell (layer_effects.psd, masks.psb, layer_comps.psb) are each best between
-# 0.43 and 0.48, and the fourth (layer_params.psb, 5 px) barely moves. A third,
-# the usual rule of thumb, leaves the falloff too steep: around
-# layer_effects.psd's shadow it scores 4.0e-5 where this scores 4.3e-6.
+# given size. Photoshop's blur is its own, so this is fitted against its
+# previews rather than derived; a third of the size, the usual rule of thumb,
+# leaves the falloff too steep. The fit is asserted in the tests.
 _SHADOW_SIGMA_PER_SIZE = 0.45
 
 # What one pixel of a shadow's canvas costs at the peak of
