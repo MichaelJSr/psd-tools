@@ -34,15 +34,20 @@ class RenderResult:
 
 @dataclass(frozen=True)
 class Fidelity:
-    """Agreement between a render and a stored raster; the harness metrics."""
+    """Agreement between a render and a stored raster; the harness metrics.
 
-    iou: float
-    bad_pct: float
-    mae: float
-    cdx: float  #: alpha-centroid shift, rendered minus stored, px
-    cdy: float
-    dx0: int  #: ink-box deltas, rendered minus stored, px
-    dy0: int
-    dx1: int
-    dy1: int
+    ``status`` is ``"ok"`` when both rasters have ink, ``"empty"`` when the
+    render has none and ``"missing"`` when a font kept the layer from
+    rendering; the shifts are ``None`` when either side has no ink.
+    """
+
+    iou: float  #: of the pixels either raster covers above ``IOU_COVER``
+    bad_pct: float  #: % of pixels whose premultiplied channel diff exceeds ``BAD_DIFF``
+    mae: float  #: mean |alpha difference| where either alpha exceeds ``ANY_ALPHA``
+    cdx: float | None  #: alpha-centroid shift, rendered minus stored, px
+    cdy: float | None
+    dx0: int | None  #: ink-box deltas, rendered minus stored, px
+    dy0: int | None
+    dx1: int | None
+    dy1: int | None
     status: Literal["ok", "empty", "missing"]

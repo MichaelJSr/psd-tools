@@ -118,12 +118,20 @@ def _env_dirs() -> list[str]:
     return [d for d in value.split(os.pathsep) if d]
 
 
+def _glyph_ymax(slot: freetype.GlyphSlot) -> int:
+    # The outline's own top: the slot's ``horiBearingY`` can differ from it
+    # for a CID-keyed CFF face.
+    if slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE and slot.outline.n_points:
+        return int(slot.outline.get_bbox().yMax)
+    return int(slot.metrics.horiBearingY)
+
+
 def _metrics(face: freetype.Face) -> FontMetrics:
     ascent, glyph = int(face.ascender), "ascender"
     for g in ASCENT_GLYPHS:
         if face.get_char_index(ord(g)):
             face.load_char(g, freetype.FT_LOAD_NO_SCALE)
-            ascent, glyph = int(face.glyph.metrics.horiBearingY), g
+            ascent, glyph = _glyph_ymax(face.glyph), g
             break
     length = c_ulong(0)
     tag = (ord("S") << 24) | (ord("V") << 16) | (ord("G") << 8) | ord(" ")

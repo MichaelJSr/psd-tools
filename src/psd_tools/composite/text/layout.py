@@ -222,9 +222,11 @@ def layout(
             justification,
             breaks,
         )
-        for line in lines:
+        for k, line in enumerate(lines):
+            # Trailing spaces hang on the line, so their runs set its metrics.
+            hang_end = lines[k + 1].start if k + 1 < len(lines) else piece.end
             styles = [
-                model.runs[i].style for i in _runs_on(model, line.start, line.end)
+                model.runs[i].style for i in _runs_on(model, line.start, hang_end)
             ]
             pitch = max((leading(s, model) for s in styles), default=0.0)
             y_prev = y
