@@ -24,6 +24,7 @@ from psd_tools.composite.adjustments import (
 )
 from psd_tools.constants import BlendMode, ColorMode, Tag
 from psd_tools.psd.adjustments import ChannelMixer as ChannelMixerData
+from psd_tools.psd.adjustments import ColorBalance as ColorBalanceData
 from psd_tools.psd.adjustments import ColorStop, TransparencyStop
 from psd_tools.psd.adjustments import Curves as CurvesData
 from psd_tools.psd.adjustments import GradientMap as GradientMapData
@@ -552,3 +553,128 @@ def test_gradient_map_with_a_noise_gradient_leaves_the_image_alone() -> None:
     )
     image = np.zeros((2, 2, 3), dtype=np.float32)
     assert apply_gradientmap(image, ColorMode.RGB, layer) is image
+
+
+# Colour balance
+def _color_balance_layer(
+    midtones: tuple[int, int, int], luminosity: bool
+) -> adjustments.ColorBalance:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[10]
+    assert isinstance(layer, adjustments.ColorBalance)
+    layer._data = ColorBalanceData(midtones=midtones, luminosity=luminosity)
+    return layer
+
+
+_RAMP = np.linspace(0.0, 1.0, 11, dtype=np.float32)[None, :, None].repeat(3, axis=2)
+
+
+def test_color_balance_midtones_are_a_gamma_per_channel() -> None:
+    """+100 toward red is the square root of red; the other channels stay."""
+    layer = _color_balance_layer((100, 0, 0), luminosity=False)
+    out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+    assert np.allclose(out[..., 0], np.sqrt(_RAMP[..., 0]), atol=1 / 255)
+    assert np.allclose(out[..., 1:], _RAMP[..., 1:], atol=1 / 255)
+
+
+def test_color_balance_preserving_luminosity_centres_the_amounts() -> None:
+    """With the flag the three amounts lose their mean.
+
+    So +100 red also darkens green and blue, and opposite shifts cancel out.
+    """
+    layer = _color_balance_layer((100, 0, 0), luminosity=True)
+    out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+    assert np.allclose(out[..., 0], _RAMP[..., 0] ** (2 ** (-2 / 3)), atol=1 / 255)
+    assert np.allclose(out[..., 1], _RAMP[..., 1] ** (2 ** (1 / 3)), atol=1 / 255)
+    balanced = _color_balance_layer((100, -100, 0), luminosity=True)
+    out = apply_colorbalance(_RAMP, ColorMode.RGB, balanced)
+    assert np.allclose(out[..., 0], np.sqrt(_RAMP[..., 0]), atol=1 / 255)
+    assert np.allclose(out[..., 1], _RAMP[..., 1] ** 2, atol=1 / 255)
+
+
+def test_color_balance_keeps_black_white_and_channel_order() -> None:
+    layer = _color_balance_layer((-60, 30, 80), luminosity=True)
+    out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+    assert np.allclose(out[0, 0], 0.0, atol=1 / 255)
+    assert np.allclose(out[0, -1], 1.0, atol=1 / 255)
+    assert np.all(np.diff(out, axis=1) >= -1e-6)
+
+
+# Vibrance
+def _vibrance_layer(vibrance: int, saturation: int) -> adjustments.Vibrance:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[8]
+    assert isinstance(layer, adjustments.Vibrance)
+    data = Descriptor()
+    data[b"vibrance"] = Integer(vibrance)
+    data[b"Strt"] = Integer(saturation)
+    layer._data = data
+    return layer
+
+
+def _linear(value: np.ndarray) -> np.ndarray:
+    return np.where(value <= 0.04045, value / 12.92, ((value + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_chroma(image: np.ndarray) -> np.ndarray:
+    linear = _linear(image)
+    return linear.max(axis=2) - linear.min(axis=2)
+
+
+_PALE_BLUE = [0.55, 0.6, 0.7]
+_DEEP_BLUE = [0.1, 0.2, 0.7]
+_PALE_RED = [0.7, 0.6, 0.55]
+_PALE_CYAN = [0.55, 0.7, 0.7]
+
+
+def test_negative_vibrance_takes_more_chroma_from_a_pale_pixel() -> None:
+    """Both pixels lose chroma and keep their brightest channel.
+
+    The pale one keeps a smaller share of what it had.
+    """
+    image = np.array([[_PALE_BLUE, _DEEP_BLUE]], dtype=np.float32)
+    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0))
+    kept = _linear_chroma(out) / _linear_chroma(image)
+    assert np.all(kept < 1)
+    assert kept[0, 0] < kept[0, 1]
+    assert np.all(out.argmax(axis=2) == image.argmax(axis=2))
+
+
+def test_a_weaker_negative_vibrance_removes_less() -> None:
+    image = np.array([[_PALE_BLUE, _DEEP_BLUE]], dtype=np.float32)
+    strong = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0))
+    weak = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-40, 0))
+    assert np.all(_linear_chroma(weak) > _linear_chroma(strong))
+    assert np.all(_linear_chroma(weak) < _linear_chroma(image))
+
+
+def test_positive_vibrance_boosts_pale_pixels_and_spares_skin_tones() -> None:
+    """A pale pixel gains more than a saturated one.
+
+    A red of the same saturation gains less than a cyan.
+    """
+    image = np.array([[_PALE_BLUE, _DEEP_BLUE, _PALE_RED, _PALE_CYAN]], np.float32)
+    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(100, 0))
+    gained = _linear_chroma(out) / _linear_chroma(image)
+    assert np.all(gained > 1)
+    assert gained[0, 0] > gained[0, 1]
+    assert gained[0, 2] < gained[0, 3]
+
+
+def test_saturation_scales_chroma_about_the_linear_luminance() -> None:
+    """-100 is the Rec. 709 luminance gray.
+
+    +50 is one and a half times the chroma around it.
+    """
+    image = np.array([[_DEEP_BLUE, _PALE_RED]], dtype=np.float32)
+    luminance = _linear(image) @ np.array([0.2126, 0.7152, 0.0722])
+    gray = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, -100))
+    assert np.allclose(_linear(gray), luminance[..., None], atol=1 / 255)
+    boosted = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 50))
+    expected = luminance[..., None] + (_linear(image) - luminance[..., None]) * 1.5
+    assert np.allclose(_linear(boosted), np.clip(expected, 0, 1), atol=1 / 255)
+
+
+def test_vibrance_at_rest_leaves_the_image_alone() -> None:
+    image = np.array([[_DEEP_BLUE]], dtype=np.float32)
+    assert apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 0)) is image
+    gray = np.full((1, 1, 1), 0.3, dtype=np.float32)
+    assert apply_vibrance(gray, ColorMode.GRAYSCALE, _vibrance_layer(50, 0)) is gray

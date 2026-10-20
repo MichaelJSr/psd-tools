@@ -28,7 +28,6 @@ from psd_tools.api.layers import Layer
 from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.blend import (
     _lum,
-    _set_lum,
     hsl2hsv,
     hsl2rgb,
     hsv2hsl,
@@ -987,19 +986,26 @@ def apply_colorbalance(
     if shadows is None or midtones is None or highlights is None:
         return img
 
+    # A midtone amount is a per-channel gamma. Preserve Luminosity centres the
+    # three amounts on their mean, so that a shift toward one primary darkens
+    # the other two instead of brightening the pixel.
+    gammas = np.array(midtones, dtype=np.float32) / _100
+    if layer.luminosity:
+        gammas -= gammas.mean()
     size = _get_lut_size(layer)
     level = _lut_domain(size) * _255
     luts: dict[int, NDArray[np.float32]] = {}
-    for channel, amounts in enumerate(zip(shadows, midtones, highlights, strict=True)):
+    for channel, (low, gamma, high) in enumerate(
+        zip(shadows, gammas, highlights, strict=True)
+    ):
         value = level
-        for amount, transfer in zip(amounts, _COLORBALANCE_TRANSFERS, strict=True):
-            if amount:
-                value = np.clip(value + amount * transfer(value, amount > 0), _0, _255)
-        luts[channel + 1] = (value / _255).astype(np.float32, copy=False)
-    out = _apply_luts(luts, img, colormode)
-    if layer.luminosity:
-        out = _set_lum(out, _lum(img))
-    return out
+        if low:
+            value = value + low * _colorbalance_shadows(value, low > 0)
+        if high:
+            value = value + high * _colorbalance_highlights(value, high > 0)
+        value = np.clip(value / _255, _0, _1) ** np.exp2(-gamma)
+        luts[channel + 1] = value.astype(np.float32, copy=False)
+    return _apply_luts(luts, img, colormode)
 
 
 def _colorbalance_low(level: np.ndarray) -> np.ndarray:
@@ -1011,19 +1017,8 @@ def _colorbalance_shadows(level: np.ndarray, add: bool) -> np.ndarray:
     return _colorbalance_low(level if add else 255 - level)
 
 
-def _colorbalance_midtones(level: np.ndarray, add: bool) -> np.ndarray:
-    return 0.667 * (1 - ((level - 127) / 127) ** 2)
-
-
 def _colorbalance_highlights(level: np.ndarray, add: bool) -> np.ndarray:
     return _colorbalance_low(255 - level if add else level)
-
-
-_COLORBALANCE_TRANSFERS = (
-    _colorbalance_shadows,
-    _colorbalance_midtones,
-    _colorbalance_highlights,
-)
 
 
 @_preserve_alpha
@@ -1036,26 +1031,63 @@ def apply_vibrance(
     if colormode != ColorMode.RGB:
         logger.info("Vibrance isn't currently supported for %s.", colormode)
         return img
-    vibrance = layer.vibrance / _100
-    saturation = layer.saturation / _100
+    vibrance = layer.vibrance / 100.0
+    saturation = layer.saturation / 100.0
     if vibrance == 0 and saturation == 0:
         return img
-    return _vibrance(img, vibrance, saturation)
+    skin = _skin_tones(img) if vibrance > 0 else None
+    out = _vibrance(_srgb_to_linear(img), vibrance, saturation, skin)
+    return _linear_to_srgb(out).astype(np.float32, copy=False)
+
+
+# Vibrance is a fit, not Photoshop's formula. In linear light each pixel is
+# blended toward a gray between its darkest and brightest channel; the blend
+# weight falls with saturation, and the gray climbs toward the brightest channel
+# with it. A positive amount pulls away from a gray near the brightest channel,
+# less for skin tones. The saturation slider scales chroma about the luminance.
+_VIBRANCE_WEIGHT_PALE = 1.0
+_VIBRANCE_WEIGHT_DROP = 0.65
+_VIBRANCE_WEIGHT_CURVE = 2.3
+_VIBRANCE_AMOUNT_CURVE = 1.2
+_VIBRANCE_GRAY_PALE = -0.5
+_VIBRANCE_GRAY_RISE = 1.3
+_VIBRANCE_BOOST_GRAY = 0.85
+_VIBRANCE_SKIN_SHARE = 0.3
+_SKIN_HUE_FROM = 300 / 360
+_SKIN_HUE_TO = 60 / 360
+_LINEAR_LUMINANCE = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+
+def _skin_tones(img: np.ndarray) -> np.ndarray:
+    """Where a pixel's hue is within the red-to-magenta window, as (H, W, 1)."""
+    hue = rgb2hsl(img)[..., 0:1]
+    return ((hue < _SKIN_HUE_TO) | (hue >= _SKIN_HUE_FROM)).astype(np.float32)
 
 
 def _vibrance(
-    img: np.ndarray, vibrance: np.float32, saturation: np.float32
+    linear: np.ndarray, vibrance: float, saturation: float, skin: np.ndarray | None
 ) -> np.ndarray:
-    high = img.max(axis=2, keepdims=True)
-    low = img.min(axis=2, keepdims=True)
+    high = linear.max(axis=2, keepdims=True)
+    low = linear.min(axis=2, keepdims=True)
     chroma = high - low
     sat = chroma / np.maximum(high, _FLOAT_EPSILON)
-    # Vibrance scales chroma by less the more saturated the pixel already is;
-    # saturation scales it uniformly.
-    factor = (_1 + saturation) * (_1 + vibrance * (_1 - sat))
-    gray = _lum(img)
-    out = gray + (img - gray) * factor
-    return out.clip(_0, _1).astype(np.float32, copy=False)
+    out = linear
+    if vibrance < 0:
+        weight = (
+            _VIBRANCE_WEIGHT_PALE - _VIBRANCE_WEIGHT_DROP * sat**_VIBRANCE_WEIGHT_CURVE
+        )
+        weight = weight * (-vibrance) ** _VIBRANCE_AMOUNT_CURVE
+        gray = low + (_VIBRANCE_GRAY_PALE + _VIBRANCE_GRAY_RISE * sat) * chroma
+        out = out + weight * (gray - out)
+    elif vibrance > 0:
+        assert skin is not None
+        weight = -(_1 - sat) * vibrance * (_1 - _VIBRANCE_SKIN_SHARE * skin)
+        gray = low + _VIBRANCE_BOOST_GRAY * chroma
+        out = out + weight * (gray - out)
+    if saturation:
+        luminance = out @ _LINEAR_LUMINANCE
+        out = luminance[..., None] + (out - luminance[..., None]) * (_1 + saturation)
+    return np.clip(out, _0, _1)
 
 
 """Adjustment function table."""
