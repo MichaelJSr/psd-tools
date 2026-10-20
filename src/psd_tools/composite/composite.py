@@ -2491,6 +2491,31 @@ class Compositor:
         )
         return utils.clip(own * mask)
 
+    def _knockout_shape(
+        self, layer: Layer, viewport: tuple[int, int, int, int], silhouette: np.ndarray
+    ) -> np.ndarray:
+        """What "layer knocks out drop shadow" cuts the shadow from under.
+
+        The silhouette the shadow is cast from, and the bands of the layer's
+        stroke effects, whole whatever their opacity: Photoshop cuts under
+        the stroke's shape, so a faint stroke shows the backdrop through
+        itself and not the shadow. A stroke whose band cannot be drawn cuts
+        nothing, as it draws nothing.
+        """
+        knockout = silhouette
+        for effect in _readable(layer, "stroke"):
+            try:
+                _, band, _ = draw_stroke_effect_split(
+                    viewport, silhouette, effect.descriptor, layer._psd
+                )
+            except _UNREADABLE as error:
+                logger.debug(
+                    "Cannot cut a drop shadow under a stroke of %s: %s", layer, error
+                )
+                continue
+            knockout = np.maximum(knockout, band)
+        return knockout
+
     def _apply_drop_shadows(self, layer: Layer) -> None:
         """Composite every drop shadow of the layer, beneath the layer.
 
@@ -2506,7 +2531,8 @@ class Compositor:
         shadow and nothing else. With "layer knocks out drop shadow" on, the
         shadow is cut away under the same silhouette it is cast from rather
         than under the layer's paint, so a layer faded by fill opacity shows
-        the backdrop through itself and not its shadow.
+        the backdrop through itself and not its shadow; the layer's stroke
+        bands cut it the same way (:py:meth:`_knockout_shape`).
 
         Each effect is guarded as the strokes are, with the silhouette read
         outside both guards so that a fault compositing a group's contents is
@@ -2563,7 +2589,9 @@ class Compositor:
                 logger.debug("Cannot draw a drop shadow of %s: %s", layer, error)
                 continue
             if knocks_out:
-                coverage = coverage * (1.0 - silhouette)
+                coverage = coverage * (
+                    1.0 - self._knockout_shape(layer, bbox, silhouette)
+                )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
                 self._apply_source(

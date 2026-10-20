@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from psd_tools.api.effects import DropShadow
+from psd_tools.api.effects import DropShadow, Stroke
 from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite, effects, utils
@@ -457,6 +457,36 @@ def test_a_group_casts_its_shadow_from_its_childrens_effects_too(
     assert float(_alone(header, viewport)[y, x, 0]) == pytest.approx(1.0)
 
 
+def test_the_knockout_cuts_the_shadow_under_the_layers_stroke_too() -> None:
+    """The knockout cuts the shadow under the layer's stroke band as well.
+
+    The header band has a faint 2 px outside stroke, which its box holds as
+    its last two rows. Its shadow, made hard and cast 20 px down, would lie
+    under the stroke along the bottom edge; Photoshop cuts it away there, so
+    the stroke shows the backdrop through itself and those rows come out as
+    they do with the shadow off, while below the stroke the shadow is whole.
+    """
+    _, band = _header(BlendMode.PASS_THROUGH)
+    stroke = cast(Stroke, next(iter(band.effects.find("stroke"))))
+    assert stroke.enabled and stroke.opacity < 100.0 and stroke.size == 2.0
+    viewport = (0, 0, 640, 200)
+    bottom, x = band.bbox[3] - 2, 320
+
+    shadow = _shadow_descriptor(band)
+    shadow[Key.Enabled] = False
+    without = _alone(band, viewport)
+    shadow[Key.Enabled] = True
+    for key, value in ((Key.Blur, 0.0), (Key.Distance, 20.0), (Key.Opacity, 100.0)):
+        shadow[key] = Double(value)
+    alpha = _alone(band, viewport)
+
+    assert float(without[bottom - 1, x, 0]) == 1.0, "the band ends elsewhere"
+    assert 0.0 < float(without[bottom, x, 0]) < 1.0, "no faint stroke here"
+    assert float(without[bottom + 2, x, 0]) == 0.0, "the stroke runs on"
+    assert np.allclose(alpha[bottom : bottom + 2, x], without[bottom : bottom + 2, x])
+    assert float(alpha[bottom + 2, x, 0]) == pytest.approx(1.0)
+
+
 def test_a_pass_through_group_keeps_its_shadow_beneath_it() -> None:
     """The shadow of a pass-through group does not paint over the group.
 
@@ -728,9 +758,12 @@ def test_an_unreadable_drop_shadow_is_dropped_and_the_document_renders(
 #   is not drawn. The bound is what pins spread: leaving it out, or shrinking
 #   the silhouette by it as #679 first did, scores above it.
 # - layer_comps.psb: the rest is a bevel that is not drawn.
+# - masks.psb: the header band carries a stroke, and its bound is what pins
+#   the knockout under the stroke's band; cutting under the silhouette alone
+#   scores an order of magnitude above it.
 _PREVIEWS = [
     ("layer_effects.psd", (60, 215, 620, 296), 1e-5, 1e-3),
-    ("masks.psb", None, 3e-5, 1.5e-4),
+    ("masks.psb", None, 1e-6, 1.5e-4),
     ("layer_params.psb", (130, 230, 470, 560), 5.6e-3, 2e-2),
     ("layer_comps.psb", None, 4.8e-3, 6e-3),
 ]
@@ -776,7 +809,7 @@ def test_drop_shadows_render_to_photoshops_preview(
 
 def test_drop_shadows_render_to_photoshops_preview_when_forced() -> None:
     """``force=True`` redraws masks.psb's cards from their paths."""
-    assert _error(PSDImage.open(full_name("masks.psb")), None, force=True) <= 3e-5
+    assert _error(PSDImage.open(full_name("masks.psb")), None, force=True) <= 1.5e-5
 
 
 # The gaussian width per pixel of size that best matches Photoshop's previews.
