@@ -336,9 +336,10 @@ option::
     ``ImportError`` with installation instructions will be raised.
 
     Note that most layer effects are not supported. Adjustment layers have
-    limited support (BrightnessContrast, Levels, Curves, Exposure, Invert,
-    Posterize, Threshold). The compositing result may look different from
-    Photoshop.
+    limited support (BrightnessContrast, Levels, Curves, Exposure,
+    HueSaturation, Invert, Posterize, Threshold, ChannelMixer, BlackAndWhite,
+    GradientMap, ColorBalance, Vibrance). The compositing result may look
+    different from Photoshop.
 
 .. note::
 
