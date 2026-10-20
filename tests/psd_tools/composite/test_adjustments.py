@@ -1,5 +1,6 @@
 import copy
 import logging
+import struct
 from collections.abc import Callable
 
 import numpy as np
@@ -9,16 +10,25 @@ from psd_tools.api import adjustments
 from psd_tools.api.layers import Group
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite.adjustments import (
+    apply_blackandwhite,
+    apply_channelmixer,
+    apply_colorbalance,
     apply_curves,
     apply_exposure,
+    apply_gradientmap,
     apply_huesaturation,
     apply_levels,
     apply_posterize,
     apply_threshold,
+    apply_vibrance,
 )
 from psd_tools.constants import BlendMode, ColorMode, Tag
+from psd_tools.psd.adjustments import ChannelMixer as ChannelMixerData
+from psd_tools.psd.adjustments import ColorStop, TransparencyStop
 from psd_tools.psd.adjustments import Curves as CurvesData
+from psd_tools.psd.adjustments import GradientMap as GradientMapData
 from psd_tools.psd.adjustments import HueSaturation as HueSaturationData
+from psd_tools.psd.descriptor import Descriptor, Integer
 
 from ..utils import full_name
 from .test_composite import check_composite_quality, check_icc_composite_quality
@@ -119,9 +129,14 @@ def test_curves_without_extra_records_leaves_the_image_alone(
     [
         (5, apply_levels),
         (7, apply_exposure),
+        (8, apply_vibrance),
         (9, apply_huesaturation),
+        (10, apply_colorbalance),
+        (11, apply_blackandwhite),
+        (13, apply_channelmixer),
         (16, apply_posterize),
         (17, apply_threshold),
+        (19, apply_gradientmap),
     ],
 )
 def test_an_absent_adjustment_block_leaves_the_image_alone(
@@ -326,3 +341,214 @@ def test_an_adjustment_inside_a_styled_group_stops_at_the_group() -> None:
     assert np.abs(passed_through - untouched).max() > 1
     isolated = under_the_group(styled=True, curves_visible=True)
     assert np.abs(isolated - untouched).max() <= 1
+
+
+# Channel mixer
+_IDENTITY_MIX = [[100, 0, 0, 0, 0], [0, 100, 0, 0, 0], [0, 0, 100, 0, 0]]
+_FOURTH_MIX = [0, 0, 0, 100, 0]
+
+
+def _mixer_data(records: list[list[int]], monochrome: int = 0) -> ChannelMixerData:
+    """A channel mixer block from ``[red, green, blue, fourth, constant]`` percent rows.
+
+    The reader keeps the first row in ``data`` and the other three in ``unknown``.
+    """
+    flat = [value for record in records + [_FOURTH_MIX] for value in record]
+    block = ChannelMixerData(
+        monochrome=monochrome, unknown=struct.pack(">15h", *flat[5:])
+    )
+    block.data = flat[:5]
+    return block
+
+
+def _channel_mixer_layer() -> adjustments.ChannelMixer:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[13]
+    assert isinstance(layer, adjustments.ChannelMixer)
+    return layer
+
+
+def test_channel_mixer_mixes_the_sources_and_adds_the_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red takes half its blue away, blue gets a 20% constant, and both clip."""
+    layer = _channel_mixer_layer()
+    records = [[100, 0, -50, 0, 0], [0, 100, 0, 0, 0], [0, 0, 100, 0, 20]]
+    monkeypatch.setattr(layer, "_data", _mixer_data(records))
+    image = np.array([[[0.8, 0.5, 0.4], [0.1, 0.2, 0.9]]], dtype=np.float32)
+    expected = [[[0.6, 0.5, 0.6], [0.0, 0.2, 1.0]]]
+    out = apply_channelmixer(image, ColorMode.RGB, layer)
+    assert out.dtype == np.float32
+    assert np.allclose(out, expected, atol=1e-6)
+
+
+def test_channel_mixer_monochrome_writes_one_mix_to_every_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Monochrome takes the first row as the gray mix and ignores the others."""
+    layer = _channel_mixer_layer()
+    records = [[30, 59, 11, 0, 0], [0, 0, 0, 0, 100], [0, 0, 0, 0, 100]]
+    monkeypatch.setattr(layer, "_data", _mixer_data(records, monochrome=1))
+    image = np.array([[[1.0, 0.0, 0.0], [0.2, 0.4, 0.6]]], dtype=np.float32)
+    out = apply_channelmixer(image, ColorMode.RGB, layer)
+    gray = image @ np.array([0.3, 0.59, 0.11], dtype=np.float32)
+    assert np.allclose(out, gray[..., None], atol=1e-6)
+
+
+def test_channel_mixer_with_a_short_block_leaves_the_image_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layer = _channel_mixer_layer()
+    block = ChannelMixerData()
+    block.data = [100, 0, 0, 0, 0]
+    monkeypatch.setattr(layer, "_data", block)
+    image = np.zeros((2, 2, 3), dtype=np.float32)
+    assert apply_channelmixer(image, ColorMode.RGB, layer) is image
+
+
+# Black & white
+def _black_and_white_layer(**sliders: int) -> adjustments.BlackAndWhite:
+    """The fixture's layer with the given sliders; the others keep their defaults."""
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[11]
+    assert isinstance(layer, adjustments.BlackAndWhite)
+    data = Descriptor()
+    for key, value in sliders.items():
+        data[key.encode("ascii").ljust(4)] = Integer(value)
+    layer._data = data
+    return layer
+
+
+def test_black_and_white_weights_a_pixel_by_its_primary_and_secondary_hue() -> None:
+    """Each primary gets its slider; a hue between two gets both, by its position.
+
+    The defaults are red 40, yellow 60, green 40, cyan 60, blue 20, magenta 80.
+    """
+    layer = _black_and_white_layer()
+    image = np.array(
+        [[[1, 0, 0], [1, 1, 0], [1, 0.5, 0], [0, 0, 1], [0, 1, 1], [0.5, 0.5, 0.5]]],
+        dtype=np.float32,
+    )
+    expected = [0.4, 0.6, 0.5, 0.2, 0.6, 0.5]
+    out = apply_blackandwhite(image, ColorMode.RGB, layer)
+    assert np.allclose(out, np.array(expected)[None, :, None], atol=1e-6)
+
+
+def test_black_and_white_reads_the_sliders_from_the_descriptor() -> None:
+    layer = _black_and_white_layer(Rd=100, Bl=0, Mgnt=50)
+    image = np.array([[[1, 0, 0], [0, 0, 1], [1, 0, 0.5]]], dtype=np.float32)
+    # magenta 50 on the min..mid span, red 100 on the mid..max span
+    expected = [1.0, 0.0, 0.5 * 0.5 + 0.5 * 1.0]
+    out = apply_blackandwhite(image, ColorMode.RGB, layer)
+    assert np.allclose(out, np.array(expected)[None, :, None], atol=1e-6)
+
+
+# Gradient map
+_LUM = np.array([0.3, 0.59, 0.11], dtype=np.float32)
+
+
+def _gradient_map_data(
+    stops: list[tuple[int, int, tuple[float, float, float]]],
+    method: bytes = b"Gcls",
+    reversed: int = 0,
+    mode: int = 0,
+) -> GradientMapData:
+    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops."""
+    color_stops = [
+        ColorStop(
+            location=location,
+            midpoint=midpoint,
+            mode=0,
+            color=tuple(round(value * 65535) for value in rgb) + (0,),
+        )
+        for location, midpoint, rgb in stops
+    ]
+    block = GradientMapData(
+        version=3, method=method, is_reversed=reversed, interpolation=4096, mode=mode
+    )
+    block.color_stops = color_stops
+    block.transparency_stops = [
+        TransparencyStop(0, 50, 255),
+        TransparencyStop(4096, 50, 255),
+    ]
+    return block
+
+
+def _gradient_map_layer(data: GradientMapData) -> adjustments.GradientMap:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[19]
+    assert isinstance(layer, adjustments.GradientMap)
+    layer._data = data
+    return layer
+
+
+_BLACK = (0.0, 0.0, 0.0)
+_WHITE = (1.0, 1.0, 1.0)
+_PRIMARIES = np.array([[[1, 0, 0], [0, 1, 0], [0, 0, 1], [0.5, 0.5, 0.5]]], np.float32)
+
+
+def test_gradient_map_maps_luminance_through_the_gradient() -> None:
+    """A black-to-white map is the luminance itself, through an 8-bit table."""
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)])
+    )
+    luminance = _PRIMARIES @ _LUM
+    out = apply_gradientmap(_PRIMARIES, ColorMode.RGB, layer)
+    assert out.shape == _PRIMARIES.shape
+    assert np.allclose(out, luminance[..., None], atol=1 / 255)
+
+
+def test_gradient_map_reversed_runs_the_gradient_the_other_way() -> None:
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], reversed=1)
+    )
+    luminance = _PRIMARIES @ _LUM
+    out = apply_gradientmap(_PRIMARIES, ColorMode.RGB, layer)
+    assert np.allclose(out, 1 - luminance[..., None], atol=1 / 255)
+
+
+def test_gradient_map_holds_the_end_colours_outside_the_end_stops() -> None:
+    """Luminance below the first stop or above the last takes that stop's colour."""
+    red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+    layer = _gradient_map_layer(_gradient_map_data([(1024, 50, red), (3072, 50, blue)]))
+    image = np.array([[[0, 0, 0], [1, 1, 1], [0.5, 0.5, 0.5]]], dtype=np.float32)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    assert np.allclose(out[0, 0], red, atol=1 / 255)
+    assert np.allclose(out[0, 1], blue, atol=1 / 255)
+    assert np.allclose(out[0, 2], (0.5, 0.0, 0.5), atol=1 / 255)
+
+
+def test_gradient_map_midpoint_is_where_the_blend_reaches_one_half() -> None:
+    """A midpoint of 25% on the end stop puts the half blend at a quarter."""
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 25, _WHITE)])
+    )
+    image = np.array([[[0.25, 0.25, 0.25], [0.625, 0.625, 0.625]]], dtype=np.float32)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    assert np.allclose(out[0, 0], 0.5, atol=1 / 255)
+    assert np.allclose(out[0, 1], 0.75, atol=1 / 255)
+
+
+def test_gradient_map_perceptual_blends_in_oklab() -> None:
+    """Halfway between black and white perceptually is Oklab L 0.5: linear 1/8."""
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], method=b"Perc")
+    )
+    image = np.full((1, 1, 3), 0.5, dtype=np.float32)
+    mid_gray = 1.055 * (1 / 8) ** (1 / 2.4) - 0.055
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    assert np.allclose(out, mid_gray, atol=1 / 255)
+
+
+def test_gradient_map_writes_one_channel_on_a_grayscale_document() -> None:
+    red = (1.0, 0.0, 0.0)
+    layer = _gradient_map_layer(_gradient_map_data([(0, 50, red), (4096, 50, red)]))
+    image = np.array([[[0.2], [0.9]]], dtype=np.float32)
+    out = apply_gradientmap(image, ColorMode.GRAYSCALE, layer)
+    assert out.shape == (1, 2, 1)
+    assert np.allclose(out, 0.3, atol=1 / 255)
+
+
+def test_gradient_map_with_a_noise_gradient_leaves_the_image_alone() -> None:
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], mode=1)
+    )
+    image = np.zeros((2, 2, 3), dtype=np.float32)
+    assert apply_gradientmap(image, ColorMode.RGB, layer) is image

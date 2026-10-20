@@ -2,6 +2,7 @@
 
 import functools
 import logging
+import struct
 from collections.abc import Callable
 from typing import Literal, TypeVar, cast
 
@@ -9,18 +10,31 @@ import numpy as np
 from numpy.typing import NDArray
 
 from psd_tools.api.adjustments import (
+    BlackAndWhite,
     BrightnessContrast,
+    ChannelMixer,
+    ColorBalance,
     Curves,
     Exposure,
+    GradientMap,
     HueSaturation,
     Invert,
     Levels,
     Posterize,
     Threshold,
+    Vibrance,
 )
 from psd_tools.api.layers import Layer
 from psd_tools.composite._compat import require_scipy
-from psd_tools.composite.blend import _lum, hsl2hsv, hsl2rgb, hsv2hsl, rgb2hsl
+from psd_tools.composite.blend import (
+    _lum,
+    _set_lum,
+    hsl2hsv,
+    hsl2rgb,
+    hsv2hsl,
+    rgb2hsl,
+)
+from psd_tools.composite.paint import _from_rgb
 from psd_tools.constants import ColorMode
 
 logger = logging.getLogger(__name__)
@@ -728,6 +742,322 @@ def apply_threshold(
     return filtered
 
 
+@_preserve_alpha
+def apply_channelmixer(
+    img: np.ndarray,
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
+    layer: ChannelMixer,
+) -> np.ndarray:
+    """Apply a channel mixer adjustment to an image."""
+    if colormode != ColorMode.RGB:
+        logger.info("Channel mixer isn't currently supported for %s.", colormode)
+        return img
+
+    records = _channelmixer_records(layer)
+    if records is None:
+        return img
+    if layer.monochrome:
+        records = np.repeat(records[:1], 3, axis=0)
+
+    weights = records[:3, :3]
+    constant = records[:3, _MIXER_FIELDS - 1]
+    out = img @ weights.T + constant
+    return out.clip(_0, _1).astype(np.float32, copy=False)
+
+
+# A channel mixer block is four output records of five int16 percentages: the
+# weights of the red, green, blue and fourth (CMYK black) source channels, then
+# a constant. The low-level reader parses the first record only; the others sit
+# in its trailing bytes.
+_MIXER_RECORDS = 4
+_MIXER_FIELDS = 5
+
+
+def _channelmixer_records(layer: ChannelMixer) -> NDArray[np.float32] | None:
+    block = layer._data
+    data = layer.data
+    if block is None or data is None or len(data) < _MIXER_FIELDS:
+        return None
+    rest = (_MIXER_RECORDS - 1) * _MIXER_FIELDS
+    trailing: bytes = block.unknown
+    if len(trailing) < 2 * rest:
+        logger.debug("Channel mixer block is short: %d bytes.", len(trailing))
+        return None
+    others = struct.unpack(f">{rest}h", trailing[: 2 * rest])
+    records = np.array(list(data[:_MIXER_FIELDS]) + list(others), dtype=np.float32)
+    return records.reshape(_MIXER_RECORDS, _MIXER_FIELDS) / _100
+
+
+@_preserve_alpha
+def apply_blackandwhite(
+    img: np.ndarray,
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
+    layer: BlackAndWhite,
+) -> np.ndarray:
+    """Apply a black & white adjustment to an image."""
+    if colormode != ColorMode.RGB:
+        logger.info("Black & White isn't currently supported for %s.", colormode)
+        return img
+    if layer._data is None:
+        return img
+    if layer.use_tint:
+        logger.info("Black & White tint is not rendered.")
+
+    # The gray of a pixel is its minimum, plus the span between its minimum and
+    # middle channel weighted by the slider of the hue those two channels mix
+    # to, plus the span to its maximum weighted by the slider of the maximum
+    # channel's primary.
+    primary = np.array([layer.red, layer.green, layer.blue], dtype=np.float32) / _100
+    secondary = (
+        np.array([layer.cyan, layer.magenta, layer.yellow], dtype=np.float32) / _100
+    )
+    high = img.max(axis=2, keepdims=True)
+    low = img.min(axis=2, keepdims=True)
+    mid = img.sum(axis=2, keepdims=True) - high - low
+    weight_high = primary[img.argmax(axis=2)][..., None]
+    weight_mid = secondary[img.argmin(axis=2)][..., None]
+    gray = low + (mid - low) * weight_mid + (high - mid) * weight_high
+    np.clip(gray, _0, _1, out=gray)
+    return np.repeat(gray, 3, axis=2).astype(np.float32, copy=False)
+
+
+@_preserve_alpha
+def apply_gradientmap(
+    img: np.ndarray,
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
+    layer: GradientMap,
+) -> np.ndarray:
+    """Apply a gradient map adjustment to an image."""
+    lut = _gradientmap_lut(layer, colormode)
+    if lut is None:
+        return img
+
+    luminance = _gradientmap_luminance(img, colormode)
+    if layer.reversed:
+        luminance = _1 - luminance
+    index = np.rint(luminance[..., 0] * (lut.shape[0] - 1)).astype(np.intp)
+    return lut[index]
+
+
+def _gradientmap_luminance(
+    img: np.ndarray,
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
+) -> np.ndarray:
+    if colormode == ColorMode.CMYK:
+        # The canvas holds what is left of each ink, so the naive RGB of a
+        # pixel is its CMY leftovers scaled by the K leftover.
+        return _lum(img[..., :3] * img[..., 3:4])
+    return _get_luminance(img, colormode)
+
+
+# A gradient map stop's colour space id and the scale of its components.
+_STOP_SPACE_RGB = 0
+_STOP_SPACE_GRAYSCALE = 8
+_STOP_COMPONENT_MAX = np.float32(65535.0)
+_STOP_LOCATION_MAX = 4096.0
+
+
+def _gradientmap_lut(
+    layer: GradientMap,
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
+) -> NDArray[np.float32] | None:
+    block = layer._data
+    stops = layer.color_stops
+    if block is None or not stops:
+        return None
+    if block.mode != 0:
+        logger.info("Noise gradient maps are not rendered.")
+        return None
+    locations: list[float] = []
+    midpoints: list[float] = []
+    colors: list[NDArray[np.float32]] = []
+    for stop in stops:
+        if stop.mode == _STOP_SPACE_RGB:
+            rgb = np.array(stop.color[:3], dtype=np.float32) / _STOP_COMPONENT_MAX
+        elif stop.mode == _STOP_SPACE_GRAYSCALE:
+            rgb = np.full(3, stop.color[0] / _STOP_COMPONENT_MAX, dtype=np.float32)
+        else:
+            logger.info(
+                "Gradient map stop colour space %d is not supported.", stop.mode
+            )
+            return None
+        location = stop.location / _STOP_LOCATION_MAX
+        if locations and locations[-1] == location:
+            locations.pop()
+            midpoints.pop()
+            colors.pop()
+        locations.append(location)
+        midpoints.append(float(stop.midpoint) / 100.0)
+        colors.append(np.clip(rgb, _0, _1))
+
+    size = _get_lut_size(layer)
+    ramp = _gradient_ramp(
+        _lut_domain(size), locations, midpoints, np.array(colors), block.method
+    )
+    return np.array(
+        [_from_rgb(colormode, tuple(float(v) for v in rgb)) for rgb in ramp],
+        dtype=np.float32,
+    )
+
+
+def _gradient_ramp(
+    t: NDArray[np.float32],
+    locations: list[float],
+    midpoints: list[float],
+    colors: NDArray[np.float32],
+    method: bytes,
+) -> NDArray[np.float32]:
+    """Sample a stop gradient at ``t``; ends are clamped to the end stops."""
+    if len(locations) == 1:
+        return np.repeat(colors[:1], len(t), axis=0)
+    to_space, from_space = _GRADIENT_SPACES.get(method, _GRADIENT_SPACES[b"Gcls"])
+    values = to_space(colors)
+    out = np.empty((len(t), colors.shape[1]), dtype=np.float64)
+    out[t < locations[0]] = values[0]
+    out[t >= locations[-1]] = values[-1]
+    for k in range(len(locations) - 1):
+        left, right = locations[k], locations[k + 1]
+        inside = (t >= left) & (t < right)
+        u = (t[inside] - left) / (right - left)
+        # A stop's midpoint is where the blend of the segment ending at it
+        # reaches one half.
+        m = min(max(midpoints[k + 1], 0.01), 0.99)
+        u = np.where(u <= m, _HALF * u / m, _HALF + _HALF * (u - m) / (1 - m))
+        out[inside] = values[k] + u[:, None] * (values[k + 1] - values[k])
+    return from_space(out).astype(np.float32, copy=False)
+
+
+def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    c = np.asarray(c, dtype=np.float64)
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
+    c = np.clip(np.asarray(c, dtype=np.float64), 0.0, 1.0)
+    return np.where(c <= 0.0031308, c * 12.92, 1.055 * c ** (1 / 2.4) - 0.055)
+
+
+# Oklab: linear sRGB -> LMS, cube root, -> Lab.
+_OKLAB_M1 = np.array(
+    [
+        [0.4122214708, 0.5363325363, 0.0514459929],
+        [0.2119034982, 0.6806995451, 0.1073969566],
+        [0.0883024619, 0.2817188376, 0.6299787005],
+    ]
+)
+_OKLAB_M2 = np.array(
+    [
+        [0.2104542553, 0.7936177850, -0.0040720468],
+        [1.9779984951, -2.4285922050, 0.4505937099],
+        [0.0259040371, 0.7827717662, -0.8086757660],
+    ]
+)
+
+
+def _srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
+    lms = _srgb_to_linear(rgb) @ _OKLAB_M1.T
+    return np.cbrt(lms) @ _OKLAB_M2.T
+
+
+def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
+    lms = (lab @ np.linalg.inv(_OKLAB_M2).T) ** 3
+    return _linear_to_srgb(lms @ np.linalg.inv(_OKLAB_M1).T)
+
+
+# Interpolation space per gradient method: classic blends encoded values,
+# perceptual blends in Oklab, linear blends in linear light.
+_GRADIENT_SPACES: dict[bytes, tuple[Callable, Callable]] = {
+    b"Gcls": (lambda c: np.asarray(c, dtype=np.float64), lambda c: np.clip(c, 0, 1)),
+    b"Perc": (_srgb_to_oklab, _oklab_to_srgb),
+    b"Lnr ": (_srgb_to_linear, _linear_to_srgb),
+}
+
+
+@_preserve_alpha
+def apply_colorbalance(
+    img: np.ndarray,
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
+    layer: ColorBalance,
+) -> np.ndarray:
+    """Apply a color balance adjustment to an image."""
+    if colormode != ColorMode.RGB:
+        logger.info("Color balance isn't currently supported for %s.", colormode)
+        return img
+    shadows, midtones, highlights = layer.shadows, layer.midtones, layer.highlights
+    if shadows is None or midtones is None or highlights is None:
+        return img
+
+    size = _get_lut_size(layer)
+    level = _lut_domain(size) * _255
+    luts: dict[int, NDArray[np.float32]] = {}
+    for channel, amounts in enumerate(zip(shadows, midtones, highlights, strict=True)):
+        value = level
+        for amount, transfer in zip(amounts, _COLORBALANCE_TRANSFERS, strict=True):
+            if amount:
+                value = np.clip(value + amount * transfer(value, amount > 0), _0, _255)
+        luts[channel + 1] = (value / _255).astype(np.float32, copy=False)
+    out = _apply_luts(luts, img, colormode)
+    if layer.luminosity:
+        out = _set_lum(out, _lum(img))
+    return out
+
+
+def _colorbalance_low(level: np.ndarray) -> np.ndarray:
+    """How much a shadow or highlight shift moves a level, peaking at the dark end."""
+    return np.clip(1.075 - 1 / (level / 16 + 1), 0, 1)
+
+
+def _colorbalance_shadows(level: np.ndarray, add: bool) -> np.ndarray:
+    return _colorbalance_low(level if add else 255 - level)
+
+
+def _colorbalance_midtones(level: np.ndarray, add: bool) -> np.ndarray:
+    return 0.667 * (1 - ((level - 127) / 127) ** 2)
+
+
+def _colorbalance_highlights(level: np.ndarray, add: bool) -> np.ndarray:
+    return _colorbalance_low(255 - level if add else level)
+
+
+_COLORBALANCE_TRANSFERS = (
+    _colorbalance_shadows,
+    _colorbalance_midtones,
+    _colorbalance_highlights,
+)
+
+
+@_preserve_alpha
+def apply_vibrance(
+    img: np.ndarray,
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
+    layer: Vibrance,
+) -> np.ndarray:
+    """Apply a vibrance adjustment to an image."""
+    if colormode != ColorMode.RGB:
+        logger.info("Vibrance isn't currently supported for %s.", colormode)
+        return img
+    vibrance = layer.vibrance / _100
+    saturation = layer.saturation / _100
+    if vibrance == 0 and saturation == 0:
+        return img
+    return _vibrance(img, vibrance, saturation)
+
+
+def _vibrance(
+    img: np.ndarray, vibrance: np.float32, saturation: np.float32
+) -> np.ndarray:
+    high = img.max(axis=2, keepdims=True)
+    low = img.min(axis=2, keepdims=True)
+    chroma = high - low
+    sat = chroma / np.maximum(high, _FLOAT_EPSILON)
+    # Vibrance scales chroma by less the more saturated the pixel already is;
+    # saturation scales it uniformly.
+    factor = (_1 + saturation) * (_1 + vibrance * (_1 - sat))
+    gray = _lum(img)
+    out = gray + (img - gray) * factor
+    return out.clip(_0, _1).astype(np.float32, copy=False)
+
+
 """Adjustment function table."""
 AdjustmentFn = Callable[..., np.ndarray]
 ADJUSTMENT_FUNC: dict[str, AdjustmentFn] = {
@@ -739,4 +1069,9 @@ ADJUSTMENT_FUNC: dict[str, AdjustmentFn] = {
     "invert": apply_invert,
     "posterize": apply_posterize,
     "threshold": apply_threshold,
+    "channelmixer": apply_channelmixer,
+    "blackandwhite": apply_blackandwhite,
+    "gradientmap": apply_gradientmap,
+    "colorbalance": apply_colorbalance,
+    "vibrance": apply_vibrance,
 }
