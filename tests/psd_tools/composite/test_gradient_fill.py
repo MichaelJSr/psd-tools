@@ -15,7 +15,7 @@ import pytest
 from psd_tools import PSDImage
 from psd_tools.composite import paint
 from psd_tools.composite.composite import _draw_gradient_overlay, composite
-from psd_tools.constants import ColorMode, GradientInterpolation
+from psd_tools.constants import ColorMode, GradientInterpolation, Tag
 from psd_tools.psd.descriptor import (
     Bool,
     Descriptor,
@@ -65,15 +65,21 @@ def _gradient(
     offset: tuple[float, float] | None = None,
     method: bytes | None = None,
     reverse: bool = False,
+    smoothness: float | None = 0.0,
 ) -> Descriptor:
-    """A ``gradientLayer`` descriptor, black to white unless ``stops`` says."""
+    """A ``gradientLayer`` descriptor, black to white unless ``stops`` says.
+
+    Its blend is linear unless ``smoothness`` says, so the ramp's geometry
+    reads off the grey directly; ``None`` leaves ``Intr`` out.
+    """
     colors = List()
     colors.extend(stops or [_stop(BLACK, 0), _stop(WHITE, 4096)])
     grad = Descriptor(classID=b"Grdn")
     grad[Type.GradientForm] = Enumerated(
         typeID=Type.GradientForm.value, enum=Enum.CustomStops.value
     )
-    grad[Key.Interpolation] = Double(4096.0)
+    if smoothness is not None:
+        grad[Key.Interpolation] = Double(smoothness * 4096.0)
     grad[Key.Colors] = colors
     if transparency is not None:
         alphas = List()
@@ -193,6 +199,57 @@ def _bent_at(midpoint: float, along: np.ndarray) -> np.ndarray:
         along <= midpoint,
         0.5 * along / midpoint,
         0.5 + 0.5 * (along - midpoint) / (1.0 - midpoint),
+    )
+
+
+def _smoothed(along: np.ndarray) -> np.ndarray:
+    """The blend at 100% smoothness: halfway from linear to a smoothstep."""
+    return along + ((3.0 - 2.0 * along) * along * along - along) / 2
+
+
+@pytest.mark.parametrize("smoothness", [1.0, None], ids=["100%", "default"])
+def test_full_smoothness_eases_the_blend_halfway_to_a_smoothstep(
+    smoothness: float | None,
+) -> None:
+    along = np.arange(101) / 100
+    grey = _grey(_gradient(smoothness=smoothness), 101, 1)[0]
+    assert np.allclose(grey, _smoothed(along), atol=1e-5)
+    assert grey[25] == pytest.approx(0.203125) and grey[50] == 0.5
+    half = _grey(_gradient(smoothness=0.5), 101, 1)[0]
+    assert np.allclose(half, (along + _smoothed(along)) / 2, atol=1e-5)
+
+
+def test_a_smooth_ramp_matches_photoshops_own_pixels() -> None:
+    """``gradient-fill.psb`` holds a violet-to-orange fill at 100% smoothness.
+
+    Its preview shows the ramp through a 16x94 mask, laid out on that mask's
+    box; drawn on the same box, the fill's own blend has to match Photoshop's
+    pixels down the opaque column, and the linear blend must not.
+    """
+    psd = PSDImage.open(full_name("gradient-fill.psb"))
+    fill = psd[2]
+    mask = fill.mask
+    assert fill.name == "Gradient Fill 1" and mask is not None
+    assert mask.bbox == (44, 6, 60, 100)
+    desc = fill.tagged_blocks.get_data(Tag.GRADIENT_FILL_SETTING)
+    assert float(desc[Key.Gradient][Key.Interpolation]) == 4096.0
+    column, rows = 50, slice(8, 98)
+    coverage = fill.numpy("mask")
+    assert coverage is not None
+    assert (coverage[rows.start - 6 : rows.stop - 6, column - 44, 0] == 1.0).all()
+    photoshop = psd.numpy()[rows, column, :3]
+
+    smooth, _ = paint.draw_gradient_fill(mask.bbox, ColorMode.RGB, desc)
+    assert smooth is not None
+    rendered = smooth[rows.start - 6 : rows.stop - 6, column - 44]
+    assert np.abs(rendered - photoshop).max() < 3 / 255
+
+    desc[Key.Gradient][Key.Interpolation] = Double(0.0)
+    linear, _ = paint.draw_gradient_fill(mask.bbox, ColorMode.RGB, desc)
+    assert linear is not None
+    assert (
+        np.abs(linear[rows.start - 6 : rows.stop - 6, column - 44] - photoshop).max()
+        > 8 / 255
     )
 
 

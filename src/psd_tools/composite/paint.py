@@ -603,23 +603,33 @@ def _collect_stops(
     return X, Y, M
 
 
-def _with_midpoints(
-    X: list[float], Y: list[np.ndarray], M: list[float]
-) -> tuple[list[float], list[np.ndarray]]:
-    """Add a knot at each segment's midpoint, where the blend is halfway.
+# One sample per ``Lctn`` unit, so every stop is a sample.
+_RAMP_SAMPLES = 4097
 
-    A midpoint at either end of its segment would land on a stop, so it is
-    left out: Photoshop's own dialog keeps midpoints away from the ends.
+
+def _blend_stops(
+    X: list[float], Y: list[np.ndarray], M: list[float], smoothness: float
+) -> np.ndarray:
+    """Sample the ramp through the stops at every ``Lctn`` unit.
+
+    Within a segment the blend runs linearly to halfway at the end stop's
+    midpoint and linearly on to the end; a midpoint on either end of its
+    segment is ignored, as Photoshop's dialog cannot author one. Smoothness
+    then eases the blend towards a smoothstep, with 100% landing halfway
+    between the two.
     """
-    Xk: list[float] = [X[0]]
-    Yk: list[np.ndarray] = [Y[0]]
-    for k in range(1, len(X)):
-        if M[k] != 0.5 and 0.0 < M[k] < 1.0:
-            Xk.append(X[k - 1] + M[k] * (X[k] - X[k - 1]))
-            Yk.append((Y[k - 1] + Y[k]) / 2)
-        Xk.append(X[k])
-        Yk.append(Y[k])
-    return Xk, Yk
+    t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
+    locations = np.asarray(X)
+    k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(X) - 2)
+    u = np.clip((t - locations[k]) / (locations[k + 1] - locations[k]), 0.0, 1.0)
+    m = np.asarray(M)[k + 1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
+    f = np.where((m > 0.0) & (m < 1.0), bent, u)
+    f += smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+    values = np.asarray(Y, dtype=np.float64)
+    f = f.reshape((-1,) + (1,) * (values.ndim - 1))
+    return values[k] * (1.0 - f) + values[k + 1] * f
 
 
 def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
@@ -671,54 +681,55 @@ _BLEND_SPACES: dict[bytes, _BlendSpace] = {
     GradientInterpolation.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),
 }
 
-# Samples taken of a ramp blended outside the canvas space.
-_BLEND_TABLE_SIZE = 1024
-
 
 def _make_linear_gradient_color(
     color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
 ) -> tuple[Any | None, Any | None]:
     from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    def knots(X: list[float], Y: list[np.ndarray]) -> Any:
-        return interpolate.interp1d(
-            X, Y, axis=0, bounds_error=False, fill_value=(Y[0], Y[-1])
-        )
-
+    smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
+    colors = grad.get(Key.Colors, [])
     space = _BLEND_SPACES.get(method) if method is not None else None
     if space is None:
-        Xc, Yc = _with_midpoints(
+        table = _blend_stops(
             *_collect_stops(
-                grad.get(Key.Colors, []),
-                lambda stop: np.array(_get_color(color_mode, stop), dtype=np.float32),
-            )
+                colors, lambda stop: np.array(_get_color(color_mode, stop))
+            ),
+            smoothness,
         )
     else:
         encode, decode = space
-        Xc, Yc = _with_midpoints(
+        blended = _blend_stops(
             *_collect_stops(
-                grad.get(Key.Colors, []),
-                lambda stop: encode(np.array(_get_color(ColorMode.RGB, stop))),
-            )
+                colors, lambda stop: encode(np.array(_get_color(ColorMode.RGB, stop)))
+            ),
+            smoothness,
         )
         # Blended as sRGB, then brought into the document's arrays row by row.
-        ramp = knots(Xc, Yc)
-        Xc = list(np.linspace(0.0, 1.0, _BLEND_TABLE_SIZE))
-        Yc = [
-            np.array(_from_rgb(color_mode, tuple(row)), dtype=np.float32)
-            for row in decode(ramp(np.array(Xc))).tolist()
-        ]
-    G = knots(Xc, Yc)
+        table = np.array(
+            [_from_rgb(color_mode, tuple(row)) for row in decode(blended).tolist()]
+        )
+
+    samples = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
+
+    def lookup(table: np.ndarray) -> Any:
+        table = table.astype(np.float32)
+        return interpolate.interp1d(
+            samples, table, axis=0, bounds_error=False, fill_value=(table[0], table[-1])
+        )
+
+    G = lookup(table)
     if Key.Transparency not in grad:
         return G, None
 
-    Xt, Yt = _with_midpoints(
+    alpha = _blend_stops(
         *_collect_stops(
             grad.get(Key.Transparency),
-            lambda stop: np.array(float(stop.get(Key.Opacity)) / 100.0, np.float32),
-        )
+            lambda stop: np.array(float(stop.get(Key.Opacity)) / 100.0),
+        ),
+        smoothness,
     )
-    return G, knots(Xt, Yt)
+    return G, lookup(alpha)
 
 
 def _noise_color_components(table: np.ndarray) -> np.ndarray:
