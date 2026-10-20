@@ -10,6 +10,14 @@ Changelog
   file whose version 8 entry is missing it (#1011, #1012)
 - [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
   ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
+- [fix] A gradient's ramp spans the line through its box at the gradient's
+  angle, so a vertical gradient on a wide layer is no longer a flat band; the
+  offset, stop midpoints, "align with layer" and the perceptual and linear
+  interpolation methods (``gs99``) are honoured. Every gradient overlay, fill
+  layer and gradient stroke not at 0 or 180 degrees renders differently
+- [api] ``GradientOverlay.scale`` defaults to 100 and ``aligned`` to True where
+  the descriptor omits them, as Photoshop does; ``GradientOverlay.interpolation``
+  reads the ``gs99`` method as ``GradientInterpolation``
 
 1.25.0 (2026-10-14)
 -------------------
