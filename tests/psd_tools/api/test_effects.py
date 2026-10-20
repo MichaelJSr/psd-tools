@@ -126,7 +126,7 @@ def test_outer_glow_spread_is_the_choke_key(fixture: PSDImage) -> None:
     """``spread`` reads ``Ckmt``, the dialog's Spread, and not the jitter key.
 
     Photoshop stores an outer glow's spread under the key an inner glow calls
-    choke; it used to be read from ``ShdN``, which is the glow's jitter.
+    choke; ``ShdN`` beside it is the glow's jitter, which reads on its own.
     """
     effect = fixture[3].effects[0]
     assert isinstance(effect, effects.OuterGlow)
