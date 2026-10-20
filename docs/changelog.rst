@@ -10,6 +10,11 @@ Changelog
   file whose version 8 entry is missing it (#1011, #1012)
 - [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
   ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
+- [fix] A drop shadow layer effect is now rendered when a document is
+  composited from its layers, instead of being dropped. Distance, size,
+  spread, contour, global light, opacity, blend mode and the layer knockout
+  are honoured; noise is read but not applied, and the blur approximates
+  Photoshop's (#679)
 
 1.25.0 (2026-10-14)
 -------------------
@@ -272,10 +277,6 @@ Changelog
   instead of a per-offset loop; a thin outline on a much bigger canvas keeps
   the loop but drops each pixel out as soon as its answer is settled. Pixel
   output is unchanged (#895, #896)
-- [fix] A drop shadow layer effect is now rendered when a document is
-  composited from its layers, instead of being dropped. It fades with the
-  layer's opacity but not its fill opacity; contour and noise are not
-  applied, and the blur approximates Photoshop's (#679)
 - [fix] Stroke and overlay effects are composited into the layer they belong
   to instead of onto the finished composite, so a layer whose coverage is
   partial no longer renders its effect with the backdrop mixed through it.

@@ -26,6 +26,7 @@ from psd_tools.composite import paint, utils, vector
 from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
 from psd_tools.composite.blend import get_blend_func, normal
 from psd_tools.composite.effects import (
+    contour_table,
     draw_drop_shadow,
     draw_stroke_effect_split,
     drop_shadow_bbox,
@@ -313,7 +314,10 @@ def _shadow_reach(
         try:
             distance, size, _ = shadow_geometry(shadow.descriptor)
             bbox = utils.union_bbox(
-                bbox, drop_shadow_bbox(cast_from, distance, shadow.angle, size)
+                bbox,
+                drop_shadow_bbox(
+                    cast_from, distance, shadow.angle, size, layer._psd._max_alloc_bytes
+                ),
             )
         except _UNREADABLE as error:
             logger.debug("Cannot measure a drop shadow of %s: %s", layer, error)
@@ -2527,12 +2531,19 @@ class Compositor:
                     raise ValueError("opacity %r is not finite" % effect_opacity)
                 blend_mode = shadow.blend_mode
                 knocks_out = shadow.layer_knocks_out
-                bbox = drop_shadow_bbox(cast_from, distance, angle, size)
+                contour = contour_table(shadow.contour)
+                anti_aliased = shadow.anti_aliased
+                noise = shadow.noise
+                bbox = drop_shadow_bbox(
+                    cast_from, distance, angle, size, layer._psd._max_alloc_bytes
+                )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a drop shadow of %s: %s", layer, error)
                 continue
             if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
+            if noise > 0.0:
+                logger.debug("The noise of a drop shadow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
             try:
                 coverage = draw_drop_shadow(
@@ -2542,6 +2553,8 @@ class Compositor:
                     angle=angle,
                     size=size,
                     spread=spread,
+                    contour=contour,
+                    anti_aliased=anti_aliased,
                 )
                 color, _ = paint.draw_solid_color_fill(
                     self._viewport, layer._psd.color_mode, shadow.descriptor

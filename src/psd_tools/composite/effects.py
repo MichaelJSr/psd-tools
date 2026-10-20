@@ -19,9 +19,10 @@ Currently supported effects:
 - **Drop shadow**: The layer's silhouette, spread, blurred and offset, painted
   behind the layer
   - Solid color; honors distance, angle (including global light), size,
-    spread, opacity, blend mode and "layer knocks out drop shadow"
-  - The blur is a gaussian approximation of Photoshop's own, and contour and
-    noise are not applied, so a soft shadow's falloff can differ
+    spread, contour and its anti-aliasing, opacity, blend mode and "layer
+    knocks out drop shadow"
+  - The blur is a gaussian approximation of Photoshop's own, so a soft
+    shadow's falloff can differ; noise is read but not applied
 
 Partially supported or limited effects:
 
@@ -677,6 +678,17 @@ def draw_stroke_effect_split(
 # layer_effects.psd's shadow it scores 4.0e-5 where this scores 4.3e-6.
 _SHADOW_SIGMA_PER_SIZE = 0.45
 
+# What one pixel of a shadow's canvas costs at the peak of
+# ``draw_drop_shadow()``: the silhouette it is cast from, the matte spread
+# grows and the distance transform and masks that grow it, the blurred matte
+# and the shifted one, with the group composite the silhouette of a group is
+# read from.
+_SHADOW_BYTES = 64
+
+# Entries in a contour's transfer table. Photoshop states a contour's points
+# on a 0-255 grid along both axes.
+_CONTOUR_STEPS = 256
+
 # How many coverage levels spread grows a silhouette at, at most. A silhouette
 # with no more distinct coverages than this is grown at each of them, so none
 # is rounded to another; one with more, an antialiased or feathered one, is
@@ -704,7 +716,11 @@ def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
 
 
 def drop_shadow_bbox(
-    bbox: tuple[int, int, int, int], distance: float, angle: float, size: float
+    bbox: tuple[int, int, int, int],
+    distance: float,
+    angle: float,
+    size: float,
+    max_alloc_bytes: AllocBudget | None = None,
 ) -> tuple[int, int, int, int]:
     """The canvas :py:func:`draw_drop_shadow` needs to draw a shadow on.
 
@@ -716,17 +732,87 @@ def drop_shadow_bbox(
 
     An empty ``bbox`` is returned untouched, as :py:func:`stroke_bbox` does:
     there is no silhouette to cast.
+
+    The distance and size are the file's, so the box they grow is checked
+    before anything is allocated on it, as a stroke's is. Raises
+    :class:`ValueError` when the grown box is over the per-axis limit or
+    ``max_alloc_bytes``, which the callers read as an unreadable shadow.
     """
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     dx, dy = _shadow_offset(distance, angle)
     margin = math.ceil(max(size, 0.0)) + 2
-    return (
+    grown = (
         math.floor(bbox[0] + min(dx, 0.0)) - margin,
         math.floor(bbox[1] + min(dy, 0.0)) - margin,
         math.ceil(bbox[2] + max(dx, 0.0)) + margin,
         math.ceil(bbox[3] + max(dy, 0.0)) + margin,
     )
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    check_pixel_size(
+        width,
+        height,
+        max_alloc_bytes=max_alloc_bytes,
+        estimated_bytes=width * height * _SHADOW_BYTES,
+        warn=False,
+    )
+    return grown
+
+
+def contour_table(desc: Descriptor | None) -> np.ndarray | None:
+    """The transfer table of a contour descriptor, or ``None`` for the identity.
+
+    A contour maps the coverage of a blurred matte to the coverage painted,
+    along a curve through the points the descriptor lists. Photoshop draws a
+    smooth curve through them; this is a monotone cubic through the same
+    points, which neither overshoots a point nor turns back between two, and
+    a straight line between two points is reproduced exactly. Past the first
+    and last point the table holds their values.
+
+    The default contour, Photoshop's "Linear", runs from corner to corner and
+    is the identity; it comes back as ``None`` so the caller can skip the
+    mapping. So does a descriptor with fewer than two points to draw a curve
+    through. A point that will not read raises as the descriptor's other
+    values do.
+    """
+    if desc is None:
+        return None
+    points = desc.get(Key.Curve)
+    if points is None or len(points) < 2:
+        return None
+    xs = np.array([float(point[Key.Horizontal]) for point in points]) / 255.0
+    ys = np.array([float(point[Key.Vertical]) for point in points]) / 255.0
+    if not (np.isfinite(xs).all() and np.isfinite(ys).all()):
+        raise ValueError("Contour points must be finite.")
+    order = np.argsort(xs, kind="stable")
+    xs, ys = xs[order], ys[order]
+    if len(xs) == 2 and np.array_equal(xs, ys) and xs[0] == 0.0 and xs[1] == 1.0:
+        return None
+    grid = np.linspace(0.0, 1.0, _CONTOUR_STEPS)
+    if len(xs) > 2 and np.all(np.diff(xs) > 0.0):
+        from scipy.interpolate import PchipInterpolator  # type: ignore[import-untyped]  # noqa: PLC0415
+
+        table = PchipInterpolator(xs, ys)(np.clip(grid, xs[0], xs[-1]))
+    else:
+        # Two points, or a step the spline cannot pass through: straight
+        # segments, which hold the end values past the ends on their own.
+        table = np.interp(grid, xs, ys)
+    return np.clip(table, 0.0, 1.0).astype(np.float32)
+
+
+def _contoured(alpha: np.ndarray, table: np.ndarray, anti_aliased: bool) -> np.ndarray:
+    """``alpha`` mapped through ``table``.
+
+    Anti-aliased, the table is read between its entries, so a coverage that
+    falls between two levels is painted between their two values. Otherwise
+    it is read at the nearest entry, the way an 8-bit matte is: a table
+    that steps paints the step.
+    """
+    last = len(table) - 1
+    if anti_aliased:
+        grid = np.linspace(0.0, 1.0, len(table))
+        return np.interp(alpha, grid, table).astype(np.float32)
+    return table[np.rint(alpha * last).astype(np.intp)]
 
 
 def _spread(alpha: np.ndarray, grow: float) -> np.ndarray:
@@ -788,12 +874,21 @@ def draw_drop_shadow(
     angle: float,
     size: float,
     spread: float,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
 ) -> np.ndarray:
     """The coverage a drop shadow casts from ``shape``, on ``viewport``.
 
     ``shape`` is the layer's silhouette on the same canvas, which
     :py:func:`drop_shadow_bbox` sizes. The result is ``(height, width, 1)``;
     the caller tints it, knocks the layer out of it and composites it.
+
+    ``contour`` is a transfer table from :py:func:`contour_table`, applied to
+    the cast matte last, as Photoshop's contour panel shows it: coverage in,
+    coverage out. It is applied on this canvas alone, so a contour that
+    lifts zero coverage paints the canvas and not the document. The table
+    is read between its entries when ``anti_aliased`` and at the nearest
+    one otherwise. Noise is not applied.
 
     ``spread`` is a percentage of ``size``, which is how Photoshop's dialog
     states it, even though the descriptor labels the value in pixels. It
@@ -842,4 +937,7 @@ def draw_drop_shadow(
     dx, dy = _shadow_offset(distance, angle)
     if dx or dy:
         alpha = ndimage.shift(alpha, (dy, dx), order=1, mode="constant", cval=0.0)
-    return np.clip(alpha, 0.0, 1.0)[:, :, None]
+    alpha = np.clip(alpha, 0.0, 1.0)
+    if contour is not None:
+        alpha = _contoured(alpha, contour, anti_aliased)
+    return alpha[:, :, None]

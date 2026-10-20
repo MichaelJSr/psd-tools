@@ -11,6 +11,7 @@ with a vector mask) are forged, by editing or copying ``masks.psb``'s.
 
 import copy
 import logging
+import sys
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -28,9 +29,9 @@ from psd_tools.composite.composite import (
     _shadow_reach,
     paste,
 )
-from psd_tools.constants import BlendMode, Tag
+from psd_tools.constants import BlendMode, Resource, Tag
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Descriptor, Double
+from psd_tools.psd.descriptor import Descriptor, Double, List, String
 from psd_tools.terminology import Key, Klass
 
 from ..utils import full_name
@@ -170,11 +171,24 @@ def test_the_shadow_canvas_holds_the_whole_shadow() -> None:
     bbox = (0, 0, 40, 40)
     shape = np.ones((40, 40, 1), dtype=np.float32)
     for spread in (0.0, 30.0):
-        values = dict(distance=7.0, angle=120.0, size=12.0, spread=spread)
         canvas = effects.drop_shadow_bbox(bbox, 7.0, 120.0, 12.0)
         roomy = (canvas[0] - 20, canvas[1] - 20, canvas[2] + 20, canvas[3] + 20)
-        tight = effects.draw_drop_shadow(canvas, paste(canvas, bbox, shape), **values)
-        wide = effects.draw_drop_shadow(roomy, paste(roomy, bbox, shape), **values)
+        tight = effects.draw_drop_shadow(
+            canvas,
+            paste(canvas, bbox, shape),
+            distance=7.0,
+            angle=120.0,
+            size=12.0,
+            spread=spread,
+        )
+        wide = effects.draw_drop_shadow(
+            roomy,
+            paste(roomy, bbox, shape),
+            distance=7.0,
+            angle=120.0,
+            size=12.0,
+            spread=spread,
+        )
         assert np.allclose(paste(roomy, canvas, tight), wide, atol=1e-6)
 
 
@@ -765,3 +779,267 @@ def test_drop_shadows_render_to_photoshops_preview(
 def test_drop_shadows_render_to_photoshops_preview_when_forced() -> None:
     """``force=True`` redraws masks.psb's cards from their paths: 1.6e-5."""
     assert _error(PSDImage.open(full_name("masks.psb")), None, force=True) <= 3e-5
+
+
+# -- Contour, noise, global light and the allocation guard ------------------ #
+
+
+def _contour(points: list[tuple[float, float]]) -> Descriptor:
+    """A contour descriptor through ``points`` on Photoshop's 0-255 grid."""
+    desc = Descriptor(classID=b"ShpC")
+    curve = List()
+    for x, y in points:
+        point = Descriptor(classID=b"CrPt")
+        point[Key.Horizontal] = Double(x)
+        point[Key.Vertical] = Double(y)
+        curve.append(point)
+    desc[Key.Name] = String("forged")
+    desc[Key.Curve] = curve
+    return desc
+
+
+def test_photoshops_linear_contour_is_the_identity() -> None:
+    """The default contour, "Linear" through two corners, is skipped as ``None``.
+
+    So is a missing contour. Every shadow in the fixture corpus but one
+    carries this contour, which is also what every drop shadow in the card
+    corpus this was built for carries.
+    """
+    _, card = _masks_card()
+    shadow = next(iter(card.effects.find("dropshadow")))
+    assert shadow.contour[Key.Name].value.rstrip("\x00") == "Linear"
+    assert effects.contour_table(shadow.contour) is None
+    assert effects.contour_table(None) is None
+    assert effects.contour_table(_contour([(0.0, 0.0), (255.0, 255.0)])) is None
+    assert effects.contour_table(_contour([(0.0, 0.0)])) is None
+
+
+def test_a_contour_table_passes_through_its_points_in_order() -> None:
+    """``layer_params.psb``'s caption carries Photoshop's nine-point "Gaussian".
+
+    The table has an entry per grid value, so each point of the curve lands
+    on an entry and the curve has to pass through it; between points it may
+    not turn back, which is what the monotone spline guarantees.
+    """
+    psd = PSDImage.open(full_name("layer_params.psb"))
+    caption = next(layer for layer in psd.descendants() if layer.name == "Test caption")
+    shadow = next(iter(caption.effects.find("dropshadow")))
+    points = [
+        (float(point[Key.Horizontal]), float(point[Key.Vertical]))
+        for point in shadow.contour[Key.Curve]
+    ]
+    assert len(points) == 9
+    table = effects.contour_table(shadow.contour)
+    assert table is not None
+    assert table.shape == (effects._CONTOUR_STEPS,)
+    for x, y in points:
+        assert float(table[int(x)]) == pytest.approx(y / 255.0, abs=1e-6)
+    assert np.all(np.diff(table) >= 0.0)
+
+
+def test_a_two_point_contour_is_a_straight_line() -> None:
+    """Two points make a line, and a step holds its values past its ends."""
+    table = effects.contour_table(_contour([(0.0, 51.0), (255.0, 255.0)]))
+    assert table is not None
+    assert np.allclose(table, np.linspace(51.0 / 255.0, 1.0, 256), atol=1e-6)
+    table = effects.contour_table(_contour([(64.0, 0.0), (128.0, 255.0)]))
+    assert table is not None
+    assert np.all(table[:65] == 0.0)
+    assert np.all(table[128:] == 1.0)
+    assert np.all(np.diff(table[64:129]) > 0.0)
+
+
+def test_a_contour_reshapes_the_falloff_of_a_drop_shadow() -> None:
+    """The contour maps the cast matte's coverage, after the blur and offset.
+
+    Inverted, it paints the shadow where the blurred matte is clear and
+    clears it where the matte is full, over the whole canvas the shadow is
+    drawn on.
+    """
+    shape = _disc(81, 12.0)
+    plain = effects.draw_drop_shadow(
+        (0, 0, 81, 81), shape, distance=3.0, angle=90.0, size=6.0, spread=0.0
+    )
+    inverted = effects.contour_table(_contour([(0.0, 255.0), (255.0, 0.0)]))
+    flipped = effects.draw_drop_shadow(
+        (0, 0, 81, 81),
+        shape,
+        distance=3.0,
+        angle=90.0,
+        size=6.0,
+        spread=0.0,
+        contour=inverted,
+        anti_aliased=True,
+    )
+    assert np.allclose(flipped, 1.0 - plain, atol=1e-6)
+
+
+def test_anti_aliasing_reads_the_contour_between_its_entries() -> None:
+    """Without anti-aliasing the table is read at the nearest entry.
+
+    A contour that steps from 0 to 1 between two entries paints a coverage
+    that falls between them as one or the other, the way an 8-bit matte
+    would; anti-aliased, it paints the value between the two.
+    """
+    steps = effects._CONTOUR_STEPS
+    table = np.where(np.arange(steps) >= steps // 2, 1.0, 0.0).astype(np.float32)
+    alpha = np.full((1, 1), (steps // 2 - 0.5) / (steps - 1), dtype=np.float32)
+    hard = float(effects._contoured(alpha, table, anti_aliased=False)[0, 0])
+    assert hard in (0.0, 1.0)
+    smooth = float(effects._contoured(alpha, table, anti_aliased=True)[0, 0])
+    assert 0.0 < smooth < 1.0
+
+
+def test_a_shadows_contour_is_applied_when_it_is_composited() -> None:
+    """A contour that lifts zero coverage paints the shadow's whole canvas.
+
+    The card's shadow is made hard and cast nowhere, so beside the card it
+    covers nothing; given a flat contour, the pixel just beside the card,
+    which is on the canvas the shadow is drawn on, is covered in full.
+    """
+    _, layer = _masks_card()
+    _forge_shadow(layer, Blur=0.0, Distance=0.0, Opacity=100.0)
+    viewport = _around(layer)
+    y, x = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1], 16 - 1
+    plain = _alone(layer, viewport)
+    _shadow_descriptor(layer)[Key.TransferSpec] = _contour(
+        [(0.0, 255.0), (255.0, 255.0)]
+    )
+    flat = _alone(layer, viewport)
+    assert float(plain[y, x, 0]) == 0.0
+    assert float(flat[y, x, 0]) == pytest.approx(1.0)
+
+
+def test_the_caption_contour_brings_layer_params_closer_to_photoshop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Photoshop's preview of the contoured caption shadow is matched better.
+
+    The caption's region also holds a bevel that is not drawn, so the error
+    does not reach the bounds the plain shadows are held to; the contour has
+    to improve on the identity table, and the shadow on no shadow at all.
+    """
+    filename = "layer_params.psb"
+    psd = PSDImage.open(full_name(filename))
+    caption = next(layer for layer in psd.descendants() if layer.name == "Test caption")
+    region = _around(caption, 30)
+    contoured = _error(psd, region)
+
+    module = sys.modules["psd_tools.composite.composite"]
+    monkeypatch.setattr(module, "contour_table", lambda desc: None)
+    identity = _error(PSDImage.open(full_name(filename)), region)
+
+    unshadowed = PSDImage.open(full_name(filename))
+    caption = next(
+        layer for layer in unshadowed.descendants() if layer.name == "Test caption"
+    )
+    _shadow_descriptor(caption)[Key.Enabled] = False
+    without = _error(unshadowed, region)
+    assert contoured < identity < without
+
+
+def test_noise_is_read_but_not_applied(caplog: pytest.LogCaptureFixture) -> None:
+    """A noisy shadow renders as the same shadow without noise, and says so."""
+    psd, layer = _masks_card()
+    viewport = _around(layer)
+    plain = _alone(layer, viewport)
+    _shadow_descriptor(layer)[Key.Noise] = Double(50.0)
+    assert next(iter(layer.effects.find("dropshadow"))).noise == 50.0
+    with caplog.at_level(logging.DEBUG, logger="psd_tools.composite.composite"):
+        noisy = _alone(layer, viewport)
+    assert "noise" in caplog.text
+    assert np.array_equal(noisy, plain)
+
+
+def test_a_shadow_lit_by_the_global_light_follows_the_documents_angle() -> None:
+    """Under global light the angle is the document's, read when it is drawn.
+
+    The forged shadow is hard and cast 20 px, so where it falls is read off
+    single pixels: below the card with the light overhead, left of it with
+    the light from the right. The reach the cull and the group canvas
+    measure moves with it.
+    """
+    psd, layer = _masks_card()
+    shadow = _forge_shadow(layer, Blur=0.0, Distance=20.0, Opacity=100.0)
+    shadow[Key.UseGlobalAngle] = True
+    effect = next(iter(layer.effects.find("dropshadow")))
+    assert effect.use_global_light
+    assert effect.angle == 90
+    viewport = _around(layer, 30)
+    left, top, right, bottom = layer.bbox
+    y, x = (top + bottom) // 2 - viewport[1], left - 10 - viewport[0]
+    below_y, below_x = bottom + 10 - viewport[1], (left + right) // 2 - viewport[0]
+
+    lit_from_above = _alone(layer, viewport)
+    assert float(lit_from_above[below_y, below_x, 0]) == pytest.approx(1.0)
+    assert float(lit_from_above[y, x, 0]) == 0.0
+    reach_above = _effect_reach(layer)
+
+    psd.image_resources[Resource.GLOBAL_ANGLE].data.value = 0
+    assert effect.angle == 0
+    lit_from_right = _alone(layer, viewport)
+    assert float(lit_from_right[y, x, 0]) == pytest.approx(1.0)
+    assert float(lit_from_right[below_y, below_x, 0]) == 0.0
+    reach_right = _effect_reach(layer)
+    assert reach_right[0] == reach_above[0] - 20
+    assert reach_right[3] == reach_above[3] - 20
+
+
+def test_a_shadow_with_its_own_angle_ignores_the_global_light() -> None:
+    """With global light off the descriptor's angle is used, whatever the document says."""
+    psd, layer = _masks_card()
+    _forge_shadow(layer, angle=90.0, Blur=0.0, Distance=20.0, Opacity=100.0)
+    psd.image_resources[Resource.GLOBAL_ANGLE].data.value = 0
+    viewport = _around(layer, 30)
+    left, top, right, bottom = layer.bbox
+    alpha = _alone(layer, viewport)
+    below = alpha[bottom + 10 - viewport[1], (left + right) // 2 - viewport[0], 0]
+    beside = alpha[(top + bottom) // 2 - viewport[1], left - 10 - viewport[0], 0]
+    assert float(below) == pytest.approx(1.0)
+    assert float(beside) == 0.0
+
+
+def test_drop_shadow_bbox_refuses_a_canvas_over_the_allocation_budget() -> None:
+    """The grown box is checked against the budget before it is allocated.
+
+    The size and distance are read unvalidated from the file, so a shadow of
+    Photoshop's largest size on a small layer is still bounded by what the
+    caller lets it allocate, as a stroke's box is.
+    """
+    bbox = (0, 0, 20, 20)
+    grown = effects.drop_shadow_bbox(
+        bbox, 0.0, 90.0, 250.0, max_alloc_bytes="unlimited"
+    )
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    budget = width * height * effects._SHADOW_BYTES
+    assert (
+        effects.drop_shadow_bbox(bbox, 0.0, 90.0, 250.0, max_alloc_bytes=budget)
+        == grown
+    )
+    with pytest.raises(ValueError):
+        effects.drop_shadow_bbox(bbox, 0.0, 90.0, 250.0, max_alloc_bytes=budget - 1)
+    # An empty box casts nothing and is not measured.
+    empty = (0, 0, 0, 0)
+    assert effects.drop_shadow_bbox(empty, 0.0, 90.0, 250.0, max_alloc_bytes=1) == empty
+
+
+def test_a_drop_shadow_over_the_documents_budget_is_dropped_not_drawn() -> None:
+    """A shadow whose canvas the document's budget refuses costs the shadow only.
+
+    The budget is set just under what the shadow's canvas costs and above
+    what the layer's own pixels do, so the layer renders as it does with the
+    shadow switched off rather than raising.
+    """
+    psd, layer = _masks_card()
+    viewport = _around(layer)
+    shadow = _shadow_descriptor(layer)
+    shadow[Key.Enabled] = False
+    disabled = _alone(layer, viewport)
+    shadow[Key.Enabled] = True
+    assert not np.array_equal(_alone(layer, viewport), disabled)
+
+    distance, size, _ = effects.shadow_geometry(shadow)
+    grown = effects.drop_shadow_bbox(layer.bbox, distance, 90.0, size)
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1
+    assert np.array_equal(_alone(layer, viewport), disabled)
