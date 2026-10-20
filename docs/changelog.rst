@@ -15,9 +15,10 @@ Changelog
   offset, stop midpoints, smoothness, "align with layer" and the perceptual
   and linear interpolation methods (``gs99``) are honoured. Every gradient
   overlay, fill layer and gradient stroke renders differently
-- [api] ``GradientOverlay.scale`` defaults to 100 and ``aligned`` to True where
-  the descriptor omits them, as Photoshop does; ``GradientOverlay.interpolation``
-  reads the ``gs99`` method as ``GradientInterpolation``
+- [api] ``GradientOverlay`` and ``PatternOverlay`` default ``scale`` to 100 and
+  ``aligned`` to True where the descriptor omits them, as Photoshop does.
+  ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
+  ``interpolation``, the ``gs99`` method as a new ``GradientInterpolation`` enum
 
 1.25.0 (2026-10-14)
 -------------------

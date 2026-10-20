@@ -575,17 +575,27 @@ def _make_gradient_color(
 def _collect_stops(
     stops: Sequence[Any], value_fn: Callable[[Any], np.ndarray]
 ) -> tuple[list[float], list[np.ndarray], list[float]]:
-    """Collect gradient stop (location, value, midpoint) triples, deduplicating co-located stops.
+    """Collect gradient stop (location, value, midpoint) triples in ramp order.
 
-    A stop's ``Mdpn`` is where, as a fraction of the segment that ends at it,
-    the blend from the previous stop is halfway.
+    Co-located stops keep the last one listed. A stop's ``Mdpn`` is where, as
+    a fraction of the segment that ends at it, the blend from the previous
+    stop is halfway.
     """
+    triples = sorted(
+        (
+            (
+                float(stop.get(Key.Location)) / 4096.0,
+                value_fn(stop),
+                float(stop.get(Key.Midpoint, 50.0)) / 100.0,
+            )
+            for stop in stops
+        ),
+        key=lambda triple: triple[0],
+    )
     X: list[float] = []
     Y: list[np.ndarray] = []
     M: list[float] = []
-    for stop in stops:
-        location = float(stop.get(Key.Location)) / 4096.0
-        value = value_fn(stop)
+    for location, value, midpoint in triples:
         if X and X[-1] == location:
             logger.debug("Duplicate stop at %s", location)
             X.pop()
@@ -593,7 +603,7 @@ def _collect_stops(
             M.pop()
         X.append(location)
         Y.append(value)
-        M.append(float(stop.get(Key.Midpoint, 50.0)) / 100.0)
+        M.append(midpoint)
     if not X:
         raise ValueError("Gradient has no stops.")
     if len(X) == 1:

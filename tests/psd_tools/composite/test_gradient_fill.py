@@ -193,6 +193,22 @@ def test_the_midpoint_is_read_from_the_stop_that_ends_the_segment() -> None:
     assert np.array_equal(unbent, plain)
 
 
+def test_stops_blend_in_ramp_order_whatever_order_they_are_listed() -> None:
+    """A red stop listed after the white end stop still sits between the two."""
+    red = (255.0, 0.0, 0.0)
+    listed = [_stop(BLACK, 0), _stop(WHITE, 4096), _stop(red, 2048)]
+    sorted_stops = [_stop(BLACK, 0), _stop(red, 2048), _stop(WHITE, 4096)]
+    color, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1), ColorMode.RGB, _gradient(stops=listed)
+    )
+    expected, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1), ColorMode.RGB, _gradient(stops=sorted_stops)
+    )
+    assert color is not None and expected is not None
+    assert np.array_equal(color, expected)
+    assert color[0, 50].tolist() == pytest.approx([1.0, 0.0, 0.0], abs=1e-5)
+
+
 def _bent_at(midpoint: float, along: np.ndarray) -> np.ndarray:
     """A segment's blend, linear to 0.5 at ``midpoint`` and linear on to 1."""
     return np.where(
@@ -338,8 +354,8 @@ def test_an_overlay_not_aligned_with_its_layer_is_laid_out_on_the_document() -> 
 def test_a_wide_overlay_at_a_near_vertical_angle_matches_photoshop() -> None:
     """A 600x60 overlay at 87 degrees against Photoshop's own render.
 
-    Its ramp is as long as the box is tall; measured as long as the box was
-    wide, only a slice of it showed.
+    Its ramp is as long as the box is tall, so the whole of it shows across
+    the 60 rows.
     """
     psd = PSDImage.open(full_name("layer_effects.psd"))
     layer = next(x for x in psd if x.name == "Gradient Overlay")
@@ -349,5 +365,5 @@ def test_a_wide_overlay_at_a_near_vertical_angle_matches_photoshop() -> None:
     color, _, _ = composite(psd, force=True)
     assert reference.shape[2] == color.shape[2]
     error = np.mean((reference - color[top:bottom, left:right]) ** 2)
-    on_main = 0.00082
-    assert error < on_main / 4
+    ramp_across_the_width = 0.00082
+    assert error < ramp_across_the_width / 4
