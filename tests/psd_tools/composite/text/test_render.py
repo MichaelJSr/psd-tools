@@ -1,8 +1,9 @@
+import builtins
 import dataclasses
 import os
 import subprocess
 import sys
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -231,3 +232,111 @@ def test_composite_import_does_not_load_text() -> None:
         "assert 'psd_tools.composite.text' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def _quantised(rgba: np.ndarray) -> np.ndarray:
+    return np.round(rgba * 255) / 255
+
+
+def test_rasterize_round_trip(
+    layer: TypeLayer, arial_as_luckiest_guy: FontMap, tmp_path: Any
+) -> None:
+    psd = cast(PSDImage, layer._psd)
+    layer.set_text("Hello\rworld")
+    assert layer._text_dirty
+    report = layer.rasterize(fonts=arial_as_luckiest_guy)
+    assert not layer._text_dirty
+    assert [line.text for line in report.lines] == ["Hello", "world"]
+    out = render_type_layer(layer, arial_as_luckiest_guy)
+    assert out is not None
+    rgba, bbox = out
+    assert tuple(layer.bbox) == bbox
+    shape = layer.numpy("shape")
+    color = layer.numpy("color")
+    assert shape is not None and color is not None
+    np.testing.assert_allclose(shape[..., 0], _quantised(rgba[..., 3]), atol=1e-6)
+    ink = rgba[..., 3] > 0
+    np.testing.assert_allclose(color[ink], _quantised(rgba[..., :3][ink]), atol=1e-6)
+    psd.save(tmp_path / "edited.psd")
+    again = PSDImage.open(tmp_path / "edited.psd")
+    reopened = next(x for x in again.descendants() if isinstance(x, TypeLayer))
+    assert reopened.text == "Hello\rworld"
+    assert tuple(reopened.bbox) == bbox
+    shape2 = reopened.numpy("shape")
+    assert shape2 is not None
+    np.testing.assert_allclose(shape2[..., 0], _quantised(rgba[..., 3]), atol=1e-6)
+    image = reopened.composite()
+    assert image is not None and image.size == (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    alpha = np.asarray(image.convert("RGBA"), dtype=np.float32)[..., 3] / 255
+    np.testing.assert_allclose(alpha, _quantised(rgba[..., 3]), atol=1e-6)
+    whole = np.asarray(again.composite().convert("RGBA"), dtype=np.float32)
+    x0, y0, x1, y1 = bbox
+    assert (whole[y0:y1, x0:x1, :3].min(axis=-1) < 128).any()
+
+
+def test_rasterize_rewrites_text_bounds(luckiest_guy_path: str) -> None:
+    psd = PSDImage.open(full_name("layers/type-layer.psd"))
+    layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
+    box = layer._data.text_data[b"boundingBox"]
+    before = {k: v.value for k, v in box.items()}
+    layer.rasterize(fonts=FontMap(aliases={"ArialMT": luckiest_guy_path}))
+    after = layer._data.text_data[b"boundingBox"]
+    assert any(after[k].value != before[k] for k in before)
+    assert after[b"Rght"].value > after[b"Left"].value
+    # Box text keeps its frame.
+    assert layer._data.text_data[b"bounds"][b"Rght"].value == pytest.approx(32.0)
+
+
+def test_rasterize_without_the_extra(
+    layer: TypeLayer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "psd_tools.composite.text":
+            raise ImportError("no text extra")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ImportError, match=r"psd-tools\[text\]"):
+        layer.rasterize()
+
+
+def test_unedited_document_saves_byte_identical(tmp_path: Any) -> None:
+    path = full_name("text.psd")
+    psd = PSDImage.open(path)
+    layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
+    render_type_layer(layer, FontMap(policy="skip"))
+    psd.save(tmp_path / "copy.psd")
+    with open(path, "rb") as f, open(tmp_path / "copy.psd", "rb") as g:
+        assert f.read() == g.read()
+
+
+@pytest.mark.parametrize("which", [0, 1, 4])
+def test_corpus_edit_round_trip(
+    corpus_fonts: FontMap, which: int, tmp_path: Any
+) -> None:
+    psd_name, index, name, *_ = CORPUS[which]
+    layer = corpus_layer(psd_name, index)
+    psd = cast(PSDImage, layer._psd)
+    layer.set_text(layer.text + " edited")
+    report = layer.rasterize(fonts=corpus_fonts)
+    assert report.lines[-1].text.endswith("edited")
+    out = render_type_layer(layer, corpus_fonts)
+    assert out is not None
+    rgba, bbox = out
+    assert tuple(layer.bbox) == bbox
+    psd.save(tmp_path / "card.psd")
+    again = PSDImage.open(tmp_path / "card.psd")
+    node: Any = again
+    for i in index:
+        node = node[i]
+    assert isinstance(node, TypeLayer)
+    assert node.text == layer.text
+    shape = node.numpy("shape")
+    assert shape is not None
+    np.testing.assert_allclose(shape[..., 0], _quantised(rgba[..., 3]), atol=1e-6)
+    image = node.composite()
+    assert image is not None
+    alpha = np.asarray(image.convert("RGBA"), dtype=np.float32)[..., 3] / 255
+    np.testing.assert_allclose(alpha, _quantised(rgba[..., 3]), atol=1e-6)

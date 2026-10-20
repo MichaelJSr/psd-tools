@@ -67,20 +67,20 @@ Limited support:
 * Basic editing of pixel layers and groups, such as adding or removing a layer
 * Blending modes except for dissolve
 * Drawing of bezier curves
+* Editing and rendering of the text in type layers (see :doc:`text`)
 
 Not supported:
 
-* Editing of various layers such as type layers, shape layers, smart objects, etc.
-* Editing of texts in type layers
+* Editing of various layers such as shape layers, smart objects, etc.
 * Composition of adjustment layers
 * Composition of many layer effects
-* Font rendering
 
 .. toctree::
     :caption: Notes
     :maxdepth: 1
 
     usage
+    text
     untrusted
     migration
     changelog
