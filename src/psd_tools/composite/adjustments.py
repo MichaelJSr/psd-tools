@@ -33,7 +33,6 @@ from psd_tools.composite.blend import (
     hsv2hsl,
     rgb2hsl,
 )
-from psd_tools.composite.paint import _from_rgb
 from psd_tools.constants import ColorMode
 
 logger = logging.getLogger(__name__)
@@ -880,12 +879,7 @@ def _gradientmap_lut(
                 "Gradient map stop colour space %d is not supported.", stop.mode
             )
             return None
-        location = stop.location / _STOP_LOCATION_MAX
-        if locations and locations[-1] == location:
-            locations.pop()
-            midpoints.pop()
-            colors.pop()
-        locations.append(location)
+        locations.append(stop.location / _STOP_LOCATION_MAX)
         midpoints.append(float(stop.midpoint) / 100.0)
         colors.append(np.clip(rgb, _0, _1))
 
@@ -893,10 +887,25 @@ def _gradientmap_lut(
     ramp = _gradient_ramp(
         _lut_domain(size), locations, midpoints, np.array(colors), block.method
     )
-    return np.array(
-        [_from_rgb(colormode, tuple(float(v) for v in rgb)) for rgb in ramp],
-        dtype=np.float32,
-    )
+    return _rows_from_rgb(colormode, ramp)
+
+
+def _rows_from_rgb(
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
+    rgb: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """``paint._from_rgb`` over the rows of an (N, 3) array."""
+    if colormode == ColorMode.RGB:
+        return rgb
+    if colormode == ColorMode.CMYK:
+        ink = _1 - rgb
+        key = ink.min(axis=1, keepdims=True)
+        cmy = (ink - key) / np.maximum(_1 - key, _FLOAT_EPSILON)
+        return (_1 - np.concatenate([cmy, key], axis=1)).astype(np.float32, copy=False)
+    return (rgb @ _BT601_LUMINANCE)[:, None].astype(np.float32, copy=False)
+
+
+_BT601_LUMINANCE = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
 def _gradient_ramp(
@@ -906,16 +915,22 @@ def _gradient_ramp(
     colors: NDArray[np.float32],
     method: bytes,
 ) -> NDArray[np.float32]:
-    """Sample a stop gradient at ``t``; ends are clamped to the end stops."""
+    """Sample a stop gradient at ``t``; ends are clamped to the end stops.
+
+    Two stops at one location make a hard edge: the segment into it ends in
+    the first stop's colour and the segment out of it starts in the second's.
+    """
     if len(locations) == 1:
         return np.repeat(colors[:1], len(t), axis=0)
     to_space, from_space = _GRADIENT_SPACES.get(method, _GRADIENT_SPACES[b"Gcls"])
     values = to_space(colors)
-    out = np.empty((len(t), colors.shape[1]), dtype=np.float64)
+    out = np.empty((len(t), colors.shape[1]), dtype=np.float32)
     out[t < locations[0]] = values[0]
     out[t >= locations[-1]] = values[-1]
     for k in range(len(locations) - 1):
         left, right = locations[k], locations[k + 1]
+        if right <= left:
+            continue
         inside = (t >= left) & (t < right)
         u = (t[inside] - left) / (right - left)
         # A stop's midpoint is where the blend of the segment ending at it
@@ -927,12 +942,12 @@ def _gradient_ramp(
 
 
 def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
-    c = np.asarray(c, dtype=np.float64)
+    c = np.asarray(c, dtype=np.float32)
     return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
 
 
 def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
-    c = np.clip(np.asarray(c, dtype=np.float64), 0.0, 1.0)
+    c = np.clip(np.asarray(c, dtype=np.float32), _0, _1)
     return np.where(c <= 0.0031308, c * 12.92, 1.055 * c ** (1 / 2.4) - 0.055)
 
 
@@ -942,15 +957,19 @@ _OKLAB_M1 = np.array(
         [0.4122214708, 0.5363325363, 0.0514459929],
         [0.2119034982, 0.6806995451, 0.1073969566],
         [0.0883024619, 0.2817188376, 0.6299787005],
-    ]
+    ],
+    dtype=np.float32,
 )
 _OKLAB_M2 = np.array(
     [
         [0.2104542553, 0.7936177850, -0.0040720468],
         [1.9779984951, -2.4285922050, 0.4505937099],
         [0.0259040371, 0.7827717662, -0.8086757660],
-    ]
+    ],
+    dtype=np.float32,
 )
+_OKLAB_M1_INV = np.linalg.inv(_OKLAB_M1)
+_OKLAB_M2_INV = np.linalg.inv(_OKLAB_M2)
 
 
 def _srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
@@ -959,14 +978,15 @@ def _srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
 
 
 def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
-    lms = (lab @ np.linalg.inv(_OKLAB_M2).T) ** 3
-    return _linear_to_srgb(lms @ np.linalg.inv(_OKLAB_M1).T)
+    lms = (lab @ _OKLAB_M2_INV.T) ** 3
+    return _linear_to_srgb(lms @ _OKLAB_M1_INV.T)
 
 
 # Interpolation space per gradient method: classic blends encoded values,
 # perceptual blends in Oklab, linear blends in linear light.
-_GRADIENT_SPACES: dict[bytes, tuple[Callable, Callable]] = {
-    b"Gcls": (lambda c: np.asarray(c, dtype=np.float64), lambda c: np.clip(c, 0, 1)),
+_ColorTransform = Callable[[np.ndarray], np.ndarray]
+_GRADIENT_SPACES: dict[bytes, tuple[_ColorTransform, _ColorTransform]] = {
+    b"Gcls": (lambda c: np.asarray(c, dtype=np.float32), lambda c: np.clip(c, _0, _1)),
     b"Perc": (_srgb_to_oklab, _oklab_to_srgb),
     b"Lnr ": (_srgb_to_linear, _linear_to_srgb),
 }
@@ -1041,16 +1061,20 @@ def apply_vibrance(
 
 
 # Vibrance is a fit, not Photoshop's formula. In linear light each pixel is
-# blended toward a gray between its darkest and brightest channel; the blend
-# weight falls with saturation, and the gray climbs toward the brightest channel
-# with it. A positive amount pulls away from a gray near the brightest channel,
-# less for skin tones. The saturation slider scales chroma about the luminance.
-_VIBRANCE_WEIGHT_PALE = 1.0
-_VIBRANCE_WEIGHT_DROP = 0.65
-_VIBRANCE_WEIGHT_CURVE = 2.3
+# blended toward a gray on the line through its darkest and brightest channel,
+# placed at a position in units of their difference. The blend weight falls
+# with saturation; the position climbs with saturation and, for pale pixels,
+# with brightness, so a bright pale pixel keeps its brightness while a dark one
+# loses some. A positive amount pulls away from a gray near the brightest
+# channel, less for skin tones. The saturation slider scales chroma about the
+# luminance.
+_VIBRANCE_WEIGHT_PALE = 0.98
+_VIBRANCE_WEIGHT_DROP = 0.64
+_VIBRANCE_WEIGHT_CURVE = 1.9
 _VIBRANCE_AMOUNT_CURVE = 1.2
-_VIBRANCE_GRAY_PALE = -0.5
-_VIBRANCE_GRAY_RISE = 1.3
+_VIBRANCE_GRAY_PALE = -0.83
+_VIBRANCE_GRAY_RISE = 1.64
+_VIBRANCE_GRAY_BRIGHT = 1.9
 _VIBRANCE_BOOST_GRAY = 0.85
 _VIBRANCE_SKIN_SHARE = 0.3
 _SKIN_HUE_FROM = 300 / 360
@@ -1077,7 +1101,12 @@ def _vibrance(
             _VIBRANCE_WEIGHT_PALE - _VIBRANCE_WEIGHT_DROP * sat**_VIBRANCE_WEIGHT_CURVE
         )
         weight = weight * (-vibrance) ** _VIBRANCE_AMOUNT_CURVE
-        gray = low + (_VIBRANCE_GRAY_PALE + _VIBRANCE_GRAY_RISE * sat) * chroma
+        position = (
+            _VIBRANCE_GRAY_PALE
+            + _VIBRANCE_GRAY_RISE * sat
+            + _VIBRANCE_GRAY_BRIGHT * high * (_1 - sat)
+        )
+        gray = low + position * chroma
         out = out + weight * (gray - out)
     elif vibrance > 0:
         assert skin is not None

@@ -1,6 +1,7 @@
 import copy
 import logging
 import struct
+import sys
 from collections.abc import Callable
 
 import numpy as np
@@ -385,6 +386,34 @@ def test_an_adjustment_nested_in_a_styled_group_still_reaches_its_content() -> N
     assert difference[190:].max() <= 1
 
 
+def test_a_style_on_a_normal_group_changes_nothing_about_its_adjustments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Normal-mode group is composited on its own with or without a style.
+
+    So the isolation rule for styled groups must not touch it: the partially
+    covered pixels of ``Group 6``'s content would otherwise see a weaker
+    ``Curves 9``. The style is faked through ``_has_enabled_effects`` so that
+    nothing but the rule itself can change the render.
+    """
+    module = sys.modules["psd_tools.composite.composite"]
+
+    def render(passthrough: bool, styled: bool) -> np.ndarray:
+        psd = PSDImage.open(
+            full_name("adjustments/adjustment_nested_composition_3.psd")
+        )
+        group = psd[4]
+        assert isinstance(group, Group)
+        assert isinstance(group[0], adjustments.Curves)
+        if not passthrough:
+            group.blend_mode = BlendMode.NORMAL
+        monkeypatch.setattr(module, "_has_enabled_effects", lambda layer: styled)
+        return np.asarray(psd.composite(force=True).convert("RGB"), dtype=np.int16)
+
+    assert np.array_equal(render(False, styled=True), render(False, styled=False))
+    assert not np.array_equal(render(True, styled=True), render(True, styled=False))
+
+
 # Channel mixer
 _IDENTITY_MIX = [[100, 0, 0, 0, 0], [0, 100, 0, 0, 0], [0, 0, 100, 0, 0]]
 _FOURTH_MIX = [0, 0, 0, 100, 0]
@@ -557,6 +586,27 @@ def test_gradient_map_holds_the_end_colours_outside_the_end_stops() -> None:
     assert np.allclose(out[0, 2], (0.5, 0.0, 0.5), atol=1 / 255)
 
 
+def test_gradient_map_keeps_a_hard_edge_between_co_located_stops() -> None:
+    """Two stops at one location end one segment and start the next.
+
+    Just under the edge is the first stop's colour; from the edge on it is the
+    second's. The duplicate at the start that Photoshop writes is harmless.
+    """
+    red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+    layer = _gradient_map_layer(
+        _gradient_map_data(
+            [(0, 50, _BLACK), (0, 50, _BLACK), (2048, 50, red), (2048, 50, blue)]
+            + [(4096, 50, _WHITE)]
+        )
+    )
+    below, at = 0.5 - 2 / 255, 0.5
+    image = np.array([[[below] * 3, [at] * 3, [0.75] * 3]], dtype=np.float32)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    assert np.allclose(out[0, 0], red, atol=3 / 255)
+    assert np.allclose(out[0, 1], blue, atol=3 / 255)
+    assert np.allclose(out[0, 2], (0.5, 0.5, 1.0), atol=1 / 255)
+
+
 def test_gradient_map_midpoint_is_where_the_blend_reaches_one_half() -> None:
     """A midpoint of 25% on the end stop puts the half blend at a quarter."""
     layer = _gradient_map_layer(
@@ -630,6 +680,21 @@ def test_color_balance_preserving_luminosity_centres_the_amounts() -> None:
     out = apply_colorbalance(_RAMP, ColorMode.RGB, balanced)
     assert np.allclose(out[..., 0], np.sqrt(_RAMP[..., 0]), atol=1 / 255)
     assert np.allclose(out[..., 1], _RAMP[..., 1] ** 2, atol=1 / 255)
+
+
+# Per-channel exponents measured on a Photoshop render of
+# midtones (100, -100, -16) with Preserve Luminosity.
+_SILITHID_MIDTONES = (100, -100, -16)
+_SILITHID_EXPONENTS = (0.46, 2.04, 1.10)
+_SILITHID_TOLERANCE = 6 / 255
+
+
+def test_color_balance_matches_the_exponents_measured_on_photoshop() -> None:
+    layer = _color_balance_layer(_SILITHID_MIDTONES, luminosity=True)
+    out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+    for channel, exponent in enumerate(_SILITHID_EXPONENTS):
+        expected = _RAMP[..., channel] ** exponent
+        assert np.allclose(out[..., channel], expected, atol=_SILITHID_TOLERANCE)
 
 
 def test_color_balance_keeps_black_white_and_channel_order() -> None:
@@ -712,6 +777,69 @@ def test_saturation_scales_chroma_about_the_linear_luminance() -> None:
     boosted = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 50))
     expected = luminance[..., None] + (_linear(image) - luminance[..., None]) * 1.5
     assert np.allclose(_linear(boosted), np.clip(expected, 0, 1), atol=1 / 255)
+
+
+# The fitted vibrance model, with its constants. Fitted on Photoshop renders
+# of the layer over the same art; a changed constant fails this test.
+_LINEAR_LUMINANCE = np.array([0.2126, 0.7152, 0.0722])
+_WEIGHT_PALE, _WEIGHT_DROP, _WEIGHT_CURVE = 0.98, 0.64, 1.9
+_AMOUNT_CURVE = 1.2
+_GRAY_PALE, _GRAY_RISE, _GRAY_BRIGHT = -0.83, 1.64, 1.9
+_BOOST_GRAY, _SKIN_SHARE = 0.85, 0.3
+
+
+def _fitted_vibrance(
+    pixel: list[float], vibrance: float, saturation: float, skin: bool
+) -> np.ndarray:
+    linear = _linear(np.array(pixel))
+    high, low = linear.max(), linear.min()
+    chroma = high - low
+    sat = chroma / high
+    if vibrance < 0:
+        weight = (_WEIGHT_PALE - _WEIGHT_DROP * sat**_WEIGHT_CURVE) * (
+            -vibrance
+        ) ** _AMOUNT_CURVE
+        position = _GRAY_PALE + _GRAY_RISE * sat + _GRAY_BRIGHT * high * (1 - sat)
+        linear = linear + weight * (low + position * chroma - linear)
+    elif vibrance > 0:
+        weight = -(1 - sat) * vibrance * (1 - _SKIN_SHARE * skin)
+        linear = linear + weight * (low + _BOOST_GRAY * chroma - linear)
+    luminance = linear @ _LINEAR_LUMINANCE
+    linear = luminance + (linear - luminance) * (1 + saturation)
+    linear = np.clip(linear, 0, 1)
+    return np.where(
+        linear <= 0.0031308, linear * 12.92, 1.055 * linear ** (1 / 2.4) - 0.055
+    )
+
+
+@pytest.mark.parametrize(
+    ("pixel", "vibrance", "saturation", "skin"),
+    [
+        (_PALE_BLUE, -100, 0, False),
+        (_DEEP_BLUE, -60, 0, False),
+        ([0.9, 0.85, 0.8], -100, -30, True),
+        ([0.2, 0.15, 0.1], -100, 0, True),
+        (_PALE_CYAN, 100, 0, False),
+        (_PALE_RED, 70, 40, True),
+    ],
+)
+def test_vibrance_is_the_fitted_model(
+    pixel: list[float], vibrance: int, saturation: int, skin: bool
+) -> None:
+    image = np.array([[pixel]], dtype=np.float32)
+    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(vibrance, saturation))
+    expected = _fitted_vibrance(pixel, vibrance / 100, saturation / 100, skin)
+    assert np.allclose(out[0, 0], expected, atol=0.5 / 255)
+
+
+def test_negative_vibrance_keeps_a_bright_pale_pixel_bright() -> None:
+    """A pale pixel near white keeps its luminance; a dark pale one loses some."""
+    image = np.array([[[0.9, 0.85, 0.8], [0.25, 0.2, 0.15]]], dtype=np.float32)
+    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0))
+    luminance_in = _linear(image) @ _LINEAR_LUMINANCE
+    luminance_out = _linear(out) @ _LINEAR_LUMINANCE
+    assert luminance_out[0, 0] > luminance_in[0, 0] * 0.98
+    assert luminance_out[0, 1] < luminance_in[0, 1] * 0.9
 
 
 def test_vibrance_at_rest_leaves_the_image_alone() -> None:
