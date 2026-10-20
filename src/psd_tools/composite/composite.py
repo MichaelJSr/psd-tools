@@ -1256,7 +1256,7 @@ class Compositor:
         self._cache: _PassCache = _PassCache() if cache is None else cache
         # Whether adjustments stop at what the enclosing isolated group has
         # painted. An array is that painted shape so far, handed down to a
-        # pass-through group inside the isolated one; True starts a fresh
+        # nested group that does not isolate on its own; True starts a fresh
         # isolated group, whose adjustments stop at its own content.
         self._adjustment_isolated = adjustment_isolated is not False
         self._enclosing_shape: np.ndarray | None = (
@@ -1782,10 +1782,13 @@ class Compositor:
 
         # Photoshop composites a group on its own when it has clip layers, a
         # fill under 100 or a layer style, so an adjustment inside such a
-        # group stops at the group's shape instead of passing through.
+        # group stops at the group's shape instead of passing through. A
+        # non-pass-through group is composited on its own anyway.
         shape_const, _ = self._get_const(layer)
         isolate_adjustments = (
-            shape_const < 1.0 or layer.has_clip_layers() or _has_enabled_effects(layer)
+            shape_const < 1.0
+            or layer.has_clip_layers()
+            or (is_passthrough and _has_enabled_effects(layer))
         )
 
         # A pass-through group is not an isolation boundary, so deep knockout
