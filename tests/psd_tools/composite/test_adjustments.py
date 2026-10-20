@@ -344,6 +344,47 @@ def test_an_adjustment_inside_a_styled_group_stops_at_the_group() -> None:
     assert np.abs(isolated - untouched).max() <= 1
 
 
+def test_an_adjustment_nested_in_a_styled_group_still_reaches_its_content() -> None:
+    """Isolation stops at the group's edge, not at a nested group's.
+
+    ``Layer 14`` is switched on as the styled ``Group 6``'s content and
+    ``Curves 9`` is moved into a pass-through group of its own above it; the
+    curve must still change ``Layer 14``'s pixels while the rows under the
+    group stay as they are.
+    """
+
+    def render(curves_visible: bool) -> tuple[np.ndarray, np.ndarray]:
+        psd = PSDImage.open(
+            full_name("adjustments/adjustment_nested_composition_3.psd")
+        )
+        group = psd[4]
+        assert isinstance(group, Group)
+        curves, content = group[0], group[1]
+        assert isinstance(curves, adjustments.Curves)
+        assert content.name == "Layer 14"
+        content.visible = True
+        curves.visible = curves_visible
+        group.create_group([curves], name="Nested")
+        donor = PSDImage.open(full_name("effects/group-stroke-off-canvas.psd"))[2]
+        block = copy.deepcopy(
+            donor.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1)
+        )
+        group.tagged_blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1, block)
+        image = np.asarray(psd.composite(force=True).convert("RGB"), dtype=np.int16)
+        shape = content.numpy("shape")
+        assert shape is not None
+        covered = np.zeros(image.shape[:2], dtype=bool)
+        left, top, right, bottom = content.bbox
+        covered[top:bottom, left:right] = shape[..., 0] > 0.99
+        return image, covered
+
+    (without, covered), (with_curves, _) = render(False), render(True)
+    assert not covered[190:].any()
+    difference = np.abs(with_curves - without).max(axis=2)
+    assert difference[covered].max() > 1
+    assert difference[190:].max() <= 1
+
+
 # Channel mixer
 _IDENTITY_MIX = [[100, 0, 0, 0, 0], [0, 100, 0, 0, 0], [0, 0, 100, 0, 0]]
 _FOURTH_MIX = [0, 0, 0, 100, 0]
