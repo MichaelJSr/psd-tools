@@ -222,13 +222,28 @@ def test_auto_leading(fonts: FontMap) -> None:
     assert [line.y for line in layout(m, fonts).lines] == pytest.approx([0.0, 15.0])
 
 
-def test_empty_leading_pieces_add_their_leading(fonts: FontMap) -> None:
+def test_empty_leading_lines_take_their_pitch(fonts: FontMap) -> None:
     m = model("\r\rI\r", style(leading=30.0), style(), cuts=(1,), box=(0, 0, 100, 200))
     lay = layout(m, fonts)
-    # The empty paragraph's leading is that of its terminator's run.
+    # The first line, empty or not, sits one ascent of its own run below the
+    # top; each later line adds the pitch of its terminator's run.
     assert [line.text for line in lay.lines] == ["", "", "I"]
-    assert lay.lines[2].y == pytest.approx(30.0 + 12.0 + 7.5)
-    assert ys(lay) == pytest.approx([49.5])
+    assert [line.y for line in lay.lines] == pytest.approx([7.5, 19.5, 31.5])
+    assert ys(lay) == pytest.approx([31.5])
+
+
+def test_empty_first_line_of_another_size(fonts: FontMap) -> None:
+    # An empty first paragraph in a smaller size: its own ascent, then the
+    # content line one leading below, not the leading plus the content's ascent.
+    m = model(
+        "\rI\r",
+        style(size=20.0, leading=32.0),
+        style(size=30.0, leading=32.0),
+        cuts=(1,),
+        box=(0, 0, 200, 200),
+    )
+    lay = layout(m, fonts)
+    assert [line.y for line in lay.lines] == pytest.approx([15.0, 47.0])
 
 
 def test_interior_empty_paragraph(fonts: FontMap) -> None:

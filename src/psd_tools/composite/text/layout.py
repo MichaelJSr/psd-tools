@@ -233,11 +233,12 @@ def layout(
             if box is None:
                 y = 0.0 if not started else y + pitch
                 started = True
-            elif not started and line.end > line.start:
+            elif not started:
+                # The first line, empty or not, sits one ascent of its own
+                # runs below the top.
                 y += max((a for a in map(ascent, styles) if a is not None), default=0.0)
                 started = True
             else:
-                # Empty lines before the first line of content add their leading.
                 y += pitch
             drawn = bottom is None or y_prev <= bottom
             if not drawn:

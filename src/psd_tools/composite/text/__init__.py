@@ -11,13 +11,14 @@ import time
 import numpy as np
 
 from psd_tools.api.layers import TypeLayer
+from psd_tools.composite.text import layout as _layout
 from psd_tools.composite.text.fonts import (
     FontMap,
     MissingFontError,
     Policy,
     TextRenderError,
 )
-from psd_tools.composite.text.layout import Layout, layout
+from psd_tools.composite.text.layout import Layout
 from psd_tools.composite.text.model import TextModel, Transform
 from psd_tools.composite.text.raster import (
     Bbox,
@@ -111,7 +112,7 @@ def render(
     options = options or Options()
     fonts = fonts or default_font_map(options.missing_font)
     model = TextModel.from_layer(layer)
-    lay = layout(model, fonts, breaks)
+    lay = _layout.layout(model, fonts, breaks)
     transform = document_transform(model)
     rgba, bbox = rasterize(lay, transform, model.antialias, options, _GLYPH_CACHE)
     return RenderResult(rgba, bbox, _report(lay, transform, t0))
