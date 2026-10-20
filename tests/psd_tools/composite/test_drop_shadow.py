@@ -32,8 +32,8 @@ from psd_tools.composite.composite import (
 )
 from psd_tools.constants import BlendMode, Resource, Tag
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Descriptor, Double, List, String
-from psd_tools.terminology import Key, Klass
+from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List, String
+from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
 from .test_composite import _mse
@@ -484,13 +484,26 @@ def test_the_knockout_cuts_the_shadow_under_the_layers_stroke_too() -> None:
     assert float(alpha[bottom + 2, x, 0]) == pytest.approx(1.0)
 
 
-def test_the_knockout_adds_the_stroke_band_to_the_silhouette() -> None:
-    """On an edge pixel the layer and its outset stroke together cover the pixel.
+@pytest.mark.parametrize(
+    ("style", "at_edge", "beyond_edge"),
+    [
+        (Enum.OutsetFrame, 1.0, 1.0),
+        (Enum.CenteredFrame, 1.0, 0.5),
+        (Enum.InsetFrame, 0.5, 0.0),
+    ],
+)
+def test_the_knockout_adds_the_stroke_band_to_the_silhouette(
+    style: bytes, at_edge: float, beyond_edge: float
+) -> None:
+    """Only the part of the band outside the boundary adds to the silhouette.
 
     An outset band is complementary to the coverage it is traced from, so a
     pixel the edge half covers is half layer and half stroke, and the shadow
-    under it is cut away whole. A union of the two would leave half of it
-    showing through every antialiased edge.
+    under it is cut away whole; a union of the two would leave half of it
+    showing through every antialiased edge. An inset band paints over the
+    layer, and on that pixel equals its coverage: added it would cut the
+    shadow from under the uncovered half too, so the knockout there stays at
+    the coverage. A centred band is half each.
     """
     psd = PSDImage.open(full_name("masks/2.psd"))
     layer = next(layer for layer in psd if layer.name == "ellipse3")
@@ -501,6 +514,7 @@ def test_the_knockout_adds_the_stroke_band_to_the_silhouette() -> None:
     )
     stroke = cast(Stroke, next(iter(layer.effects.find("stroke"))))
     assert stroke.size == 2.0 and stroke.opacity < 100.0
+    stroke.descriptor[Key.Style] = Enumerated(Type.FrameFill, style)
 
     viewport = (0, 0, 41, 41)
     silhouette = np.zeros((41, 41, 1), dtype=np.float32)
@@ -513,8 +527,8 @@ def test_the_knockout_adds_the_stroke_band_to_the_silhouette() -> None:
     )
     knockout = compositor._knockout_shape(layer, viewport, silhouette)
     assert float(knockout[20, 20, 0]) == 1.0
-    assert float(knockout[20, 30, 0]) == pytest.approx(1.0, abs=1e-3)
-    assert float(knockout[20, 31, 0]) == pytest.approx(1.0, abs=1e-3)
+    assert float(knockout[20, 30, 0]) == pytest.approx(at_edge, abs=1e-3)
+    assert float(knockout[20, 31, 0]) == pytest.approx(beyond_edge, abs=1e-3)
     assert float(knockout[20, 34, 0]) == 0.0
 
 

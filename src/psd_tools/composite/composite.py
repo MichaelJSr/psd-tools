@@ -2504,12 +2504,16 @@ class Compositor:
         The silhouette the shadow is cast from, and the bands of the layer's
         stroke effects, whole whatever their opacity: Photoshop cuts under
         the stroke's shape, so a faint stroke shows the backdrop through
-        itself and not the shadow. The band *adds* to the silhouette rather
-        than unioning with it, for the reason :py:meth:`_apply_outer_effects`
-        gives: an outset band is complementary to the coverage it is traced
-        from, so on a pixel the edge cuts the layer covers one part and the
-        stroke the rest, and the shadow is cut from under the whole pixel.
-        A stroke whose band cannot be drawn cuts nothing, as it draws nothing.
+        itself and not the shadow. The part of a band outside the boundary
+        *adds* to the silhouette rather than unioning with it, for the reason
+        :py:meth:`_apply_outer_effects` gives: it is complementary to the
+        coverage it is traced from, so on a pixel the edge cuts the layer
+        covers one part and the stroke the rest, and the shadow is cut from
+        under the whole pixel. The part inside the boundary paints over the
+        layer, not beside it, and on such a pixel comes out equal to the
+        layer's own coverage; added it would count that coverage twice, so
+        it is left out. A stroke whose band cannot be drawn cuts nothing, as
+        it draws nothing.
 
         The band is traced from what the stroke itself is traced from past
         the viewport (:py:meth:`_trace_shape`): the mask when the stroke
@@ -2524,13 +2528,13 @@ class Compositor:
             traced = self._get_mask(layer, viewport)
         for effect in strokes:
             try:
-                band, _ = stroke_band(viewport, traced, effect.descriptor)
+                band, inside = stroke_band(viewport, traced, effect.descriptor)
             except _UNREADABLE as error:
                 logger.debug(
                     "Cannot cut a drop shadow under a stroke of %s: %s", layer, error
                 )
                 continue
-            knockout = np.minimum(knockout + band, 1.0)
+            knockout = np.minimum(knockout + (band - inside), 1.0)
         return knockout
 
     def _apply_drop_shadows(self, layer: Layer) -> None:
