@@ -515,13 +515,13 @@ def _gradient_length(angle: float, width: float, height: float) -> float:
 
 
 def _ramp_axis(start: float, count: int, extent: int, scale: float) -> np.ndarray:
-    """``count`` pixel-centre ramp coordinates from pixel ``start``.
+    """``count`` ramp coordinates from pixel ``start``.
 
-    The box of ``extent`` pixels is centred on 0, and ``scale`` pixels span
-    -1 to 1.
+    The box's first and last pixels sit at -extent/scale and extent/scale, so
+    a ramp as long as the box puts a stop on each end pixel, as Photoshop does.
     """
-    centres = start + np.arange(count) + 0.5 - extent / 2.0
-    return (centres * (2.0 / scale)).astype(np.float32)
+    step = 2.0 * extent / scale / (extent - 1) if extent > 1 else 0.0
+    return (-extent / scale + (start + np.arange(count)) * step).astype(np.float32)
 
 
 def _make_linear_gradient(X: np.ndarray, Y: np.ndarray, angle: float) -> np.ndarray:
