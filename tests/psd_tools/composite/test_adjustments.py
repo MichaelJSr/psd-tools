@@ -1,3 +1,4 @@
+import copy
 import logging
 from collections.abc import Callable
 
@@ -5,6 +6,7 @@ import numpy as np
 import pytest
 
 from psd_tools.api import adjustments
+from psd_tools.api.layers import Group
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite.adjustments import (
     apply_curves,
@@ -14,7 +16,7 @@ from psd_tools.composite.adjustments import (
     apply_posterize,
     apply_threshold,
 )
-from psd_tools.constants import BlendMode, ColorMode
+from psd_tools.constants import BlendMode, ColorMode, Tag
 from psd_tools.psd.adjustments import Curves as CurvesData
 from psd_tools.psd.adjustments import HueSaturation as HueSaturationData
 
@@ -283,3 +285,44 @@ def test_adjustment_clipping() -> None:
     filename = "adjustments/adjustment_clipping"
     check_icc_composite_quality(filename, 0.0005)
     check_composite_quality(f"{filename}.psd", 0.0005, False)
+
+
+# Groups with a layer style
+def test_an_adjustment_inside_a_styled_group_stops_at_the_group() -> None:
+    """A styled pass-through group keeps its adjustments to itself.
+
+    A layer style makes Photoshop composite the group on its own, so an
+    adjustment inside it no longer reaches the layers under the group.
+    ``adjustment_nested_composition_3.psd``: pass-through ``Group 6`` holds an
+    unclipped ``Curves 9`` over ``Layer 15`` and ``Color Fill 1``, which fill
+    the canvas under it; from row 150 down nothing but those two is drawn. The
+    style is the inside stroke block of ``group-stroke-off-canvas.psd``, which
+    cannot reach past the group's own box.
+    """
+
+    def under_the_group(styled: bool, curves_visible: bool) -> np.ndarray:
+        psd = PSDImage.open(
+            full_name("adjustments/adjustment_nested_composition_3.psd")
+        )
+        group = psd[4]
+        assert group.name == "Group 6"
+        assert group.blend_mode == BlendMode.PASS_THROUGH
+        assert isinstance(group, Group)
+        curves = group[0]
+        assert isinstance(curves, adjustments.Curves)
+        curves.visible = curves_visible
+        if styled:
+            donor = PSDImage.open(full_name("effects/group-stroke-off-canvas.psd"))[2]
+            block = copy.deepcopy(
+                donor.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1)
+            )
+            group.tagged_blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1, block)
+            assert group.effects.enabled
+        image = psd.composite(force=True).convert("RGB")
+        return np.asarray(image, dtype=np.int16)[150:]
+
+    untouched = under_the_group(styled=False, curves_visible=False)
+    passed_through = under_the_group(styled=False, curves_visible=True)
+    assert np.abs(passed_through - untouched).max() > 1
+    isolated = under_the_group(styled=True, curves_visible=True)
+    assert np.abs(isolated - untouched).max() <= 1

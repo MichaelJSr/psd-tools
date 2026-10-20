@@ -97,6 +97,15 @@ _UNREADABLE = (
 )
 
 
+def _has_enabled_effects(layer: Layer) -> bool:
+    """Whether the layer carries a layer style Photoshop would draw."""
+    try:
+        effects = layer.effects
+        return effects.enabled and any(effect.enabled for effect in effects)
+    except _UNREADABLE:
+        return False
+
+
 def _readable(layer: Layer, name: str) -> list[_StyledEffect]:
     """The layer's enabled effects of one kind, empty if they cannot be listed.
 
@@ -1757,9 +1766,13 @@ class Compositor:
             color_b = self._color
             alpha_b = self._alpha
 
-        # adjustments don't pass-through layers if the group layer has clip layers or its fill attribute is not 100.
+        # Photoshop composites a group on its own when it has clip layers, a
+        # fill under 100 or a layer style, so an adjustment inside such a
+        # group stops at the group's shape instead of passing through.
         shape_const, _ = self._get_const(layer)
-        isolate_adjustments = shape_const < 1.0 or layer.has_clip_layers()
+        isolate_adjustments = (
+            shape_const < 1.0 or layer.has_clip_layers() or _has_enabled_effects(layer)
+        )
 
         # A pass-through group is not an isolation boundary, so deep knockout
         # inside it still reaches the document backdrop; an isolated group is,
