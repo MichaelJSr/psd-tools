@@ -15,12 +15,20 @@ from psd_tools.constants import (
     BlendMode,
     GlowSource,
     GlowTechnique,
+    GradientInterpolation,
     GradientType,
     StrokeFillType,
     StrokePosition,
     Tag,
 )
-from psd_tools.psd.descriptor import Bool, Descriptor, List, String, UnitFloat
+from psd_tools.psd.descriptor import (
+    Bool,
+    Descriptor,
+    Enumerated,
+    List,
+    String,
+    UnitFloat,
+)
 from psd_tools.psd.image_resources import ImageResources
 from psd_tools.terminology import Enum, Key, Unit
 
@@ -188,6 +196,7 @@ def test_gradient_overlay(fixture: PSDImage) -> None:
     assert effect.reversed is False
     assert effect.scale == 100.0
     assert effect.type == Enum.Linear
+    assert effect.interpolation is GradientInterpolation.CLASSIC
 
 
 def test_pattern_overlay(fixture: PSDImage) -> None:
@@ -790,3 +799,22 @@ def test_photoshop_writes_every_blend_mode_but_pass_through() -> None:
     assert set(_PHOTOSHOP_EFFECT_BLEND_MODES.values()) == set(BlendMode) - {
         BlendMode.PASS_THROUGH
     }
+
+
+def test_gradient_overlay_defaults_are_photoshops() -> None:
+    """A descriptor that omits the keys reads as the dialog's defaults.
+
+    That is 100% scale, aligned with the layer, classic interpolation.
+    """
+    bare = effects.GradientOverlay(Descriptor(classID=b"GrFl"), ImageResources())
+    assert bare.scale == 100.0
+    assert bare.aligned is True
+    assert bare.interpolation is GradientInterpolation.CLASSIC
+
+    descriptor = Descriptor(classID=b"GrFl")
+    descriptor[b"gs99"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=b"Perc"
+    )
+    perceptual = effects.GradientOverlay(descriptor, ImageResources())
+    assert perceptual.interpolation is GradientInterpolation.PERCEPTUAL
+    assert perceptual.interpolation == b"Perc"
