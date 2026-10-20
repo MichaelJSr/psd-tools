@@ -50,7 +50,11 @@ def rendered_em(style: Style, sub_size: float = SUB_SIZE) -> float:
 
 
 def shaping_key(style: Style) -> tuple[object, ...]:
-    """What a segment shares; colour, tracking, underline and shift do not cut."""
+    """What a segment shares; colour, tracking and underline do not cut.
+
+    A ``BaselineShift`` change does: a shifted glyph is not kerned with its
+    neighbours.
+    """
     return (
         style.font,
         style.size,
@@ -61,6 +65,7 @@ def shaping_key(style: Style) -> tuple[object, ...]:
         style.ligatures,
         style.faux_bold,
         style.faux_italic,
+        style.baseline_shift,
     )
 
 

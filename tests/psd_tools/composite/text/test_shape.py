@@ -180,6 +180,14 @@ def test_segment_spans_colour_runs(fonts: FontMap) -> None:
     assert shaping_key(runs[0].style) == shaping_key(runs[1].style)
 
 
+def test_baseline_shift_cuts_kerning(fonts: FontMap) -> None:
+    text = "AV"
+    runs = runs_for(text, style(), style(baseline_shift=2.0), cuts=(1,))
+    shaped = shape_piece(text, 0, 2, runs, fonts)
+    assert shaped.glyphs[0].adv == pytest.approx(adv("A"))
+    assert shaping_key(runs[0].style) != shaping_key(runs[1].style)
+
+
 def test_size_change_cuts_segment(fonts: FontMap) -> None:
     text = "AV"
     runs = runs_for(text, style(), style(size=20.0), cuts=(1,))
