@@ -31,6 +31,7 @@ from psd_tools.composite.effects import (
     draw_stroke_effect_split,
     drop_shadow_bbox,
     shadow_geometry,
+    stroke_band,
     stroke_bbox,
 )
 from psd_tools.composite.widen import make_widen
@@ -374,9 +375,9 @@ class _PassCache:
 
     ``group_alphas`` holds the alpha of the same composites, under the same
     keys, for a group's drop shadow: that is cast from how opaque the
-    contents are rather than from what they cover. Both are kept from every
-    composite, so a traced group retains two canvases per box rather than
-    one.
+    contents are rather than from what they cover. A composite keeps only
+    the canvas it was asked for: a stroke and a shadow on one group ask on
+    different boxes, so the other would not be read.
     """
 
     content_bboxes: _ContentBBoxes = field(default_factory=dict)
@@ -1407,8 +1408,8 @@ class Compositor:
         The cull measures ``_effect_reach()`` and not ``layer.bbox``, because
         a stroke reaches outside the layer: a layer whose own box has cleared
         the viewport can still paint the part of its stroke that falls back
-        inside, and rejecting it here lost the stroke along with the layer
-        (#815). A drop shadow reaches out the same way. ``_effect_reach()``
+        inside, and rejecting it here would lose the stroke along with the
+        layer (#815). A drop shadow reaches out the same way. ``_effect_reach()``
         rather than ``_paint_bbox()`` because the group half of that
         measurement is unreachable from here: a group is exempt from the cull,
         so the box is only ever measured for a layer that has no contents to
@@ -1534,11 +1535,7 @@ class Compositor:
         for effect_name in _OVERLAY_DRAWS:
             self._add_overlay(layer, effect_name, canvas)
 
-        # A layer drawn from a fill, or force-redrawn from its vector mask, has
-        # no source shape worth tracing -- the stroke follows the mask instead.
-        traces_mask = (self._force and layer.has_vector_mask()) or (
-            not layer.has_pixels() and utils.has_fill(layer)
-        )
+        traces_mask = self._traces_mask(layer)
         traced: float | np.ndarray = source.shape
         if traces_mask:
             traced = source.shape_mask
@@ -1555,6 +1552,16 @@ class Compositor:
             traces_mask,
         )
         return canvas.source(), outer
+
+    def _traces_mask(self, layer: Layer) -> bool:
+        """Whether the layer's strokes follow its mask rather than its coverage.
+
+        A layer drawn from a fill, or force-redrawn from its vector mask, has
+        no source shape worth tracing.
+        """
+        return (self._force and layer.has_vector_mask()) or (
+            not layer.has_pixels() and utils.has_fill(layer)
+        )
 
     def _apply_outer_effects(
         self, effects: Sequence[_OuterEffect], covered: np.ndarray | None
@@ -2427,11 +2434,10 @@ class Compositor:
         is composited from and an outset one beside it, which
         ``group-clips-child-stroke.psd`` measures.
 
-        ``alpha`` hands back the same composite's alpha instead, which is kept
-        beside the coverage so that asking for both composites once. It reads
-        no backdrop either: it starts at zero, and a knockout inside the group
-        reaches for this transparent backdrop, so it can only cut the group's
-        own alpha away.
+        ``alpha`` hands back the same composite's alpha instead, memoised on
+        its own. It reads no backdrop either: it starts at zero, and a
+        knockout inside the group reaches for this transparent backdrop, so it
+        can only cut the group's own alpha away.
         """
         inner = viewport
         if layer.blend_mode != BlendMode.PASS_THROUGH:
@@ -2459,9 +2465,8 @@ class Compositor:
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
-            self._cache.group_shapes[key] = group_compositor.shape
-            self._cache.group_alphas[key] = group_compositor.alpha
-            shape = cached[key]
+            shape = group_compositor.alpha if alpha else group_compositor.shape
+            cached[key] = shape
         return paste(viewport, inner, shape)
 
     def _cast_shape(
@@ -2499,21 +2504,33 @@ class Compositor:
         The silhouette the shadow is cast from, and the bands of the layer's
         stroke effects, whole whatever their opacity: Photoshop cuts under
         the stroke's shape, so a faint stroke shows the backdrop through
-        itself and not the shadow. A stroke whose band cannot be drawn cuts
-        nothing, as it draws nothing.
+        itself and not the shadow. The band *adds* to the silhouette rather
+        than unioning with it, for the reason :py:meth:`_apply_outer_effects`
+        gives: an outset band is complementary to the coverage it is traced
+        from, so on a pixel the edge cuts the layer covers one part and the
+        stroke the rest, and the shadow is cut from under the whole pixel.
+        A stroke whose band cannot be drawn cuts nothing, as it draws nothing.
+
+        The band is traced from what the stroke itself is traced from past
+        the viewport (:py:meth:`_trace_shape`): the mask when the stroke
+        follows it, the silhouette otherwise.
         """
         knockout = silhouette
-        for effect in _readable(layer, "stroke"):
+        strokes = _readable(layer, "stroke")
+        if not strokes:
+            return knockout
+        traced: float | np.ndarray = silhouette
+        if self._traces_mask(layer):
+            traced = self._get_mask(layer, viewport)
+        for effect in strokes:
             try:
-                _, band, _ = draw_stroke_effect_split(
-                    viewport, silhouette, effect.descriptor, layer._psd
-                )
+                band, _ = stroke_band(viewport, traced, effect.descriptor)
             except _UNREADABLE as error:
                 logger.debug(
                     "Cannot cut a drop shadow under a stroke of %s: %s", layer, error
                 )
                 continue
-            knockout = np.maximum(knockout, band)
+            knockout = np.minimum(knockout + band, 1.0)
         return knockout
 
     def _apply_drop_shadows(self, layer: Layer) -> None:

@@ -14,7 +14,9 @@ Changelog
   composited from its layers, instead of being dropped. Distance, size,
   spread, contour, global light, opacity, blend mode and the layer knockout
   are honoured; noise is read but not applied, and the blur approximates
-  Photoshop's (#679)
+  Photoshop's. Needs ``scipy``, as a stroke effect does (#679)
+- [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
+  jitter (#679)
 
 1.25.0 (2026-10-14)
 -------------------

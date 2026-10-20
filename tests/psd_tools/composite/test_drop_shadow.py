@@ -87,10 +87,9 @@ def test_spread_grows_the_silhouette_and_takes_the_blur_it_replaces() -> None:
     """Spread is Photoshop's "expands the matte before blurring".
 
     The descriptor stores it under the key an inner shadow calls choke, which
-    shrinks; #679 first read it that way for a drop shadow too. At 100% the
-    whole of ``size`` goes to the growth and none to the blur, so the shadow
-    is the silhouette grown by ``size`` with a hard edge. At 0% the same
-    reach is all blur.
+    shrinks. At 100% the whole of ``size`` goes to the growth and none to the
+    blur, so the shadow is the silhouette grown by ``size`` with a hard edge.
+    At 0% the same reach is all blur.
     """
     shape = _disc(81, 12.0)
     hard = effects.draw_drop_shadow(
@@ -110,12 +109,11 @@ def test_spread_grows_the_silhouette_and_takes_the_blur_it_replaces() -> None:
 
 
 def test_a_drop_shadow_blur_treats_the_canvas_edge_as_empty() -> None:
-    """Nothing past the canvas casts a shadow (#679 review).
+    """Nothing past the canvas casts a shadow.
 
-    ``gaussian_filter`` reflects at the edge by default, which reads a
-    silhouette that touches the edge as continuing past it: the pixel at the
-    edge stayed at 0.99 here where half the kernel falls on empty canvas and
-    it should be about half covered.
+    ``gaussian_filter`` reflects at the edge by default, which would read a
+    silhouette that touches the edge as continuing past it. Half the kernel
+    falls on empty canvas at the edge pixel here, so it is about half covered.
     """
     shape = np.zeros((40, 40, 1), dtype=np.float32)
     shape[:, :10] = 1.0
@@ -151,10 +149,10 @@ def test_drop_shadow_bbox_holds_the_layer_and_the_cast_shadow() -> None:
 
 @pytest.mark.parametrize("angle", [0.0, 90.0, 180.0, -90.0, 120.0])
 def test_drop_shadow_bbox_does_not_depend_on_where_the_layer_is(angle: float) -> None:
-    """The same layer moved is the same canvas moved (#679 review).
+    """The same layer moved is the same canvas moved.
 
-    ``cos(90)`` is 6e-17 rather than 0, which floored against 0 took an extra
-    column and against 10 did not.
+    ``cos(90)`` is 6e-17 rather than 0, which floors to a different column
+    against 0 than against 10 unless the offset is rounded first.
     """
     here = effects.drop_shadow_bbox((0, 0, 20, 20), 5.0, angle, 3.0)
     there = effects.drop_shadow_bbox((10, 10, 30, 30), 5.0, angle, 3.0)
@@ -166,8 +164,8 @@ def test_the_shadow_canvas_holds_the_whole_shadow() -> None:
 
     Drawn on the canvas :py:func:`drop_shadow_bbox` asks for and again with
     room to spare, the two agree, and the roomy one has nothing outside the
-    first. A gaussian left to its default reach ran on past ``size``, and the
-    canvas cut it off in a visible rectangle (#679 review).
+    first. A gaussian left to its default reach would run on past ``size``,
+    and the canvas would cut it off in a visible rectangle.
     """
     bbox = (0, 0, 40, 40)
     shape = np.ones((40, 40, 1), dtype=np.float32)
@@ -198,9 +196,9 @@ def test_spread_keeps_the_coverage_of_a_partial_silhouette(alpha: float) -> None
     """A half-covered silhouette grows into a half-covered matte.
 
     Spread is a dilation of the matte, which takes the highest coverage
-    within reach and invents none. Growing the silhouette's half-coverage
-    contour instead turned a matte at 128/255 opaque and grew one at 127/255
-    not at all (#679 review).
+    within reach and invents none. Grown as its half-coverage contour
+    instead, a matte at 128/255 would come out opaque and one at 127/255
+    would not grow at all.
     """
     shape = np.zeros((41, 41, 1), dtype=np.float32)
     shape[15:26, 15:26] = alpha
@@ -217,8 +215,8 @@ def test_spread_grows_a_faint_feather_at_its_own_levels() -> None:
     """A feather with more coverages than there are levels still grows.
 
     The levels are picked from the silhouette's own coverages. Spaced evenly
-    over 0 to 1 instead, a feather that never passed 5% fell below the first
-    of them and did not grow at all (#679 review).
+    over 0 to 1 instead, a feather that never passes 5% would fall below the
+    first of them and not grow at all.
     """
     shape = np.zeros((41, 41, 1), dtype=np.float32)
     shape[15:26, 15:26, 0] = np.linspace(0.001, 0.05, 121).reshape(11, 11)
@@ -234,12 +232,11 @@ def test_spread_grows_a_faint_feather_at_its_own_levels() -> None:
 def test_a_pixel_elsewhere_does_not_drop_a_plateau_s_spread() -> None:
     """The levels are spaced over coverage, not over the coverages present.
 
-    A plateau at 0.99 beside a faint feather of 29 coverages: picking every
-    few of the coverages present left no level between the feather's top
-    and the plateau, so one opaque pixel added across the canvas, nowhere
-    near either, sank the plateau's grown fringe from 0.99 to 0.029 (#679
-    review). Spaced over coverage, a level is never more than a fifteenth of
-    the range below what it grows.
+    A plateau beside a faint feather of many coverages: picked from the
+    coverages present, the levels would leave none between the feather's top
+    and the plateau, and one opaque pixel added across the canvas, nowhere
+    near either, would move them all. Spaced over coverage, a level is never
+    more than a fifteenth of the range below what it grows.
     """
     shape = np.zeros((41, 81, 1), dtype=np.float32)
     shape[15:26, 15:26] = 0.99
@@ -316,7 +313,7 @@ def _shadow_descriptor(layer: Layer) -> Descriptor:
 
 
 def test_layer_opacity_fades_the_drop_shadow_with_the_layer() -> None:
-    """A half-opaque layer casts a half-opaque shadow (#679 review).
+    """A half-opaque layer casts a half-opaque shadow.
 
     The shadow is composited apart from the layer's source, as an outset
     stroke's band is, so it carries the layer opacity itself: nothing later
@@ -441,8 +438,8 @@ def test_a_group_casts_its_shadow_from_its_childrens_effects_too(
     The band's own shadow, made hard and cast 40 px down, runs past the
     group's box, which is a union of its children's own boxes. The group's
     shadow, cast 20 px further, has to reach 20 px past the band's; grown
-    from the group's box alone, the silhouette was cut off before that and
-    the group's shadow with it (#679 review).
+    from the group's box alone, the silhouette would be cut off before that
+    and the group's shadow with it.
     """
     header, band = _header(blend_mode)
     band_shadow = _shadow_descriptor(band)
@@ -487,6 +484,40 @@ def test_the_knockout_cuts_the_shadow_under_the_layers_stroke_too() -> None:
     assert float(alpha[bottom + 2, x, 0]) == pytest.approx(1.0)
 
 
+def test_the_knockout_adds_the_stroke_band_to_the_silhouette() -> None:
+    """On an edge pixel the layer and its outset stroke together cover the pixel.
+
+    An outset band is complementary to the coverage it is traced from, so a
+    pixel the edge half covers is half layer and half stroke, and the shadow
+    under it is cut away whole. A union of the two would leave half of it
+    showing through every antialiased edge.
+    """
+    psd = PSDImage.open(full_name("masks/2.psd"))
+    layer = next(layer for layer in psd if layer.name == "ellipse3")
+    _, band = _header(BlendMode.PASS_THROUGH)
+    layer.tagged_blocks.set_data(
+        Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
+        copy.deepcopy(band.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)),
+    )
+    stroke = cast(Stroke, next(iter(layer.effects.find("stroke"))))
+    assert stroke.size == 2.0 and stroke.opacity < 100.0
+
+    viewport = (0, 0, 41, 41)
+    silhouette = np.zeros((41, 41, 1), dtype=np.float32)
+    silhouette[10:31, 10:30] = 1.0
+    silhouette[10:31, 30] = 0.5
+    compositor = Compositor(
+        viewport,
+        np.ones((41, 41, 3), dtype=np.float32),
+        np.zeros((41, 41, 1), dtype=np.float32),
+    )
+    knockout = compositor._knockout_shape(layer, viewport, silhouette)
+    assert float(knockout[20, 20, 0]) == 1.0
+    assert float(knockout[20, 30, 0]) == pytest.approx(1.0, abs=1e-3)
+    assert float(knockout[20, 31, 0]) == pytest.approx(1.0, abs=1e-3)
+    assert float(knockout[20, 34, 0]) == 0.0
+
+
 def test_a_pass_through_group_keeps_its_shadow_beneath_it() -> None:
     """The shadow of a pass-through group does not paint over the group.
 
@@ -494,7 +525,7 @@ def test_a_pass_through_group_keeps_its_shadow_beneath_it() -> None:
     would put its shadow over it; the shadow goes on before the group is
     resolved instead, and the group is resolved over it. With the knockout
     off, the band's middle has to come out as it does with no group shadow at
-    all, and below the band the shadow has to be there (#679 review).
+    all, and below the band the shadow has to be there.
     """
 
     def render(with_shadow: bool) -> np.ndarray:
@@ -549,8 +580,8 @@ def test_a_pass_through_group_casts_the_shadow_a_normal_one_does() -> None:
 
     The icons are 40% opaque, so their shadow shows through them wherever it
     lies under them. Held back from what the group covers after the fact, it
-    came out at ``a + s * (1 - a) ** 2`` there rather than ``a + s * (1 - a)``,
-    and over the icons' colour rather than under it (#679 review).
+    would come out at ``a + s * (1 - a) ** 2`` there rather than
+    ``a + s * (1 - a)``, and over the icons' colour rather than under it.
     """
     rendered = []
     for blend_mode in (BlendMode.PASS_THROUGH, BlendMode.NORMAL):
@@ -570,8 +601,7 @@ def test_a_faded_pass_through_group_is_resolved_over_its_shadow() -> None:
     contents are still resolved over the canvas beneath it, which has to
     hold the shadow by then. The icons are white and set to Multiply, so
     over their own shadow they change nothing, and what is left at an icon
-    is the shadow alone: 40% black over white. Resolved before the shadow
-    went on, their white came back over it at 0.68 (#679 review).
+    is the shadow alone: 40% black over white.
     """
     social = _social(BlendMode.PASS_THROUGH)
     social.tagged_blocks.set_data(Tag.BLEND_FILL_OPACITY, ByteElement(128))
@@ -594,8 +624,8 @@ def test_a_group_shadow_does_not_depend_on_the_viewport(knockout: int) -> None:
 
     One icon knocks out at fill 0. Resolved over the canvas, a knockout
     takes alpha from the backdrop it reaches, so a silhouette read off the
-    resolved group cast a shadow from the knocked-out icon in a full render
-    and none in a render of the shadow alone (#679 review). Read afresh over
+    resolved group would cast a shadow from the knocked-out icon in a full
+    render and none in a render of the shadow alone. Read afresh over
     nothing, the strip below the icons comes out the same in both.
     """
     social = _social(BlendMode.PASS_THROUGH)
@@ -616,7 +646,7 @@ def test_nested_shadowed_groups_are_resolved_once_each() -> None:
     box and pass, so the one layer at the bottom of eight groups that each
     cast a shadow is resolved once for the render and once for each group's
     silhouette. Resolving a pass-through group again over its own shadow
-    did it 2 ** 8 times (#679 review).
+    would double that at every level.
     """
     psd = PSDImage.new("RGB", (80, 80))
     leaf = psd.create_pixel_layer(
@@ -649,8 +679,8 @@ def test_a_group_casts_its_shadow_from_how_opaque_its_contents_are(
 
     The icons cover their pixels fully at 40% opacity, so their hard shadow,
     cast clear of them, is 40% opaque too, and an icon faded to nothing
-    casts nothing. Read off coverage, every icon cast an opaque shadow,
-    the invisible one included (#679 review).
+    casts nothing. Read off coverage, every icon would cast an opaque
+    shadow, the invisible one included.
     """
     social = _social(blend_mode)
     faded = next(layer for layer in social if layer.name == "facebook")
@@ -678,10 +708,10 @@ def test_a_masked_pixel_layer_casts_its_shadow_from_its_pixels(force: bool) -> N
     """The silhouette is what the layer covers, not the outline of its mask.
 
     ``masks/2.psd``'s third ellipse is a pixel layer under a vector mask that
-    spans the whole canvas. A stroke traces that mask under ``force``, and so
-    did the shadow: it was cast from the whole canvas and then knocked out
-    under all of it, leaving nothing (#679 review). Both force modes cover
-    the same pixels, so they have to cast the same shadow.
+    spans the whole canvas. A stroke traces that mask under ``force``; a
+    shadow cast from it would cover the whole canvas and be knocked out under
+    all of it, leaving nothing. Both force modes cover the same pixels, so
+    they have to cast the same shadow.
     """
     psd = PSDImage.open(full_name("masks/2.psd"))
     layer = next(layer for layer in psd if layer.name == "ellipse3")
@@ -756,11 +786,11 @@ def test_an_unreadable_drop_shadow_is_dropped_and_the_document_renders(
 #   shadow is not drawn.
 # - layer_params.psb: what is left is the outer glow on the same layer, which
 #   is not drawn. The bound is what pins spread: leaving it out, or shrinking
-#   the silhouette by it as #679 first did, scores above it.
+#   the silhouette by it, scores above it.
 # - layer_comps.psb: the rest is a bevel that is not drawn.
 # - masks.psb: the header band carries a stroke, and its bound is what pins
 #   the knockout under the stroke's band; cutting under the silhouette alone
-#   scores an order of magnitude above it.
+#   scores above it.
 _PREVIEWS = [
     ("layer_effects.psd", (60, 215, 620, 296), 1e-5, 1e-3),
     ("masks.psb", None, 1e-6, 1.5e-4),
@@ -812,12 +842,9 @@ def test_drop_shadows_render_to_photoshops_preview_when_forced() -> None:
     assert _error(PSDImage.open(full_name("masks.psb")), None, force=True) <= 1.5e-5
 
 
-# The gaussian width per pixel of size that best matches Photoshop's previews.
-# Fitted on the fixture corpus (layer_effects.psd, masks.psb, layer_comps.psb,
-# sizes 10 to 100 px) and confirmed on a card corpus of 813 Photoshop renders:
-# the shadows a size of 50 to 250 px casts from a filled silhouette are
-# matched point for point at this width, and a 2 px shadow, the common case,
-# cannot tell widths apart.
+# The gaussian width per pixel of size that best matches Photoshop's previews,
+# fitted on the shadows the fixtures above cast. A shadow a few pixels wide
+# cannot tell widths apart; the fit is set by the wide ones.
 _FITTED_SIGMA_PER_SIZE = 0.45
 
 
@@ -856,8 +883,7 @@ def test_photoshops_linear_contour_is_the_identity() -> None:
     """The default contour, "Linear" through two corners, is skipped as ``None``.
 
     So is a missing contour. Every shadow in the fixture corpus but one
-    carries this contour, which is also what every drop shadow in the card
-    corpus this was built for carries.
+    carries this contour.
     """
     _, card = _masks_card()
     shadow = _drop_shadow(card)
@@ -889,6 +915,17 @@ def test_a_contour_table_passes_through_its_points_in_order() -> None:
     for x, y in points:
         assert float(table[int(x)]) == pytest.approx(y / 255.0, abs=1e-6)
     assert np.all(np.diff(table) >= 0.0)
+
+
+def test_a_curved_contour_asks_for_scipy_by_name_when_it_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spline through three or more points needs scipy, and says so."""
+    monkeypatch.setattr(effects, "HAS_SCIPY", False)
+    with pytest.raises(ImportError, match="Drop shadow effects require: scipy"):
+        effects.contour_table(_contour([(0.0, 0.0), (128.0, 64.0), (255.0, 255.0)]))
+    # Two points need no spline.
+    assert effects.contour_table(_contour([(0.0, 51.0), (255.0, 255.0)])) is not None
 
 
 def test_a_two_point_contour_is_a_straight_line() -> None:

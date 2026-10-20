@@ -132,6 +132,18 @@ def _enum(desc: Descriptor, key: bytes) -> bytes:
     return getattr(desc.get(key), "enum", b"")
 
 
+def _require_scipy(what: str) -> None:
+    """Raise :class:`ImportError` naming ``what`` and the package it needs."""
+    if not HAS_SCIPY:
+        raise ImportError(
+            "%s require: scipy\n\n"
+            "Install with:\n"
+            "    pip install 'psd-tools[composite]'\n"
+            "Or:\n"
+            "    pip install scipy" % what
+        )
+
+
 def _stroke_size(desc: Descriptor) -> float:
     """The descriptor's stroke size, held to what Photoshop can write."""
     size = float(desc.get(Key.SizeKey, 1.0))
@@ -496,14 +508,7 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     if reach is None:
         # No band named, so no bound: far enough that nothing is out of range.
         reach = float(math.hypot(*alpha.shape))
-    if not HAS_SCIPY:
-        raise ImportError(
-            "Stroke effects require: scipy\n\n"
-            "Install with:\n"
-            "    pip install 'psd-tools[composite]'\n"
-            "Or:\n"
-            "    pip install scipy"
-        )
+    _require_scipy("Stroke effects")
     from scipy.ndimage import (  # type: ignore[import-untyped]  # noqa: PLC0415
         distance_transform_edt,
     )
@@ -597,8 +602,6 @@ def draw_stroke_effect_split(
     """
     logger.debug("Stroke effect has limited support")
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-    if not isinstance(shape, np.ndarray):
-        shape = np.full((height, width, 1), shape, dtype=np.float32)
 
     paint_type = _enum(desc, Key.PaintType)
     if paint_type == Enum.SolidColor:
@@ -617,6 +620,25 @@ def draw_stroke_effect_split(
         logger.warning("No fill specification found.")
         color = np.ones((height, width, 1))
 
+    coverage, inside = stroke_band(viewport, shape, desc)
+    return color, coverage, inside
+
+
+def stroke_band(
+    viewport: tuple[int, int, int, int],
+    shape: float | np.ndarray,
+    desc: Descriptor,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The coverage of a stroke effect, split at the boundary, without its paint.
+
+    What :py:func:`draw_stroke_effect_split` returns after the colour, drawn
+    on its own for a caller that only needs where the stroke lies: the
+    drop shadow's knockout cuts under the band, whatever it is painted with.
+    """
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    if not isinstance(shape, np.ndarray):
+        shape = np.full((height, width, 1), shape, dtype=np.float32)
+
     # Note: current implementation is purely image-based.
     # For layers with path objects, this should be based on drawing.
 
@@ -629,7 +651,6 @@ def draw_stroke_effect_split(
     # a descriptor can carry one.
     if size <= 0.0:
         return (
-            color,
             np.zeros((height, width, 1), dtype=np.float32),
             np.zeros((height, width, 1), dtype=np.float32),
         )
@@ -665,7 +686,7 @@ def draw_stroke_effect_split(
         within = _distance_band(distance, lo, 0.0)
         beyond = _distance_band(distance, 0.0, hi)
         inside = coverage * divide(within, within + beyond, fill=0.0)
-    return color, np.expand_dims(coverage, 2), np.expand_dims(inside, 2)
+    return np.expand_dims(coverage, 2), np.expand_dims(inside, 2)
 
 
 # How wide a gaussian stands in for the blur Photoshop gives a drop shadow of a
@@ -786,6 +807,7 @@ def contour_table(desc: Descriptor | None) -> np.ndarray | None:
         return None
     grid = np.linspace(0.0, 1.0, _CONTOUR_STEPS)
     if len(xs) > 2 and np.all(np.diff(xs) > 0.0):
+        _require_scipy("Drop shadow effects")
         from scipy.interpolate import PchipInterpolator  # type: ignore[import-untyped]  # noqa: PLC0415
 
         table = PchipInterpolator(xs, ys)(np.clip(grid, xs[0], xs[-1]))
@@ -819,8 +841,7 @@ def _spread(alpha: np.ndarray, grow: float) -> np.ndarray:
     matte rather than an opaque one. It is taken a coverage level at a time,
     each level a binary silhouette grown along its distance transform with
     the edge antialiased, and the levels summed, each weighted by the step
-    in coverage it stands for. Growing the one silhouette ``alpha >= 0.5``
-    instead stepped from nothing to opaque across that threshold.
+    in coverage it stands for.
 
     The levels are the silhouette's own coverages: all of them when it has
     few, which rounds none and costs a binary silhouette a single transform.
@@ -904,14 +925,7 @@ def draw_drop_shadow(
     every step here without complaint, and one NaN in the coverage spreads to
     the whole canvas it is composited on.
     """
-    if not HAS_SCIPY:
-        raise ImportError(
-            "Drop shadow effects require: scipy\n\n"
-            "Install with:\n"
-            "    pip install 'psd-tools[composite]'\n"
-            "Or:\n"
-            "    pip install scipy"
-        )
+    _require_scipy("Drop shadow effects")
     from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
     if not all(math.isfinite(value) for value in (distance, angle, size, spread)):
