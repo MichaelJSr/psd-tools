@@ -2,6 +2,7 @@
 
 import logging
 import math
+import warnings
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple, Protocol, cast
@@ -23,6 +24,7 @@ from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import check_growth, check_pixel_size, get_color_channels
 from psd_tools.composite import paint, utils, vector
+from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
 from psd_tools.composite.blend import get_blend_func, normal
 from psd_tools.composite.effects import (
@@ -86,8 +88,9 @@ def _styled(effects: Iterator[Any]) -> Iterator[_StyledEffect]:
 
 
 # How many times the larger of the viewport and the layer a vector stroke's
-# fill may grow to, past the floor check_growth() allows.
-_STROKE_GROWTH = 4
+# fill, or a layer effect's canvas, may grow to, past the floor check_growth()
+# allows.
+_CANVAS_GROWTH = 4
 
 
 def _pixels(bbox: tuple[int, int, int, int]) -> int:
@@ -289,14 +292,16 @@ def _cast_bbox(
 ) -> tuple[int, int, int, int]:
     """The box a layer's silhouette can cover, which is what casts its shadow.
 
-    A layer's own box, except for a group: its silhouette is its composited
-    contents, effects included, and a child's stroke or shadow runs past the
-    group's box, which is the union of its children's own. The group's
-    content box is every box those contents paint on (#808).
+    A layer's own box grown by its vector stroke, which a redrawn shape paints
+    past its path. A group's silhouette is its composited contents, effects
+    included, and a child's stroke or shadow runs past the group's box, which
+    is the union of its children's own; so a group's is its content box, every
+    box those contents paint on.
     """
+    # A child's effects run past the group's own box (#808).
     if layer.is_group():
         return _content_bbox(layer, memo)
-    return layer.bbox
+    return _vector_stroke_reach(layer)
 
 
 def _shadow_reach(
@@ -396,6 +401,22 @@ def _effect_reach(
         utils.union_bbox(_stroke_reach(layer), _shadow_reach(layer, memo)),
         _bevel_reach(layer, memo),
     )
+
+
+def _has_scipy(what: str) -> bool:
+    """Whether scipy is there to draw ``what``, warning when it is not.
+
+    A drop shadow, satin or bevel without it is left out rather than raised
+    for, so a document that has one still composites.
+    """
+    if HAS_SCIPY:
+        return True
+    warnings.warn(
+        "%s are not drawn without scipy. Install with: "
+        "pip install 'psd-tools[composite]'" % what,
+        stacklevel=2,
+    )
+    return False
 
 
 _ContentBBoxes = dict[int, tuple[int, int, int, int]]
@@ -2319,7 +2340,7 @@ class Compositor:
             check_growth(
                 (fill_bbox[2] - fill_bbox[0]) * (fill_bbox[3] - fill_bbox[1]),
                 max(_pixels(self._viewport), _pixels(layer.bbox)),
-                _STROKE_GROWTH,
+                _CANVAS_GROWTH,
             )
             check_pixel_size(
                 fill_bbox[2] - fill_bbox[0],
@@ -2552,14 +2573,41 @@ class Compositor:
         through a knockout, which would make the shadow depend on the
         viewport. The group's contents are composited over nothing, once per
         box and pass, as :py:meth:`_get_group_shape` does for a stroke.
+
+        A shape redrawn from its path casts what :py:meth:`_get_object` paints
+        of it: its stroke as well as its fill, and the stroke alone with the
+        fill switched off.
         """
         mask = self._get_mask(layer, viewport)
-        own = (
-            self._get_group_shape(layer, viewport, alpha=True)
-            if isinstance(layer, GroupMixin)
-            else self._get_object_shape(layer, viewport)
+        if isinstance(layer, GroupMixin):
+            return utils.clip(self._get_group_shape(layer, viewport, alpha=True) * mask)
+        if not (
+            self._has_redrawn_stroke(layer)
+            or (
+                (self._force or not layer.has_pixels())
+                and utils.is_fill_disabled(layer)
+            )
+        ):
+            return utils.clip(self._get_object_shape(layer, viewport) * mask)
+        height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+        redrawn = Compositor(
+            viewport,
+            np.ones((height, width, self._channels), dtype=np.float32),
+            np.zeros((height, width, 1), dtype=np.float32),
+            force=self._force,
+            widen=self._widen,
+            color_mode=self._color_mode,
+            cache=self._cache,
         )
-        return utils.clip(own * mask)
+        _, _, alpha, stroke = redrawn._get_object(layer)
+        alpha = alpha * mask
+        if stroke is not None:
+            # The fill's share and the stroke's are disjoint, as in
+            # :py:meth:`_resolve_source`.
+            alpha = alpha + stroke[1] * self._get_mask(
+                layer, viewport, clip_to_path=False
+            )
+        return utils.clip(alpha)
 
     def _knockout_shape(
         self, layer: Layer, viewport: tuple[int, int, int, int], silhouette: np.ndarray
@@ -2609,7 +2657,7 @@ class Compositor:
         is drawn on its own box, grown from :py:func:`_cast_bbox` so a group's
         has room for its children's effects, and cast from
         :py:meth:`_cast_shape` read on that box, so a layer that runs past the
-        viewport still casts from the part of it out of view (#804).
+        viewport still casts from the part of it out of view.
 
         The layer opacity fades the shadow with the layer, as it fades an
         outer stroke. Fill opacity does not: it fades the layer's own paint
@@ -2627,7 +2675,7 @@ class Compositor:
         composited it would take every pixel of the canvas with it.
         """
         shadows = _readable(layer, "dropshadow")
-        if not shadows:
+        if not shadows or not _has_scipy("Drop shadows"):
             return
         _, opacity = self._get_const(layer)
         if opacity <= 0.0:
@@ -2649,6 +2697,7 @@ class Compositor:
                 bbox = drop_shadow_bbox(
                     cast_from, distance, angle, size, layer._psd._max_alloc_bytes
                 )
+                self._check_effect_growth(bbox, cast_from)
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a drop shadow of %s: %s", layer, error)
                 continue
@@ -2689,13 +2738,29 @@ class Compositor:
 
         The silhouette is read on it: the layer's box grown by the reach, but
         no further than the reach past the viewport, since nothing beyond that
-        reaches back into view. Raises as :py:func:`inner_bbox` does.
+        reaches back into view. Raises as :py:func:`inner_bbox` does, and when
+        the box is out of proportion to the layer and the viewport.
         """
-        max_alloc = layer._psd._max_alloc_bytes
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        return utils.intersect(
-            inner_bbox(cast_from, reach, max_alloc),
-            inner_bbox(self._viewport, reach, max_alloc),
+        bbox = inner_bbox(
+            cast_from, reach, layer._psd._max_alloc_bytes, within=self._viewport
+        )
+        self._check_effect_growth(bbox, cast_from)
+        return bbox
+
+    def _check_effect_growth(
+        self, bbox: tuple[int, int, int, int], cast_from: tuple[int, int, int, int]
+    ) -> None:
+        """Raise ``ValueError`` when an effect's canvas is out of proportion.
+
+        Its distance and size are the file's, so the canvas they grow is held
+        to the larger of the viewport and what it is cast from, as a vector
+        stroke's is.
+        """
+        check_growth(
+            _pixels(bbox),
+            max(_pixels(self._viewport), _pixels(cast_from)),
+            _CANVAS_GROWTH,
         )
 
     def _add_satins(self, layer: Layer, canvas: _EffectCanvas) -> None:
@@ -2704,7 +2769,10 @@ class Compositor:
         Drawn from :py:meth:`_cast_shape` read on a box grown by the satin's
         reach, and guarded as the drop shadows are.
         """
-        for effect in _readable(layer, "satin"):
+        satins = _readable(layer, "satin")
+        if not satins or not _has_scipy("Satins"):
+            return
+        for effect in satins:
             satin = cast(Satin, effect)
             try:
                 distance, size = satin_geometry(satin.descriptor)
@@ -2755,7 +2823,10 @@ class Compositor:
         stroke is. A stroke emboss, which bevels the stroke rather than the
         layer, a shape contour and a texture are not drawn.
         """
-        for effect in _readable(layer, "bevelemboss"):
+        bevels = _readable(layer, "bevelemboss")
+        if not bevels or not _has_scipy("Bevels"):
+            return
+        for effect in bevels:
             bevel = cast(BevelEmboss, effect)
             try:
                 style = _bevel_style(bevel)

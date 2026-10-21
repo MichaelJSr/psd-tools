@@ -333,7 +333,8 @@ option::
 
     Basic compositing works without them by using cached previews or simple
     pixel-based operations. If a feature requires missing dependencies, an
-    ``ImportError`` with installation instructions will be raised.
+    ``ImportError`` with installation instructions will be raised; a drop
+    shadow, satin or bevel is left out with a warning instead.
 
     Note that most layer effects are not supported. Adjustment layers have
     limited support (BrightnessContrast, Levels, Curves, Exposure, Invert,

@@ -11,19 +11,16 @@ Changelog
 - [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
   ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
 - [fix] A drop shadow layer effect is now rendered when a document is
-  composited from its layers, instead of being dropped. Distance, size,
-  spread, contour, global light, opacity, blend mode and the layer knockout
-  are honoured; noise is read but not applied, and the blur approximates
-  Photoshop's. Needs ``scipy``, as a stroke effect does (#679)
+  composited from its layers, instead of being dropped. Noise is not applied.
+  Needs ``scipy``; without it the shadow is left out with a warning (#679)
 - [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
   jitter (#679)
 - [fix] Satin and bevel/emboss layer effects are now rendered when a document
-  is composited from its layers. All bevel styles but stroke emboss are drawn;
-  the chisel soft technique, the shape contour and the texture are
-  approximated or left out, and the blurs approximate Photoshop's. Needs
-  ``scipy``
+  is composited from its layers; a stroke emboss, a bevel's shape contour and
+  its texture are not. Needs ``scipy``; without it they are left out with a
+  warning (#379)
 - [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
-  the effect uses global light
+  the effect uses global light (#379)
 
 1.25.0 (2026-10-14)
 -------------------
