@@ -17,6 +17,9 @@ Changelog
   Photoshop's. Needs ``scipy``, as a stroke effect does (#679)
 - [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
   jitter (#679)
+- [fix] Inner shadow and inner glow layer effects are now rendered when a
+  document is composited from its layers. Solid colours only: a gradient
+  glow is still dropped, and noise is read but not applied. Needs ``scipy``
 
 1.25.0 (2026-10-14)
 -------------------

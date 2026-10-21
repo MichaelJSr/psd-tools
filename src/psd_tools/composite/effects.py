@@ -23,11 +23,13 @@ Currently supported effects:
     knocks out drop shadow"
   - The blur is a gaussian approximation of Photoshop's own, so a soft
     shadow's falloff can differ; noise is read but not applied
+- **Inner shadow** and **inner glow**: the same blur, cast from the outside of
+  the silhouette and painted inside the layer
+  - Solid color; honors distance, angle, size, choke, contour, opacity and
+    blend mode, and an inner glow's source, technique and range; noise is
+    read but not applied, and a gradient glow is not drawn
 
-Partially supported or limited effects:
-
-- Inner shadow, outer glow, inner glow
-- These may render but with reduced accuracy
+Not supported: outer glow, satin, bevel and emboss.
 
 The main function :py:func:`draw_stroke_effect` handles stroke rendering by:
 
@@ -153,7 +155,9 @@ def _stroke_size(desc: Descriptor) -> float:
 
 
 def shadow_geometry(desc: Descriptor) -> tuple[float, float, float]:
-    """A drop shadow's ``(distance, size, spread)``, as the file states them.
+    """A shadow's or glow's ``(distance, size, spread)``, as the file states them.
+
+    The spread is an inner effect's choke, which shares its key.
 
     Read off the descriptor rather than through :py:class:`~psd_tools.api.effects.DropShadow`,
     whose properties read a value they cannot parse as its default: to the
@@ -926,14 +930,43 @@ def draw_drop_shadow(
     the whole canvas it is composited on.
     """
     _require_scipy("Drop shadow effects")
+    alpha = _cast_matte(
+        shape[:, :, 0].astype(np.float32),
+        distance=distance,
+        angle=angle,
+        size=size,
+        spread=spread,
+        outside=0.0,
+        what="Drop shadow",
+    )
+    if contour is not None:
+        alpha = _contoured(alpha, contour, anti_aliased)
+    return alpha[:, :, None]
+
+
+def _cast_matte(
+    alpha: np.ndarray,
+    *,
+    distance: float,
+    angle: float,
+    size: float,
+    spread: float,
+    outside: float,
+    what: str,
+) -> np.ndarray:
+    """``alpha`` spread, blurred and offset, as a shadow casts it.
+
+    ``outside`` is the matte past the canvas: 0 for a matte drawn from the
+    silhouette, 1 for one drawn from its complement. Raises ``ValueError``
+    for a parameter that is not finite, naming ``what``.
+    """
     from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
     if not all(math.isfinite(value) for value in (distance, angle, size, spread)):
         raise ValueError(
-            "Drop shadow parameters must be finite: distance=%r angle=%r "
-            "size=%r spread=%r" % (distance, angle, size, spread)
+            "%s parameters must be finite: distance=%r angle=%r size=%r spread=%r"
+            % (what, distance, angle, size, spread)
         )
-    alpha = shape[:, :, 0].astype(np.float32)
     size = max(float(size), 0.0)
     grow = size * min(max(float(spread), 0.0), 100.0) / 100.0
     if grow > 0.0 and alpha.any():
@@ -942,12 +975,105 @@ def draw_drop_shadow(
     sigma = radius * _SHADOW_SIGMA_PER_SIZE
     if sigma > 1e-3:
         alpha = ndimage.gaussian_filter(
-            alpha, sigma, mode="constant", cval=0.0, truncate=radius / sigma
+            alpha, sigma, mode="constant", cval=outside, truncate=radius / sigma
         )
     dx, dy = _shadow_offset(distance, angle)
     if dx or dy:
-        alpha = ndimage.shift(alpha, (dy, dx), order=1, mode="constant", cval=0.0)
-    alpha = np.clip(alpha, 0.0, 1.0)
+        alpha = ndimage.shift(alpha, (dy, dx), order=1, mode="constant", cval=outside)
+    return np.clip(alpha, 0.0, 1.0)
+
+
+def draw_inner_shadow(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    distance: float,
+    angle: float,
+    size: float,
+    choke: float,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+) -> np.ndarray:
+    """The coverage an inner shadow casts inside ``shape``, on ``viewport``.
+
+    The shadow :py:func:`draw_drop_shadow` casts from the complement of
+    ``shape``, cut to ``shape``: the outside falls into the layer from the
+    side the light comes from. ``choke`` is a percentage of ``size``, as a
+    drop shadow's spread is, and shrinks the silhouette before the blur.
+    The canvas past ``viewport`` counts as outside the layer. The result is
+    ``(height, width, 1)`` and never exceeds ``shape``.
+    """
+    _require_scipy("Inner shadow effects")
+    alpha = shape[:, :, 0].astype(np.float32)
+    matte = _cast_matte(
+        1.0 - alpha,
+        distance=distance,
+        angle=angle,
+        size=size,
+        spread=choke,
+        outside=1.0,
+        what="Inner shadow",
+    )
     if contour is not None:
-        alpha = _contoured(alpha, contour, anti_aliased)
-    return alpha[:, :, None]
+        matte = _contoured(matte, contour, anti_aliased)
+    return (matte * alpha)[:, :, None]
+
+
+def _glow_range(matte: np.ndarray, glow_range: float) -> np.ndarray:
+    """``matte`` with a glow's range applied, before its contour."""
+    share = min(max(float(glow_range), 1.0), 100.0) / 100.0
+    return np.clip(matte / share, 0.0, 1.0)
+
+
+def draw_inner_glow(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    size: float,
+    choke: float,
+    center: bool = False,
+    precise: bool = False,
+    glow_range: float = 50.0,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+) -> np.ndarray:
+    """The coverage an inner glow puts inside ``shape``, on ``viewport``.
+
+    From the edge, the glow is full at the boundary and fades over ``size``
+    inward; from the ``center``, it is the complement, full inside and fading
+    out towards the edge. ``choke`` is a percentage of ``size`` held at full
+    strength before the fade. The softer technique fades along the blur
+    :py:func:`draw_inner_shadow` uses, the ``precise`` one linearly with the
+    distance to the edge. ``glow_range`` is the percentage of the fade the
+    contour is spread over. The result is ``(height, width, 1)`` and never
+    exceeds ``shape``.
+    """
+    _require_scipy("Inner glow effects")
+    if not all(math.isfinite(value) for value in (size, choke, glow_range)):
+        raise ValueError(
+            "Inner glow parameters must be finite: size=%r choke=%r range=%r"
+            % (size, choke, glow_range)
+        )
+    alpha = shape[:, :, 0].astype(np.float32)
+    size = max(float(size), 0.0)
+    if precise:
+        grow = size * min(max(float(choke), 0.0), 100.0) / 100.0
+        depth = -_signed_distance(alpha, size + 1.0)
+        fade = max(size - grow, 1e-3)
+        matte = np.clip((size - depth) / fade, 0.0, 1.0).astype(np.float32)
+    else:
+        matte = _cast_matte(
+            1.0 - alpha,
+            distance=0.0,
+            angle=0.0,
+            size=size,
+            spread=choke,
+            outside=1.0,
+            what="Inner glow",
+        )
+    if center:
+        matte = 1.0 - matte
+    matte = _glow_range(matte, glow_range)
+    if contour is not None:
+        matte = _contoured(matte, contour, anti_aliased)
+    return (matte * alpha)[:, :, None]
