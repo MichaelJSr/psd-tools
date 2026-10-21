@@ -389,11 +389,13 @@ def test_a_centred_stroke_survives_negative_document_coordinates() -> None:
     (:py:func:`test_an_inner_stroke_stops_where_the_path_does`), so the
     alignment is forged: the pen translates the path by minus the viewport
     origin, which is machinery of its own, and a band that never leaves the
-    canvas cannot exercise it.
+    canvas cannot exercise it. Align Edges is switched off, so the pen stays
+    on the path.
     """
     psd = PSDImage.open(full_name("path-operations/combine.psd"))
     layer = psd[0]
     assert layer.stroke is not None
+    del layer._record.tagged_blocks[Tag.USING_ALIGNED_RENDERING]
     layer.stroke._data[b"strokeStyleLineAlignment"] = Enumerated(
         b"strokeStyleLineAlignment", b"strokeStyleAlignCenter"
     )
@@ -1404,3 +1406,84 @@ def test_an_inner_stroke_keeps_its_opacity_at_the_path_edge() -> None:
     partial = (shape > 0.05) & (shape < 0.95)
     assert partial.any(), "the path has antialiased edges"
     assert alpha[partial] == pytest.approx(0.5 * shape[partial], abs=1e-4)
+
+
+def _aligned_rectangle(
+    box: tuple[float, float, float, float], aligned: bool = True
+) -> tuple[PSDImage, Layer]:
+    """``double-stroke-effects.psd``'s shape, its path replaced by ``box``.
+
+    The layer aligns its edges and carries a centred 1 px stroke. ``box`` is
+    in document pixels on the 32x32 canvas.
+    """
+    psd = PSDImage.open(full_name("effects/double-stroke-effects.psd"))
+    layer = psd[1]
+    assert layer.stroke is not None and layer.stroke.line_width == 1.0
+    assert layer.stroke.line_alignment == "center"
+    assert layer.tagged_blocks.get_data(Tag.USING_ALIGNED_RENDERING) == 1
+    if not aligned:
+        del layer._record.tagged_blocks[Tag.USING_ALIGNED_RENDERING]
+    setting = layer.tagged_blocks.get_data(Tag.VECTOR_MASK_SETTING2)
+    x0, y0, x1, y1 = box
+    knots: list[Any] = []
+    for x, y in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]:
+        point = (y / psd.height, x / psd.width)  # knots are (y, x) fractions
+        knots.append(ClosedKnotLinked(point, point, point))
+    keep = [x for x in setting.path if not isinstance(x, ClosedPath)]
+    setting.path._items = keep + [ClosedPath(items=knots, operation=1, index=0)]
+    assert "_vector_mask" not in layer.__dict__
+    return psd, layer
+
+
+def _union(layer: Layer) -> np.ndarray:
+    """The layer's fill and stroke over each other, one column through the middle."""
+    fill = vector.draw_vector_mask(layer)[:, 16, 0]
+    stroke = vector.draw_stroke(layer)[:, 16, 0]
+    return fill + stroke - fill * stroke
+
+
+def test_align_edges_snaps_an_edge_on_a_pixel_boundary() -> None:
+    """Edges a hair off a pixel boundary fill whole rows under Align Edges.
+
+    The card corpus's separator rectangles sit that far off; Photoshop's
+    raster of them has no partial row. The centred 1 px pen covers the row
+    below each edge: inside at the top, outside at the bottom.
+    """
+    off = 0.005
+    _, layer = _aligned_rectangle((4.0, 3.0 - off, 28.0, 27.0 + off))
+    fill = vector.draw_vector_mask(layer)[:, 16, 0]
+    assert list(fill[1:5]) == [0.0, 0.0, 1.0, 1.0]
+    assert list(fill[25:29]) == [1.0, 1.0, 0.0, 0.0]
+    union = _union(layer)
+    assert list(union[1:5]) == [0.0, 0.0, 1.0, 1.0]
+    assert list(union[25:29]) == [1.0, 1.0, 1.0, 0.0]
+
+
+def test_align_edges_leaves_an_edge_between_pixel_boundaries() -> None:
+    """An edge halfway across a pixel is not on a boundary and keeps its area."""
+    _, layer = _aligned_rectangle((4.0, 2.5, 28.0, 27.5))
+    fill = vector.draw_vector_mask(layer)[:, 16, 0]
+    assert fill[2] == pytest.approx(0.5, abs=1e-6)
+    assert fill[27] == pytest.approx(0.5, abs=1e-6)
+    assert fill[3] == 1.0 and fill[26] == 1.0
+
+
+def test_without_align_edges_a_pen_straddles_the_boundary() -> None:
+    """The snap belongs to Align Edges: without it the pen is centred on the path."""
+    off = 0.005
+    _, layer = _aligned_rectangle((4.0, 3.0 - off, 28.0, 27.0 + off), aligned=False)
+    union = _union(layer)
+    assert union[2] == pytest.approx(0.5, abs=0.02)
+    assert union[27] == pytest.approx(0.5, abs=0.02)
+
+
+def test_an_aligned_stroked_shape_matches_photoshops_raster() -> None:
+    """``double-stroke-effects.psd``'s rectangle, redrawn, is the raster it stores."""
+    psd = PSDImage.open(full_name("effects/double-stroke-effects.psd"))
+    layer = psd[1]
+    box = layer.bbox
+    fill = vector.draw_vector_mask(layer, box)
+    stroke = vector.draw_stroke(layer, box)
+    stored = layer.numpy("shape")
+    assert stored is not None
+    assert np.allclose(fill + stroke - fill * stroke, stored, atol=1 / 255)
