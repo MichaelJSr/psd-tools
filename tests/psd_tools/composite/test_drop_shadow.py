@@ -801,7 +801,8 @@ def test_an_unreadable_drop_shadow_is_dropped_and_the_document_renders(
 # - layer_params.psb: what is left is the outer glow on the same layer, which
 #   is not drawn. The bound is what pins spread: leaving it out, or shrinking
 #   the silhouette by it, scores above it.
-# - layer_comps.psb: the rest is a bevel that is not drawn.
+# - layer_comps.psb: the rest lies along the shapes' edges and in the
+#   gradient overlays.
 # - masks.psb: the header band carries a stroke, and its bound is what pins
 #   the knockout under the stroke's band; cutting under the silhouette alone
 #   scores above it.
@@ -809,7 +810,7 @@ _PREVIEWS = [
     ("layer_effects.psd", (60, 215, 620, 296), 1e-5, 1e-3),
     ("masks.psb", None, 1e-6, 1.5e-4),
     ("layer_params.psb", (130, 230, 470, 560), 5.6e-3, 2e-2),
-    ("layer_comps.psb", None, 4.8e-3, 6e-3),
+    ("layer_comps.psb", None, 1.6e-3, 3e-3),
 ]
 
 

@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 
 from psd_tools.api import numpy_io, pil_io
-from psd_tools.api.effects import DropShadow
+from psd_tools.api.effects import BevelEmboss, DropShadow, Satin
 from psd_tools.api.layers import (
     AdjustmentLayer,
     Artboard,
@@ -26,16 +26,27 @@ from psd_tools.composite import paint, utils, vector
 from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
 from psd_tools.composite.blend import get_blend_func, normal
 from psd_tools.composite.effects import (
+    bevel_beside,
+    bevel_geometry,
+    bevel_inside,
+    bevel_reach,
     contour_table,
+    draw_bevel,
     draw_drop_shadow,
+    draw_satin,
     draw_stroke_effect_split,
     drop_shadow_bbox,
+    inner_bbox,
+    satin_geometry,
     shadow_geometry,
     stroke_band,
     stroke_bbox,
 )
 from psd_tools.composite.widen import make_widen
 from psd_tools.constants import (
+    BevelDirection,
+    BevelStyle,
+    BevelTechnique,
     BlendMode,
     ChannelID,
     ColorMode,
@@ -45,6 +56,7 @@ from psd_tools.constants import (
     Tag,
 )
 from psd_tools.psd.descriptor import Descriptor
+from psd_tools.terminology import Key
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +337,45 @@ def _shadow_reach(
     return bbox
 
 
+def _bevel_reach(
+    layer: Layer, memo: "_ContentBBoxes | None" = None
+) -> tuple[int, int, int, int]:
+    """``layer.bbox`` grown to every box its bevels paint beside the layer on.
+
+    An inner bevel stays inside the layer and adds nothing. Degrades as
+    :py:func:`_shadow_reach` does.
+    """
+    bbox = layer.bbox
+    if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+        return bbox
+    bevels = _readable(layer, "bevelemboss")
+    if not bevels:
+        return bbox
+    for effect in bevels:
+        bevel = cast(BevelEmboss, effect)
+        try:
+            style = _bevel_style(bevel)
+            if not bevel_beside(style):
+                continue
+            _, size, soften = bevel_geometry(bevel.descriptor)
+            bbox = utils.union_bbox(
+                bbox,
+                inner_bbox(
+                    _cast_bbox(layer, memo),
+                    bevel_reach(style, size, soften),
+                    layer._psd._max_alloc_bytes,
+                ),
+            )
+        except _UNREADABLE as error:
+            logger.debug("Cannot measure a bevel of %s: %s", layer, error)
+    return bbox
+
+
+def _bevel_style(bevel: BevelEmboss) -> BevelStyle:
+    """The bevel's style, inner where the descriptor does not say."""
+    return bevel.bevel_style or BevelStyle.INNER_BEVEL
+
+
 def _effect_reach(
     layer: Layer, memo: "_ContentBBoxes | None" = None
 ) -> tuple[int, int, int, int]:
@@ -335,7 +386,10 @@ def _effect_reach(
     shadow loses it as surely as one that clips its stroke, and a layer whose
     own box has cleared the viewport can still cast a shadow back into it.
     """
-    return utils.union_bbox(_stroke_reach(layer), _shadow_reach(layer, memo))
+    return utils.union_bbox(
+        utils.union_bbox(_stroke_reach(layer), _shadow_reach(layer, memo)),
+        _bevel_reach(layer, memo),
+    )
 
 
 _ContentBBoxes = dict[int, tuple[int, int, int, int]]
@@ -1526,14 +1580,18 @@ class Compositor:
         the layer and goes on before the layer is resolved -- see
         :py:meth:`_apply_drop_shadows`.
 
-        TODO: Inner shadow, the two glows, satin and bevel are not drawn at
-        all, so where they would land is not settled here either. An inner one
-        joins the overlays; an outer glow is an outer effect with a blur, which
-        ``draw_drop_shadow()`` already draws the coverage of.
+        A satin goes on over the overlays, and a bevel over the stroke, so it
+        shades the stroke too; the part of a bevel beside the layer is an
+        outer effect, after the stroke's.
+
+        TODO: Inner shadow and the two glows are not drawn at all. An inner
+        one joins the overlays; an outer glow is an outer effect with a blur,
+        which ``draw_drop_shadow()`` already draws the coverage of.
         """
         canvas = _EffectCanvas(self, source)
         for effect_name in _OVERLAY_DRAWS:
             self._add_overlay(layer, effect_name, canvas)
+        self._add_satins(layer, canvas)
 
         traces_mask = self._traces_mask(layer)
         traced: float | np.ndarray = source.shape
@@ -1551,6 +1609,7 @@ class Compositor:
             outer,
             traces_mask,
         )
+        self._add_bevels(layer, canvas, outer)
         return canvas.source(), outer
 
     def _traces_mask(self, layer: Layer) -> bool:
@@ -2618,6 +2677,149 @@ class Compositor:
                 self._apply_source(
                     color, coverage, coverage * effect_opacity * opacity, blend_mode
                 )
+
+    def _inner_box(self, layer: Layer, reach: float) -> tuple[int, int, int, int]:
+        """The box an inner effect reaching ``reach`` past an edge is drawn on.
+
+        The silhouette is read on it: the layer's box grown by the reach, but
+        no further than the reach past the viewport, since nothing beyond that
+        reaches back into view. Raises as :py:func:`inner_bbox` does.
+        """
+        max_alloc = layer._psd._max_alloc_bytes
+        cast_from = _cast_bbox(layer, self._cache.content_bboxes)
+        return utils.intersect(
+            inner_bbox(cast_from, reach, max_alloc),
+            inner_bbox(self._viewport, reach, max_alloc),
+        )
+
+    def _add_satins(self, layer: Layer, canvas: _EffectCanvas) -> None:
+        """Composite every satin of the layer into it, over its overlays.
+
+        Drawn from :py:meth:`_cast_shape` read on a box grown by the satin's
+        reach, and guarded as the drop shadows are.
+        """
+        for effect in _readable(layer, "satin"):
+            satin = cast(Satin, effect)
+            try:
+                distance, size = satin_geometry(satin.descriptor)
+                angle = satin.angle
+                opacity = satin.opacity / 100.0
+                if not math.isfinite(opacity):
+                    raise ValueError("opacity %r is not finite" % opacity)
+                blend_mode = satin.blend_mode
+                inverted = satin.inverted
+                contour = contour_table(satin.contour)
+                anti_aliased = satin.anti_aliased
+                bbox = self._inner_box(layer, abs(distance) + size)
+            except _UNREADABLE as error:
+                logger.debug("Cannot measure a satin of %s: %s", layer, error)
+                continue
+            if bbox == (0, 0, 0, 0):
+                continue
+            silhouette = self._cast_shape(layer, bbox)
+            try:
+                coverage = draw_satin(
+                    bbox,
+                    silhouette,
+                    distance=distance,
+                    angle=angle,
+                    size=size,
+                    inverted=inverted,
+                    contour=contour,
+                    anti_aliased=anti_aliased,
+                )
+                color, _ = paint.draw_solid_color_fill(
+                    self._viewport, layer._psd.color_mode, satin.descriptor
+                )
+            except _UNREADABLE as error:
+                logger.debug("Cannot draw a satin of %s: %s", layer, error)
+                continue
+            coverage = paste(self._viewport, bbox, coverage)
+            canvas.over(canvas.within(coverage), color, blend_mode, opacity)
+
+    def _add_bevels(
+        self, layer: Layer, canvas: _EffectCanvas, outer: list[_OuterEffect]
+    ) -> None:
+        """Composite every bevel of the layer: inside it, and beside it.
+
+        The highlight and the shadow are two effects with a colour, blend mode
+        and opacity each. What falls inside the silhouette goes into the
+        layer, over everything else inside it; what an outer bevel, an emboss or
+        a pillow emboss puts beside it is an outer effect, as an outset
+        stroke is. A stroke emboss, which bevels the stroke rather than the
+        layer, and a texture are not drawn.
+        """
+        for effect in _readable(layer, "bevelemboss"):
+            bevel = cast(BevelEmboss, effect)
+            try:
+                style = _bevel_style(bevel)
+                if style == BevelStyle.STROKE_EMBOSS:
+                    logger.debug("A stroke emboss of %s is not drawn", layer)
+                    continue
+                depth, size, soften = bevel_geometry(bevel.descriptor)
+                technique = bevel.bevel_type or BevelTechnique.SOFT_MATTE
+                up = bevel.direction != BevelDirection.STAMP_OUT
+                angle, altitude = bevel.angle, bevel.altitude
+                contour = contour_table(bevel.contour)
+                anti_aliased = bevel.anti_aliased
+                halves = []
+                for color_desc, blend_mode, opacity in (
+                    (
+                        bevel.highlight_color,
+                        bevel.highlight_mode,
+                        bevel.highlight_opacity,
+                    ),
+                    (bevel.shadow_color, bevel.shadow_mode, bevel.shadow_opacity),
+                ):
+                    opacity /= 100.0
+                    if not math.isfinite(opacity):
+                        raise ValueError("opacity %r is not finite" % opacity)
+                    paint_desc = Descriptor()
+                    paint_desc[Key.Color] = color_desc
+                    color, _ = paint.draw_solid_color_fill(
+                        self._viewport, layer._psd.color_mode, paint_desc
+                    )
+                    halves.append((color, blend_mode, opacity))
+                bbox = self._inner_box(layer, bevel_reach(style, size, soften))
+            except _UNREADABLE as error:
+                logger.debug("Cannot measure a bevel of %s: %s", layer, error)
+                continue
+            if bbox == (0, 0, 0, 0):
+                continue
+            if bevel.use_texture:
+                logger.debug("The texture of a bevel of %s is not applied", layer)
+            silhouette = self._cast_shape(layer, bbox)
+            try:
+                amounts = draw_bevel(
+                    bbox,
+                    silhouette,
+                    style=style,
+                    technique=technique,
+                    up=up,
+                    depth=depth,
+                    size=size,
+                    soften=soften,
+                    angle=angle,
+                    altitude=altitude,
+                    contour=contour,
+                    anti_aliased=anti_aliased,
+                )
+            except _UNREADABLE as error:
+                logger.debug("Cannot draw a bevel of %s: %s", layer, error)
+                continue
+            for amount, (color, blend_mode, opacity) in zip(amounts, halves, strict=True):
+                if bevel_inside(style):
+                    inside = paste(self._viewport, bbox, amount * silhouette)
+                    canvas.over(canvas.within(inside), color, blend_mode, opacity)
+                if bevel_beside(style):
+                    beside = paste(self._viewport, bbox, amount * (1.0 - silhouette))
+                    beside = np.minimum(beside, 1.0 - canvas.region)
+                    if beside.any():
+                        outer.append(
+                            _OuterEffect(
+                                color, beside, opacity * canvas.opacity, blend_mode
+                            )
+                        )
 
     def _add_stroke_effects(
         self,
