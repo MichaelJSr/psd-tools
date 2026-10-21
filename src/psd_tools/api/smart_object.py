@@ -13,7 +13,8 @@ from psd_tools.api._descriptor import get_scalar
 from psd_tools.api.protocols import LayerProtocol
 from psd_tools.compression import decompress
 from psd_tools.constants import Compression, Tag
-from psd_tools.psd.filter_effects import FilterEffect
+from psd_tools.psd.descriptor import Descriptor
+from psd_tools.psd.filter_effects import FilterEffect, FilterEffectExtra
 
 logger = logging.getLogger(__name__)
 
@@ -344,15 +345,15 @@ class SmartObject:
         else:
             return None
 
-
     # -- Smart filters -----------------------------------------------------
 
     @property
-    def filters(self) -> object | None:
+    def filters(self) -> Descriptor | None:
         """The smart filter descriptor (``filterFX``), or ``None``."""
         if self._config is None:
             return None
-        return self._config.data.get(b"filterFX")
+        value = self._config.data.get(b"filterFX")
+        return value if isinstance(value, Descriptor) else None
 
     @property
     def has_enabled_filters(self) -> bool:
@@ -388,7 +389,7 @@ class SmartObject:
             return None
         psd = getattr(self._layer, "_psd", None)
         blocks = getattr(psd, "tagged_blocks", None)
-        if blocks is None:
+        if psd is None or blocks is None:
             return None
         items = None
         for key in (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3):
@@ -403,7 +404,12 @@ class SmartObject:
             if item.rectangle is None or bbox is None:
                 return False
             top, left, bottom, right = item.rectangle
-            return left <= bbox[0] and top <= bbox[1] and right >= bbox[2] and bottom >= bbox[3]
+            return (
+                left <= bbox[0]
+                and top <= bbox[1]
+                and right >= bbox[2]
+                and bottom >= bbox[3]
+            )
 
         index = 0
         for layer in psd.descendants():
@@ -418,11 +424,20 @@ class SmartObject:
                 return item
         return None
 
-    def filter_source(self) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
+    def filter_source(
+        self,
+    ) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
         """``(bbox, color uint8 (h, w, 3), alpha uint8 (h, w) | None)`` of the
-        object as rendered before its smart filters, or ``None``."""
+        object as rendered before its smart filters, or ``None``.
+        """
         item = self.filter_effect()
-        if item is None or item.depth != 8 or not item.channels:
+        if (
+            item is None
+            or item.depth != 8
+            or not item.channels
+            or item.rectangle is None
+            or item.max_channels is None
+        ):
             return None
         top, left, bottom, right = item.rectangle
         w, h = right - left, bottom - top
@@ -437,23 +452,35 @@ class SmartObject:
             planes = planes * 3
         color = np.stack(planes[:3], axis=-1)
         alpha = None
-        transparency = item.channels[item.max_channels + 1] if len(item.channels) > item.max_channels + 1 else None
-        if transparency is not None and transparency.is_written and transparency.compression is not None:
+        index = item.max_channels + 1
+        transparency = item.channels[index] if len(item.channels) > index else None
+        if (
+            transparency is not None
+            and transparency.is_written
+            and transparency.compression is not None
+        ):
             alpha = _decode_plane(transparency.data, transparency.compression, w, h)
         return (left, top, right, bottom), color, alpha
 
     def filter_mask(self) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
         """``(bbox, mask uint8 (h, w))`` of the smart filters' mask (255 =
-        filtered), or ``None`` when no mask pixels are stored."""
+        filtered), or ``None`` when no mask pixels are stored.
+        """
         item = self.filter_effect()
         extra = item.extra if item is not None else None
-        if extra is None or not getattr(extra, "is_written", 0) or not extra.data:
+        if (
+            not isinstance(extra, FilterEffectExtra)
+            or not extra.is_written
+            or not extra.data
+        ):
             return None
         top, left, bottom, right = extra.rectangle
         w, h = right - left, bottom - top
         if w <= 0 or h <= 0:
             return None
-        return (left, top, right, bottom), _decode_plane(extra.data, extra.compression, w, h)
+        return (left, top, right, bottom), _decode_plane(
+            extra.data, extra.compression, w, h
+        )
 
     def save(
         self,
@@ -518,11 +545,11 @@ class SmartObject:
         return f"SmartObject({self.filename!r} kind={self.kind!r} type={self.filetype!r} detected={self.detected_filetype!r} size={self.filesize})"
 
 
-def _flag(desc: object, key: bytes, default: bool) -> bool:
+def _flag(desc: Descriptor | None, key: bytes, default: bool) -> bool:
     """A boolean descriptor field, or *default* when absent."""
     if desc is None:
         return default
-    value = desc.get(key)  # type: ignore[attr-defined]
+    value = desc.get(key)
     return default if value is None else bool(getattr(value, "value", value))
 
 

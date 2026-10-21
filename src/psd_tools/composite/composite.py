@@ -1663,13 +1663,17 @@ def _unfilter_under_mask(
         sbox, src_color, src_alpha = source
         src = np.zeros((h, w, 3), dtype=np.uint8)
         covered = np.zeros((h, w), dtype=np.uint8)
-        _paste_plane(covered, (x0, y0, x1, y1), np.full(src_color.shape[:2], 255, np.uint8), sbox)
+        _paste_plane(
+            covered, (x0, y0, x1, y1), np.full(src_color.shape[:2], 255, np.uint8), sbox
+        )
         for i in range(3):
             _paste_plane(src[..., i], (x0, y0, x1, y1), src_color[..., i], sbox)
         a_u = np.ones((h, w), dtype=np.float32)
         if src_alpha is not None:
             a_u[:] = 0
-            _paste_plane(a_u, (x0, y0, x1, y1), src_alpha.astype(np.float32) / 255.0, sbox)
+            _paste_plane(
+                a_u, (x0, y0, x1, y1), src_alpha.astype(np.float32) / 255.0, sbox
+            )
     except Exception as exc:  # the stored pixels are the safe fallback
         logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
         return color, shape
@@ -1681,11 +1685,16 @@ def _unfilter_under_mask(
     premul = mf * a_f * color + (1.0 - mf) * a_u * (src.astype(np.float32) / 255.0)
     out = np.where(alpha > 0, premul / np.maximum(alpha, 1e-6), color)
     logger.info("Smart filter mask applied to %r", layer.name)
-    return out.astype(np.float32), (alpha.astype(np.float32) if shape is not None else None)
+    return out.astype(np.float32), (
+        alpha.astype(np.float32) if shape is not None else None
+    )
 
 
 def _paste_plane(
-    dst: np.ndarray, dbox: tuple[int, int, int, int], src: np.ndarray, sbox: tuple[int, int, int, int]
+    dst: np.ndarray,
+    dbox: tuple[int, int, int, int],
+    src: np.ndarray,
+    sbox: tuple[int, int, int, int],
 ) -> None:
     """Copy the overlap of *src* (on *sbox*) into *dst* (on *dbox*)."""
     x0, y0 = max(dbox[0], sbox[0]), max(dbox[1], sbox[1])
