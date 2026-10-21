@@ -8,12 +8,13 @@ height.
 """
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import pytest
 
 from psd_tools import PSDImage
-from psd_tools.composite import paint
+from psd_tools.composite import effects, paint
 from psd_tools.composite.composite import _draw_gradient_overlay, composite
 from psd_tools.constants import ColorMode, GradientInterpolation, Tag
 from psd_tools.psd.descriptor import (
@@ -235,6 +236,49 @@ def test_full_smoothness_eases_the_blend_halfway_to_a_smoothstep(
     assert np.allclose(half, (along + _smoothed(along)) / 2, atol=1e-5)
 
 
+def _infinite_angle(desc: Descriptor) -> None:
+    desc[Key.Angle] = UnitFloat(math.inf, Unit.Angle)
+
+
+def _offset_not_a_point(desc: Descriptor) -> None:
+    desc[Key.Offset] = Integer(3)
+
+
+def _offset_not_a_number(desc: Descriptor) -> None:
+    point = Descriptor(classID=Klass.Point.value)
+    point[Key.Horizontal] = List()
+    point[Key.Vertical] = UnitFloat(math.nan, Unit.Percent)
+    desc[Key.Offset] = point
+
+
+def _smoothness_not_a_number(desc: Descriptor) -> None:
+    desc[Key.Gradient][Key.Interpolation] = List()
+
+
+def _midpoint_not_a_number(desc: Descriptor) -> None:
+    desc[Key.Gradient][Key.Colors][1][Key.Midpoint] = List()
+
+
+@pytest.mark.parametrize(
+    "forge",
+    [
+        _infinite_angle,
+        _offset_not_a_point,
+        _offset_not_a_number,
+        _smoothness_not_a_number,
+        _midpoint_not_a_number,
+    ],
+)
+def test_a_malformed_number_reads_as_if_it_were_absent(
+    forge: Callable[[Descriptor], None],
+) -> None:
+    """A fill layer has no guard around its draw, so the ramp must not raise."""
+    expected = _grey(_gradient(smoothness=None), 16, 4)
+    desc = _gradient(smoothness=None)
+    forge(desc)
+    assert np.allclose(_grey(desc, 16, 4), expected, atol=1e-6)
+
+
 def test_a_smooth_ramp_matches_photoshops_own_pixels() -> None:
     """``gradient-fill.psb`` holds a violet-to-orange fill at 100% smoothness.
 
@@ -338,10 +382,10 @@ def test_an_overlay_not_aligned_with_its_layer_is_laid_out_on_the_document() -> 
     desc = next(layer.effects.find("gradientoverlay")).descriptor
     assert layer.bbox == (99, 422, 699, 482) and psd.viewbox == (0, 0, 800, 640)
 
-    assert paint.gradient_anchor(layer, desc) is None, "aligned by default"
+    assert paint.gradient_anchor(psd, desc) is None, "aligned by default"
     aligned, _ = _draw_gradient_overlay(layer, layer.bbox, desc, 3)
     desc[Key.Alignment] = Bool(False)
-    assert paint.gradient_anchor(layer, desc) == psd.viewbox
+    assert paint.gradient_anchor(psd, desc) == psd.viewbox
     unaligned, _ = _draw_gradient_overlay(layer, layer.bbox, desc, 3)
     on_document, _ = paint.draw_gradient_fill(
         layer.bbox, psd.color_mode, desc, psd.viewbox
@@ -349,6 +393,23 @@ def test_an_overlay_not_aligned_with_its_layer_is_laid_out_on_the_document() -> 
     assert aligned is not None and unaligned is not None and on_document is not None
     assert np.array_equal(unaligned, on_document)
     assert not np.array_equal(unaligned, aligned)
+
+
+def test_a_stroke_not_aligned_with_its_layer_is_laid_out_on_the_document() -> None:
+    psd = PSDImage.open(full_name("effects/stroke-effects.psd"))
+    layer = next(x for x in psd.descendants() if x.name == "Gradient")
+    desc = next(iter(layer.effects.find("stroke"))).descriptor
+    assert layer.bbox == (33, 130, 57, 154) and psd.viewbox == (0, 0, 117, 157)
+    box = layer.bbox
+    shape = np.ones((box[3] - box[1], box[2] - box[0], 1), dtype=np.float32)
+
+    aligned, _ = effects.draw_stroke_effect(box, shape, desc, psd)
+    desc[Key.Alignment] = Bool(False)
+    unaligned, _ = effects.draw_stroke_effect(box, shape, desc, psd)
+    on_document, _ = paint.draw_gradient_fill(box, psd.color_mode, desc, psd.viewbox)
+    assert on_document is not None
+    assert np.array_equal(unaligned, on_document)
+    assert not np.allclose(unaligned, aligned, atol=0.1)
 
 
 def test_a_wide_overlay_at_a_near_vertical_angle_matches_photoshop() -> None:

@@ -655,7 +655,9 @@ def draw_stroke_effect_split(
         if color is None:
             color = np.ones((height, width, 1))
     elif paint_type == Enum.GradientFill:
-        color, _ = paint.draw_gradient_fill(viewport, psd.color_mode, desc)
+        color, _ = paint.draw_gradient_fill(
+            viewport, psd.color_mode, desc, paint.gradient_anchor(psd, desc)
+        )
         if color is None:
             color = np.ones((height, width, 1))
     else:
@@ -1247,7 +1249,11 @@ def glow_paint(
     along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
-    colors, opacities = paint._make_gradient_color(color_mode, desc[Key.Gradient])
+    colors, opacities = paint._make_gradient_color(
+        color_mode,
+        desc[Key.Gradient],
+        getattr(desc.get(paint._INTERPOLATION_KEY), "enum", None),
+    )
     if colors is None:
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)

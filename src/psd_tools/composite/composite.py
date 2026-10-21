@@ -217,7 +217,7 @@ def _draw_gradient_overlay(
         bbox,
         layer._psd.color_mode,
         descriptor,
-        paint.gradient_anchor(layer, descriptor),
+        paint.gradient_anchor(layer._psd, descriptor),
     )
 
 
@@ -280,19 +280,32 @@ def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
     own: its mask is its shape, so the mask's box stands in -- empty when the
     mask hides everything -- and the whole canvas where there is no mask or
     the mask reveals what lies outside its box. A vector mask narrows it as
-    it narrows the shape.
+    it narrows the shape. A mask under full density reveals the layer
+    everywhere, as :py:meth:`Compositor._get_mask` folds it in, and narrows
+    nothing.
     """
     if not isinstance(layer, AdjustmentLayer):
         return layer.bbox
     psd = layer._psd
     bbox = (0, 0, psd.width, psd.height)
     mask = layer.mask
-    if mask is not None and not mask.disabled and mask.background_color == 0:
+    parameters = mask.parameters if mask is not None else None
+    vector_density = parameters.vector_mask_density if parameters else None
+    user_density = parameters.user_mask_density if parameters else None
+    if user_density is None:
+        user_density = vector_density
+    if (
+        mask is not None
+        and not mask.disabled
+        and mask.background_color == 0
+        and user_density in (None, 255)
+    ):
         bbox = mask.bbox
     vector = layer.vector_mask if layer.has_vector_mask() else None
     if (
         vector is not None
         and not vector.disabled
+        and vector_density in (None, 255)
         and any(len(path) for path in vector.paths)
     ):
         bbox = utils.intersect(bbox, _path_bbox(layer))
@@ -1474,8 +1487,8 @@ class _Isolation:
     content rather than the canvas it was composited over, which takes the
     backdrop the enclosing group was seeded with -- see
     :py:meth:`Compositor._apply_adjustment`. A nested group that is not
-    pass-through stands on its own transparent backdrop, and gets that
-    instead.
+    pass-through stands on its own transparent backdrop, and isolates as a
+    fresh group instead.
     """
 
     alpha: np.ndarray
@@ -2309,17 +2322,15 @@ class Compositor:
         if not isolate_adjustments and self._adjustment_isolated:
             if is_passthrough:
                 backdrop_color, backdrop_alpha = self._isolation_backdrop()
-                content_alpha = self._isolation_alpha()
+                adjustment_isolated = _Isolation(
+                    alpha=paste(viewport, self._viewport, self._isolation_alpha()),
+                    backdrop_color=paste(viewport, self._viewport, backdrop_color, 1.0),
+                    backdrop_alpha=paste(viewport, self._viewport, backdrop_alpha),
+                )
             else:
                 # Stands on its own transparent backdrop, with nothing of the
-                # enclosing group's content on it.
-                backdrop_color, backdrop_alpha = color_b, group_alpha
-                content_alpha = group_alpha
-            adjustment_isolated = _Isolation(
-                alpha=paste(viewport, self._viewport, content_alpha),
-                backdrop_color=paste(viewport, self._viewport, backdrop_color, 1.0),
-                backdrop_alpha=paste(viewport, self._viewport, backdrop_alpha),
-            )
+                # enclosing group's content on it: the one it is seeded with.
+                adjustment_isolated = True
         group_compositor = Compositor(
             viewport,
             color=paste(viewport, self._viewport, color_b, 1.0),
@@ -3182,16 +3193,20 @@ class Compositor:
     def _inner_box(self, layer: Layer, reach: float) -> tuple[int, int, int, int]:
         """The box an inner effect reaching ``reach`` past an edge is drawn on.
 
-        The silhouette is read on it: the layer's box grown by the reach, but
-        no further than the reach past the viewport, since nothing beyond that
-        reaches back into view. Raises as :py:func:`inner_bbox` does.
+        The silhouette is read on it: the layer's box grown by the reach. An
+        object's goes no further than the reach past the viewport, since
+        nothing beyond that reaches back into view. A group's is not cut to
+        the viewport, so it is the same box from every compositor that asks
+        and its contents are composited for it once per pass, as for a drop
+        shadow; cut, a nested group re-composites at every level. Raises as
+        :py:func:`inner_bbox` does.
         """
         max_alloc = layer._psd._max_alloc_bytes
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        return utils.intersect(
-            inner_bbox(cast_from, reach, max_alloc),
-            inner_bbox(self._viewport, reach, max_alloc),
-        )
+        bbox = inner_bbox(cast_from, reach, max_alloc)
+        if isinstance(layer, GroupMixin):
+            return bbox
+        return utils.intersect(bbox, inner_bbox(self._viewport, reach, max_alloc))
 
     def _add_satins(self, layer: Layer, canvas: _EffectSink) -> None:
         """Composite every satin of the layer into it, over its overlays.
@@ -3215,7 +3230,7 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a satin of %s: %s", layer, error)
                 continue
-            if bbox == (0, 0, 0, 0):
+            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
             silhouette = self._cast_shape(layer, bbox)
             try:
@@ -3344,7 +3359,7 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a bevel of %s: %s", layer, error)
                 continue
-            if bbox == (0, 0, 0, 0):
+            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
             if bevel.use_shape:
                 logger.debug("The shape contour of a bevel of %s is not applied", layer)

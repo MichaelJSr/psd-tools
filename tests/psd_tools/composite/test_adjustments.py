@@ -473,6 +473,43 @@ def test_a_style_on_a_normal_group_changes_nothing_about_its_adjustments(
     assert not np.array_equal(render(True, styled=True), render(True, styled=False))
 
 
+def test_a_normal_group_in_a_styled_group_renders_as_in_an_unstyled_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Normal group composites on its own, whether or not its parent isolates.
+
+    ``Layer 16`` and ``Curves 9`` are moved into a Normal group inside the
+    pass-through ``Group 6``. The new group's box, (54, 16, 199, 142), starts
+    away from the parent's viewport origin, so the isolation it inherits has to
+    be laid out on its own viewport rather than its parent's.
+    """
+
+    def render(styled: bool, curves_visible: bool = True) -> np.ndarray:
+        psd = PSDImage.open(
+            full_name("adjustments/adjustment_nested_composition_3.psd")
+        )
+        group = psd[4]
+        assert isinstance(group, Group) and group.blend_mode == BlendMode.PASS_THROUGH
+        curves, content = group[0], group[3]
+        assert isinstance(curves, adjustments.Curves) and content.name == "Layer 16"
+        nested = group.create_group([content, curves], name="Nested")
+        nested.blend_mode = BlendMode.NORMAL
+        assert nested.bbox == (54, 16, 199, 142)
+        assert [sub.name for sub in nested] == ["Layer 16", "Curves 9"]
+        curves.visible = curves_visible
+        monkeypatch.setattr(
+            composite_module,
+            "_has_enabled_effects",
+            lambda layer: styled and layer is group,
+        )
+        color, _, _ = composite_module.composite(psd)
+        return color
+
+    styled = render(True)
+    assert np.allclose(styled, render(False), atol=1e-6)
+    assert not np.allclose(styled, render(True, curves_visible=False), atol=1 / 255)
+
+
 # Channel mixer
 _IDENTITY_MIX = [[100, 0, 0, 0, 0], [0, 100, 0, 0, 0], [0, 0, 100, 0, 0]]
 _FOURTH_MIX = [0, 0, 0, 100, 0]
@@ -580,8 +617,12 @@ def _gradient_map_data(
     method: bytes = b"Gcls",
     reversed: int = 0,
     mode: int = 0,
+    smoothness: int = 0,
 ) -> GradientMapData:
-    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops."""
+    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops.
+
+    ``smoothness`` is in 4096ths; at 0 every segment blends linearly.
+    """
     color_stops = [
         ColorStop(
             location=location,
@@ -592,7 +633,11 @@ def _gradient_map_data(
         for location, midpoint, rgb in stops
     ]
     block = GradientMapData(
-        version=3, method=method, is_reversed=reversed, interpolation=4096, mode=mode
+        version=3,
+        method=method,
+        is_reversed=reversed,
+        interpolation=smoothness,
+        mode=mode,
     )
     block.color_stops = color_stops
     block.transparency_stops = [
@@ -711,6 +756,27 @@ def test_gradient_map_with_a_noise_gradient_leaves_the_image_alone() -> None:
     layer = _gradient_map_layer(
         _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], mode=1)
     )
+    image = np.zeros((2, 2, 3), dtype=np.float32)
+    assert apply_gradientmap(image, ColorMode.RGB, layer) is image
+
+
+def test_gradient_map_smoothness_eases_the_blend_as_a_gradient_fill_does() -> None:
+    """At 100% smoothness the blend lands halfway between linear and a smoothstep."""
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], smoothness=4096)
+    )
+    gray = np.array([0.25, 0.5, 0.75], dtype=np.float32)
+    image = np.repeat(gray[None, :, None], 3, axis=2)
+    eased = gray + ((3 - 2 * gray) * gray * gray - gray) / 2
+    assert not np.allclose(eased, gray, atol=4 / 255)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    assert np.allclose(out[0, :, 0], eased, atol=1 / 255)
+
+
+def test_gradient_map_with_a_grayscale_stop_leaves_the_image_alone() -> None:
+    data = _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)])
+    data.color_stops[1].mode = 8
+    layer = _gradient_map_layer(data)
     image = np.zeros((2, 2, 3), dtype=np.float32)
     assert apply_gradientmap(image, ColorMode.RGB, layer) is image
 

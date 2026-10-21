@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from psd_tools.api import numpy_io
+from psd_tools.api._descriptor import get_descriptor, get_scalar
 from psd_tools.api.utils import check_growth, check_pixel_size
 from psd_tools.color_convert import (
     cmyk_to_rgb,
@@ -28,6 +29,7 @@ from psd_tools.terminology import Enum, Key, Klass, Type
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import Layer
+    from psd_tools.api.protocols import PSDProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,12 @@ _SINGLE_CHANNEL_MODES = (
     ColorMode.DUOTONE,
     ColorMode.MULTICHANNEL,
 )
+
+
+def _finite(desc: Descriptor, key: bytes, default: float) -> float:
+    """``desc[key]`` as a float, or ``default`` where it is missing, mistyped or not finite."""
+    value = get_scalar(desc, key, float, default)
+    return value if math.isfinite(value) else default
 
 
 def _clamp01(value: float) -> float:
@@ -250,12 +258,12 @@ def create_fill_desc(
 
 
 def gradient_anchor(
-    layer: "Layer", desc: Descriptor
+    psd: "PSDProtocol", desc: Descriptor
 ) -> tuple[int, int, int, int] | None:
     """The box a gradient is laid out on: the layer's, or the document's with ``Algn`` off."""
     if bool(desc.get(Key.Alignment, True)):
         return None
-    return layer._psd.viewbox
+    return psd.viewbox
 
 
 def create_fill(
@@ -272,7 +280,7 @@ def create_fill(
         return draw_pattern_fill(viewport, layer._psd, desc)
     if (desc := blocks.get_data(Tag.GRADIENT_FILL_SETTING)) is not None:
         return draw_gradient_fill(
-            viewport, layer._psd.color_mode, desc, gradient_anchor(layer, desc)
+            viewport, layer._psd.color_mode, desc, gradient_anchor(layer._psd, desc)
         )
     if (desc := blocks.get_data(Tag.VECTOR_STROKE_CONTENT_DATA)) is not None:
         if Key.Color in desc:
@@ -280,7 +288,12 @@ def create_fill(
         elif Key.Pattern in desc:
             return draw_pattern_fill(viewport, layer._psd, desc)
         elif Key.Gradient in desc:
-            return draw_gradient_fill(viewport, layer._psd.color_mode, desc)
+            return draw_gradient_fill(
+                viewport,
+                layer._psd.color_mode,
+                desc,
+                gradient_anchor(layer._psd, desc),
+            )
     return None, None
 
 
@@ -455,15 +468,15 @@ def draw_gradient_fill(
     # A path with no extent along an axis ramps as a single pixel there.
     box_height, box_width = max(box[3] - box[1], 1), max(box[2] - box[0], 1)
 
-    angle = float(desc.get(Key.Angle, 0))
+    angle = _finite(desc, Key.Angle, 0.0)
     scale = float(desc.get(Key.Scale, 100.0)) / 100.0
     scale *= _gradient_length(angle, box_width, box_height)
     # ``Ofst`` moves the ramp's centre by a share of the box.
     shift_x = shift_y = 0.0
-    offset = desc.get(Key.Offset)
+    offset = get_descriptor(desc, Key.Offset)
     if offset is not None:
-        shift_x = box_width * float(offset.get(Key.Horizontal, 0.0)) / 100.0
-        shift_y = box_height * float(offset.get(Key.Vertical, 0.0)) / 100.0
+        shift_x = box_width * _finite(offset, Key.Horizontal, 0.0) / 100.0
+        shift_y = box_height * _finite(offset, Key.Vertical, 0.0) / 100.0
     X, Y = np.meshgrid(
         _ramp_axis(viewport[0] - box[0] - shift_x, width, box_width, scale),
         _ramp_axis(viewport[1] - box[1] - shift_y, height, box_height, scale),
@@ -586,7 +599,7 @@ def _collect_stops(
             (
                 float(stop.get(Key.Location)) / 4096.0,
                 value_fn(stop),
-                float(stop.get(Key.Midpoint, 50.0)) / 100.0,
+                _finite(stop, Key.Midpoint, 50.0) / 100.0,
             )
             for stop in stops
         ),
@@ -697,7 +710,7 @@ def _make_linear_gradient_color(
 ) -> tuple[Any | None, Any | None]:
     from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
+    smoothness = _clamp01(_finite(grad, Key.Interpolation, 4096.0) / 4096.0)
     colors = grad.get(Key.Colors, [])
     space = _BLEND_SPACES.get(method) if method is not None else None
     if space is None:

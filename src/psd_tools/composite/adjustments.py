@@ -850,9 +850,9 @@ def _gradientmap_luminance(
 
 # A gradient map stop's colour space id and the scale of its components.
 _STOP_SPACE_RGB = 0
-_STOP_SPACE_GRAYSCALE = 8
 _STOP_COMPONENT_MAX = np.float32(65535.0)
 _STOP_LOCATION_MAX = 4096.0
+_STOP_SMOOTHNESS_MAX = 4096.0
 
 
 def _gradientmap_lut(
@@ -870,22 +870,27 @@ def _gradientmap_lut(
     midpoints: list[float] = []
     colors: list[NDArray[np.float32]] = []
     for stop in stops:
-        if stop.mode == _STOP_SPACE_RGB:
-            rgb = np.array(stop.color[:3], dtype=np.float32) / _STOP_COMPONENT_MAX
-        elif stop.mode == _STOP_SPACE_GRAYSCALE:
-            rgb = np.full(3, stop.color[0] / _STOP_COMPONENT_MAX, dtype=np.float32)
-        else:
+        # A grayscale stop (8) is on a 0..10000 scale whose direction no
+        # fixture pins down, so it is declined with the other spaces.
+        if stop.mode != _STOP_SPACE_RGB:
             logger.info(
                 "Gradient map stop colour space %d is not supported.", stop.mode
             )
             return None
+        rgb = np.array(stop.color[:3], dtype=np.float32) / _STOP_COMPONENT_MAX
         locations.append(stop.location / _STOP_LOCATION_MAX)
         midpoints.append(float(stop.midpoint) / 100.0)
         colors.append(np.clip(rgb, _0, _1))
 
     size = _get_lut_size(layer)
+    smoothness = min(max(block.interpolation / _STOP_SMOOTHNESS_MAX, 0.0), 1.0)
     ramp = _gradient_ramp(
-        _lut_domain(size), locations, midpoints, np.array(colors), block.method
+        _lut_domain(size),
+        locations,
+        midpoints,
+        np.array(colors),
+        block.method,
+        smoothness,
     )
     return _rows_from_rgb(colormode, ramp)
 
@@ -914,11 +919,13 @@ def _gradient_ramp(
     midpoints: list[float],
     colors: NDArray[np.float32],
     method: bytes,
+    smoothness: float,
 ) -> NDArray[np.float32]:
     """Sample a stop gradient at ``t``; ends are clamped to the end stops.
 
     Two stops at one location make a hard edge: the segment into it ends in
     the first stop's colour and the segment out of it starts in the second's.
+    Midpoints and smoothness bend each segment as ``paint._blend_stops`` does.
     """
     if len(locations) == 1:
         return np.repeat(colors[:1], len(t), axis=0)
@@ -935,8 +942,10 @@ def _gradient_ramp(
         u = (t[inside] - left) / (right - left)
         # A stop's midpoint is where the blend of the segment ending at it
         # reaches one half.
-        m = min(max(midpoints[k + 1], 0.01), 0.99)
-        u = np.where(u <= m, _HALF * u / m, _HALF + _HALF * (u - m) / (1 - m))
+        m = midpoints[k + 1]
+        if 0.0 < m < 1.0:
+            u = np.where(u <= m, _HALF * u / m, _HALF + _HALF * (u - m) / (1 - m))
+        u = u + smoothness * ((3 - 2 * u) * u * u - u) / 2
         out[inside] = values[k] + u[:, None] * (values[k + 1] - values[k])
     return from_space(out).astype(np.float32, copy=False)
 

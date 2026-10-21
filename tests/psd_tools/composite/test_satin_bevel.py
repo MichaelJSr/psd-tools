@@ -8,7 +8,9 @@ corpus does not isolate is checked on forged silhouettes, where the result has
 a closed form.
 """
 
+import copy
 import math
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -19,7 +21,7 @@ from psd_tools.api.effects import BevelEmboss
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite, effects
-from psd_tools.constants import BevelStyle, BevelTechnique
+from psd_tools.constants import BevelStyle, BevelTechnique, BlendMode, Tag
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated
 from psd_tools.terminology import Key
 
@@ -392,6 +394,54 @@ def test_a_cut_through_a_wide_chisel_renders_what_the_whole_does(
     for viewport in ((60, 90, 75, 110), (80, 90, 100, 110)):
         left, top, right, bottom = viewport
         assert np.array_equal(rendered(viewport), whole[top:bottom, left:right])
+
+
+def test_a_nested_bevelled_group_is_composited_once_for_its_silhouette(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group's silhouette box does not follow the viewport of the compositor asking.
+
+    ``layer_effects.psd``'s ``Bevel`` is wrapped in four Normal groups, each
+    carrying its bevel, and the viewport cuts through it, so every group runs
+    past every compositor's viewport. Cut to that viewport, a group's box
+    would differ from one level to the next, and its contents would be
+    composited again for each.
+    """
+    module = sys.modules["psd_tools.composite.composite"]
+    caches: list[Any] = []
+    pass_cache = module._PassCache
+
+    def recording() -> Any:
+        caches.append(pass_cache())
+        return caches[-1]
+
+    monkeypatch.setattr(module, "_PassCache", recording)
+
+    def rendered(
+        viewport: tuple[int, int, int, int] | None,
+    ) -> tuple[np.ndarray, list[Layer]]:
+        psd = PSDImage.open(full_name("layer_effects.psd"))
+        node: Layer = _layer(psd, "Bevel")
+        block = node.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+        groups: list[Layer] = []
+        for index in range(4):
+            node = psd.create_group(
+                [node], name="G%d" % index, blend_mode=BlendMode.NORMAL
+            )
+            node.tagged_blocks.set_data(
+                Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, copy.deepcopy(block)
+            )
+            groups.append(node)
+        return _rendered(psd, viewport), groups
+
+    viewport = (150, 40, 200, 70)
+    cut, groups = rendered(viewport)
+    keys = caches[-1].group_alphas
+    assert [sum(key[0] == id(group) for key in keys) for group in groups] == [1] * 4
+
+    whole, _ = rendered(None)
+    left, top, right, bottom = viewport
+    assert np.array_equal(cut, whole[top:bottom, left:right])
 
 
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:

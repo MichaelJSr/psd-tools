@@ -21,7 +21,7 @@ Changelog
   composited from its layers, instead of being dropped. Size, spread,
   technique, range, contour, a solid or gradient colour, opacity and blend
   mode are honoured; noise and jitter are read but not applied, and the
-  blur and range approximate Photoshop's. Needs ``scipy`` (#680)
+  blur and range approximate Photoshop's. Needs ``scipy`` (#382, #680)
 - [fix] Inner shadow and inner glow layer effects are now rendered when a
   document is composited from its layers. Solid colours only: a gradient
   glow is still dropped, and noise is read but not applied. Needs ``scipy``
@@ -29,7 +29,7 @@ Changelog
   is composited from its layers. All bevel styles but stroke emboss are drawn;
   the chisel soft technique, the shape contour and the texture are
   approximated or left out, and the blurs approximate Photoshop's. Needs
-  ``scipy``
+  ``scipy`` (#379)
 - [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
   the effect uses global light
 - [fix] A gradient's ramp spans the line through its box at the gradient's
@@ -44,19 +44,18 @@ Changelog
 - [fix] The compositor renders channel mixer, black & white, colour balance
   and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
   grayscale and CMYK documents, instead of skipping them. Channel mixer is
-  exact, black & white is exact without its tint; gradient maps interpolate
-  classic, linear and perceptual gradients; colour balance midtones and
-  vibrance are fitted to Photoshop output
+  exact, black & white is exact without its tint; gradient maps honour
+  smoothness and the classic, linear and perceptual methods; colour balance
+  midtones and vibrance are fitted to Photoshop output
 - [fix] An adjustment inside a pass-through group that carries an enabled
   layer style stays within the group, as in Photoshop, instead of passing
-  through to the layers beneath
+  through to the layers beneath. In such a group, or one with clip layers or a
+  fill under 100, it adjusts the group's own content, not the flattened
+  canvas, so a half-transparent layer under it stays half-transparent
 - [fix] Layer effects on an adjustment layer are rendered, with the layer's
   mask as its shape: overlays fill the mask, inner effects and strokes are
   drawn from its edge, shadows and glows are cast from it; without a mask the
   document edge is the layer's. They were dropped
-- [fix] An adjustment inside a styled pass-through group adjusts the group's
-  own content at the content's own opacity, instead of the flattened canvas,
-  so a half-transparent layer under it stays half-transparent over the backdrop
 
 1.25.0 (2026-10-14)
 -------------------
