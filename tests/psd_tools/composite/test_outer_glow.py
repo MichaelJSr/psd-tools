@@ -21,14 +21,20 @@ import pytest
 from psd_tools.api.effects import OuterGlow
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import composite, effects, utils
+from psd_tools.composite import composite, effects, paint, utils
 from psd_tools.composite.composite import (
     Compositor,
     _beneath_reach,
     _content_bbox,
     _effect_reach,
 )
-from psd_tools.constants import BlendMode, ColorMode, GlowTechnique, Tag
+from psd_tools.constants import (
+    BlendMode,
+    ColorMode,
+    GlowTechnique,
+    GradientInterpolation,
+    Tag,
+)
 from psd_tools.psd.base import ByteElement
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass, Type
@@ -362,6 +368,28 @@ def test_a_gradient_glow_runs_from_its_first_stop_at_the_edge_to_its_last() -> N
     color, _ = _paint(desc, falloff)
     assert np.allclose(color[0, 0], colors[-1], atol=1e-6)
     assert np.allclose(color[0, 1], colors[0], atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "method", [GradientInterpolation.PERCEPTUAL, GradientInterpolation.LINEAR]
+)
+def test_a_gradient_glow_blends_by_its_interpolation_method(
+    method: GradientInterpolation,
+) -> None:
+    """``gs99`` is read off the glow, as a gradient overlay reads it."""
+    desc, _, _ = _gradient_glow()
+    falloff = np.linspace(0.0, 1.0, 17, dtype=np.float32)[None, :]
+    classic, _ = _paint(desc, falloff)
+    desc[b"gs99"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=method.value
+    )
+    color, _ = _paint(desc, falloff)
+    ramp, _ = paint._make_gradient_color(
+        ColorMode.RGB, desc[Key.Gradient], method.value
+    )
+    assert ramp is not None
+    assert np.allclose(color[0], ramp(1.0 - falloff[0]), atol=1e-6)
+    assert not np.allclose(color, classic, atol=1e-3)
 
 
 def test_a_gradients_transparency_holds_the_coverage_under_it() -> None:

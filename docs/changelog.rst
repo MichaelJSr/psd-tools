@@ -32,15 +32,16 @@ Changelog
   ``scipy``
 - [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
   the effect uses global light
-- [fix] A gradient's ramp spans the line through its box at the gradient's
-  angle, so a vertical gradient on a wide layer is no longer a flat band; the
-  offset, stop midpoints, smoothness, "align with layer" and the perceptual
-  and linear interpolation methods (``gs99``) are honoured. Every gradient
-  overlay, fill layer and gradient stroke renders differently
-- [api] ``GradientOverlay`` and ``PatternOverlay`` default ``scale`` to 100 and
-  ``aligned`` to True where the descriptor omits them, as Photoshop does.
-  ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
-  ``interpolation``, the ``gs99`` method as a new ``GradientInterpolation`` enum
+- [fix] Gradients render closer to Photoshop: a vertical gradient on a wide
+  layer is no longer a flat band, and the offset, stop midpoints, smoothness,
+  "align with layer" and the perceptual and linear interpolation methods are
+  honoured. Every gradient overlay, fill layer and gradient stroke renders
+  differently
+- [api] Backwards-incompatible: ``GradientOverlay`` and ``PatternOverlay``
+  return ``scale`` 100.0 (was 1.0) and ``aligned`` True (was False) where the
+  descriptor omits them, as Photoshop does. ``GradientOverlay``, ``Stroke``,
+  ``OuterGlow`` and ``InnerGlow`` gain ``interpolation``, a new
+  ``GradientInterpolation`` enum
 - [fix] The compositor renders channel mixer, black & white, colour balance
   and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
   grayscale and CMYK documents, instead of skipping them. Channel mixer is
@@ -51,9 +52,8 @@ Changelog
   layer style stays within the group, as in Photoshop, instead of passing
   through to the layers beneath
 - [fix] A shape layer with Align Edges that is redrawn from its path is
-  snapped onto the pixel grid as Photoshop does: the box of its visible edge
-  moves to whole pixels and the path with it, so a centred stroke of odd
-  width lands on pixel centres instead of half-covering the pixels either side
+  snapped onto the pixel grid as Photoshop does, so its edges and a centred
+  stroke of odd width no longer render half a pixel soft
 
 1.25.0 (2026-10-14)
 -------------------

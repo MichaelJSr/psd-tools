@@ -394,6 +394,28 @@ def test_a_cut_through_a_wide_chisel_renders_what_the_whole_does(
         assert np.array_equal(rendered(viewport), whole[top:bottom, left:right])
 
 
+def test_a_budget_for_the_layers_box_draws_the_bevel_and_the_satin(
+    whole: np.ndarray,
+) -> None:
+    """The budget is checked on the box drawn on, not on the whole viewport grown.
+
+    Half of what an inner effect needs per pixel of the canvas is still more
+    than the canvas itself needs, and far more than the layers' boxes do.
+    """
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    psd._max_alloc_bytes = psd.width * psd.height * effects._INNER_BYTES // 2
+    assert np.array_equal(_rendered(psd), whole)
+
+
+def test_inner_bbox_is_checked_inside_what_it_is_kept_within() -> None:
+    budget = 100 * 100 * effects._INNER_BYTES
+    assert effects.inner_bbox(
+        (40, 40, 50, 50), 5.0, budget, within=(0, 0, 10_000, 10_000)
+    ) == (33, 33, 57, 57)
+    with pytest.raises(ValueError):
+        effects.inner_bbox((0, 0, 10_000, 10_000), 5.0, budget)
+
+
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:
     return lambda desc: desc.__setitem__(key, value)
 

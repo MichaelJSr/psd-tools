@@ -322,9 +322,10 @@ def _cast_bbox(
     A layer's own box, except for a group: its silhouette is its composited
     contents, effects included, and a child's stroke or shadow runs past the
     group's box, which is the union of its children's own. The group's
-    content box is every box those contents paint on (#808).
+    content box is every box those contents paint on.
     """
     if layer.is_group():
+        # A child's effects reach past the group's own box (#808).
         return _content_bbox(layer, memo)
     return layer.bbox
 
@@ -2611,15 +2612,48 @@ class Compositor:
         group resolved over this canvas can take alpha from it through a
         knockout, which would make the shadow depend on the viewport. The
         group's contents are composited over nothing, once per box and pass,
-        as :py:meth:`_get_group_shape` does for a stroke.
+        as :py:meth:`_get_group_shape` does for a stroke. A shape redrawn from
+        its path casts what it draws: its vector stroke, and no fill where
+        the fill is off.
         """
-        mask = self._get_mask(layer, viewport)
-        own = (
-            self._get_group_shape(layer, viewport, alpha=True)
-            if isinstance(layer, GroupMixin)
-            else self._get_object_shape(layer, viewport)
+        if isinstance(layer, GroupMixin):
+            own = self._get_group_shape(layer, viewport, alpha=True)
+        elif self._redraws_object(layer):
+            return self._get_redrawn_alpha(layer, viewport)
+        else:
+            own = self._get_object_shape(layer, viewport)
+        return utils.clip(own * self._get_mask(layer, viewport))
+
+    def _redraws_object(self, layer: Layer) -> bool:
+        """Whether :py:meth:`_get_object` draws the layer as more or less than its fill."""
+        return self._has_redrawn_stroke(layer) or (
+            (self._force or not layer.has_pixels()) and utils.is_fill_disabled(layer)
         )
-        return utils.clip(own * mask)
+
+    def _get_redrawn_alpha(
+        self, layer: Layer, viewport: tuple[int, int, int, int]
+    ) -> np.ndarray:
+        """A redrawn shape's alpha on ``viewport``, before its opacities.
+
+        What :py:meth:`_resolve_source` makes of :py:meth:`_get_object`, read
+        by a compositor on ``viewport``: the fill under the layer's mask, and
+        the stroke under the mask but not the path.
+        """
+        height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+        compositor = Compositor(
+            viewport,
+            np.ones((height, width, self._channels), dtype=np.float32),
+            np.zeros((height, width, 1), dtype=np.float32),
+            force=self._force,
+            widen=self._widen,
+            color_mode=self._color_mode,
+            cache=self._cache,
+        )
+        _, _, alpha, stroke = compositor._get_object(layer)
+        alpha = alpha * compositor._get_mask(layer)
+        if stroke is not None:
+            alpha = alpha + stroke[1] * compositor._get_mask(layer, clip_to_path=False)
+        return utils.clip(alpha)
 
     def _knockout_shape(
         self, layer: Layer, viewport: tuple[int, int, int, int], silhouette: np.ndarray
@@ -2678,7 +2712,7 @@ class Compositor:
         is drawn on its own box, grown from :py:func:`_cast_bbox` so a group's
         has room for its children's effects, and cast from
         :py:meth:`_cast_shape` read on that box, so a layer that runs past the
-        viewport still casts from the part of it out of view (#804).
+        viewport still casts from the part of it out of view.
 
         The layer opacity fades the shadow with the layer, as it fades an
         outer stroke. Fill opacity does not: it fades the layer's own paint
@@ -2831,7 +2865,7 @@ class Compositor:
 
         Each is drawn on the cast box grown by its size, from the silhouette
         :py:meth:`_cast_shape` reads there, so an edge past the viewport is
-        not taken for the layer's own (#804).
+        not taken for the layer's own.
         """
         glows = _readable(layer, "innerglow")
         shadows = _readable(layer, "innershadow")
@@ -2877,11 +2911,11 @@ class Compositor:
         no further than the reach past the viewport, since nothing beyond that
         reaches back into view. Raises as :py:func:`inner_bbox` does.
         """
-        max_alloc = layer._psd._max_alloc_bytes
-        cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        return utils.intersect(
-            inner_bbox(cast_from, reach, max_alloc),
-            inner_bbox(self._viewport, reach, max_alloc),
+        return inner_bbox(
+            _cast_bbox(layer, self._cache.content_bboxes),
+            reach,
+            layer._psd._max_alloc_bytes,
+            within=self._viewport,
         )
 
     def _add_satins(self, layer: Layer, canvas: _EffectCanvas) -> None:

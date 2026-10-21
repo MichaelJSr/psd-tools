@@ -32,7 +32,14 @@ from psd_tools.composite.composite import (
 )
 from psd_tools.constants import BlendMode, Resource, Tag
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List, String
+from psd_tools.psd.descriptor import (
+    Bool,
+    Descriptor,
+    Double,
+    Enumerated,
+    List,
+    String,
+)
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
@@ -738,6 +745,43 @@ def test_a_masked_pixel_layer_casts_its_shadow_from_its_pixels(force: bool) -> N
     # Left of the ellipse, where only its shadow can be: opaque, faded by the
     # layer's own opacity.
     assert float(alpha[40, 4, 0]) == pytest.approx(layer.opacity / 255.0)
+
+
+@pytest.mark.parametrize("fill_enabled", [False, True])
+@pytest.mark.parametrize(
+    "alignment", [b"strokeStyleAlignInside", b"strokeStyleAlignOutside"]
+)
+def test_a_redrawn_shape_casts_from_its_stroke_and_fill(
+    fill_enabled: bool, alignment: bytes
+) -> None:
+    """Under ``force`` the silhouette is what the shape draws from its path.
+
+    ``stroke.psd``'s first rectangle has a vector stroke. With the fill off it
+    draws only the stroke, so nothing is cast from inside it; an outer stroke
+    casts from past the path.
+    """
+    psd = PSDImage.open(full_name("stroke.psd"))
+    layer = next(layer for layer in psd if layer.name == "Rectangle 1")
+    assert layer.stroke is not None
+    layer.stroke._data[b"strokeStyleLineAlignment"] = Enumerated(
+        b"strokeStyleLineAlignment", alignment
+    )
+    stroke = layer.tagged_blocks.get_data(Tag.VECTOR_STROKE_DATA)
+    stroke[b"fillEnabled"] = Bool(fill_enabled)
+    viewport = _around(layer)
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    compositor = Compositor(
+        viewport,
+        np.ones((height, width, 3), dtype=np.float32),
+        np.zeros((height, width, 1), dtype=np.float32),
+        force=True,
+    )
+    source = compositor._resolve_source(layer)
+    silhouette = compositor._cast_shape(layer, viewport)
+    assert np.allclose(silhouette, source.alpha / source.opacity, atol=1e-6)
+    centre = silhouette[height // 2, width // 2, 0]
+    assert centre == (1.0 if fill_enabled else 0.0)
+    assert silhouette.max() > 0.0, "the stroke casts"
 
 
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:

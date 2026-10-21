@@ -226,6 +226,18 @@ def test_gradient_overlay(fixture: PSDImage) -> None:
     assert effect.interpolation is GradientInterpolation.CLASSIC
 
 
+@pytest.mark.parametrize("method", list(GradientInterpolation))
+def test_gradient_overlay_reads_every_interpolation_method(
+    fixture: PSDImage, method: GradientInterpolation
+) -> None:
+    effect = fixture[8].effects[0]
+    assert isinstance(effect, effects.GradientOverlay)
+    effect.descriptor[b"gs99"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=method.value
+    )
+    assert effect.interpolation is method
+
+
 def test_pattern_overlay(fixture: PSDImage) -> None:
     effect = fixture[9].effects[0]
     assert isinstance(effect, effects.PatternOverlay)

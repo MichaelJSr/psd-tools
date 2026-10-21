@@ -635,11 +635,15 @@ def _blend_stops(
     m = np.asarray(M)[k + 1]
     with np.errstate(divide="ignore", invalid="ignore"):
         bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
-    f = np.where((m > 0.0) & (m < 1.0), bent, u)
-    f += smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+    f = _ease(np.where((m > 0.0) & (m < 1.0), bent, u), smoothness)
     values = np.asarray(Y, dtype=np.float64)
     f = f.reshape((-1,) + (1,) * (values.ndim - 1))
     return values[k] * (1.0 - f) + values[k + 1] * f
+
+
+def _ease(f: np.ndarray, smoothness: float) -> np.ndarray:
+    """Ease a blend fraction towards a smoothstep, 100% landing halfway."""
+    return f + smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
 
 
 def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
