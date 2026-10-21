@@ -335,11 +335,12 @@ option::
     pixel-based operations. If a feature requires missing dependencies, an
     ``ImportError`` with installation instructions will be raised.
 
-    Note that most layer effects are not supported. Adjustment layers have
-    limited support (BrightnessContrast, Levels, Curves, Exposure,
-    HueSaturation, Invert, Posterize, Threshold, ChannelMixer, BlackAndWhite,
-    GradientMap, ColorBalance, Vibrance). The compositing result may look
-    different from Photoshop.
+    Layer effects are rendered, some approximately; stroke emboss, bevel
+    textures, gradient inner glows and the noise and jitter settings are left
+    out. Adjustment layers have limited support (BrightnessContrast, Levels,
+    Curves, Exposure, HueSaturation, Invert, Posterize, Threshold,
+    ChannelMixer, BlackAndWhite, GradientMap, ColorBalance, Vibrance). The
+    compositing result may look different from Photoshop.
 
 .. note::
 

@@ -438,6 +438,30 @@ def test_an_unreadable_effect_is_dropped_and_the_document_renders(
     assert np.array_equal(result, disabled)
 
 
+@pytest.mark.parametrize("kind", sorted(_AROUND))
+def test_an_effect_is_charged_for_its_own_canvas_not_the_whole_viewport(
+    kind: str,
+) -> None:
+    """A document composite under a budget the whole canvas is over still draws it.
+
+    The effect is drawn on its layer's box grown by its reach, so that box is
+    what the budget is held to, not the document's.
+    """
+
+    def rendered(enabled: bool) -> np.ndarray:
+        psd = PSDImage.open(full_name("layer_effects.psd"))
+        width, height = psd.size
+        psd.max_alloc_bytes = width * height * effects._INNER_BYTES // 2
+        for layer in psd.descendants():
+            for effect in layer.effects.find(kind):
+                effect.descriptor[Key.Enabled] = enabled
+        return _rendered(psd)
+
+    left, top, right, bottom = _AROUND[kind]
+    region = (slice(top, bottom), slice(left, right))
+    assert not np.array_equal(rendered(True)[region], rendered(False)[region])
+
+
 # -- Fidelity against Photoshop's own render ------------------------------- #
 
 # Each case is a document, the region around one effect, the effect's kind,

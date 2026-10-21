@@ -374,7 +374,10 @@ def _beneath_reach(
     for effect in glows:
         try:
             size, _, _ = glow_geometry(effect.descriptor)
-            bbox = utils.union_bbox(bbox, outer_glow_bbox(cast_from, size, budget))
+            gradient = Key.Gradient in effect.descriptor
+            bbox = utils.union_bbox(
+                bbox, outer_glow_bbox(cast_from, size, budget, gradient)
+            )
         except _UNREADABLE as error:
             logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
     return bbox
@@ -2755,6 +2758,8 @@ class Compositor:
                 widen=self._widen,
                 color_mode=self._color_mode,
                 cache=self._cache,
+                # Only the alpha and shape are read, which text gamma leaves.
+                text_gamma=None,
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
@@ -2954,7 +2959,12 @@ class Compositor:
                 anti_aliased = glow.anti_aliased
                 noise = glow.noise
                 jitter = glow.quality_jitter
-                bbox = outer_glow_bbox(cast_from, size, layer._psd._max_alloc_bytes)
+                bbox = outer_glow_bbox(
+                    cast_from,
+                    size,
+                    layer._psd._max_alloc_bytes,
+                    Key.Gradient in glow.descriptor,
+                )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
                 continue
@@ -3045,11 +3055,11 @@ class Compositor:
         no further than the reach past the viewport, since nothing beyond that
         reaches back into view. Raises as :py:func:`inner_bbox` does.
         """
-        max_alloc = layer._psd._max_alloc_bytes
-        cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        return utils.intersect(
-            inner_bbox(cast_from, reach, max_alloc),
-            inner_bbox(self._viewport, reach, max_alloc),
+        return inner_bbox(
+            _cast_bbox(layer, self._cache.content_bboxes),
+            reach,
+            layer._psd._max_alloc_bytes,
+            within=self._viewport,
         )
 
     def _add_satins(self, layer: Layer, canvas: _EffectCanvas) -> None:

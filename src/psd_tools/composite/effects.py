@@ -90,7 +90,7 @@ import numpy as np
 from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite import paint
 from psd_tools.composite._compat import HAS_SCIPY
-from psd_tools.composite.utils import divide
+from psd_tools.composite.utils import divide, intersect
 from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key
@@ -754,10 +754,14 @@ _GLOW_RANGE_FLOOR = 15.0
 # What one pixel of a shadow's or glow's canvas costs at the peak of
 # ``draw_drop_shadow()`` or ``draw_outer_glow()``: the silhouette it is cast
 # from, the matte spread grows and the distance transform and masks that grow
-# it, the blurred or ramped matte and the shifted one, or the gradient paint
-# laid along it, with the group composite the silhouette of a group is read
-# from.
+# it, the blurred or ramped matte and the shifted one, with the group
+# composite the silhouette of a group is read from.
 _SHADOW_BYTES = 64
+
+# What one pixel of a gradient glow's canvas costs while ``glow_paint()``
+# lays the gradient along the falloff: the colour lookup's index and float64
+# planes for each of up to four channels, beside the silhouette and falloff.
+_GLOW_GRADIENT_BYTES = 192
 
 # Entries in a contour's transfer table. Photoshop states a contour's points
 # on a 0-255 grid along both axes.
@@ -795,6 +799,7 @@ def drop_shadow_bbox(
     angle: float,
     size: float,
     max_alloc_bytes: AllocBudget | None = None,
+    bytes_per_pixel: int = _SHADOW_BYTES,
 ) -> tuple[int, int, int, int]:
     """The canvas :py:func:`draw_drop_shadow` needs to draw a shadow on.
 
@@ -827,7 +832,7 @@ def drop_shadow_bbox(
         width,
         height,
         max_alloc_bytes=max_alloc_bytes,
-        estimated_bytes=width * height * _SHADOW_BYTES,
+        estimated_bytes=width * height * bytes_per_pixel,
         warn=False,
     )
     return grown
@@ -837,14 +842,17 @@ def outer_glow_bbox(
     bbox: tuple[int, int, int, int],
     size: float,
     max_alloc_bytes: AllocBudget | None = None,
+    gradient: bool = False,
 ) -> tuple[int, int, int, int]:
     """The canvas :py:func:`draw_outer_glow` needs to draw a glow on.
 
     A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the size
     on every side, with the same fringe, checked against the same budget and
-    raising the same way.
+    raising the same way. A ``gradient`` glow is checked at what painting its
+    gradient peaks at.
     """
-    return drop_shadow_bbox(bbox, 0.0, 0.0, size, max_alloc_bytes)
+    per_pixel = _GLOW_GRADIENT_BYTES if gradient else _SHADOW_BYTES
+    return drop_shadow_bbox(bbox, 0.0, 0.0, size, max_alloc_bytes, per_pixel)
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
@@ -1247,7 +1255,11 @@ def glow_paint(
     along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
-    colors, opacities = paint._make_gradient_color(color_mode, desc[Key.Gradient])
+    colors, opacities = paint._make_gradient_color(
+        color_mode,
+        desc[Key.Gradient],
+        getattr(desc.get(paint._INTERPOLATION_KEY), "enum", None),
+    )
     if colors is None:
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)
@@ -1377,20 +1389,34 @@ def inner_bbox(
     bbox: tuple[int, int, int, int],
     reach: float,
     max_alloc_bytes: AllocBudget | None = None,
+    within: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
     """The canvas a satin or a bevel is drawn on: ``bbox`` grown by ``reach``.
 
     The silhouette is read on this box, so that a blur or an offset near the
     viewport's edge sees the layer past it rather than an edge that is not
     there (#804). The two pixels added on top are the blur's antialiased
-    fringe and the offset's interpolation. Checked against the per-axis limit
-    and ``max_alloc_bytes`` as :py:func:`drop_shadow_bbox` is, raising
-    :class:`ValueError`. An empty ``bbox`` is returned untouched.
+    fringe and the offset's interpolation. ``within``, when given, is grown
+    the same way and the canvas cut to it. Only the canvas is checked against
+    the per-axis limit and ``max_alloc_bytes``, as :py:func:`drop_shadow_bbox`
+    is, raising :class:`ValueError`. An empty ``bbox`` is returned untouched.
     """
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     margin = math.ceil(max(reach, 0.0)) + 2
     grown = (bbox[0] - margin, bbox[1] - margin, bbox[2] + margin, bbox[3] + margin)
+    if within is not None:
+        grown = intersect(
+            grown,
+            (
+                within[0] - margin,
+                within[1] - margin,
+                within[2] + margin,
+                within[3] + margin,
+            ),
+        )
+        if grown == (0, 0, 0, 0):
+            return grown
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     check_pixel_size(
         width,

@@ -332,6 +332,56 @@ def test_a_ramp_blended_outside_the_canvas_space_lands_in_the_documents_arrays(
     assert color.min() >= 0.0 and color.max() <= 1.0
 
 
+def _ink_stop(ink: tuple[float, float, float, float], location: int) -> Descriptor:
+    stop = _stop(BLACK, location)
+    cmyk = Descriptor(classID=Klass.CMYKColor.value)
+    for key, value in zip(
+        (Key.Cyan, Key.Magenta, Key.Yellow, Key.Black), ink, strict=True
+    ):
+        cmyk[key] = Double(value)
+    stop[Key.Color] = cmyk
+    return stop
+
+
+def _lab_stop(lab: tuple[float, float, float], location: int) -> Descriptor:
+    stop = _stop(BLACK, location)
+    color = Descriptor(classID=Klass.LabColor.value)
+    for key, value in zip((Key.Luminance, Key.A, Key.B), lab, strict=True):
+        color[key] = Double(value)
+    stop[Key.Color] = color
+    return stop
+
+
+# Stops an sRGB round trip changes: a rich black and a CMY grey lose their
+# ink split, and a saturated Lab blue is outside sRGB.
+OWN_SPACE_STOPS = {
+    ColorMode.CMYK: [_ink_stop((60, 40, 40, 100), 0), _ink_stop((40, 40, 40, 0), 4096)],
+    ColorMode.LAB: [_lab_stop((30, 60, -110), 0), _lab_stop((90, -70, 80), 4096)],
+}
+
+
+@pytest.mark.parametrize(
+    "method",
+    [GradientInterpolation.PERCEPTUAL.value, GradientInterpolation.LINEAR.value],
+)
+@pytest.mark.parametrize("color_mode", list(OWN_SPACE_STOPS))
+def test_a_cmyk_or_lab_document_keeps_its_stops_whatever_the_method(
+    method: bytes, color_mode: ColorMode
+) -> None:
+    """The ramp blends classic there, so each end is its stop's own colour."""
+    stops = OWN_SPACE_STOPS[color_mode]
+    viewport = (0, 0, 33, 1)
+    blended, _ = paint.draw_gradient_fill(
+        viewport, color_mode, _gradient(stops=stops, method=method)
+    )
+    classic, _ = paint.draw_gradient_fill(viewport, color_mode, _gradient(stops=stops))
+    assert blended is not None and classic is not None
+    assert np.array_equal(blended, classic)
+    for column, stop in ((0, stops[0]), (-1, stops[-1])):
+        own = paint._get_color(color_mode, stop)
+        assert np.allclose(blended[0, column], own, atol=1e-5)
+
+
 def test_an_overlay_not_aligned_with_its_layer_is_laid_out_on_the_document() -> None:
     psd = PSDImage.open(full_name("layer_effects.psd"))
     layer = next(x for x in psd if x.name == "Gradient Overlay")

@@ -25,6 +25,7 @@ from psd_tools.api.adjustments import (
     Vibrance,
 )
 from psd_tools.api.layers import Layer
+from psd_tools.composite import paint
 from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.blend import (
     _lum,
@@ -848,11 +849,14 @@ def _gradientmap_luminance(
     return _get_luminance(img, colormode)
 
 
-# A gradient map stop's colour space id and the scale of its components.
+# A gradient map stop's colour space id and the scale of its components:
+# Photoshop's colour structure stores RGB on 0..65535 and grey on 0..10000.
 _STOP_SPACE_RGB = 0
 _STOP_SPACE_GRAYSCALE = 8
-_STOP_COMPONENT_MAX = np.float32(65535.0)
+_STOP_RGB_MAX = np.float32(65535.0)
+_STOP_GRAY_MAX = np.float32(10000.0)
 _STOP_LOCATION_MAX = 4096.0
+_SMOOTHNESS_MAX = 4096.0
 
 
 def _gradientmap_lut(
@@ -871,9 +875,9 @@ def _gradientmap_lut(
     colors: list[NDArray[np.float32]] = []
     for stop in stops:
         if stop.mode == _STOP_SPACE_RGB:
-            rgb = np.array(stop.color[:3], dtype=np.float32) / _STOP_COMPONENT_MAX
+            rgb = np.array(stop.color[:3], dtype=np.float32) / _STOP_RGB_MAX
         elif stop.mode == _STOP_SPACE_GRAYSCALE:
-            rgb = np.full(3, stop.color[0] / _STOP_COMPONENT_MAX, dtype=np.float32)
+            rgb = np.full(3, stop.color[0] / _STOP_GRAY_MAX, dtype=np.float32)
         else:
             logger.info(
                 "Gradient map stop colour space %d is not supported.", stop.mode
@@ -884,8 +888,14 @@ def _gradientmap_lut(
         colors.append(np.clip(rgb, _0, _1))
 
     size = _get_lut_size(layer)
+    smoothness = min(max(block.interpolation / _SMOOTHNESS_MAX, 0.0), 1.0)
     ramp = _gradient_ramp(
-        _lut_domain(size), locations, midpoints, np.array(colors), block.method
+        _lut_domain(size),
+        locations,
+        midpoints,
+        np.array(colors),
+        block.method,
+        smoothness,
     )
     return _rows_from_rgb(colormode, ramp)
 
@@ -914,16 +924,19 @@ def _gradient_ramp(
     midpoints: list[float],
     colors: NDArray[np.float32],
     method: bytes,
+    smoothness: float,
 ) -> NDArray[np.float32]:
     """Sample a stop gradient at ``t``; ends are clamped to the end stops.
 
-    Two stops at one location make a hard edge: the segment into it ends in
-    the first stop's colour and the segment out of it starts in the second's.
+    Each segment blends as a gradient fill's does, in the space ``method``
+    names. Two stops at one location make a hard edge: the segment into it
+    ends in the first stop's colour and the segment out of it starts in the
+    second's.
     """
     if len(locations) == 1:
         return np.repeat(colors[:1], len(t), axis=0)
-    to_space, from_space = _GRADIENT_SPACES.get(method, _GRADIENT_SPACES[b"Gcls"])
-    values = to_space(colors)
+    space = paint._BLEND_SPACES.get(method)
+    values = colors if space is None else space[0](colors)
     out = np.empty((len(t), colors.shape[1]), dtype=np.float32)
     out[t < locations[0]] = values[0]
     out[t >= locations[-1]] = values[-1]
@@ -933,63 +946,11 @@ def _gradient_ramp(
             continue
         inside = (t >= left) & (t < right)
         u = (t[inside] - left) / (right - left)
-        # A stop's midpoint is where the blend of the segment ending at it
-        # reaches one half.
-        m = min(max(midpoints[k + 1], 0.01), 0.99)
-        u = np.where(u <= m, _HALF * u / m, _HALF + _HALF * (u - m) / (1 - m))
-        out[inside] = values[k] + u[:, None] * (values[k + 1] - values[k])
-    return from_space(out).astype(np.float32, copy=False)
-
-
-def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
-    c = np.asarray(c, dtype=np.float32)
-    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
-
-
-def _linear_to_srgb(c: np.ndarray) -> np.ndarray:
-    c = np.clip(np.asarray(c, dtype=np.float32), _0, _1)
-    return np.where(c <= 0.0031308, c * 12.92, 1.055 * c ** (1 / 2.4) - 0.055)
-
-
-# Oklab: linear sRGB -> LMS, cube root, -> Lab.
-_OKLAB_M1 = np.array(
-    [
-        [0.4122214708, 0.5363325363, 0.0514459929],
-        [0.2119034982, 0.6806995451, 0.1073969566],
-        [0.0883024619, 0.2817188376, 0.6299787005],
-    ],
-    dtype=np.float32,
-)
-_OKLAB_M2 = np.array(
-    [
-        [0.2104542553, 0.7936177850, -0.0040720468],
-        [1.9779984951, -2.4285922050, 0.4505937099],
-        [0.0259040371, 0.7827717662, -0.8086757660],
-    ],
-    dtype=np.float32,
-)
-_OKLAB_M1_INV = np.linalg.inv(_OKLAB_M1)
-_OKLAB_M2_INV = np.linalg.inv(_OKLAB_M2)
-
-
-def _srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
-    lms = _srgb_to_linear(rgb) @ _OKLAB_M1.T
-    return np.cbrt(lms) @ _OKLAB_M2.T
-
-
-def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
-    lms = (lab @ _OKLAB_M2_INV.T) ** 3
-    return _linear_to_srgb(lms @ _OKLAB_M1_INV.T)
-
-
-# Interpolation space per gradient method: classic blends encoded values,
-# perceptual blends in Oklab, linear blends in linear light.
-_ColorTransform = Callable[[np.ndarray], np.ndarray]
-_GRADIENT_SPACES: dict[bytes, tuple[_ColorTransform, _ColorTransform]] = {
-    b"Gcls": (lambda c: np.asarray(c, dtype=np.float32), lambda c: np.clip(c, _0, _1)),
-    b"Perc": (_srgb_to_oklab, _oklab_to_srgb),
-    b"Lnr ": (_srgb_to_linear, _linear_to_srgb),
-}
+        f = paint._segment_blend(u, midpoints[k + 1], smoothness)
+        out[inside] = values[k] + f[:, None] * (values[k + 1] - values[k])
+    if space is not None:
+        out = space[1](out)
+    return np.clip(out, _0, _1).astype(np.float32, copy=False)
 
 
 @_preserve_alpha
@@ -1056,8 +1017,8 @@ def apply_vibrance(
     if vibrance == 0 and saturation == 0:
         return img
     skin = _skin_tones(img) if vibrance > 0 else None
-    out = _vibrance(_srgb_to_linear(img), vibrance, saturation, skin)
-    return _linear_to_srgb(out).astype(np.float32, copy=False)
+    out = _vibrance(paint._srgb_to_linear(img), vibrance, saturation, skin)
+    return paint._linear_to_srgb(out).astype(np.float32, copy=False)
 
 
 # Vibrance is a fit, not Photoshop's formula. In linear light each pixel is

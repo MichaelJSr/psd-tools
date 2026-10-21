@@ -44,18 +44,21 @@ Changelog
 - [fix] A gradient's ramp spans the line through its box at the gradient's
   angle, so a vertical gradient on a wide layer is no longer a flat band; the
   offset, stop midpoints, smoothness, "align with layer" and the perceptual
-  and linear interpolation methods (``gs99``) are honoured. Every gradient
-  overlay, fill layer and gradient stroke renders differently
+  and linear interpolation methods (``gs99``, blended classic in CMYK and Lab
+  documents) are honoured. Every gradient overlay, fill layer and gradient
+  stroke renders differently
 - [api] ``GradientOverlay`` and ``PatternOverlay`` default ``scale`` to 100 and
   ``aligned`` to True where the descriptor omits them, as Photoshop does.
-  ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
+  Backwards-incompatible: code that read 1.0 or False for a missing key now
+  gets 100.0 or True
+- [api] ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
   ``interpolation``, the ``gs99`` method as a new ``GradientInterpolation`` enum
 - [fix] The compositor renders channel mixer, black & white, colour balance
   and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
   grayscale and CMYK documents, instead of skipping them. Channel mixer is
-  exact, black & white is exact without its tint; gradient maps interpolate
-  classic, linear and perceptual gradients; colour balance midtones and
-  vibrance are fitted to Photoshop output
+  exact, black & white is exact without its tint; gradient maps blend their
+  stops as gradient fills do; colour balance midtones and vibrance are fitted
+  to Photoshop output
 - [fix] An adjustment inside a pass-through group that carries an enabled
   layer style stays within the group, as in Photoshop, instead of passing
   through to the layers beneath

@@ -12,6 +12,7 @@ drawn on a disc.
 import copy
 import logging
 import math
+import tracemalloc
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -21,14 +22,20 @@ import pytest
 from psd_tools.api.effects import OuterGlow
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import composite, effects, utils
+from psd_tools.composite import composite, effects, paint, utils
 from psd_tools.composite.composite import (
     Compositor,
     _beneath_reach,
     _content_bbox,
     _effect_reach,
 )
-from psd_tools.constants import BlendMode, ColorMode, GlowTechnique, Tag
+from psd_tools.constants import (
+    BlendMode,
+    ColorMode,
+    GlowTechnique,
+    GradientInterpolation,
+    Tag,
+)
 from psd_tools.psd.base import ByteElement
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass, Type
@@ -262,6 +269,18 @@ def test_outer_glow_bbox_grows_the_box_by_the_size_on_every_side() -> None:
         effects.outer_glow_bbox(bbox, 250.0, max_alloc_bytes=budget - 1)
 
 
+def test_a_gradient_glows_box_is_charged_what_its_paint_peaks_at() -> None:
+    """A budget the solid glow's canvas fits refuses the same canvas painted a gradient."""
+    bbox = (10, 20, 30, 40)
+    grown = effects.outer_glow_bbox(bbox, 250.0, max_alloc_bytes="unlimited")
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    budget = width * height * effects._GLOW_GRADIENT_BYTES
+    assert effects.outer_glow_bbox(bbox, 250.0, budget, gradient=True) == grown
+    assert effects.outer_glow_bbox(bbox, 250.0, budget - 1) == grown
+    with pytest.raises(ValueError):
+        effects.outer_glow_bbox(bbox, 250.0, budget - 1, gradient=True)
+
+
 # -- Paint ----------------------------------------------------------------- #
 
 
@@ -404,6 +423,49 @@ def test_a_gradient_is_placed_by_the_falloff_and_not_by_the_cut() -> None:
     assert np.allclose(color[0, 0], colors[0], atol=1e-6)
     assert np.allclose(color[0, 1], colors[0], atol=1e-6)
     assert float(painted[0, 0, 0]) == pytest.approx(0.5 * float(painted[0, 1, 0]))
+
+
+@pytest.mark.parametrize(
+    "method", [GradientInterpolation.PERCEPTUAL, GradientInterpolation.LINEAR]
+)
+def test_a_gradient_glow_blends_in_its_interpolation_method(
+    method: GradientInterpolation,
+) -> None:
+    """``gs99`` picks the space the stops blend in, as it does for a fill."""
+    desc, _, _ = _gradient_glow()
+    falloff = np.linspace(1.0, 0.0, 33, dtype=np.float32)[None, :]
+    classic, _ = _paint(desc, falloff)
+    desc[b"gs99"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=method.value
+    )
+    blended, _ = _paint(desc, falloff)
+    colors, _ = paint._make_gradient_color(
+        ColorMode.RGB, desc[Key.Gradient], method.value
+    )
+    assert colors is not None
+    assert np.allclose(blended, colors(1.0 - falloff), atol=1e-6)
+    assert not np.allclose(blended, classic, atol=1e-3)
+
+
+@pytest.mark.parametrize("color_mode", [ColorMode.RGB, ColorMode.CMYK])
+def test_a_gradient_glows_paint_peaks_within_what_its_canvas_is_charged(
+    color_mode: ColorMode,
+) -> None:
+    """The paint, with the silhouette and falloff it is laid along, fits the model."""
+    desc, _, _ = _gradient_glow()
+    side = 256
+    falloff = np.random.default_rng(0).random((side, side), dtype=np.float32)
+    shape = np.zeros((side, side, 1), dtype=np.float32)
+    viewport = (0, 0, side, side)
+    effects.glow_paint(viewport, color_mode, desc, shape, falloff)
+    tracemalloc.start()
+    try:
+        effects.glow_paint(viewport, color_mode, desc, shape, falloff)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    held = falloff.nbytes + shape.nbytes
+    assert peak + held <= side * side * effects._GLOW_GRADIENT_BYTES
 
 
 # -- Compositing ----------------------------------------------------------- #
@@ -683,6 +745,25 @@ def test_a_glow_over_the_documents_budget_is_dropped_not_drawn() -> None:
     grown = effects.outer_glow_bbox(layer.bbox, size)
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1
+    assert np.array_equal(_alone(layer, viewport), disabled)
+
+
+def test_a_gradient_glow_over_the_budget_its_paint_needs_is_dropped() -> None:
+    """Charged for its gradient, a glow a solid colour's budget would fit is not drawn."""
+    psd, layer = _masks_card()
+    glow = _forge_glow(layer)
+    glow[Key.Gradient] = _gradient_glow()[0][Key.Gradient]
+    viewport = _around(layer)
+    glow[Key.Enabled] = False
+    disabled = _alone(layer, viewport)
+    glow[Key.Enabled] = True
+
+    size, _, _ = effects.glow_geometry(glow)
+    grown = effects.outer_glow_bbox(layer.bbox, size)
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    psd.max_alloc_bytes = width * height * effects._GLOW_GRADIENT_BYTES
+    assert not np.array_equal(_alone(layer, viewport), disabled)
+    psd.max_alloc_bytes -= 1
     assert np.array_equal(_alone(layer, viewport), disabled)
 
 

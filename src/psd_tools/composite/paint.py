@@ -617,26 +617,34 @@ def _collect_stops(
 _RAMP_SAMPLES = 4097
 
 
+def _segment_blend(
+    u: np.ndarray, m: np.ndarray | float, smoothness: float
+) -> np.ndarray:
+    """How far a segment's blend has gone at ``u``, its share of the segment.
+
+    The blend runs linearly to halfway at the end stop's midpoint ``m`` and
+    linearly on to the end; a midpoint on either end of its segment is
+    ignored, as Photoshop's dialog cannot author one. Smoothness then eases
+    the blend towards a smoothstep, with 100% landing halfway between the two.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
+    f = np.where((m > 0.0) & (m < 1.0), bent, u)
+    return f + smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+
+
 def _blend_stops(
     X: list[float], Y: list[np.ndarray], M: list[float], smoothness: float
 ) -> np.ndarray:
     """Sample the ramp through the stops at every ``Lctn`` unit.
 
-    Within a segment the blend runs linearly to halfway at the end stop's
-    midpoint and linearly on to the end; a midpoint on either end of its
-    segment is ignored, as Photoshop's dialog cannot author one. Smoothness
-    then eases the blend towards a smoothstep, with 100% landing halfway
-    between the two.
+    Each segment blends as :py:func:`_segment_blend` says.
     """
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
     k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(X) - 2)
     u = np.clip((t - locations[k]) / (locations[k + 1] - locations[k]), 0.0, 1.0)
-    m = np.asarray(M)[k + 1]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
-    f = np.where((m > 0.0) & (m < 1.0), bent, u)
-    f += smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+    f = _segment_blend(u, np.asarray(M)[k + 1], smoothness)
     values = np.asarray(Y, dtype=np.float64)
     f = f.reshape((-1,) + (1,) * (values.ndim - 1))
     return values[k] * (1.0 - f) + values[k + 1] * f
@@ -700,6 +708,10 @@ def _make_linear_gradient_color(
     smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
     colors = grad.get(Key.Colors, [])
     space = _BLEND_SPACES.get(method) if method is not None else None
+    # A trip through sRGB changes a CMYK or Lab stop's own values, so those
+    # documents blend their stops where they are.
+    if color_mode in (ColorMode.CMYK, ColorMode.LAB):
+        space = None
     if space is None:
         table = _blend_stops(
             *_collect_stops(
