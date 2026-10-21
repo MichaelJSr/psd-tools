@@ -144,8 +144,7 @@ _UNREADABLE = (
 def _has_enabled_effects(layer: Layer) -> bool:
     """Whether the layer carries a layer style Photoshop would draw."""
     try:
-        effects = layer.effects
-        return effects.enabled and any(effect.enabled for effect in effects)
+        return layer.has_effects()
     except _UNREADABLE:
         return False
 
@@ -1573,8 +1572,8 @@ class _Isolation:
     content rather than the canvas it was composited over, which takes the
     backdrop the enclosing group was seeded with -- see
     :py:meth:`Compositor._apply_adjustment`. A nested group that is not
-    pass-through stands on its own transparent backdrop, and gets that
-    instead.
+    pass-through is seeded transparent, so its adjustments read its own
+    content and it is handed none.
     """
 
     alpha: np.ndarray
@@ -2533,18 +2532,14 @@ class Compositor:
                 dtype=np.float32,
             )
         )
+        # A non-pass-through group is seeded transparent, so its colour is its
+        # own content and the enclosing group's shape does not weigh on it:
+        # only a pass-through child inherits the enclosing isolation.
         adjustment_isolated: bool | _Isolation = isolate_adjustments
-        if not isolate_adjustments and self._adjustment_isolated:
-            if is_passthrough:
-                backdrop_color, backdrop_alpha = self._isolation_backdrop()
-                content_alpha = self._isolation_alpha()
-            else:
-                # Stands on its own transparent backdrop, with nothing of the
-                # enclosing group's content on it.
-                backdrop_color, backdrop_alpha = color_b, group_alpha
-                content_alpha = group_alpha
+        if not isolate_adjustments and is_passthrough and self._adjustment_isolated:
+            backdrop_color, backdrop_alpha = self._isolation_backdrop()
             adjustment_isolated = _Isolation(
-                alpha=paste(viewport, self._viewport, content_alpha),
+                alpha=paste(viewport, self._viewport, self._isolation_alpha()),
                 backdrop_color=paste(viewport, self._viewport, backdrop_color, 1.0),
                 backdrop_alpha=paste(viewport, self._viewport, backdrop_alpha),
             )

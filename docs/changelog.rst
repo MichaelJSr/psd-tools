@@ -71,15 +71,12 @@ Changelog
   Backwards-incompatible: ``GradientOverlay`` and ``PatternOverlay`` now
   default ``scale`` to 100.0 and ``aligned`` to True where the descriptor
   omits them, as Photoshop does; they were 1.0 and False
-- [fix] The compositor renders channel mixer, black & white, colour balance
-  and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
-  grayscale and CMYK documents, instead of skipping them. Channel mixer is
-  exact, black & white is exact without its tint; gradient maps interpolate
-  classic, linear and perceptual gradients; colour balance midtones and
-  vibrance are fitted to Photoshop output
-- [fix] An adjustment inside a pass-through group that carries an enabled
-  layer style stays within the group, as in Photoshop, instead of passing
-  through to the layers beneath
+- [fix] The compositor renders channel mixer, black & white, colour balance and
+  vibrance adjustments on RGB documents, and gradient maps on RGB, grayscale and
+  CMYK documents, instead of skipping them. Colour balance and vibrance are
+  approximate, and a black & white tint is not drawn
+- [fix] An adjustment inside a pass-through group with an enabled layer style
+  stays within the group instead of reaching the layers beneath
 - [fix] Layer effects on an adjustment layer are rendered, with the layer's
   mask as its shape: overlays fill the mask, inner effects and strokes are
   drawn from its edge, shadows and glows are cast from it; without a mask the
