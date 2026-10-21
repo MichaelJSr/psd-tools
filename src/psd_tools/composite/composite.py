@@ -27,6 +27,7 @@ from psd_tools.api.layers import (
     GroupMixin,
     Layer,
     ShapeLayer,
+    SmartObjectLayer,
     TypeLayer,
 )
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
@@ -1869,6 +1870,71 @@ def _remix(
     )
 
 
+def _unfilter_under_mask(
+    layer: SmartObjectLayer, color: np.ndarray, shape: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """A filtered smart object's pixels with its filter mask applied.
+
+    The layer's channels hold the smart filters' result over the whole
+    object; Photoshop shows that only where the filter mask is white and the
+    stored pre-filter rendering (``FEid``) elsewhere. Blends the two in
+    premultiplied space on ``layer.bbox``; a missing, disabled or all-white
+    mask leaves the stored pixels as they are.
+    """
+    so = layer.smart_object
+    try:
+        if not (so.has_enabled_filters and so.filter_mask_enabled):
+            return color, shape
+        mask = so.filter_mask()
+        if mask is None:
+            return color, shape
+        x0, y0, x1, y1 = layer.bbox
+        h, w = y1 - y0, x1 - x0
+        fill = 255 if so.filter_mask_extends_white else 0
+        m = np.full((h, w), fill, dtype=np.uint8)
+        _paste_plane(m, (x0, y0, x1, y1), mask[1], mask[0])
+        if m.min() == 255:
+            return color, shape
+        source = so.filter_source()
+        if source is None:
+            return color, shape
+        sbox, src_color, src_alpha = source
+        src = np.zeros((h, w, 3), dtype=np.uint8)
+        covered = np.zeros((h, w), dtype=np.uint8)
+        _paste_plane(covered, (x0, y0, x1, y1), np.full(src_color.shape[:2], 255, np.uint8), sbox)
+        for i in range(3):
+            _paste_plane(src[..., i], (x0, y0, x1, y1), src_color[..., i], sbox)
+        a_u = np.ones((h, w), dtype=np.float32)
+        if src_alpha is not None:
+            a_u[:] = 0
+            _paste_plane(a_u, (x0, y0, x1, y1), src_alpha.astype(np.float32) / 255.0, sbox)
+    except Exception as exc:  # the stored pixels are the safe fallback
+        logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
+        return color, shape
+    # Where the source is not stored the filtered pixels stand.
+    mf = np.where(covered == 255, m.astype(np.float32) / 255.0, 1.0)[..., None]
+    a_f = shape if shape is not None else np.ones((h, w, 1), dtype=np.float32)
+    a_u = a_u[..., None]
+    alpha = mf * a_f + (1.0 - mf) * a_u
+    premul = mf * a_f * color + (1.0 - mf) * a_u * (src.astype(np.float32) / 255.0)
+    out = np.where(alpha > 0, premul / np.maximum(alpha, 1e-6), color)
+    logger.info("Smart filter mask applied to %r", layer.name)
+    return out.astype(np.float32), (alpha.astype(np.float32) if shape is not None else None)
+
+
+def _paste_plane(
+    dst: np.ndarray, dbox: tuple[int, int, int, int], src: np.ndarray, sbox: tuple[int, int, int, int]
+) -> None:
+    """Copy the overlap of *src* (on *sbox*) into *dst* (on *dbox*)."""
+    x0, y0 = max(dbox[0], sbox[0]), max(dbox[1], sbox[1])
+    x1, y1 = min(dbox[2], sbox[2]), min(dbox[3], sbox[3])
+    if x1 <= x0 or y1 <= y0:
+        return
+    dst[y0 - dbox[1] : y1 - dbox[1], x0 - dbox[0] : x1 - dbox[0]] = src[
+        y0 - sbox[1] : y1 - sbox[1], x0 - sbox[0] : x1 - sbox[0]
+    ]
+
+
 class Compositor:
     """Composite context.
 
@@ -2863,6 +2929,8 @@ class Compositor:
             color, shape = paint.create_fill(layer, layer.bbox)
             if shape is None:
                 shape = np.ones((layer.height, layer.width, 1), dtype=np.float32)
+        elif color is not None and isinstance(layer, SmartObjectLayer):
+            color, shape = _unfilter_under_mask(layer, color, shape)
         return color, shape
 
     @staticmethod
