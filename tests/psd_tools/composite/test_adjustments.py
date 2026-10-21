@@ -1025,7 +1025,7 @@ def test_vibrance_is_the_fitted_model(
 
 
 def test_positive_vibrance_boosts_a_dark_pale_pixel_more_than_a_bright_one() -> None:
-    """A dark olive gains more chroma than a light cyan of the same saturation."""
+    """A dark olive gains more chroma than a light cyan of similar saturation."""
     image = np.array([[[0.32, 0.33, 0.27], [0.8, 0.96, 1.0]]], dtype=np.float32)
     out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(100, 0))
     gained = _linear_chroma(out) / _linear_chroma(image)

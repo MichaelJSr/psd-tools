@@ -1104,7 +1104,7 @@ def _vibrance(img: np.ndarray, vibrance: float, saturation: float) -> np.ndarray
     chroma = high - low
     out = linear
     if vibrance > 0:
-        out = _raise_vibrance(img, linear, vibrance)
+        out = _raise_vibrance(img, linear, high, low, vibrance)
     elif vibrance < 0:
         sat = chroma / np.maximum(high, _FLOAT_EPSILON)
         weight = (
@@ -1123,13 +1123,21 @@ def _vibrance(img: np.ndarray, vibrance: float, saturation: float) -> np.ndarray
     if saturation:
         luminance = out @ _LINEAR_LUMINANCE
         out = luminance[..., None] + (out - luminance[..., None]) * (_1 + saturation)
-    return np.clip(out, _0, _1)
+        out = np.clip(out, _0, _1)
+    return out
 
 
-def _raise_vibrance(img: np.ndarray, linear: np.ndarray, vibrance: float) -> np.ndarray:
-    """Scale chroma up, most for pale, mid-bright pixels away from red."""
-    high = linear.max(axis=2, keepdims=True)
-    low = linear.min(axis=2, keepdims=True)
+def _raise_vibrance(
+    img: np.ndarray,
+    linear: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    vibrance: float,
+) -> np.ndarray:
+    """Scale chroma up, most for pale, mid-bright pixels away from red.
+
+    ``high`` and ``low`` are the per-pixel extremes of ``linear``.
+    """
     encoded_high = img.max(axis=2, keepdims=True)
     sat = (encoded_high - img.min(axis=2, keepdims=True)) / np.maximum(
         encoded_high, _FLOAT_EPSILON
