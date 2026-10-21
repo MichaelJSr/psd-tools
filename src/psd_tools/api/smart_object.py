@@ -7,9 +7,13 @@ import os
 from collections.abc import Iterator
 from typing import IO
 
+import numpy as np
+
 from psd_tools.api._descriptor import get_scalar
 from psd_tools.api.protocols import LayerProtocol
-from psd_tools.constants import Tag
+from psd_tools.compression import decompress
+from psd_tools.constants import Compression, Tag
+from psd_tools.psd.filter_effects import FilterEffect
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +66,7 @@ class SmartObject:
     """
 
     def __init__(self, layer: LayerProtocol):
+        self._layer = layer
         self._config = None
         for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
             self._config = layer.tagged_blocks.get_data(key)
@@ -339,6 +344,117 @@ class SmartObject:
         else:
             return None
 
+
+    # -- Smart filters -----------------------------------------------------
+
+    @property
+    def filters(self) -> object | None:
+        """The smart filter descriptor (``filterFX``), or ``None``."""
+        if self._config is None:
+            return None
+        return self._config.data.get(b"filterFX")
+
+    @property
+    def has_enabled_filters(self) -> bool:
+        """Whether an enabled smart filter is applied to the object."""
+        fx = self.filters
+        if fx is None or not _flag(fx, b"enab", True):
+            return False
+        items = fx.get(b"filterFXList") or []
+        return any(_flag(item, b"enab", True) for item in items)
+
+    @property
+    def filter_mask_enabled(self) -> bool:
+        """Whether the smart filters' mask is on."""
+        return _flag(self.filters, b"filterMaskEnable", False)
+
+    @property
+    def filter_mask_extends_white(self) -> bool:
+        """Mask value outside its stored rectangle: white (filtered) or black."""
+        return _flag(self.filters, b"filterMaskExtendWithWhite", True)
+
+    def filter_effect(self) -> FilterEffect | None:
+        """The document's stored pre-filter raster and filter mask for this layer.
+
+        Photoshop keeps, for each smart object carrying smart filters, the
+        rendered object *before* the filters (colour channels plus
+        transparency) and the painted filter mask in the document-level
+        ``FEid`` block, while the layer's own channels hold the filtered
+        result; it composites ``lerp(source, filtered, mask)``. The block
+        lists one item per filtered layer in layer order, and the item's
+        rectangle contains the layer's bbox; both are checked here.
+        """
+        if self.filters is None:
+            return None
+        psd = getattr(self._layer, "_psd", None)
+        blocks = getattr(psd, "tagged_blocks", None)
+        if blocks is None:
+            return None
+        items = None
+        for key in (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3):
+            items = blocks.get_data(key)
+            if items is not None:
+                break
+        if not items:
+            return None
+        bbox = self._layer.bbox
+
+        def contains(item: FilterEffect) -> bool:
+            if item.rectangle is None or bbox is None:
+                return False
+            top, left, bottom, right = item.rectangle
+            return left <= bbox[0] and top <= bbox[1] and right >= bbox[2] and bottom >= bbox[3]
+
+        index = 0
+        for layer in psd.descendants():
+            if layer is self._layer:
+                break
+            if layer.kind == "smartobject" and layer.smart_object.filters is not None:
+                index += 1
+        if index < len(items) and contains(items[index]):
+            return items[index]
+        for item in items:
+            if contains(item):
+                return item
+        return None
+
+    def filter_source(self) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
+        """``(bbox, color uint8 (h, w, 3), alpha uint8 (h, w) | None)`` of the
+        object as rendered before its smart filters, or ``None``."""
+        item = self.filter_effect()
+        if item is None or item.depth != 8 or not item.channels:
+            return None
+        top, left, bottom, right = item.rectangle
+        w, h = right - left, bottom - top
+        if w <= 0 or h <= 0:
+            return None
+        planes = []
+        for channel in item.channels[:3]:
+            if not channel.is_written or channel.compression is None:
+                return None
+            planes.append(_decode_plane(channel.data, channel.compression, w, h))
+        if len(planes) == 1:
+            planes = planes * 3
+        color = np.stack(planes[:3], axis=-1)
+        alpha = None
+        transparency = item.channels[item.max_channels + 1] if len(item.channels) > item.max_channels + 1 else None
+        if transparency is not None and transparency.is_written and transparency.compression is not None:
+            alpha = _decode_plane(transparency.data, transparency.compression, w, h)
+        return (left, top, right, bottom), color, alpha
+
+    def filter_mask(self) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
+        """``(bbox, mask uint8 (h, w))`` of the smart filters' mask (255 =
+        filtered), or ``None`` when no mask pixels are stored."""
+        item = self.filter_effect()
+        extra = item.extra if item is not None else None
+        if extra is None or not getattr(extra, "is_written", 0) or not extra.data:
+            return None
+        top, left, bottom, right = extra.rectangle
+        w, h = right - left, bottom - top
+        if w <= 0 or h <= 0:
+            return None
+        return (left, top, right, bottom), _decode_plane(extra.data, extra.compression, w, h)
+
     def save(
         self,
         filename: str | os.PathLike | None = None,
@@ -400,3 +516,21 @@ class SmartObject:
 
     def __repr__(self) -> str:
         return f"SmartObject({self.filename!r} kind={self.kind!r} type={self.filetype!r} detected={self.detected_filetype!r} size={self.filesize})"
+
+
+def _flag(desc: object, key: bytes, default: bool) -> bool:
+    """A boolean descriptor field, or *default* when absent."""
+    if desc is None:
+        return default
+    value = desc.get(key)  # type: ignore[attr-defined]
+    return default if value is None else bool(getattr(value, "value", value))
+
+
+def _decode_plane(data: bytes, compression: int, width: int, height: int) -> np.ndarray:
+    """One 8-bit ``FEid`` plane as ``uint8 (height, width)``.
+
+    The rows carry 4-byte RLE counts (the PSB layout) in PSD files too: the
+    4-byte table sums to the payload length, the 2-byte one does not.
+    """
+    raw = decompress(data, Compression(compression), width, height, 8, 2)
+    return np.frombuffer(raw, dtype=np.uint8).reshape(height, width)
