@@ -470,8 +470,11 @@ class OuterGlow(_GlowEffect):
 
     @property
     def spread(self) -> float:
-        """Spread level in percent."""
-        return get_scalar(self.descriptor, Key.ShadingNoise, float, 0.0)
+        """Spread in percent of the size.
+
+        The descriptor stores it under the key an inner glow calls choke.
+        """
+        return get_scalar(self.descriptor, Key.ChokeMatte, float, 0.0)
 
 
 @register(Klass.InnerGlow.value)

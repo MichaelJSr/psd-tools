@@ -16,10 +16,17 @@ Currently supported effects:
   - Supports solid color, gradient, and pattern fills
   - Position: inside, outside, or centered
   - Limited compared to Photoshop's full implementation
+- **Drop shadow**: The layer's silhouette, spread, blurred and offset, painted
+  behind the layer
+  - Solid color; honors distance, angle (including global light), size,
+    spread, contour and its anti-aliasing, opacity, blend mode and "layer
+    knocks out drop shadow"
+  - The blur is a gaussian approximation of Photoshop's own, so a soft
+    shadow's falloff can differ; noise is read but not applied
 
 Partially supported or limited effects:
 
-- Drop shadow, inner shadow, outer glow, inner glow
+- Inner shadow, outer glow, inner glow
 - These may render but with reduced accuracy
 
 The main function :py:func:`draw_stroke_effect` handles stroke rendering by:
@@ -125,12 +132,46 @@ def _enum(desc: Descriptor, key: bytes) -> bytes:
     return getattr(desc.get(key), "enum", b"")
 
 
+def _require_scipy(what: str) -> None:
+    """Raise :class:`ImportError` naming ``what`` and the package it needs."""
+    if not HAS_SCIPY:
+        raise ImportError(
+            "%s require: scipy\n\n"
+            "Install with:\n"
+            "    pip install 'psd-tools[composite]'\n"
+            "Or:\n"
+            "    pip install scipy" % what
+        )
+
+
 def _stroke_size(desc: Descriptor) -> float:
     """The descriptor's stroke size, held to what Photoshop can write."""
     size = float(desc.get(Key.SizeKey, 1.0))
     if not math.isfinite(size):
         raise ValueError("Stroke size is not finite.")
     return min(size, _MAX_STROKE_SIZE)
+
+
+def shadow_geometry(desc: Descriptor) -> tuple[float, float, float]:
+    """A drop shadow's ``(distance, size, spread)``, as the file states them.
+
+    Read off the descriptor rather than through :py:class:`~psd_tools.api.effects.DropShadow`,
+    whose properties read a value they cannot parse as its default: to the
+    compositor that value is an unreadable effect, as a stroke's size is to
+    :py:func:`stroke_bbox`, and the effect is dropped rather than drawn at
+    some invented size. Raises :class:`ValueError` or :class:`TypeError` for
+    a value that will not parse, and :class:`ValueError` for one that is not
+    finite. The size is held to what Photoshop can write, as a stroke's is.
+    """
+    distance = float(desc.get(Key.Distance, 0.0))
+    size = float(desc.get(Key.Blur, 0.0))
+    spread = float(desc.get(Key.ChokeMatte, 0.0))
+    if not all(math.isfinite(value) for value in (distance, size, spread)):
+        raise ValueError(
+            "Drop shadow parameters must be finite: distance=%r size=%r spread=%r"
+            % (distance, size, spread)
+        )
+    return distance, min(size, _MAX_STROKE_SIZE), spread
 
 
 def stroke_bbox(
@@ -467,14 +508,7 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     if reach is None:
         # No band named, so no bound: far enough that nothing is out of range.
         reach = float(math.hypot(*alpha.shape))
-    if not HAS_SCIPY:
-        raise ImportError(
-            "Stroke effects require: scipy\n\n"
-            "Install with:\n"
-            "    pip install 'psd-tools[composite]'\n"
-            "Or:\n"
-            "    pip install scipy"
-        )
+    _require_scipy("Stroke effects")
     from scipy.ndimage import (  # type: ignore[import-untyped]  # noqa: PLC0415
         distance_transform_edt,
     )
@@ -568,8 +602,6 @@ def draw_stroke_effect_split(
     """
     logger.debug("Stroke effect has limited support")
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-    if not isinstance(shape, np.ndarray):
-        shape = np.full((height, width, 1), shape, dtype=np.float32)
 
     paint_type = _enum(desc, Key.PaintType)
     if paint_type == Enum.SolidColor:
@@ -588,6 +620,25 @@ def draw_stroke_effect_split(
         logger.warning("No fill specification found.")
         color = np.ones((height, width, 1))
 
+    coverage, inside = stroke_band(viewport, shape, desc)
+    return color, coverage, inside
+
+
+def stroke_band(
+    viewport: tuple[int, int, int, int],
+    shape: float | np.ndarray,
+    desc: Descriptor,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The coverage of a stroke effect, split at the boundary, without its paint.
+
+    What :py:func:`draw_stroke_effect_split` returns after the colour, drawn
+    on its own for a caller that only needs where the stroke lies: the
+    drop shadow's knockout cuts under the band, whatever it is painted with.
+    """
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    if not isinstance(shape, np.ndarray):
+        shape = np.full((height, width, 1), shape, dtype=np.float32)
+
     # Note: current implementation is purely image-based.
     # For layers with path objects, this should be based on drawing.
 
@@ -600,7 +651,6 @@ def draw_stroke_effect_split(
     # a descriptor can carry one.
     if size <= 0.0:
         return (
-            color,
             np.zeros((height, width, 1), dtype=np.float32),
             np.zeros((height, width, 1), dtype=np.float32),
         )
@@ -636,4 +686,268 @@ def draw_stroke_effect_split(
         within = _distance_band(distance, lo, 0.0)
         beyond = _distance_band(distance, 0.0, hi)
         inside = coverage * divide(within, within + beyond, fill=0.0)
-    return color, np.expand_dims(coverage, 2), np.expand_dims(inside, 2)
+    return np.expand_dims(coverage, 2), np.expand_dims(inside, 2)
+
+
+# How wide a gaussian stands in for the blur Photoshop gives a drop shadow of a
+# given size. Photoshop's blur is its own, so this is fitted against its
+# previews rather than derived; a third of the size, the usual rule of thumb,
+# leaves the falloff too steep. The fit is asserted in the tests.
+_SHADOW_SIGMA_PER_SIZE = 0.45
+
+# What one pixel of a shadow's canvas costs at the peak of
+# ``draw_drop_shadow()``: the silhouette it is cast from, the matte spread
+# grows and the distance transform and masks that grow it, the blurred matte
+# and the shifted one, with the group composite the silhouette of a group is
+# read from.
+_SHADOW_BYTES = 64
+
+# Entries in a contour's transfer table. Photoshop states a contour's points
+# on a 0-255 grid along both axes.
+_CONTOUR_STEPS = 256
+
+# How many coverage levels spread grows a silhouette at, at most. A silhouette
+# with no more distinct coverages than this is grown at each of them, so none
+# is rounded to another; one with more, an antialiased or feathered one, is
+# grown at this many of its own, spaced evenly between its lowest and highest.
+_SPREAD_LEVELS = 16
+
+
+def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
+    """How far a shadow is cast, as ``(dx, dy)`` in image coordinates.
+
+    ``angle`` is where the light comes *from*, counter-clockwise from the
+    positive x axis, so the shadow falls the opposite way; image rows run
+    down, which is why a light at 90 degrees casts the shadow down.
+
+    Rounded to a millionth of a pixel so that a light straight overhead or
+    level casts exactly along the axis: ``cos(90)`` is 6e-17 rather than 0,
+    and a canvas measured off that would take an extra column on one side
+    at some positions and not at others.
+    """
+    theta = math.radians(angle)
+    return (
+        round(-distance * math.cos(theta), 6),
+        round(distance * math.sin(theta), 6),
+    )
+
+
+def drop_shadow_bbox(
+    bbox: tuple[int, int, int, int],
+    distance: float,
+    angle: float,
+    size: float,
+    max_alloc_bytes: AllocBudget | None = None,
+) -> tuple[int, int, int, int]:
+    """The canvas :py:func:`draw_drop_shadow` needs to draw a shadow on.
+
+    ``bbox`` grown by the shadow's size on every side and by its offset on
+    the side it is cast to. It is the box the silhouette is read on, before
+    it is moved, so it has to hold that too. The two pixels added on top are
+    the antialiased fringe spread leaves, and the one the offset's
+    interpolation can spill into.
+
+    An empty ``bbox`` is returned untouched, as :py:func:`stroke_bbox` does:
+    there is no silhouette to cast.
+
+    The distance and size are the file's, so the box they grow is checked
+    before anything is allocated on it, as a stroke's is. Raises
+    :class:`ValueError` when the grown box is over the per-axis limit or
+    ``max_alloc_bytes``, which the callers read as an unreadable shadow.
+    """
+    if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+        return bbox
+    dx, dy = _shadow_offset(distance, angle)
+    margin = math.ceil(max(size, 0.0)) + 2
+    grown = (
+        math.floor(bbox[0] + min(dx, 0.0)) - margin,
+        math.floor(bbox[1] + min(dy, 0.0)) - margin,
+        math.ceil(bbox[2] + max(dx, 0.0)) + margin,
+        math.ceil(bbox[3] + max(dy, 0.0)) + margin,
+    )
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    check_pixel_size(
+        width,
+        height,
+        max_alloc_bytes=max_alloc_bytes,
+        estimated_bytes=width * height * _SHADOW_BYTES,
+        warn=False,
+    )
+    return grown
+
+
+def contour_table(desc: Descriptor | None) -> np.ndarray | None:
+    """The transfer table of a contour descriptor, or ``None`` for the identity.
+
+    A contour maps the coverage of a blurred matte to the coverage painted,
+    along a curve through the points the descriptor lists. Photoshop draws a
+    smooth curve through them; this is a monotone cubic through the same
+    points, which neither overshoots a point nor turns back between two, and
+    a straight line between two points is reproduced exactly. Past the first
+    and last point the table holds their values.
+
+    The default contour, Photoshop's "Linear", runs from corner to corner and
+    is the identity; it comes back as ``None`` so the caller can skip the
+    mapping. So does a descriptor with fewer than two points to draw a curve
+    through. A point that will not read raises as the descriptor's other
+    values do.
+    """
+    if desc is None:
+        return None
+    points = desc.get(Key.Curve)
+    if points is None or len(points) < 2:
+        return None
+    xs = np.array([float(point[Key.Horizontal]) for point in points]) / 255.0
+    ys = np.array([float(point[Key.Vertical]) for point in points]) / 255.0
+    if not (np.isfinite(xs).all() and np.isfinite(ys).all()):
+        raise ValueError("Contour points must be finite.")
+    order = np.argsort(xs, kind="stable")
+    xs, ys = xs[order], ys[order]
+    if len(xs) == 2 and np.array_equal(xs, ys) and xs[0] == 0.0 and xs[1] == 1.0:
+        return None
+    grid = np.linspace(0.0, 1.0, _CONTOUR_STEPS)
+    if len(xs) > 2 and np.all(np.diff(xs) > 0.0):
+        _require_scipy("Drop shadow effects")
+        from scipy.interpolate import PchipInterpolator  # type: ignore[import-untyped]  # noqa: PLC0415
+
+        table = PchipInterpolator(xs, ys)(np.clip(grid, xs[0], xs[-1]))
+    else:
+        # Two points, or a step the spline cannot pass through: straight
+        # segments, which hold the end values past the ends on their own.
+        table = np.interp(grid, xs, ys)
+    return np.clip(table, 0.0, 1.0).astype(np.float32)
+
+
+def _contoured(alpha: np.ndarray, table: np.ndarray, anti_aliased: bool) -> np.ndarray:
+    """``alpha`` mapped through ``table``.
+
+    Anti-aliased, the table is read between its entries, so a coverage that
+    falls between two levels is painted between their two values. Otherwise
+    it is read at the nearest entry, the way an 8-bit matte is: a table
+    that steps paints the step.
+    """
+    last = len(table) - 1
+    if anti_aliased:
+        grid = np.linspace(0.0, 1.0, len(table))
+        return np.interp(alpha, grid, table).astype(np.float32)
+    return table[np.rint(alpha * last).astype(np.intp)]
+
+
+def _spread(alpha: np.ndarray, grow: float) -> np.ndarray:
+    """``alpha`` grown by ``grow`` pixels, keeping the coverage it grows.
+
+    A grey dilation by a disc: every pixel takes the highest coverage within
+    ``grow`` of it, so a half-covered silhouette grows into a half-covered
+    matte rather than an opaque one. It is taken a coverage level at a time,
+    each level a binary silhouette grown along its distance transform with
+    the edge antialiased, and the levels summed, each weighted by the step
+    in coverage it stands for.
+
+    The levels are the silhouette's own coverages: all of them when it has
+    few, which rounds none and costs a binary silhouette a single transform.
+    With more, they are the lowest of its coverages at or above each of that
+    many evenly spaced values between its lowest and highest, so a coverage
+    grows at a level less than one space below it, and the grown fringe is
+    never more than a space under a full grey dilation's. The spacing
+    follows wherever the coverage lies: a feather that never passes 5% is
+    grown in steps of a fifteenth of 5%.
+    """
+    from scipy.ndimage import distance_transform_edt  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    levels = np.unique(alpha[alpha > 0.0])
+    if levels.size > _SPREAD_LEVELS:
+        spaced = np.linspace(levels[0], levels[-1], _SPREAD_LEVELS)
+        picks = np.searchsorted(levels, spaced, side="left")
+        levels = np.unique(levels[np.minimum(picks, levels.size - 1)])
+    grown = np.zeros(alpha.shape, dtype=np.float32)
+    reach = grown
+    previous: np.ndarray | None = None
+    below = 0.0
+    for level in levels:
+        inside = alpha >= level
+        if not inside.any():
+            break  # The levels only shrink from here.
+        # Consecutive levels no pixel falls between are one silhouette, and
+        # share its transform.
+        if previous is None or not np.array_equal(inside, previous):
+            if inside.all():
+                reach = np.ones(alpha.shape, dtype=np.float32)
+            else:
+                # Half a pixel past the centre of the nearest pixel inside,
+                # the way ``_signed_distance()`` measures a hard edge.
+                outside = distance_transform_edt(~inside).astype(np.float32)
+                reach = np.clip(grow + 1.0 - outside, 0.0, 1.0)
+            previous = inside
+        grown += (float(level) - below) * reach
+        below = float(level)
+    return np.maximum(alpha, grown)
+
+
+def draw_drop_shadow(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    distance: float,
+    angle: float,
+    size: float,
+    spread: float,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+) -> np.ndarray:
+    """The coverage a drop shadow casts from ``shape``, on ``viewport``.
+
+    ``shape`` is the layer's silhouette on the same canvas, which
+    :py:func:`drop_shadow_bbox` sizes. The result is ``(height, width, 1)``;
+    the caller tints it, knocks the layer out of it and composites it.
+
+    ``contour`` is a transfer table from :py:func:`contour_table`, applied to
+    the cast matte last, as Photoshop's contour panel shows it: coverage in,
+    coverage out. It is applied on this canvas alone, so a contour that
+    lifts zero coverage paints the canvas and not the document. The table
+    is read between its entries when ``anti_aliased`` and at the nearest
+    one otherwise. Noise is not applied.
+
+    ``spread`` is a percentage of ``size``, which is how Photoshop's dialog
+    states it, even though the descriptor labels the value in pixels. It
+    *grows* the silhouette before the blur, and the blur takes what is left
+    of ``size``, so a shadow turns hard-edged at 100%. (The same key shrinks
+    the silhouette of an inner shadow, where the dialog calls it choke.)
+
+    The blur is cut off at that remaining radius, rounded to a whole pixel,
+    so the shadow reaches at most a pixel or two past ``size`` from the
+    silhouette, and the canvas :py:func:`drop_shadow_bbox` asks for holds all
+    of it; a gaussian left to its default reach runs on past both. Both
+    filters treat what lies past the canvas as empty, since nothing outside
+    it casts a shadow. The default for a blur is to reflect the edge instead,
+    which doubles back any coverage that reaches it.
+
+    A parameter that is not finite raises ``ValueError``: NaN passes through
+    every step here without complaint, and one NaN in the coverage spreads to
+    the whole canvas it is composited on.
+    """
+    _require_scipy("Drop shadow effects")
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    if not all(math.isfinite(value) for value in (distance, angle, size, spread)):
+        raise ValueError(
+            "Drop shadow parameters must be finite: distance=%r angle=%r "
+            "size=%r spread=%r" % (distance, angle, size, spread)
+        )
+    alpha = shape[:, :, 0].astype(np.float32)
+    size = max(float(size), 0.0)
+    grow = size * min(max(float(spread), 0.0), 100.0) / 100.0
+    if grow > 0.0 and alpha.any():
+        alpha = _spread(alpha, grow)
+    radius = size - grow
+    sigma = radius * _SHADOW_SIGMA_PER_SIZE
+    if sigma > 1e-3:
+        alpha = ndimage.gaussian_filter(
+            alpha, sigma, mode="constant", cval=0.0, truncate=radius / sigma
+        )
+    dx, dy = _shadow_offset(distance, angle)
+    if dx or dy:
+        alpha = ndimage.shift(alpha, (dy, dx), order=1, mode="constant", cval=0.0)
+    alpha = np.clip(alpha, 0.0, 1.0)
+    if contour is not None:
+        alpha = _contoured(alpha, contour, anti_aliased)
+    return alpha[:, :, None]

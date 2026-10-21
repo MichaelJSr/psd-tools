@@ -20,7 +20,14 @@ from psd_tools.constants import (
     StrokePosition,
     Tag,
 )
-from psd_tools.psd.descriptor import Bool, Descriptor, List, String, UnitFloat
+from psd_tools.psd.descriptor import (
+    Bool,
+    Descriptor,
+    Double,
+    List,
+    String,
+    UnitFloat,
+)
 from psd_tools.psd.image_resources import ImageResources
 from psd_tools.terminology import Enum, Key, Unit
 
@@ -113,6 +120,20 @@ def test_outer_glow(fixture: PSDImage) -> None:
     assert effect.size == 41.0
     assert effect.spread == 0.0
     assert effect.gradient is None
+
+
+def test_outer_glow_spread_is_the_choke_key(fixture: PSDImage) -> None:
+    """``spread`` reads ``Ckmt``, the dialog's Spread, and not the jitter key.
+
+    Photoshop stores an outer glow's spread under the key an inner glow calls
+    choke; ``ShdN`` beside it is the glow's jitter, which reads on its own.
+    """
+    effect = fixture[3].effects[0]
+    assert isinstance(effect, effects.OuterGlow)
+    effect.descriptor[Key.ChokeMatte] = Double(42.0)
+    effect.descriptor[Key.ShadingNoise] = Double(7.0)
+    assert effect.spread == 42.0
+    assert effect.quality_jitter == 7.0
 
 
 def test_inner_glow(fixture: PSDImage) -> None:

@@ -10,6 +10,13 @@ Changelog
   file whose version 8 entry is missing it (#1011, #1012)
 - [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
   ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
+- [fix] A drop shadow layer effect is now rendered when a document is
+  composited from its layers, instead of being dropped. Distance, size,
+  spread, contour, global light, opacity, blend mode and the layer knockout
+  are honoured; noise is read but not applied, and the blur approximates
+  Photoshop's. Needs ``scipy``, as a stroke effect does (#679)
+- [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
+  jitter (#679)
 
 1.25.0 (2026-10-14)
 -------------------
