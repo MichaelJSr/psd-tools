@@ -1277,9 +1277,8 @@ def _rendered(
     """``filename`` composited after ``mutate`` has broken its effects.
 
     ``nth`` selects one effect per layer, counted over the enabled effects of
-    that kind in the order the compositor draws them. The fixtures below that
-    use it carry their effects on a single layer, so it names one effect in
-    the document.
+    that kind in file order. The fixtures below that use it carry their
+    effects on a single layer, so it names one effect in the document.
     """
     psd = PSDImage.open(full_name(filename))
     for layer in psd.descendants():
