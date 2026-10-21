@@ -187,7 +187,8 @@ def test_a_precise_glow_fades_linearly_with_the_distance_to_the_edge() -> None:
     """The precise technique ramps along the distance field, not a blur.
 
     A hard edge at column 10: the first column inside lies half a pixel from
-    it, and the ramp falls by one size-th per pixel from there.
+    it, and the ramp falls by one size-th per pixel from there. Measured
+    short of the far canvas edge, which counts as an edge of its own.
     """
     shape = np.zeros((20, 40, 1), dtype=np.float32)
     shape[:, 10:] = 1.0
@@ -195,10 +196,25 @@ def test_a_precise_glow_fades_linearly_with_the_distance_to_the_edge() -> None:
     glow = effects.draw_inner_glow(
         (0, 0, 40, 20), shape, size=size, choke=0.0, precise=True, glow_range=100.0
     )
-    depth = np.arange(30) + 0.5
+    depth = np.arange(20) + 0.5
     expected = np.clip((size - depth) / size, 0.0, 1.0)
-    assert np.allclose(glow[10, 10:, 0], expected, atol=1e-6)
+    assert np.allclose(glow[10, 10:30, 0], expected, atol=1e-6)
     assert not glow[:, :10].any()
+
+
+def test_the_canvas_past_a_precise_glow_counts_as_outside() -> None:
+    """A layer that fills its canvas has an edge there under either technique.
+
+    The first pixel inside a hard edge lies half a pixel from it, so the
+    precise ramp starts there, and the centre is out of its reach.
+    """
+    shape = np.ones((40, 40, 1), dtype=np.float32)
+    size = 9.0
+    glow = effects.draw_inner_glow(
+        (0, 0, 40, 40), shape, size=size, choke=0.0, precise=True, glow_range=100.0
+    )
+    assert float(glow[20, 0, 0]) == pytest.approx((size - 0.5) / size, abs=1e-6)
+    assert float(glow[20, 20, 0]) == 0.0
 
 
 def test_an_inverted_contour_turns_an_edge_glow_into_a_center_one() -> None:
@@ -224,6 +240,27 @@ def test_a_parameter_that_is_not_finite_raises(
 ) -> None:
     with pytest.raises(ValueError, match="must be finite"):
         draw(_disc(81, 20.0))
+
+
+@pytest.mark.parametrize(
+    ("what", "message"),
+    [
+        (None, "Drop shadow"),
+        ("Inner shadow", "Inner shadow"),
+        ("Inner glow", "Inner glow"),
+    ],
+    ids=["default", "shadow", "glow"],
+)
+def test_shadow_geometry_names_the_effect_whose_value_is_not_finite(
+    what: str | None, message: str
+) -> None:
+    desc = Descriptor()
+    desc[Key.Blur] = Double(float("nan"))
+    with pytest.raises(ValueError, match=message + " parameters must be finite"):
+        if what is None:
+            effects.shadow_geometry(desc)
+        else:
+            effects.shadow_geometry(desc, what)
 
 
 @pytest.mark.parametrize(
@@ -474,6 +511,30 @@ def test_an_unreadable_inner_effect_is_dropped_and_the_document_renders(
     rendered, _ = _render(psd)
     assert np.isfinite(rendered).all()
     assert np.array_equal(rendered, disabled)
+
+
+@pytest.mark.parametrize("klass", [Klass.InnerShadow, Klass.InnerGlow])
+def test_an_inner_effect_over_the_documents_budget_is_dropped_not_drawn(
+    klass: Klass,
+) -> None:
+    """An effect whose canvas the budget refuses costs the effect only.
+
+    The budget is set just under what the effect's canvas costs and above
+    what the layer's own pixels do, so the layer renders as it does with
+    the effect switched off rather than raising.
+    """
+    psd, layer = _square()
+    desc = _forge(layer, klass, Distance=4.0, Blur=4.0)
+    desc[Key.Enabled] = False
+    disabled, _ = _render(psd)
+    desc[Key.Enabled] = True
+    assert not np.array_equal(_render(psd)[0], disabled)
+
+    _, size, _ = effects.shadow_geometry(desc)
+    grown = effects.drop_shadow_bbox(layer.bbox, 0.0, 0.0, size)
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1
+    assert np.array_equal(_render(psd)[0], disabled)
 
 
 # -- Fidelity against Photoshop's own render ------------------------------- #

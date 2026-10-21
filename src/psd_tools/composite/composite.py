@@ -2682,7 +2682,8 @@ class Compositor:
         """An inner effect's box and the draw of its coverage on that box."""
         inner = cast(InnerShadow | InnerGlow, effect)
         desc = inner.descriptor
-        distance, size, choke = shadow_geometry(desc)
+        what = "Inner shadow" if isinstance(inner, InnerShadow) else "Inner glow"
+        distance, size, choke = shadow_geometry(desc, what)
         contour = contour_table(inner.contour)
         anti_aliased = inner.anti_aliased
         if inner.noise > 0.0:

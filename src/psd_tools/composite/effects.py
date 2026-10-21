@@ -154,10 +154,13 @@ def _stroke_size(desc: Descriptor) -> float:
     return min(size, _MAX_STROKE_SIZE)
 
 
-def shadow_geometry(desc: Descriptor) -> tuple[float, float, float]:
+def shadow_geometry(
+    desc: Descriptor, what: str = "Drop shadow"
+) -> tuple[float, float, float]:
     """A shadow's or glow's ``(distance, size, spread)``, as the file states them.
 
-    The spread is an inner effect's choke, which shares its key.
+    The spread is an inner effect's choke, which shares its key. ``what``
+    names the effect in the error raised for a value that is not finite.
 
     Read off the descriptor rather than through :py:class:`~psd_tools.api.effects.DropShadow`,
     whose properties read a value they cannot parse as its default: to the
@@ -172,8 +175,8 @@ def shadow_geometry(desc: Descriptor) -> tuple[float, float, float]:
     spread = float(desc.get(Key.ChokeMatte, 0.0))
     if not all(math.isfinite(value) for value in (distance, size, spread)):
         raise ValueError(
-            "Drop shadow parameters must be finite: distance=%r size=%r spread=%r"
-            % (distance, size, spread)
+            "%s parameters must be finite: distance=%r size=%r spread=%r"
+            % (what, distance, size, spread)
         )
     return distance, min(size, _MAX_STROKE_SIZE), spread
 
@@ -1044,9 +1047,10 @@ def draw_inner_glow(
     out towards the edge. ``choke`` is a percentage of ``size`` held at full
     strength before the fade. The softer technique fades along the blur
     :py:func:`draw_inner_shadow` uses, the ``precise`` one linearly with the
-    distance to the edge. ``glow_range`` is the percentage of the fade the
-    contour is spread over. The result is ``(height, width, 1)`` and never
-    exceeds ``shape``.
+    distance to the edge, read at each pixel's centre. ``glow_range`` is the
+    percentage of the fade the contour is spread over. The canvas past
+    ``viewport`` counts as outside the layer under either technique. The
+    result is ``(height, width, 1)`` and never exceeds ``shape``.
     """
     _require_scipy("Inner glow effects")
     if not all(math.isfinite(value) for value in (size, choke, glow_range)):
@@ -1058,7 +1062,9 @@ def draw_inner_glow(
     size = max(float(size), 0.0)
     if precise:
         grow = size * min(max(float(choke), 0.0), 100.0) / 100.0
-        depth = -_signed_distance(alpha, size + 1.0)
+        # A ring of clear pixels puts an edge at the canvas, as the blur's
+        # ``outside`` does for the softer technique.
+        depth = -_signed_distance(np.pad(alpha, 1), size + 1.0)[1:-1, 1:-1]
         fade = max(size - grow, 1e-3)
         matte = np.clip((size - depth) / fade, 0.0, 1.0).astype(np.float32)
     else:
