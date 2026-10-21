@@ -13,40 +13,45 @@ Changelog
 - [fix] A drop shadow layer effect is now rendered when a document is
   composited from its layers, instead of being dropped. Distance, size,
   spread, contour, global light, opacity, blend mode and the layer knockout
-  are honoured; noise is read but not applied, and the blur approximates
-  Photoshop's. Needs ``scipy``, as a stroke effect does (#679)
-- [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
-  jitter (#679)
+  are honoured; noise is not applied and the blur approximates Photoshop's
+  (#679)
+- [fix] Backwards-incompatible: ``OuterGlow.spread`` returns the glow's
+  Spread value instead of its jitter (#679)
 - [fix] An outer glow layer effect is now rendered when a document is
   composited from its layers, instead of being dropped. Size, spread,
   technique, range, contour, a solid or gradient colour, opacity and blend
-  mode are honoured; noise and jitter are read but not applied, and the
-  blur and range approximate Photoshop's. Needs ``scipy`` (#680)
+  mode are honoured; noise and jitter are not applied, and the blur and
+  range approximate Photoshop's (#382, #680)
 - [fix] Inner shadow and inner glow layer effects are now rendered when a
   document is composited from its layers. Solid colours only: a gradient
-  glow is still dropped, and noise is read but not applied. Needs ``scipy``
+  glow is still dropped, and noise is not applied
 - [fix] Satin and bevel/emboss layer effects are now rendered when a document
   is composited from its layers. All bevel styles but stroke emboss are drawn;
   the chisel soft technique, the shape contour and the texture are
-  approximated or left out, and the blurs approximate Photoshop's. Needs
-  ``scipy``
-- [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
-  the effect uses global light
+  approximated or left out (#379)
+- [fix] Backwards-incompatible: without ``scipy``, compositing a layer with a
+  drop shadow, outer glow, inner shadow, inner glow, satin or bevel raises
+  ``ImportError``, as a stroke effect does, instead of leaving the effect
+  out. Install ``psd-tools[composite]`` to render them
+- [fix] Backwards-incompatible: ``BevelEmboss.altitude`` returns the
+  document's global altitude when the effect uses global light
 - [fix] A gradient's ramp spans the line through its box at the gradient's
   angle, so a vertical gradient on a wide layer is no longer a flat band; the
-  offset, stop midpoints, smoothness, "align with layer" and the perceptual
-  and linear interpolation methods (``gs99``) are honoured. Every gradient
-  overlay, fill layer and gradient stroke renders differently
-- [api] ``GradientOverlay`` and ``PatternOverlay`` default ``scale`` to 100 and
-  ``aligned`` to True where the descriptor omits them, as Photoshop does.
+  offset, stop midpoints, smoothness, "align with layer", the interpolation
+  method (``gs99``) and a hard edge between stops at one location are
+  honoured. Every gradient overlay, fill layer, gradient stroke and gradient
+  outer glow renders differently
+- [api] Backwards-incompatible: ``GradientOverlay`` and ``PatternOverlay``
+  default ``scale`` to 100 rather than 1, and ``aligned`` to True rather than
+  False, where the descriptor omits them, as Photoshop does.
   ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
-  ``interpolation``, the ``gs99`` method as a new ``GradientInterpolation`` enum
+  ``interpolation``, the ``gs99`` method as a new ``GradientInterpolation``
+  enum; ``SMOOTH`` is read but renders as classic
 - [fix] The compositor renders channel mixer, black & white, colour balance
   and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
-  grayscale and CMYK documents, instead of skipping them. Channel mixer is
-  exact, black & white is exact without its tint; gradient maps interpolate
-  classic, linear and perceptual gradients; colour balance midtones and
-  vibrance are fitted to Photoshop output
+  grayscale and CMYK documents, instead of skipping them. Black & white's
+  tint is not applied, and colour balance midtones and vibrance approximate
+  Photoshop's
 - [fix] An adjustment inside a pass-through group that carries an enabled
   layer style stays within the group, as in Photoshop, instead of passing
   through to the layers beneath

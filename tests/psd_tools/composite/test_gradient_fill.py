@@ -29,6 +29,8 @@ from psd_tools.terminology import Enum, Key, Klass, Type, Unit
 
 from ..utils import full_name
 
+pytest.importorskip("scipy")
+
 BLACK = (0.0, 0.0, 0.0)
 WHITE = (255.0, 255.0, 255.0)
 
@@ -108,6 +110,26 @@ def _grey(desc: Descriptor, width: int, height: int) -> np.ndarray:
     color, _ = paint.draw_gradient_fill((0, 0, width, height), ColorMode.RGB, desc)
     assert color is not None and color.shape == (height, width, 3)
     return color[..., 0]
+
+
+def test_two_stops_at_one_location_make_a_hard_edge() -> None:
+    """The segment into the location ends on the first, the one out starts on the second.
+
+    At the gradient's end too, where the last stop is the colour from there on.
+    """
+    edged = _gradient(
+        stops=[_stop(BLACK, 0), _stop(WHITE, 2048), _stop(BLACK, 2048)]
+        + [_stop(WHITE, 4096)]
+    )
+    grey = _grey(edged, 101, 1)[0]
+    assert np.allclose(grey[:50], np.arange(50) / 50, atol=1e-3)
+    assert np.allclose(grey[50:], np.arange(51) / 50, atol=1e-3)
+
+    ending = _gradient(stops=[_stop(BLACK, 0), _stop(WHITE, 4096), _stop(BLACK, 4096)])
+    grey = _grey(ending, 101, 1)[0]
+    assert np.isfinite(grey).all()
+    assert grey[99] == pytest.approx(0.99, abs=1e-3)
+    assert grey[100] == pytest.approx(0.0, abs=1e-3)
 
 
 def test_a_vertical_ramp_spans_the_height_of_a_wide_box() -> None:

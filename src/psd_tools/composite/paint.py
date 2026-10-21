@@ -577,9 +577,9 @@ def _collect_stops(
 ) -> tuple[list[float], list[np.ndarray], list[float]]:
     """Collect gradient stop (location, value, midpoint) triples in ramp order.
 
-    Co-located stops keep the last one listed. A stop's ``Mdpn`` is where, as
-    a fraction of the segment that ends at it, the blend from the previous
-    stop is halfway.
+    Co-located stops are all kept, in the order listed, so they make a hard
+    edge. A stop's ``Mdpn`` is where, as a fraction of the segment that ends
+    at it, the blend from the previous stop is halfway.
     """
     triples = sorted(
         (
@@ -592,18 +592,9 @@ def _collect_stops(
         ),
         key=lambda triple: triple[0],
     )
-    X: list[float] = []
-    Y: list[np.ndarray] = []
-    M: list[float] = []
-    for location, value, midpoint in triples:
-        if X and X[-1] == location:
-            logger.debug("Duplicate stop at %s", location)
-            X.pop()
-            Y.pop()
-            M.pop()
-        X.append(location)
-        Y.append(value)
-        M.append(midpoint)
+    X = [location for location, _, _ in triples]
+    Y = [value for _, value, _ in triples]
+    M = [midpoint for _, _, midpoint in triples]
     if not X:
         raise ValueError("Gradient has no stops.")
     if len(X) == 1:
@@ -626,12 +617,16 @@ def _blend_stops(
     midpoint and linearly on to the end; a midpoint on either end of its
     segment is ignored, as Photoshop's dialog cannot author one. Smoothness
     then eases the blend towards a smoothstep, with 100% landing halfway
-    between the two.
+    between the two. A segment of no width is a hard edge: the colour up to
+    its location is the first stop's, and from it the last's.
     """
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
     k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(X) - 2)
-    u = np.clip((t - locations[k]) / (locations[k + 1] - locations[k]), 0.0, 1.0)
+    width = locations[k + 1] - locations[k]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        u = np.where(width > 0.0, (t - locations[k]) / width, t >= locations[k])
+    u = np.clip(u, 0.0, 1.0)
     m = np.asarray(M)[k + 1]
     with np.errstate(divide="ignore", invalid="ignore"):
         bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
@@ -684,8 +679,8 @@ _BlendSpace = tuple[
 ]
 
 # ``gs99`` methods that blend somewhere other than the document's own arrays:
-# perceptual in Oklab, linear in linear-light sRGB. Classic, and a missing or
-# unknown key, blend the canvas values directly.
+# perceptual in Oklab, linear in linear-light sRGB. Classic, smooth, which is
+# not modelled, and a missing or unknown key blend the canvas values directly.
 _BLEND_SPACES: dict[bytes, _BlendSpace] = {
     GradientInterpolation.PERCEPTUAL.value: (_srgb_to_oklab, _oklab_to_srgb),
     GradientInterpolation.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),

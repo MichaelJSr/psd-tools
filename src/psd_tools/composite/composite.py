@@ -341,14 +341,18 @@ def _cast_bbox(
 ) -> tuple[int, int, int, int]:
     """The box a layer's silhouette can cover, which is what casts its shadow.
 
-    A layer's own box, except for a group: its silhouette is its composited
-    contents, effects included, and a child's stroke or shadow runs past the
-    group's box, which is the union of its children's own. The group's
-    content box is every box those contents paint on (#808).
+    A layer's own box, grown by a vector stroke that may be redrawn past it,
+    except for a group: its silhouette is its composited contents, effects
+    included, and a child's stroke or shadow runs past the group's box, which
+    is the union of its children's own. The group's content box is every box
+    those contents paint on (#808).
     """
     if layer.is_group():
         return _content_bbox(layer, memo)
-    return layer.bbox
+    bbox = layer.bbox
+    if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+        return bbox
+    return _vector_stroke_reach(layer)
 
 
 def _beneath_reach(
@@ -2169,6 +2173,15 @@ class Compositor:
             and layer.stroke.enabled
         )
 
+    def _drops_fill(self, layer: Layer) -> bool:
+        """Whether this layer is redrawn with its fill switched off.
+
+        A layer read from stored pixels has the fill state in them already.
+        """
+        return bool(
+            (self._force or not layer.has_pixels()) and utils.is_fill_disabled(layer)
+        )
+
     def _get_object(
         self, layer: Layer
     ) -> tuple[
@@ -2236,7 +2249,7 @@ class Compositor:
                 shape_s = bounded
             return color, shape, alpha, (shape_s * uncovered, alpha_s * uncovered)
 
-        if fill_off and (self._force or not layer.has_pixels()):
+        if self._drops_fill(layer):
             shape, alpha = shape * 0.0, alpha * 0.0
         return color, shape, alpha, None
 
@@ -2643,10 +2656,12 @@ class Compositor:
         """What casts the layer's drop shadow or outer glow, on ``viewport``.
 
         How opaque the layer is, before its opacity and fill opacity, and
-        under its mask: an object's own coverage, and a group's composited
-        alpha, so a child faded to nothing casts nothing. Not the outline of
-        a vector mask, which a stroke follows under ``force``: on a pixel
-        layer that would cast a shadow from the mask's empty margin.
+        under its mask: an object's coverage as :py:meth:`_get_object` paints
+        it, a redrawn vector stroke included and a fill switched off left
+        out, and a group's composited alpha, so a child faded to nothing
+        casts nothing. Not the outline of a vector mask, which a stroke
+        follows under ``force``: on a pixel layer that would cast a shadow
+        from the mask's empty margin.
 
         Read afresh on ``viewport`` rather than taken from the resolved
         source, which :py:meth:`_trace_shape` pastes from where it can. Both
@@ -2657,11 +2672,30 @@ class Compositor:
         as :py:meth:`_get_group_shape` does for a stroke.
         """
         mask = self._get_mask(layer, viewport)
-        own = (
-            self._get_group_shape(layer, viewport, alpha=True)
-            if isinstance(layer, GroupMixin)
-            else self._get_object_shape(layer, viewport)
-        )
+        if isinstance(layer, GroupMixin):
+            own = self._get_group_shape(layer, viewport, alpha=True)
+        elif self._has_redrawn_stroke(layer):
+            # The stroke is painted on this compositor's viewport, so it is
+            # redrawn by one on ``viewport``.
+            height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+            compositor = Compositor(
+                viewport,
+                np.zeros((height, width, self._channels), dtype=np.float32),
+                np.zeros((height, width, 1), dtype=np.float32),
+                force=self._force,
+                widen=self._widen,
+                color_mode=self._color_mode,
+                cache=self._cache,
+            )
+            _, _, own, stroke = compositor._get_object(layer)
+            if stroke is not None:
+                stroke_mask = self._get_mask(layer, viewport, clip_to_path=False)
+                return utils.clip(own * mask + stroke[1] * stroke_mask)
+        elif self._drops_fill(layer):
+            height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+            return np.zeros((height, width, 1), dtype=np.float32)
+        else:
+            own = self._get_object_shape(layer, viewport)
         return utils.clip(own * mask)
 
     def _knockout_shape(
@@ -2920,11 +2954,11 @@ class Compositor:
         no further than the reach past the viewport, since nothing beyond that
         reaches back into view. Raises as :py:func:`inner_bbox` does.
         """
-        max_alloc = layer._psd._max_alloc_bytes
-        cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        return utils.intersect(
-            inner_bbox(cast_from, reach, max_alloc),
-            inner_bbox(self._viewport, reach, max_alloc),
+        return inner_bbox(
+            _cast_bbox(layer, self._cache.content_bboxes),
+            reach,
+            layer._psd._max_alloc_bytes,
+            within=self._viewport,
         )
 
     def _add_satins(self, layer: Layer, canvas: _EffectCanvas) -> None:

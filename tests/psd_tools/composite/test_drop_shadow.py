@@ -38,6 +38,8 @@ from psd_tools.terminology import Enum, Key, Klass, Type
 from ..utils import full_name
 from .test_composite import _mse
 
+pytest.importorskip("scipy")
+
 logger = logging.getLogger(__name__)
 
 
@@ -738,6 +740,31 @@ def test_a_masked_pixel_layer_casts_its_shadow_from_its_pixels(force: bool) -> N
     # Left of the ellipse, where only its shadow can be: opaque, faded by the
     # layer's own opacity.
     assert float(alpha[40, 4, 0]) == pytest.approx(layer.opacity / 255.0)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "stroke-center.psd",
+        "stroke-center-no-fill.psd",
+        "stroke-outer.psd",
+        "stroke-outer-no-fill.psd",
+    ],
+)
+def test_a_redrawn_vector_stroke_casts_the_shadow_its_pixels_do(filename: str) -> None:
+    """The silhouette is what the layer paints, its vector stroke included.
+
+    Each file is a 10 px stroke on a 40 x 40 rectangle, fill on and off,
+    authored in Photoshop, so its stored pixels hold the stroke and the fill
+    state. Redrawn under ``force``, the layer casts the shadow they do.
+    """
+    pytest.importorskip("aggdraw")
+    psd = PSDImage.open(full_name(filename))
+    layer = psd[1]
+    _forge_shadow(layer, angle=0.0, Blur=0.0, Distance=6.0, Opacity=100.0)
+    stored = _alone(layer, psd.viewbox)
+    redrawn = _alone(layer, psd.viewbox, force=True)
+    assert np.abs(redrawn - stored).max() <= 1 / 255 + 1e-6
 
 
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:

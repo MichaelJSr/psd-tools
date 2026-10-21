@@ -90,7 +90,7 @@ import numpy as np
 from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite import paint
 from psd_tools.composite._compat import HAS_SCIPY
-from psd_tools.composite.utils import divide
+from psd_tools.composite.utils import divide, intersect
 from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key
@@ -1247,7 +1247,11 @@ def glow_paint(
     along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
-    colors, opacities = paint._make_gradient_color(color_mode, desc[Key.Gradient])
+    colors, opacities = paint._make_gradient_color(
+        color_mode,
+        desc[Key.Gradient],
+        getattr(desc.get(paint._INTERPOLATION_KEY), "enum", None),
+    )
     if colors is None:
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)
@@ -1377,20 +1381,40 @@ def inner_bbox(
     bbox: tuple[int, int, int, int],
     reach: float,
     max_alloc_bytes: AllocBudget | None = None,
+    within: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
     """The canvas a satin or a bevel is drawn on: ``bbox`` grown by ``reach``.
 
     The silhouette is read on this box, so that a blur or an offset near the
     viewport's edge sees the layer past it rather than an edge that is not
     there (#804). The two pixels added on top are the blur's antialiased
-    fringe and the offset's interpolation. Checked against the per-axis limit
-    and ``max_alloc_bytes`` as :py:func:`drop_shadow_bbox` is, raising
-    :class:`ValueError`. An empty ``bbox`` is returned untouched.
+    fringe and the offset's interpolation. ``within``, when given, holds the
+    canvas to that box grown the same way, and the checks are made on what is
+    left. Checked against the per-axis limit and ``max_alloc_bytes`` as
+    :py:func:`drop_shadow_bbox` is, raising :class:`ValueError`. An empty
+    ``bbox`` is returned untouched, or as ``(0, 0, 0, 0)`` with ``within``.
     """
-    if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+    empty = bbox[0] >= bbox[2] or bbox[1] >= bbox[3]
+    if within is not None and (
+        empty or within[0] >= within[2] or within[1] >= within[3]
+    ):
+        return (0, 0, 0, 0)
+    if empty:
         return bbox
     margin = math.ceil(max(reach, 0.0)) + 2
     grown = (bbox[0] - margin, bbox[1] - margin, bbox[2] + margin, bbox[3] + margin)
+    if within is not None:
+        grown = intersect(
+            grown,
+            (
+                within[0] - margin,
+                within[1] - margin,
+                within[2] + margin,
+                within[3] + margin,
+            ),
+        )
+        if grown == (0, 0, 0, 0):
+            return grown
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     check_pixel_size(
         width,

@@ -525,8 +525,12 @@ def _gradient_map_data(
     method: bytes = b"Gcls",
     reversed: int = 0,
     mode: int = 0,
+    smoothness: int = 0,
 ) -> GradientMapData:
-    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops."""
+    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops.
+
+    Its blend is linear unless ``smoothness`` says, 4096 being 100%.
+    """
     color_stops = [
         ColorStop(
             location=location,
@@ -537,7 +541,11 @@ def _gradient_map_data(
         for location, midpoint, rgb in stops
     ]
     block = GradientMapData(
-        version=3, method=method, is_reversed=reversed, interpolation=4096, mode=mode
+        version=3,
+        method=method,
+        is_reversed=reversed,
+        interpolation=smoothness,
+        mode=mode,
     )
     block.color_stops = color_stops
     block.transparency_stops = [
@@ -620,6 +628,32 @@ def test_gradient_map_midpoint_is_where_the_blend_reaches_one_half() -> None:
     out = apply_gradientmap(image, ColorMode.RGB, layer)
     assert np.allclose(out[0, 0], 0.5, atol=1 / 255)
     assert np.allclose(out[0, 1], 0.75, atol=1 / 255)
+
+
+def test_gradient_map_smoothness_eases_the_blend_as_a_gradient_fill_does() -> None:
+    """At 100% the blend is halfway from linear to a smoothstep."""
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], smoothness=4096)
+    )
+    t = np.array([0.25, 0.5, 0.75], dtype=np.float32)
+    image = np.repeat(t[None, :, None], 3, axis=2)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    eased = t + ((3 - 2 * t) * t * t - t) / 2
+    assert np.allclose(out[0, :, 0], eased, atol=1 / 255)
+    assert not np.allclose(out[0, :, 0], t, atol=1 / 255)
+
+
+def test_gradient_map_reads_a_grayscale_stop_as_ink() -> None:
+    """A grayscale stop's component runs 0 to 10000, as ink: 10000 is black."""
+    data = _gradient_map_data([(0, 50, _BLACK), (2048, 50, _BLACK), (4096, 50, _BLACK)])
+    for stop, ink in zip(data.color_stops, (10000, 5000, 0), strict=True):
+        stop.mode = 8
+        stop.color = (ink, 0, 0, 0)
+    layer = _gradient_map_layer(data)
+    t = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+    image = np.repeat(t[None, :, None], 3, axis=2)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    assert np.allclose(out[0], np.repeat(t[:, None], 3, axis=1), atol=1 / 255)
 
 
 def test_gradient_map_perceptual_blends_in_oklab() -> None:

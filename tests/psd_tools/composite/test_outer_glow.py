@@ -21,7 +21,7 @@ import pytest
 from psd_tools.api.effects import OuterGlow
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import composite, effects, utils
+from psd_tools.composite import composite, effects, paint, utils
 from psd_tools.composite.composite import (
     Compositor,
     _beneath_reach,
@@ -36,6 +36,8 @@ from psd_tools.terminology import Enum, Key, Klass, Type
 from ..utils import full_name
 from .test_composite import _mse
 from .test_drop_shadow import _alone, _around, _contour, _disc, _masks_card
+
+pytest.importorskip("scipy")
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +364,20 @@ def test_a_gradient_glow_runs_from_its_first_stop_at_the_edge_to_its_last() -> N
     color, _ = _paint(desc, falloff)
     assert np.allclose(color[0, 0], colors[-1], atol=1e-6)
     assert np.allclose(color[0, 1], colors[0], atol=1e-6)
+
+
+@pytest.mark.parametrize("method", [b"Perc", b"Lnr "])
+def test_a_gradient_glow_blends_by_its_interpolation_method(method: bytes) -> None:
+    """``gs99`` picks the space the stops blend in, as for a gradient overlay."""
+    desc, _, _ = _gradient_glow()
+    falloff = np.array([[0.75, 0.5, 0.25]], dtype=np.float32)
+    classic, _ = _paint(desc, falloff)
+    desc[b"gs99"] = Enumerated(typeID=b"gradientInterpolationMethodType", enum=method)
+    color, _ = _paint(desc, falloff)
+    expected, _ = paint._make_gradient_color(ColorMode.RGB, desc[Key.Gradient], method)
+    assert expected is not None
+    assert np.allclose(color[0], expected(1.0 - falloff[0]), atol=1e-6)
+    assert not np.allclose(color, classic, atol=1e-3)
 
 
 def test_a_gradients_transparency_holds_the_coverage_under_it() -> None:

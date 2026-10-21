@@ -27,6 +27,8 @@ from ..utils import full_name
 from .test_composite import _mse
 from .test_drop_shadow import _contour
 
+pytest.importorskip("scipy")
+
 _SQUARE = (0, 0, 40, 40)
 
 
@@ -392,6 +394,27 @@ def test_a_cut_through_a_wide_chisel_renders_what_the_whole_does(
     for viewport in ((60, 90, 75, 110), (80, 90, 100, 110)):
         left, top, right, bottom = viewport
         assert np.array_equal(rendered(viewport), whole[top:bottom, left:right])
+
+
+@pytest.mark.parametrize("kind", ["satin", "bevelemboss"])
+def test_the_budget_is_charged_for_the_canvas_the_effect_is_drawn_on(
+    kind: str,
+) -> None:
+    """Not for the whole viewport grown by the reach, which is never allocated.
+
+    The budget lets the document composite, but not an effect canvas as wide
+    as the viewport; each layer the effect is on is far smaller.
+    """
+
+    def rendered(enabled: bool) -> np.ndarray:
+        psd = PSDImage.open(full_name("layer_effects.psd"))
+        psd.max_alloc_bytes = psd.width * psd.height * effects._INNER_BYTES // 2
+        for layer in psd.descendants():
+            for effect in layer.effects.find(kind):
+                effect.descriptor[Key.Enabled] = enabled
+        return _rendered(psd)
+
+    assert not np.array_equal(rendered(True), rendered(False))
 
 
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:

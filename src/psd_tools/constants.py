@@ -533,6 +533,7 @@ class GradientInterpolation(bytes, Enum):
     CLASSIC = b"Gcls"
     PERCEPTUAL = b"Perc"
     LINEAR = b"Lnr "
+    SMOOTH = b"Smoo"
 
 
 class StrokeFillType(bytes, Enum):

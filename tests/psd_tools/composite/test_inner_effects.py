@@ -25,6 +25,8 @@ from ..utils import full_name
 from .test_composite import _mse
 from .test_drop_shadow import _contour
 
+pytest.importorskip("scipy")
+
 
 def _disc(size: int, radius: float) -> np.ndarray:
     """A hard-edged disc centred on a ``size`` x ``size`` canvas."""
