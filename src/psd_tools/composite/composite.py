@@ -1,9 +1,10 @@
 """Composite implementation for layer rendering and blending."""
 
+import functools
 import logging
 import math
 import warnings
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple, Protocol, cast
 
@@ -1347,9 +1348,70 @@ class _OuterEffect(NamedTuple):
     # The effect's own opacity with the layer's already in it. The layer
     # opacity fades a layer's style along with the layer, which the inner
     # effects get from being composited inside the source it scales; an outer
-    # effect is not in that source, so it carries the factor itself.
-    opacity: float
+    # effect is not in that source, so it carries the factor itself. Per
+    # pixel for merged stroke bands painted at different opacities.
+    opacity: float | np.ndarray
     blend_mode: BlendMode
+
+
+class _StrokeBand(NamedTuple):
+    """A stroke effect's paint and coverage, measured before any is painted.
+
+    Or several bands as one: those of one blend mode are disjoint once each
+    is cut from under the ones above it, so they add, and one source carries
+    their summed coverage, the opacity each pixel is painted at and the
+    colour weighted by it -- see :py:func:`_merge_bands`.
+    """
+
+    color: np.ndarray
+    coverage: np.ndarray
+    # The part of ``coverage`` inside the boundary the band was traced from.
+    inside: np.ndarray
+    opacity: float | np.ndarray
+    blend_mode: BlendMode
+
+
+def _total(arrays: Iterable[np.ndarray]) -> np.ndarray:
+    """The arrays summed, without stacking them."""
+    return functools.reduce(np.add, arrays)
+
+
+def _merge_bands(bands: Sequence[_StrokeBand]) -> list[_StrokeBand]:
+    """The bands as one per blend mode, bottom first.
+
+    Composited one over the other, two bands that share a pixel would each
+    see the other's paint in the share it leaves: an opaque ring's outer edge
+    over the ring beneath it would let the backdrop through. Added into one
+    source they fill the pixel between them exactly. A lone band is handed
+    back as it is.
+    """
+    groups: dict[BlendMode, list[_StrokeBand]] = {}
+    for band in reversed(bands):
+        groups.setdefault(band.blend_mode, []).append(band)
+    merged: list[_StrokeBand] = []
+    for blend_mode, members in groups.items():
+        if len(members) == 1:
+            merged.append(members[0])
+            continue
+        coverage = np.minimum(_total(band.coverage for band in members), 1.0)
+        inside = np.minimum(_total(band.inside for band in members), 1.0)
+        weights = [band.coverage * band.opacity for band in members]
+        weight = _total(weights)
+        color = utils.divide(
+            _total(w * band.color for w, band in zip(weights, members, strict=True)),
+            weight,
+            fill=members[0].color,
+        )
+        merged.append(
+            _StrokeBand(
+                color,
+                coverage,
+                inside,
+                utils.divide(weight, coverage, fill=0.0),
+                blend_mode,
+            )
+        )
+    return merged
 
 
 class _EffectSink(Protocol):
@@ -1375,7 +1437,7 @@ class _EffectSink(Protocol):
         coverage: np.ndarray,
         color: np.ndarray,
         blend_mode: BlendMode,
-        opacity: float,
+        opacity: float | np.ndarray,
     ) -> None: ...
 
 
@@ -1471,7 +1533,7 @@ class _EffectCanvas:
         coverage: np.ndarray,
         color: np.ndarray,
         blend_mode: BlendMode,
-        opacity: float,
+        opacity: float | np.ndarray,
     ) -> None:
         """Paint an effect over the layer, inside its region.
 
@@ -1560,7 +1622,7 @@ class _AdjustmentCanvas:
         coverage: np.ndarray,
         color: np.ndarray,
         blend_mode: BlendMode,
-        opacity: float,
+        opacity: float | np.ndarray,
     ) -> None:
         """Composite an effect onto the canvas, inside the region."""
         if not coverage.any():
@@ -3755,7 +3817,16 @@ class Compositor:
         # this effect being unreadable. What is inside the second guard is the
         # drawing as well as the reading, so a stroke whose pattern data will
         # not decode is lost here too, rather than taking the document.
-        for effect in _readable(layer, "stroke"):
+        # Each band is cut from under the ones listed above it, whatever
+        # their opacity: Photoshop shows the backdrop through a faint stroke,
+        # not the next stroke down. So the bands are measured top first, in
+        # file order, and painted bottom first. Every band is measured from
+        # the same boundary, so on either side of it the bands are nested
+        # intervals: what the ones above claim of a pixel is the widest of
+        # them, on each side separately, and a band keeps what exceeds that.
+        bands: list[_StrokeBand] = []
+        claimed: tuple[np.ndarray, np.ndarray] | None = None
+        for effect in reversed(_readable(layer, "stroke")):
             try:
                 # Effect must happen at the layer viewport, grown so an outset
                 # or centered stroke has room for the part of itself that
@@ -3779,12 +3850,27 @@ class Compositor:
             color = paste(self._viewport, bbox, color)
             mask = paste(self._viewport, bbox, mask_in_bbox)
             inside = paste(self._viewport, bbox, inside_in_bbox)
+            outside = mask - inside
+            if claimed is None:
+                claimed = (inside, outside)
+            else:
+                claimed_inside, claimed_outside = claimed
+                claimed = (
+                    np.maximum(claimed_inside, inside),
+                    np.maximum(claimed_outside, outside),
+                )
+                inside = np.maximum(inside - claimed_inside, 0.0)
+                mask = inside + np.maximum(outside - claimed_outside, 0.0)
+            bands.append(_StrokeBand(color, mask, inside, opacity, blend_mode))
+
+        for band in _merge_bands(bands):
+            color, mask, inside, band_opacity, blend_mode = band
             # The two halves of the band go to different places, and an inset
             # or outset stroke is all of one of them -- only a centered stroke
             # is split. The rest of the band, not ``mask - inside``, so that
             # the two are exactly what was drawn however they divide.
             overlap = np.minimum(inside, canvas.region)
-            canvas.over(canvas.within(overlap), color, blend_mode, opacity)
+            canvas.over(canvas.within(overlap), color, blend_mode, band_opacity)
             # ``inside`` is inside the boundary the stroke was traced from,
             # which is the layer's own coverage only while the two are the
             # same shape. A stroke that traces the *mask* -- a fill layer's,
@@ -3798,5 +3884,7 @@ class Compositor:
             beside = np.minimum(mask - overlap, 1.0 - canvas.region)
             if beside.any():
                 outer.append(
-                    _OuterEffect(color, beside, opacity * canvas.opacity, blend_mode)
+                    _OuterEffect(
+                        color, beside, band_opacity * canvas.opacity, blend_mode
+                    )
                 )

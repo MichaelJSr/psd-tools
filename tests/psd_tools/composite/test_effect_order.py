@@ -115,15 +115,49 @@ def test_a_wider_first_listed_stroke_hides_the_one_under_it() -> None:
     np.testing.assert_allclose(_below(psd), [_BLUE] * 3, atol=1e-6)
 
 
-@pytest.mark.parametrize("opacity", [25.0, 50.0, 75.0])
-def test_a_faded_first_listed_stroke_is_composited_over_the_second(
+def _backdrop(psd: PSDImage) -> np.ndarray:
+    """The same rows as :py:func:`_below`, with the rectangle left out."""
+    color = composite(psd, layer_filter=lambda layer: layer.name != "Rectangle 1")[0]
+    return color[_BOTTOM : _BOTTOM + 3, _COLUMN]
+
+
+@pytest.mark.parametrize("opacity", [0.0, 25.0, 50.0, 75.0])
+def test_a_faded_first_listed_stroke_shows_the_backdrop_not_the_second(
     opacity: float,
 ) -> None:
-    """``t * first + (1 - t) * second`` where the two rings overlap."""
+    """The second ring is cut from under the first, whatever the first's opacity.
+
+    So ``t * first + (1 - t) * backdrop`` on the first row, and the second
+    ring only past it.
+    """
     psd, layer = _rectangle()
+    backdrop = _backdrop(psd)
     _strokes(layer, (1.0, _RED, opacity), (3.0, _BLUE, 100.0))
-    mixed = _over(opacity / 100.0, _RED, _BLUE)
+    mixed = _over(opacity / 100.0, _RED, tuple(backdrop[0]))
     np.testing.assert_allclose(_below(psd), [mixed, _BLUE, _BLUE], atol=1e-6)
+
+
+def test_a_wide_faded_first_listed_stroke_hides_the_narrow_one_under_it() -> None:
+    psd, layer = _rectangle()
+    backdrop = _backdrop(psd)
+    _strokes(layer, (3.0, _RED, 0.0), (1.0, _BLUE, 100.0))
+    np.testing.assert_allclose(_below(psd), backdrop, atol=1e-6)
+
+
+@pytest.mark.parametrize("opacity", [100.0, 50.0])
+def test_rings_that_meet_within_a_pixel_fill_it_between_them(opacity: float) -> None:
+    """A 1.5 px ring over a 3 px one: the second row is half of each.
+
+    The two bands add rather than composite one over the other, so no
+    backdrop shows between them; a faded first ring shows it only through
+    its own half.
+    """
+    psd, layer = _rectangle()
+    backdrop = _backdrop(psd)
+    _strokes(layer, (1.5, _RED, opacity), (3.0, _BLUE, 100.0))
+    first = _over(opacity / 100.0, _RED, tuple(backdrop[1]))
+    half = _over(0.5, first, _BLUE)
+    np.testing.assert_allclose(_below(psd)[1], half, atol=1e-6)
 
 
 @pytest.mark.parametrize(
