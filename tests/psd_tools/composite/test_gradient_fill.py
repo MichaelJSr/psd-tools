@@ -3,9 +3,9 @@
 A gradient's descriptor says where its ramp runs -- ``Angl``, ``Scl ``,
 ``Ofst``, ``Algn`` -- and how its stops blend -- ``Mdpn`` and the method, under
 ``gs99`` on an overlay and ``gradientsInterpolationMethod`` on a fill layer or
-stroke effect. The closed forms below are for a black-to-white gradient, whose rendered grey is
-the ramp position itself, on boxes whose aspect tells the width from the
-height.
+stroke effect. The closed forms below are for a black-to-white gradient, whose
+rendered grey is the ramp position itself, on boxes whose aspect tells the
+width from the height.
 """
 
 import math
@@ -310,6 +310,21 @@ def test_each_interpolation_method_blends_in_its_own_space(
 FILL_METHOD_KEY = b"gradientsInterpolationMethod"
 
 
+def test_an_unknown_method_under_gs99_yields_to_the_fill_layers_key() -> None:
+    """Both keys are read in order, skipping a value outside the enumeration."""
+    desc = _gradient(method=b"Smoo")
+    assert paint._interpolation_method(desc) is None
+    desc[FILL_METHOD_KEY] = Enumerated(
+        typeID=b"gradientInterpolationMethodType",
+        enum=GradientInterpolation.PERCEPTUAL.value,
+    )
+    assert paint._interpolation_method(desc) == GradientInterpolation.PERCEPTUAL.value
+    grey = _grey(desc, 101, 1)[0]
+    assert grey[50] == pytest.approx(
+        HALFWAY_GREY[GradientInterpolation.PERCEPTUAL.value], abs=0.002
+    )
+
+
 def _fill_layer(method: bytes | None) -> tuple[Layer, Descriptor]:
     """The fixture's 32x32 red foreground-to-transparent fill at 90 degrees.
 
@@ -485,6 +500,22 @@ def test_stops_native_to_a_non_rgb_canvas_keep_the_canvas_blend(
     ends = [np.array(paint._get_color(color_mode, stop)) for stop in stops]
     assert np.allclose(perceptual[0, 0], ends[0], atol=1e-6)
     assert np.allclose(perceptual[0, 100], ends[1], atol=1e-6)
+    # The transparency stops carry no colour, so they are eased all the same.
+    fade = [_opacity_stop(100.0, 0), _opacity_stop(0.0, 4096)]
+    _, classic_shape = paint.draw_gradient_fill(
+        (0, 0, 101, 1), color_mode, _gradient(stops=stops, transparency=fade)
+    )
+    _, eased_shape = paint.draw_gradient_fill(
+        (0, 0, 101, 1),
+        color_mode,
+        _gradient(
+            stops=stops,
+            transparency=fade,
+            method=GradientInterpolation.PERCEPTUAL.value,
+        ),
+    )
+    assert classic_shape is not None and eased_shape is not None
+    assert np.allclose(eased_shape, _eased(classic_shape), atol=1e-5)
 
 
 def test_rgb_stops_in_a_cmyk_document_still_blend_perceptually() -> None:
@@ -499,6 +530,36 @@ def test_rgb_stops_in_a_cmyk_document_still_blend_perceptually() -> None:
     assert np.allclose(perceptual[0, 0], classic[0, 0], atol=1e-6)
     assert np.allclose(perceptual[0, 100], classic[0, 100], atol=1e-6)
     assert not np.allclose(perceptual[0, 50], classic[0, 50], atol=0.01)
+
+
+def _grey_stop(black: float, location: int) -> Descriptor:
+    """A ``Grsc`` stop; ``Gry `` is percent black."""
+    color = Descriptor(classID=Klass.Grayscale.value)
+    color[Key.Gray] = Double(black)
+    stop = _stop(BLACK, location)
+    stop[Key.Color] = color
+    return stop
+
+
+@pytest.mark.parametrize(
+    "method",
+    [GradientInterpolation.PERCEPTUAL.value, GradientInterpolation.LINEAR.value],
+)
+def test_grey_stops_on_a_grayscale_canvas_blend_as_their_rgb_spelling_does(
+    method: bytes,
+) -> None:
+    """A grey survives the trip through sRGB, so how it is stored changes nothing."""
+    as_grey = [_grey_stop(100.0, 0), _grey_stop(0.0, 4096)]
+    from_grey, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1), ColorMode.GRAYSCALE, _gradient(stops=as_grey, method=method)
+    )
+    from_rgb, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1), ColorMode.GRAYSCALE, _gradient(method=method)
+    )
+    assert from_grey is not None and from_rgb is not None
+    assert from_grey.shape == (1, 101, 1)
+    assert np.allclose(from_grey, from_rgb, atol=1e-6)
+    assert from_grey[0, 50, 0] == pytest.approx(HALFWAY_GREY[method], abs=0.002)
 
 
 def _eased(opacity: np.ndarray) -> np.ndarray:

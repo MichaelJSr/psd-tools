@@ -500,11 +500,18 @@ def draw_gradient_fill(
     return color, shape
 
 
+_METHODS = frozenset(method.value for method in GradientInterpolation)
+
+
 def _interpolation_method(desc: Descriptor) -> bytes | None:
-    """The ``gs99`` method, or the one under a fill layer's or stroke's own key."""
+    """The ``gs99`` method, or the one under a fill layer's or stroke's own key.
+
+    A key holding a value outside :py:class:`GradientInterpolation` is skipped,
+    as ``Stroke.interpolation`` skips it.
+    """
     for key in (_INTERPOLATION_KEY, _FILL_INTERPOLATION_KEY):
         method = getattr(desc.get(key), "enum", None)
-        if method is not None:
+        if method in _METHODS:
             return method
     return None
 
@@ -727,12 +734,13 @@ _ALPHA_BLEND_SPACES: dict[bytes, _BlendSpace] = {
 }
 
 # The colour classes ``_get_color()`` lands in a canvas without a trip through
-# sRGB. Such a stop keeps the canvas blend: read as sRGB and converted back,
-# its inks or out-of-gamut Lab would not survive, even at the stop itself.
+# sRGB, and whose inks or out-of-gamut Lab a round trip would not keep, even
+# at the stop itself. Such a stop keeps the canvas blend. A grey stop on a
+# single-channel canvas also lands directly, but it survives the trip, so it
+# blends as its RGB spelling does.
 _NATIVE_STOP_CLASSES: dict[ColorMode, frozenset[bytes]] = {
     ColorMode.CMYK: frozenset({Klass.CMYKColor.value, Klass.Grayscale.value}),
     ColorMode.LAB: frozenset({Klass.LabColor.value}),
-    **dict.fromkeys(_SINGLE_CHANNEL_MODES, frozenset({Klass.Grayscale.value})),
 }
 
 
@@ -741,7 +749,10 @@ def _blends_as_srgb(color_mode: ColorMode, stops: Any) -> bool:
     native = _NATIVE_STOP_CLASSES.get(color_mode)
     if not native:
         return True
-    return all(stop.get(Key.Color).classID not in native for stop in stops)
+    # A stop with no colour is left to ``_get_color()`` to reject.
+    return all(
+        getattr(stop.get(Key.Color), "classID", None) not in native for stop in stops
+    )
 
 
 def _make_linear_gradient_color(
