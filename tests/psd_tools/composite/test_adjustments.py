@@ -3,13 +3,13 @@ import importlib
 import logging
 import struct
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pytest
 
 from psd_tools.api import adjustments
-from psd_tools.api.layers import Group
+from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import paint
 from psd_tools.composite.adjustments import (
@@ -207,6 +207,35 @@ def test_an_unrendered_adjustment_leaves_the_composite_alone_under_multiply() ->
     layer.blend_mode = BlendMode.MULTIPLY
     layer._data = _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], mode=1)
     assert psd.composite(force=True).tobytes() == expected.tobytes()
+
+
+def test_an_unrendered_adjustment_still_composites_its_clip_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its clip layers go over the unadjusted content, as over a neutral one.
+
+    ``adjustment_clipping.psd``'s ``Curves 3`` carries the clipped ``Curves
+    4``. With ``Curves 3`` not rendered the document reads as with it neutral;
+    hiding it hides ``Curves 4`` too, which reads differently.
+    """
+    psd = PSDImage.open(full_name("adjustments/adjustment_clipping.psd"))
+    carrier = next(layer for layer in psd if layer.name == "Curves 3")
+    assert [layer.name for layer in carrier.clip_layers] == ["Curves 4"]
+    apply_curves = composite_module.ADJUSTMENT_FUNC["curves"]
+
+    def made(result: Callable[[np.ndarray], np.ndarray | None]) -> Any:
+        def apply(img: np.ndarray, colormode: ColorMode, layer: Layer) -> Any:
+            if layer is carrier:
+                return result(img)
+            return apply_curves(img, colormode, layer)
+
+        monkeypatch.setitem(composite_module.ADJUSTMENT_FUNC, "curves", apply)
+        return psd.composite(force=True)
+
+    neutral = made(lambda img: img)
+    assert made(lambda img: None).tobytes() == neutral.tobytes()
+    carrier.visible = False
+    assert made(lambda img: None).tobytes() != neutral.tobytes()
 
 
 def test_an_absent_adjustment_block_leaves_the_composite_alone_under_multiply(
@@ -811,6 +840,40 @@ def test_gradient_map_midpoint_is_where_the_blend_reaches_one_half() -> None:
     out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out[0, 0], 0.5, atol=1 / 255)
     assert np.allclose(out[0, 1], 0.75, atol=1 / 255)
+
+
+@pytest.mark.parametrize("midpoint", [0, 100])
+def test_gradient_map_ignores_a_midpoint_on_either_end_of_its_segment(
+    midpoint: int,
+) -> None:
+    """At 0% or 100% the blend would be all at one end; it runs linearly instead."""
+    image = np.repeat(np.linspace(0.0, 1.0, 9, dtype=np.float32)[None, :, None], 3, 2)
+    linear = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)])
+    )
+    on_end = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, midpoint, _WHITE)])
+    )
+    expected = _applied(apply_gradientmap(image, ColorMode.RGB, linear))
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, on_end))
+    assert np.isfinite(out).all()
+    assert np.allclose(out, expected, atol=1 / 255)
+    assert np.allclose(out[0, :, 0], image[0, :, 0], atol=1 / 255)
+
+
+def test_gradient_map_with_every_stop_at_one_location_steps_as_a_fill_does() -> None:
+    """Below the location is the first stop, from it on the last, in map and fill alike."""
+    red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+    stops = [(2048, 50, red), (2048, 50, _BLACK), (2048, 50, blue)]
+    layer = _gradient_map_layer(_gradient_map_data(stops))
+    image = np.array([[[0.25] * 3, [0.5] * 3, [0.75] * 3]], dtype=np.float32)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
+    assert np.allclose(out[0], [red, blue, blue], atol=1 / 255)
+    fill = paint._blend_stops(
+        [0.5, 0.5, 0.5], [np.array(rgb) for _, _, rgb in stops], [0.5] * 3, 0.0
+    )
+    quarter = (len(fill) - 1) // 4
+    assert np.allclose(fill[[quarter, 2 * quarter, 3 * quarter]], [red, blue, blue])
 
 
 def test_gradient_map_perceptual_blends_in_oklab() -> None:

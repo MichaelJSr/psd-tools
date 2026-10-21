@@ -31,7 +31,12 @@ from psd_tools.api.layers import (
 )
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.api.utils import check_growth, check_pixel_size, get_color_channels
+from psd_tools.api.utils import (
+    UNLIMITED,
+    check_growth,
+    check_pixel_size,
+    get_color_channels,
+)
 from psd_tools.composite import paint, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
@@ -494,12 +499,12 @@ def _bevel_reach(
     """``layer.bbox`` grown to every box its bevels paint beside the layer on.
 
     An inner bevel stays inside the layer and adds nothing. Degrades as
-    :py:func:`_beneath_reach` does, except that no budget is checked here:
-    the canvas a bevel is drawn on is cut to the viewport first
-    (:py:meth:`Compositor._inner_box`) and only that is checked, so checking
-    the whole grown box would leave this narrower than what is drawn. The
-    size and soften are held to what Photoshop writes, so the box is bounded
-    without one.
+    :py:func:`_beneath_reach` does, except that no budget is checked here,
+    the document's or the module's: the canvas a bevel is drawn on is cut to
+    the viewport first (:py:meth:`Compositor._inner_box`) and only that is
+    checked, so checking the whole grown box would leave this narrower than
+    what is drawn. The size and soften are held to what Photoshop writes, so
+    the box is bounded without one.
     """
     bbox = _reach_base(layer)
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
@@ -519,6 +524,7 @@ def _bevel_reach(
                 inner_bbox(
                     _cast_bbox(layer, memo),
                     bevel_reach(size, soften, _bevel_technique(bevel)),
+                    UNLIMITED,
                 ),
             )
         except _UNREADABLE as error:
@@ -2329,11 +2335,14 @@ class Compositor:
             content_alpha = self._alpha
             content = self._color
         transformed_color = adjustment_fn(content, colormode, layer)
-        # An adjustment that is not rendered is not blended either: the
-        # content would blend with itself.
+        # An adjustment that is not rendered leaves the content as it is; its
+        # clip layers still go over that, as they go over a neutral one. With
+        # none there is nothing to blend: the content would blend with itself.
         if transformed_color is None:
             logger.debug("Adjustment layer not rendered: %s", layer.kind)
-            return
+            if not layer.has_clip_layers():
+                return
+            transformed_color = content
 
         if layer.has_clip_layers():
             transformed_color = self._apply_clip_layers(

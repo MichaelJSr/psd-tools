@@ -694,8 +694,13 @@ def _blend_stops(
     k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(X) - 2)
     span = locations[k + 1] - locations[k]
     with np.errstate(divide="ignore", invalid="ignore"):
-        # A sample falls in a segment of no width only on its end stop.
-        u = np.where(span > 0.0, np.clip((t - locations[k]) / span, 0.0, 1.0), 1.0)
+        # A sample falls in a segment of no width only on its end stop, unless
+        # every stop is there: then those before it take the first stop.
+        u = np.where(
+            span > 0.0,
+            np.clip((t - locations[k]) / span, 0.0, 1.0),
+            (t >= locations[k]).astype(np.float64),
+        )
     f = _segment_blend(u, np.asarray(M)[k + 1], smoothness)
     values = np.asarray(Y, dtype=np.float64)
     f = f.reshape((-1,) + (1,) * (values.ndim - 1))

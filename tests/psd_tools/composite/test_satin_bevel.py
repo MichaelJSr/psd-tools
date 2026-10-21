@@ -10,6 +10,7 @@ a closed form.
 
 import copy
 import importlib
+import logging
 import math
 from collections.abc import Callable
 from typing import Any
@@ -17,6 +18,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from psd_tools.api import utils as api_utils
 from psd_tools.api.effects import BevelEmboss
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
@@ -513,13 +515,17 @@ def test_inner_bbox_is_checked_inside_what_it_is_kept_within() -> None:
         effects.inner_bbox((0, 0, 10_000, 10_000), 5.0, budget)
 
 
-def test_a_bevels_reach_is_measured_under_any_budget() -> None:
+@pytest.mark.parametrize("budget", ["document", "module"])
+def test_a_bevels_reach_is_measured_under_any_budget(
+    monkeypatch: pytest.MonkeyPatch, budget: str
+) -> None:
     """Measuring stays as wide as drawing, never narrower.
 
     The canvas is checked when it is drawn, cut to the viewport; the whole
     box grown by the reach is not allocated, so a budget it is over still
-    grows the measured reach by it. Cut short, a group canvas holding the
-    layer would clip the bevel its compositor still draws.
+    grows the measured reach by it, the document's own or the module's that
+    stands in without one. Cut short, a group canvas holding the layer would
+    clip the bevel its compositor still draws.
     """
     compositing = importlib.import_module("psd_tools.composite.composite")
     psd = PSDImage.open(full_name("layer_effects.psd"))
@@ -530,11 +536,45 @@ def test_a_bevels_reach_is_measured_under_any_budget() -> None:
     technique = bevel.bevel_type or BevelTechnique.SOFT_MATTE
     grown = effects.inner_bbox(layer.bbox, effects.bevel_reach(size, soften, technique))
     assert grown != layer.bbox
-    psd.max_alloc_bytes = (grown[2] - grown[0]) * (grown[3] - grown[1]) * (
-        effects._INNER_BYTES
-    ) - 1
+    over = (grown[2] - grown[0]) * (grown[3] - grown[1]) * effects._INNER_BYTES - 1
+    if budget == "document":
+        psd.max_alloc_bytes = over
+    else:
+        assert psd.max_alloc_bytes is None
+        monkeypatch.setattr(api_utils, "MAX_ALLOC_BYTES", over)
     assert compositing._bevel_reach(layer) == grown
     assert compositing._effect_reach(layer) == grown
+
+
+@pytest.mark.parametrize("kind", ["satin", "bevelemboss"])
+def test_an_inner_effects_canvas_out_of_proportion_to_its_layer_is_dropped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, kind: str
+) -> None:
+    """The reach is the file's, so the canvas it grows is held in proportion.
+
+    The geometry is forged past what a descriptor is held to, so that the
+    canvas, cut to the viewport, still runs over the growth floor under an
+    unlimited budget; the effect is dropped and the rest is drawn.
+    """
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    reach = 2400.0
+    if kind == "satin":
+        monkeypatch.setattr(compositing, "satin_geometry", lambda desc: (reach, 0.0))
+    else:
+        monkeypatch.setattr(compositing, "bevel_reach", lambda *args: reach)
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    psd.max_alloc_bytes = "unlimited"
+    with caplog.at_level(logging.DEBUG, logger="psd_tools.composite.composite"):
+        dropped = _rendered(psd, _AROUND[kind])
+    assert (
+        "Cannot measure a %s" % ("satin" if kind == "satin" else "bevel") in caplog.text
+    )
+    assert "allowed for it" in caplog.text
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    for layer in psd.descendants():
+        for effect in layer.effects.find(kind):
+            effect.descriptor[Key.Enabled] = False
+    assert np.array_equal(dropped, _rendered(psd, _AROUND[kind]))
 
 
 def test_a_nested_bevelled_group_is_composited_once_for_its_silhouette(

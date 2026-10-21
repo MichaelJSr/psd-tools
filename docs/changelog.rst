@@ -45,10 +45,10 @@ Changelog
   Spread value instead of its jitter (#679)
 - [fix] An outer glow layer effect is now rendered when a document is
   composited from its layers, instead of being dropped. Size, spread,
-  technique, range, contour, a solid or gradient colour, opacity and blend
-  mode are honoured; noise and jitter are read but not applied, and the
-  blur and range approximate Photoshop's. Without ``scipy`` it is skipped
-  with a warning (#382, #680)
+  technique, range, contour, a solid or gradient colour, a gradient's method
+  (``gs99``), opacity and blend mode are honoured; noise and jitter are read
+  but not applied, and the blur and range approximate Photoshop's. Without
+  ``scipy`` it is skipped with a warning (#382, #680)
 - [fix] A gradient stop whose location or opacity is out of range or not a
   number is held to 0-100%, as a stop's colour is, and so is a noise
   gradient's transparency. A gradient fill, overlay or stroke with one could
@@ -70,7 +70,7 @@ Changelog
   angle, so a vertical gradient on a wide layer is no longer a flat band, and
   its offset, stop midpoints, smoothness, hard edges, "align with layer" and
   method (classic, perceptual or linear) are honoured. Every gradient overlay,
-  fill layer and gradient stroke renders differently
+  fill layer, gradient stroke and gradient outer glow renders differently
 - [api] ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
   ``method``, the gradient's method as a new ``GradientMethod`` enum.
   Backwards-incompatible: ``GradientOverlay`` and ``PatternOverlay`` now
