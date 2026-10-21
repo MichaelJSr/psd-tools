@@ -1061,48 +1061,52 @@ def apply_vibrance(
     saturation = layer.saturation / 100.0
     if vibrance == 0 and saturation == 0:
         return img
-    skin = _skin_tones(img) if vibrance > 0 else None
-    out = _vibrance(_srgb_to_linear(img), vibrance, saturation, skin)
+    out = _vibrance(img, vibrance, saturation)
     return _linear_to_srgb(out).astype(np.float32, copy=False)
 
 
 # Vibrance is a fit, not Photoshop's formula. In linear light each pixel is
-# blended toward a gray on the line through its darkest and brightest channel,
-# placed at a position in units of their difference. The blend weight falls
-# with saturation; the position climbs with saturation and, for pale pixels,
-# with brightness, so a bright pale pixel keeps its brightness while a dark one
-# loses some. A positive amount pulls away from a gray near the brightest
-# channel, less for skin tones. The saturation slider scales chroma about the
+# scaled away from or toward a gray on the line through its darkest and
+# brightest channel, which keeps its hue; the gray sits at a position in units
+# of their difference. A positive amount boosts low-saturation pixels most, and
+# spares bright, very dark and reddish (skin) ones; its saturation is measured
+# on the encoded values. A negative amount pulls pale pixels furthest; its gray
+# climbs with saturation and brightness, and toward the brightest channel in
+# near-black pixels. The saturation slider then scales chroma about the
 # luminance.
-_VIBRANCE_WEIGHT_PALE = 0.98
-_VIBRANCE_WEIGHT_DROP = 0.64
-_VIBRANCE_WEIGHT_CURVE = 1.9
-_VIBRANCE_AMOUNT_CURVE = 1.2
-_VIBRANCE_GRAY_PALE = -0.83
-_VIBRANCE_GRAY_RISE = 1.64
-_VIBRANCE_GRAY_BRIGHT = 1.9
-_VIBRANCE_BOOST_GRAY = 0.85
-_VIBRANCE_SKIN_SHARE = 0.3
-_SKIN_HUE_FROM = 300 / 360
-_SKIN_HUE_TO = 60 / 360
+_VIBRANCE_BOOST = 2.44
+_VIBRANCE_BOOST_CURVE = 2.6
+_VIBRANCE_BOOST_TAIL = 0.25
+_VIBRANCE_BOOST_AMOUNT_CURVE = 1.33
+_VIBRANCE_BOOST_BRIGHT = 0.73
+_VIBRANCE_BOOST_DARK = 0.023
+_VIBRANCE_BOOST_GRAY = 0.79
+_VIBRANCE_BOOST_GRAY_SLOPE = -0.29
+_VIBRANCE_SKIN_WIDTH = 0.058
+_VIBRANCE_SKIN_CURVE = 1.8
+_VIBRANCE_WEIGHT_PALE = 1.01
+_VIBRANCE_WEIGHT_DROP = 0.67
+_VIBRANCE_WEIGHT_CURVE = 2.04
+_VIBRANCE_AMOUNT_CURVE = 1.03
+_VIBRANCE_GRAY_PALE = -0.82
+_VIBRANCE_GRAY_RISE = 1.58
+_VIBRANCE_GRAY_BRIGHT = 1.86
+_VIBRANCE_GRAY_DARK = 1.59
+_VIBRANCE_GRAY_DARK_SCALE = 0.015
 _LINEAR_LUMINANCE = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
 
-def _skin_tones(img: np.ndarray) -> np.ndarray:
-    """Where a pixel's hue is within the red-to-magenta window, as (H, W, 1)."""
-    hue = rgb2hsl(img)[..., 0:1]
-    return ((hue < _SKIN_HUE_TO) | (hue >= _SKIN_HUE_FROM)).astype(np.float32)
-
-
-def _vibrance(
-    linear: np.ndarray, vibrance: float, saturation: float, skin: np.ndarray | None
-) -> np.ndarray:
+def _vibrance(img: np.ndarray, vibrance: float, saturation: float) -> np.ndarray:
+    """Linear-light result of the vibrance and saturation sliders."""
+    linear = _srgb_to_linear(img)
     high = linear.max(axis=2, keepdims=True)
     low = linear.min(axis=2, keepdims=True)
     chroma = high - low
-    sat = chroma / np.maximum(high, _FLOAT_EPSILON)
     out = linear
-    if vibrance < 0:
+    if vibrance > 0:
+        out = _raise_vibrance(img, linear, vibrance)
+    elif vibrance < 0:
+        sat = chroma / np.maximum(high, _FLOAT_EPSILON)
         weight = (
             _VIBRANCE_WEIGHT_PALE - _VIBRANCE_WEIGHT_DROP * sat**_VIBRANCE_WEIGHT_CURVE
         )
@@ -1111,18 +1115,38 @@ def _vibrance(
             _VIBRANCE_GRAY_PALE
             + _VIBRANCE_GRAY_RISE * sat
             + _VIBRANCE_GRAY_BRIGHT * high * (_1 - sat)
+            + _VIBRANCE_GRAY_DARK * np.exp(-high / _VIBRANCE_GRAY_DARK_SCALE)
         )
-        gray = low + position * chroma
+        gray = low + np.minimum(position, _1) * chroma
         out = out + weight * (gray - out)
-    elif vibrance > 0:
-        assert skin is not None
-        weight = -(_1 - sat) * vibrance * (_1 - _VIBRANCE_SKIN_SHARE * skin)
-        gray = low + _VIBRANCE_BOOST_GRAY * chroma
-        out = out + weight * (gray - out)
+    out = np.clip(out, _0, _1)
     if saturation:
         luminance = out @ _LINEAR_LUMINANCE
         out = luminance[..., None] + (out - luminance[..., None]) * (_1 + saturation)
     return np.clip(out, _0, _1)
+
+
+def _raise_vibrance(img: np.ndarray, linear: np.ndarray, vibrance: float) -> np.ndarray:
+    """Scale chroma up, most for pale, mid-bright pixels away from red."""
+    high = linear.max(axis=2, keepdims=True)
+    low = linear.min(axis=2, keepdims=True)
+    encoded_high = img.max(axis=2, keepdims=True)
+    sat = (encoded_high - img.min(axis=2, keepdims=True)) / np.maximum(
+        encoded_high, _FLOAT_EPSILON
+    )
+    pale = _1 - sat
+    hue = rgb2hsl(img)[..., 0:1]
+    from_red = np.minimum(hue, _1 - hue) / _VIBRANCE_SKIN_WIDTH
+    skin = np.exp(-0.5 * from_red**2) * pale**_VIBRANCE_SKIN_CURVE
+    boost = _VIBRANCE_BOOST * (
+        pale**_VIBRANCE_BOOST_CURVE + _VIBRANCE_BOOST_TAIL * sat * pale
+    )
+    boost = boost * (_1 - _VIBRANCE_BOOST_BRIGHT * encoded_high)
+    boost = boost * (_1 - np.exp(-high / _VIBRANCE_BOOST_DARK)) * (_1 - skin)
+    scale = _1 + vibrance**_VIBRANCE_BOOST_AMOUNT_CURVE * boost
+    position = _VIBRANCE_BOOST_GRAY + _VIBRANCE_BOOST_GRAY_SLOPE * sat
+    gray = low + position * (high - low)
+    return gray + scale * (linear - gray)
 
 
 """Adjustment function table."""

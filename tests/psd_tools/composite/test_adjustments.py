@@ -1,3 +1,4 @@
+import colorsys
 import copy
 import importlib
 import logging
@@ -951,28 +952,47 @@ def test_saturation_scales_chroma_about_the_linear_luminance() -> None:
 # The fitted vibrance model, with its constants. Fitted on Photoshop renders
 # of the layer over the same art; a changed constant fails this test.
 _LINEAR_LUMINANCE = np.array([0.2126, 0.7152, 0.0722])
-_WEIGHT_PALE, _WEIGHT_DROP, _WEIGHT_CURVE = 0.98, 0.64, 1.9
-_AMOUNT_CURVE = 1.2
-_GRAY_PALE, _GRAY_RISE, _GRAY_BRIGHT = -0.83, 1.64, 1.9
-_BOOST_GRAY, _SKIN_SHARE = 0.85, 0.3
+_BOOST, _BOOST_CURVE, _BOOST_TAIL, _BOOST_AMOUNT_CURVE = 2.44, 2.6, 0.25, 1.33
+_BOOST_BRIGHT, _BOOST_DARK = 0.73, 0.023
+_BOOST_GRAY, _BOOST_GRAY_SLOPE = 0.79, -0.29
+_SKIN_WIDTH, _SKIN_CURVE = 0.058, 1.8
+_WEIGHT_PALE, _WEIGHT_DROP, _WEIGHT_CURVE, _AMOUNT_CURVE = 1.01, 0.67, 2.04, 1.03
+_GRAY_PALE, _GRAY_RISE, _GRAY_BRIGHT = -0.82, 1.58, 1.86
+_GRAY_DARK, _GRAY_DARK_SCALE = 1.59, 0.015
 
 
 def _fitted_vibrance(
-    pixel: list[float], vibrance: float, saturation: float, skin: bool
+    pixel: list[float], vibrance: float, saturation: float
 ) -> np.ndarray:
-    linear = _linear(np.array(pixel))
+    encoded = np.array(pixel)
+    hue = colorsys.rgb_to_hsv(*pixel)[0]
+    linear = _linear(encoded)
     high, low = linear.max(), linear.min()
     chroma = high - low
-    sat = chroma / high
-    if vibrance < 0:
+    if vibrance > 0:
+        sat = (encoded.max() - encoded.min()) / encoded.max()
+        from_red = min(hue, 1 - hue) / _SKIN_WIDTH
+        skin = np.exp(-0.5 * from_red**2) * (1 - sat) ** _SKIN_CURVE
+        boost = _BOOST * ((1 - sat) ** _BOOST_CURVE + _BOOST_TAIL * sat * (1 - sat))
+        boost *= (1 - _BOOST_BRIGHT * encoded.max()) * (1 - skin)
+        boost *= 1 - np.exp(-high / _BOOST_DARK)
+        gray = low + (_BOOST_GRAY + _BOOST_GRAY_SLOPE * sat) * chroma
+        scale = 1 + vibrance**_BOOST_AMOUNT_CURVE * boost
+        linear = gray + scale * (linear - gray)
+    elif vibrance < 0:
+        sat = chroma / high
         weight = (_WEIGHT_PALE - _WEIGHT_DROP * sat**_WEIGHT_CURVE) * (
             -vibrance
         ) ** _AMOUNT_CURVE
-        position = _GRAY_PALE + _GRAY_RISE * sat + _GRAY_BRIGHT * high * (1 - sat)
-        linear = linear + weight * (low + position * chroma - linear)
-    elif vibrance > 0:
-        weight = -(1 - sat) * vibrance * (1 - _SKIN_SHARE * skin)
-        linear = linear + weight * (low + _BOOST_GRAY * chroma - linear)
+        position = (
+            _GRAY_PALE
+            + _GRAY_RISE * sat
+            + _GRAY_BRIGHT * high * (1 - sat)
+            + _GRAY_DARK * np.exp(-high / _GRAY_DARK_SCALE)
+        )
+        gray = low + min(position, 1) * chroma
+        linear = linear + weight * (gray - linear)
+    linear = np.clip(linear, 0, 1)
     luminance = linear @ _LINEAR_LUMINANCE
     linear = luminance + (linear - luminance) * (1 + saturation)
     linear = np.clip(linear, 0, 1)
@@ -982,23 +1002,42 @@ def _fitted_vibrance(
 
 
 @pytest.mark.parametrize(
-    ("pixel", "vibrance", "saturation", "skin"),
+    ("pixel", "vibrance", "saturation"),
     [
-        (_PALE_BLUE, -100, 0, False),
-        (_DEEP_BLUE, -60, 0, False),
-        ([0.9, 0.85, 0.8], -100, -30, True),
-        ([0.2, 0.15, 0.1], -100, 0, True),
-        (_PALE_CYAN, 100, 0, False),
-        (_PALE_RED, 70, 40, True),
+        (_PALE_BLUE, -100, 0),
+        (_DEEP_BLUE, -60, 0),
+        ([0.9, 0.85, 0.8], -100, -30),
+        ([0.2, 0.15, 0.1], -100, 0),
+        ([0.05, 0.04, 0.03], -100, 0),
+        (_PALE_CYAN, 100, 0),
+        ([0.78, 0.94, 0.98], 100, 50),
+        ([0.32, 0.33, 0.27], 100, 50),
+        (_PALE_RED, 70, 40),
     ],
 )
 def test_vibrance_is_the_fitted_model(
-    pixel: list[float], vibrance: int, saturation: int, skin: bool
+    pixel: list[float], vibrance: int, saturation: int
 ) -> None:
     image = np.array([[pixel]], dtype=np.float32)
     out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(vibrance, saturation))
-    expected = _fitted_vibrance(pixel, vibrance / 100, saturation / 100, skin)
+    expected = _fitted_vibrance(pixel, vibrance / 100, saturation / 100)
     assert np.allclose(out[0, 0], expected, atol=0.5 / 255)
+
+
+def test_positive_vibrance_boosts_a_dark_pale_pixel_more_than_a_bright_one() -> None:
+    """A dark olive gains more chroma than a light cyan of the same saturation."""
+    image = np.array([[[0.32, 0.33, 0.27], [0.8, 0.96, 1.0]]], dtype=np.float32)
+    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(100, 0))
+    gained = _linear_chroma(out) / _linear_chroma(image)
+    assert gained[0, 0] > 1.5 * gained[0, 1]
+
+
+def test_negative_vibrance_lifts_a_near_black_pixel_to_its_brightest_channel() -> None:
+    """The other channels close more than half the gap; the brightest stays."""
+    image = np.array([[[0.02, 0.01, 0.04]]], dtype=np.float32)
+    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0))
+    assert out[0, 0].min() > (0.01 + 0.04) / 2
+    assert out[0, 0, 2] == pytest.approx(0.04, abs=1e-6)
 
 
 def test_negative_vibrance_keeps_a_bright_pale_pixel_bright() -> None:

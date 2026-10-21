@@ -4,6 +4,9 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A vibrance adjustment matches Photoshop more closely: a positive amount
+  boosts dark, pale colours more and light ones less, and a negative amount
+  keeps very dark pixels' brightness. It is still an approximation
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round
