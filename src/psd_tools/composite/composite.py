@@ -10,7 +10,8 @@ import numpy as np
 from PIL import Image
 
 from psd_tools.api import numpy_io, pil_io
-from psd_tools.api.effects import DropShadow, OuterGlow
+from psd_tools.api._descriptor import get_blend_mode
+from psd_tools.api.effects import DropShadow, InnerGlow, InnerShadow, OuterGlow
 from psd_tools.api.layers import (
     AdjustmentLayer,
     Artboard,
@@ -28,6 +29,8 @@ from psd_tools.composite.blend import get_blend_func, normal
 from psd_tools.composite.effects import (
     contour_table,
     draw_drop_shadow,
+    draw_inner_glow,
+    draw_inner_shadow,
     draw_stroke_effect_split,
     drop_shadow_bbox,
     glow_falloff,
@@ -43,6 +46,7 @@ from psd_tools.constants import (
     BlendMode,
     ChannelID,
     ColorMode,
+    GlowSource,
     GlowTechnique,
     Knockout,
     Resource,
@@ -50,6 +54,7 @@ from psd_tools.constants import (
     Tag,
 )
 from psd_tools.psd.descriptor import Descriptor
+from psd_tools.terminology import Key
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +243,7 @@ def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
 
     A stroke, effect or vector, is one of the two things in this module that
     reach outside the layer, and :py:func:`_beneath_reach` measures the other:
-    the three overlays draw on ``layer.bbox`` and are pasted from it, and
+    the three overlays and the inner effects stay inside the layer, and
     satin and bevel are not implemented at all. :py:func:`_effect_reach` is
     the two together, and is what the callers below ask.
 
@@ -1537,13 +1542,17 @@ class Compositor:
         here: they lie beneath the layer and go on before the layer is
         resolved -- see :py:meth:`_apply_beneath_effects`.
 
-        TODO: Inner shadow, inner glow, satin and bevel are not drawn at all,
-        so where they would land is not settled here either. The first three
-        join the overlays; a bevel has an outer part beside the layer too.
+        Inner glows and inner shadows go over the overlays and under the
+        stroke, as Photoshop stacks them.
+
+        TODO: Satin and bevel are not drawn, so where they would land is not
+        settled here either. Satin joins the overlays; a bevel has an outer
+        part beside the layer too.
         """
         canvas = _EffectCanvas(self, source)
         for effect_name in _OVERLAY_DRAWS:
             self._add_overlay(layer, effect_name, canvas)
+        self._add_inner_effects(layer, canvas)
 
         traces_mask = self._traces_mask(layer)
         traced: float | np.ndarray = source.shape
@@ -2710,6 +2719,109 @@ class Compositor:
                     coverage * effect_opacity * opacity,
                     blend_mode,
                 )
+
+    def _add_inner_effects(self, layer: Layer, canvas: _EffectCanvas) -> None:
+        """Composite every inner glow, then every inner shadow, into the layer.
+
+        Each is drawn on the cast box grown by its size, from the silhouette
+        :py:meth:`_cast_shape` reads there, so an edge past the viewport is
+        not taken for the layer's own (#804).
+        """
+        glows = _readable(layer, "innerglow")
+        shadows = _readable(layer, "innershadow")
+        if not (glows or shadows):
+            return
+        cast_from = _cast_bbox(layer, self._cache.content_bboxes)
+        silhouettes: dict[tuple[int, int, int, int], np.ndarray] = {}
+        for effect in [*glows, *shadows]:
+            try:
+                bbox, draw = self._inner_effect(layer, effect, cast_from)
+                opacity = effect.opacity / 100.0
+                if not math.isfinite(opacity):
+                    raise ValueError("opacity %r is not finite" % opacity)
+                default = (
+                    BlendMode.MULTIPLY
+                    if isinstance(effect, InnerShadow)
+                    else BlendMode.SCREEN
+                )
+                blend_mode = get_blend_mode(effect.descriptor, Key.Mode, default)
+            except _UNREADABLE as error:
+                logger.debug("Cannot measure an inner effect of %s: %s", layer, error)
+                continue
+            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
+                continue
+            silhouette = silhouettes.get(bbox)
+            if silhouette is None:
+                silhouette = silhouettes[bbox] = self._cast_shape(layer, bbox)
+            try:
+                coverage = draw(bbox, silhouette)
+                color, _ = paint.draw_solid_color_fill(
+                    self._viewport, layer._psd.color_mode, effect.descriptor
+                )
+            except _UNREADABLE as error:
+                logger.debug("Cannot draw an inner effect of %s: %s", layer, error)
+                continue
+            coverage = paste(self._viewport, bbox, coverage)
+            canvas.over(canvas.within(coverage), color, blend_mode, opacity)
+
+    def _inner_effect(
+        self,
+        layer: Layer,
+        effect: _StyledEffect,
+        cast_from: tuple[int, int, int, int],
+    ) -> tuple[
+        tuple[int, int, int, int],
+        Callable[[tuple[int, int, int, int], np.ndarray], np.ndarray],
+    ]:
+        """An inner effect's box and the draw of its coverage on that box."""
+        inner = cast(InnerShadow | InnerGlow, effect)
+        desc = inner.descriptor
+        what = "Inner shadow" if isinstance(inner, InnerShadow) else "Inner glow"
+        distance, size, choke = shadow_geometry(desc, what)
+        contour = contour_table(inner.contour)
+        anti_aliased = inner.anti_aliased
+        if inner.noise > 0.0:
+            logger.debug("The noise of an inner effect of %s is not applied", layer)
+        bbox = drop_shadow_bbox(cast_from, 0.0, 0.0, size, layer._psd._max_alloc_bytes)
+        if isinstance(inner, InnerShadow):
+            angle = inner.angle
+
+            def draw_shadow(
+                box: tuple[int, int, int, int], shape: np.ndarray
+            ) -> np.ndarray:
+                return draw_inner_shadow(
+                    box,
+                    shape,
+                    distance=distance,
+                    angle=angle,
+                    size=size,
+                    choke=choke,
+                    contour=contour,
+                    anti_aliased=anti_aliased,
+                )
+
+            return bbox, draw_shadow
+        glow = inner
+        if glow.gradient is not None and desc.get(Key.Color) is None:
+            raise ValueError("a gradient glow is not drawn")
+        center = glow.glow_source == GlowSource.CENTER
+        precise = glow.glow_type == GlowTechnique.PRECISE_MATTE
+        glow_range = float(desc.get(Key.InputRange, 50.0))
+
+        def draw_glow(box: tuple[int, int, int, int], shape: np.ndarray) -> np.ndarray:
+            return draw_inner_glow(
+                box,
+                shape,
+                size=size,
+                choke=choke,
+                center=center,
+                precise=precise,
+                glow_range=glow_range,
+                contour=contour,
+                anti_aliased=anti_aliased,
+            )
+
+        return bbox, draw_glow
 
     def _add_stroke_effects(
         self,

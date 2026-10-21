@@ -22,6 +22,9 @@ Changelog
   technique, range, contour, a solid or gradient colour, opacity and blend
   mode are honoured; noise and jitter are read but not applied, and the
   blur and range approximate Photoshop's. Needs ``scipy`` (#680)
+- [fix] Inner shadow and inner glow layer effects are now rendered when a
+  document is composited from its layers. Solid colours only: a gradient
+  glow is still dropped, and noise is read but not applied. Needs ``scipy``
 
 1.25.0 (2026-10-14)
 -------------------
