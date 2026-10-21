@@ -299,6 +299,26 @@ def stroke_bbox(
     return grown
 
 
+def stroke_reach(desc: Descriptor) -> int | None:
+    """How far a stroke's band reads from each pixel it covers, in pixels.
+
+    The band is a function of the distance to the nearest boundary within
+    its widest limit, and a partial pixel states its boundary up to half a
+    pixel from its centre: coverage further away than that moves no pixel
+    of the band, so the band on a box is the band on any larger box, cut.
+    The two pixels on top round the half pixel out and keep clear of the
+    neighbourhood a hard edge is read from.
+
+    None for a band painted with a gradient or a pattern, which is laid out
+    across the box it is drawn on and so reads all of it. Raises as
+    :py:func:`stroke_bbox` does for a size it cannot read.
+    """
+    if _enum(desc, Key.PaintType) != Enum.SolidColor:
+        return None
+    limits = _BANDS.get(_enum(desc, Key.Style), _UNRECOGNISED)
+    return math.ceil(max(abs(limits[0]), abs(limits[1])) * _stroke_size(desc)) + 2
+
+
 def _grow(mask: np.ndarray) -> np.ndarray:
     """``mask`` widened by one pixel along each axis.
 
@@ -883,6 +903,35 @@ def _cast_canvas(
         warn=False,
     )
     return grown
+
+
+def cast_reach(distance: float, angle: float, size: float, spread: float) -> int | None:
+    """How far a cast matte reads from each pixel it covers, in pixels.
+
+    The blur's radius and the offset, each rounded out, with the pixel the
+    offset interpolates across and the fringe the blur's rounding leaves:
+    the silhouette further away than that moves no pixel of the matte, so
+    the matte on a box is the matte on any larger box, cut.
+
+    None when the matte is spread: spread grows the silhouette at the
+    coverage levels it finds on the whole canvas, so no part of the canvas
+    can stand for all of it. A spread of a size-0 matte grows nothing.
+    """
+    if size > 0.0 and spread > 0.0:
+        return None
+    dx, dy = _shadow_offset(distance, angle)
+    return math.ceil(max(size, 0.0)) + math.ceil(max(abs(dx), abs(dy))) + 3
+
+
+def glow_reach(size: float, spread: float, precise: bool) -> int | None:
+    """How far a glow's falloff reads from each pixel, as :py:func:`cast_reach`.
+
+    A precise glow ramps along the distance to the silhouette and is never
+    spread, so it is bounded whatever its spread.
+    """
+    if not precise and size > 0.0 and spread > 0.0:
+        return None
+    return math.ceil(max(size, 0.0)) + 3
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
