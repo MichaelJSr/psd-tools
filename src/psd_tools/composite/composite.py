@@ -243,11 +243,12 @@ def _vector_stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
 def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     """``layer.bbox`` grown to every box its strokes are drawn on.
 
-    A stroke, effect or vector, is one of the two things in this module that
-    reach outside the layer, and :py:func:`_shadow_reach` measures the other:
-    the three overlays draw on ``layer.bbox`` and are pasted from it, and
-    glow, satin and bevel are not implemented at all. :py:func:`_effect_reach`
-    is the two together, and is what the callers below ask.
+    A stroke, effect or vector, is one of the things in this module that reach
+    outside the layer; :py:func:`_shadow_reach` and :py:func:`_bevel_reach`
+    measure the others. The three overlays draw on ``layer.bbox`` and are
+    pasted from it, a satin and an inner bevel stay inside the layer, and the
+    glows are not implemented at all. :py:func:`_effect_reach` is all of them
+    together, and is what the callers below ask.
 
     ``find("stroke")`` rather than a descriptor walk, so this stays in lockstep
     with the loop in :py:meth:`Compositor._add_stroke_effects` that actually
@@ -362,7 +363,7 @@ def _bevel_reach(
                 bbox,
                 inner_bbox(
                     _cast_bbox(layer, memo),
-                    bevel_reach(style, size, soften),
+                    bevel_reach(size, soften),
                     layer._psd._max_alloc_bytes,
                 ),
             )
@@ -2780,7 +2781,7 @@ class Compositor:
                         self._viewport, layer._psd.color_mode, paint_desc
                     )
                     halves.append((color, blend_mode, opacity))
-                bbox = self._inner_box(layer, bevel_reach(style, size, soften))
+                bbox = self._inner_box(layer, bevel_reach(size, soften))
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a bevel of %s: %s", layer, error)
                 continue
@@ -2807,7 +2808,9 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a bevel of %s: %s", layer, error)
                 continue
-            for amount, (color, blend_mode, opacity) in zip(amounts, halves, strict=True):
+            for amount, (color, blend_mode, opacity) in zip(
+                amounts, halves, strict=True
+            ):
                 if bevel_inside(style):
                     inside = paste(self._viewport, bbox, amount * silhouette)
                     canvas.over(canvas.within(inside), color, blend_mode, opacity)
