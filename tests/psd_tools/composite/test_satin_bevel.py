@@ -8,6 +8,7 @@ corpus does not isolate is checked on forged silhouettes, where the result has
 a closed form.
 """
 
+import copy
 import importlib
 import math
 from collections.abc import Callable
@@ -20,7 +21,7 @@ from psd_tools.api.effects import BevelEmboss
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite, effects
-from psd_tools.constants import BevelStyle, BevelTechnique
+from psd_tools.constants import BevelStyle, BevelTechnique, BlendMode, Tag
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated
 from psd_tools.terminology import Key
 
@@ -488,6 +489,100 @@ def test_a_satin_is_budgeted_on_the_box_it_is_drawn_on() -> None:
         return _rendered(psd)[region]
 
     assert not np.array_equal(rendered(True), rendered(False))
+
+
+def test_a_budget_for_the_layers_box_draws_the_bevel_and_the_satin(
+    whole: np.ndarray,
+) -> None:
+    """The budget is checked on the box drawn on, not on the whole viewport grown.
+
+    Half of what an inner effect needs per pixel of the canvas is still more
+    than the canvas itself needs, and far more than the layers' boxes do.
+    """
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    psd.max_alloc_bytes = psd.width * psd.height * effects._INNER_BYTES // 2
+    assert np.array_equal(_rendered(psd), whole)
+
+
+def test_inner_bbox_is_checked_inside_what_it_is_kept_within() -> None:
+    budget = 100 * 100 * effects._INNER_BYTES
+    assert effects.inner_bbox(
+        (40, 40, 50, 50), 5.0, budget, within=(0, 0, 10_000, 10_000)
+    ) == (33, 33, 57, 57)
+    with pytest.raises(ValueError):
+        effects.inner_bbox((0, 0, 10_000, 10_000), 5.0, budget)
+
+
+def test_a_bevels_reach_is_measured_under_any_budget() -> None:
+    """Measuring stays as wide as drawing, never narrower.
+
+    The canvas is checked when it is drawn, cut to the viewport; the whole
+    box grown by the reach is not allocated, so a budget it is over still
+    grows the measured reach by it. Cut short, a group canvas holding the
+    layer would clip the bevel its compositor still draws.
+    """
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    layer = _layer(psd, "Emboss")
+    bevel = _bevel_of(layer)
+    assert bevel.bevel_style is BevelStyle.EMBOSS, "paints beside the layer"
+    _, size, soften = effects.bevel_geometry(bevel.descriptor)
+    technique = bevel.bevel_type or BevelTechnique.SOFT_MATTE
+    grown = effects.inner_bbox(layer.bbox, effects.bevel_reach(size, soften, technique))
+    assert grown != layer.bbox
+    psd.max_alloc_bytes = (grown[2] - grown[0]) * (grown[3] - grown[1]) * (
+        effects._INNER_BYTES
+    ) - 1
+    assert compositing._bevel_reach(layer) == grown
+    assert compositing._effect_reach(layer) == grown
+
+
+def test_a_nested_bevelled_group_is_composited_once_for_its_silhouette(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group's silhouette box does not follow the viewport of the compositor asking.
+
+    ``layer_effects.psd``'s ``Bevel`` is wrapped in four Normal groups, each
+    carrying its bevel, and the viewport cuts through it, so every group runs
+    past every compositor's viewport. Cut to that viewport, a group's box
+    would differ from one level to the next, and its contents would be
+    composited again for each.
+    """
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    caches: list[Any] = []
+    pass_cache = compositing._PassCache
+
+    def recording() -> Any:
+        caches.append(pass_cache())
+        return caches[-1]
+
+    monkeypatch.setattr(compositing, "_PassCache", recording)
+
+    def rendered(
+        viewport: tuple[int, int, int, int] | None,
+    ) -> tuple[np.ndarray, list[Layer]]:
+        psd = PSDImage.open(full_name("layer_effects.psd"))
+        node: Layer = _layer(psd, "Bevel")
+        block = node.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+        groups: list[Layer] = []
+        for index in range(4):
+            node = psd.create_group(
+                [node], name="G%d" % index, blend_mode=BlendMode.NORMAL
+            )
+            node.tagged_blocks.set_data(
+                Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, copy.deepcopy(block)
+            )
+            groups.append(node)
+        return _rendered(psd, viewport), groups
+
+    viewport = (150, 40, 200, 70)
+    cut, groups = rendered(viewport)
+    keys = caches[-1].group_alphas
+    assert [sum(key[0] == id(group) for key in keys) for group in groups] == [1] * 4
+
+    whole, _ = rendered(None)
+    left, top, right, bottom = viewport
+    assert np.array_equal(cut, whole[top:bottom, left:right])
 
 
 def test_without_scipy_the_effects_are_left_out_with_a_warning(

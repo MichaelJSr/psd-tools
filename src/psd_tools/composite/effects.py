@@ -779,6 +779,13 @@ _GLOW_RANGE_FLOOR = 15.0
 # each drawn on its own stroke's box, which ``stroke_bbox()`` checks on its own.
 _SHADOW_BYTES = 64
 
+# What one pixel of a gradient glow's canvas costs while ``glow_paint()`` lays
+# the gradient along the falloff: the colour lookup's index and float64 planes
+# for each of up to four channels, beside the silhouette and falloff. Measured
+# with tracemalloc at about 135 bytes a pixel in RGB and 167 in CMYK, plus the
+# arrays held across the call; the shadow's 64 and a fill's 128 are both under.
+_GLOW_GRADIENT_BYTES = 192
+
 # Entries in a contour's transfer table. Photoshop states a contour's points
 # on a 0-255 grid along both axes.
 _CONTOUR_STEPS = 256
@@ -845,14 +852,12 @@ def outer_glow_bbox(
 
     A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the
     glow's size on every side, with the same fringe, and raising the same
-    way. A gradient glow is checked against what its paint costs, which is
-    more than the falloff it is laid along. Raises as
+    way. A gradient glow is checked against what painting its gradient peaks
+    at, which is more than the falloff it is laid along. Raises as
     :py:func:`glow_geometry` does for a size it cannot read.
     """
     size, _, _ = glow_geometry(desc)
-    per_pixel = _SHADOW_BYTES
-    if Key.Gradient in desc:
-        per_pixel = max(per_pixel, paint.GRADIENT_FILL_BYTES)
+    per_pixel = _GLOW_GRADIENT_BYTES if Key.Gradient in desc else _SHADOW_BYTES
     return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, per_pixel)
 
 

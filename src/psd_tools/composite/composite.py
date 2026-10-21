@@ -481,7 +481,12 @@ def _bevel_reach(
     """``layer.bbox`` grown to every box its bevels paint beside the layer on.
 
     An inner bevel stays inside the layer and adds nothing. Degrades as
-    :py:func:`_beneath_reach` does.
+    :py:func:`_beneath_reach` does, except that no budget is checked here:
+    the canvas a bevel is drawn on is cut to the viewport first
+    (:py:meth:`Compositor._inner_box`) and only that is checked, so checking
+    the whole grown box would leave this narrower than what is drawn. The
+    size and soften are held to what Photoshop writes, so the box is bounded
+    without one.
     """
     bbox = _reach_base(layer)
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
@@ -501,7 +506,6 @@ def _bevel_reach(
                 inner_bbox(
                     _cast_bbox(layer, memo),
                     bevel_reach(size, soften, _bevel_technique(bevel)),
-                    layer._psd._max_alloc_bytes,
                 ),
             )
         except _UNREADABLE as error:
@@ -3502,15 +3506,18 @@ class Compositor:
     def _inner_box(self, layer: Layer, reach: float) -> tuple[int, int, int, int]:
         """The box an inner effect reaching ``reach`` past an edge is drawn on.
 
-        The silhouette is read on it: the layer's box grown by the reach, but
-        no further than the reach past the viewport, since nothing beyond that
-        reaches back into view. Raises as :py:func:`inner_bbox` does, and when
-        the box is out of proportion to the layer and the viewport.
+        The silhouette is read on it: the layer's box grown by the reach. An
+        object's goes no further than the reach past the viewport, since
+        nothing beyond that reaches back into view. A group's is not cut to
+        the viewport, so it is the same box from every compositor that asks
+        and its contents are composited for it once per pass, as for a drop
+        shadow; cut, a nested group would be composited again at every level.
+        Raises as :py:func:`inner_bbox` does, and when the box is out of
+        proportion to the layer and the viewport.
         """
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        bbox = inner_bbox(
-            cast_from, reach, layer._psd._max_alloc_bytes, within=self._viewport
-        )
+        within = None if isinstance(layer, GroupMixin) else self._viewport
+        bbox = inner_bbox(cast_from, reach, layer._psd._max_alloc_bytes, within=within)
         self._check_effect_growth(bbox, cast_from)
         return bbox
 
@@ -3554,7 +3561,7 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a satin of %s: %s", layer, error)
                 continue
-            if bbox == (0, 0, 0, 0):
+            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
             silhouette = self._cast_shape(layer, bbox)
             try:
@@ -3687,7 +3694,7 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a bevel of %s: %s", layer, error)
                 continue
-            if bbox == (0, 0, 0, 0):
+            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
             if bevel.use_shape:
                 logger.debug("The shape contour of a bevel of %s is not applied", layer)
