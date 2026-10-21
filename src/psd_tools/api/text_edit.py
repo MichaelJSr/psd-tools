@@ -42,10 +42,13 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
     inserted text continues the run before it. Paragraphs are rebuilt from
     ``\r``, a new one inheriting the paragraph the edit started in.
     ``keep="single"`` collapses the styles to the first run and the
-    paragraphs to the first paragraph.
+    paragraphs to the first paragraph. Setting the text the layer already
+    has with ``keep="runs"`` changes nothing.
     """
     old = _editor_text(layer)
     new = text + "\r"
+    if new == old and keep == "runs":
+        return
     old_u, new_u = utf16_prefix(old), utf16_prefix(new)
     n_old, n_new = old_u[-1], new_u[-1]
     p = 0

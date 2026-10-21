@@ -10,6 +10,7 @@ Changelog
   text into the layer's pixels with the new ``text`` extra (``uharfbuzz``,
   ``freetype-py``). ``psd_tools.composite.text`` exposes ``render()``,
   ``verify()`` and ``FontMap``; ``composite()`` still uses the stored pixels
+  (#25, #317, #468)
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a

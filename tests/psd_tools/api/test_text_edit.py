@@ -110,6 +110,22 @@ def test_paragraphs_inherit_the_edited_one() -> None:
     assert just == [0, 2, 2, 0]
 
 
+def test_set_text_same_text_changes_nothing() -> None:
+    layer = open_layer()
+    layer.set_span_style(0, 4, fill=(1, 0, 0))
+    psd = cast(PSDImage, layer._psd)
+    before = io.BytesIO()
+    psd.save(before)
+    psd._updated = False
+    layer._text_dirty = False
+    layer.set_text(layer.text)
+    assert not layer._text_dirty
+    assert not psd.is_updated()
+    after = io.BytesIO()
+    psd.save(after)
+    assert after.getvalue() == before.getvalue()
+
+
 def test_set_text_single() -> None:
     layer = open_layer()
     layer.set_span_style(0, 4, fill=(1, 0, 0), FauxBold=True)

@@ -4,6 +4,9 @@ from typing import Any, cast
 
 import pytest
 
+pytest.importorskip("freetype")
+pytest.importorskip("uharfbuzz")
+
 from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
 from psd_tools.composite.text import model as model_module

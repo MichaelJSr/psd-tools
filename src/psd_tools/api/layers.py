@@ -132,6 +132,7 @@ from psd_tools.constants import (
     Tag,
     TextType,
 )
+from psd_tools.psd.base import NumericElement
 from psd_tools.psd.descriptor import Descriptor, DescriptorBlock, String
 from psd_tools.psd.header import FileHeader
 from psd_tools.psd.image_resources import ImageResource, Integer
@@ -3202,6 +3203,12 @@ class TypeLayer(Layer):
             header.version,
             depth,
         )
+        # The mask channels keep their own rectangle (``mask_data``), so the
+        # render does not touch them.
+        for info, data in zip(self._record.channel_info, self._channels, strict=True):
+            if info.id in (ChannelID.USER_LAYER_MASK, ChannelID.REAL_USER_LAYER_MASK):
+                record.channel_info.append(info)
+                channels.append(data)
         self._apply_reencoded((record, channels))
         self._record.left, self._record.top = x0, y0
         self._record.right, self._record.bottom = x1, y1
@@ -3352,13 +3359,13 @@ class TypeLayer(Layer):
         return [font.postscript_name for font in self.typesetting.fonts]
 
 
-def _set_rect(desc: Any, rect: tuple[float, float, float, float]) -> None:
+def _set_rect(desc: Descriptor | None, rect: tuple[float, float, float, float]) -> None:
     """Write ``(left, top, right, bottom)`` into a ``bounds``-style descriptor."""
     if desc is None:
         return
     for key, value in zip((b"Left", b"Top ", b"Rght", b"Btom"), rect, strict=True):
         item = desc.get(key)
-        if item is not None and hasattr(item, "value"):
+        if isinstance(item, NumericElement):
             item.value = float(value)
 
 

@@ -2,6 +2,9 @@ from collections.abc import Callable, Mapping
 
 import pytest
 
+pytest.importorskip("freetype")
+pytest.importorskip("uharfbuzz")
+
 from psd_tools.composite.text.compose import Line, break_lines
 
 W = 100.0

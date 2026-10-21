@@ -26,6 +26,7 @@ from psd_tools.composite.text import (
 )
 from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.composite.text.model import TextModel
+from psd_tools.constants import ChannelID
 
 from ...utils import full_name
 from .conftest import PS_TT
@@ -229,7 +230,9 @@ def test_corpus_box_report(corpus_fonts: FontMap) -> None:
 def test_composite_import_does_not_load_text() -> None:
     code = (
         "import sys, psd_tools.composite; "
-        "assert 'psd_tools.composite.text' not in sys.modules"
+        "assert 'psd_tools.composite.text' not in sys.modules; "
+        "assert 'freetype' not in sys.modules; "
+        "assert 'uharfbuzz' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 
@@ -274,6 +277,29 @@ def test_rasterize_round_trip(
     assert (whole[y0:y1, x0:x1, :3].min(axis=-1) < 128).any()
 
 
+def test_rasterize_keeps_the_mask(luckiest_guy_path: str, tmp_path: Any) -> None:
+    psd = PSDImage.open(full_name("transparency/fill-opacity.psd"))
+    layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
+    assert layer.mask is not None
+    before = layer.mask.topil()
+    assert before is not None
+    bbox = layer.mask.bbox
+    layer.rasterize(fonts=FontMap(aliases={"ArialMT": luckiest_guy_path}))
+    ids = [info.id for info in layer._record.channel_info]
+    assert ids.count(ChannelID.USER_LAYER_MASK) == 1
+    assert len(ids) == len(layer._channels)
+    assert layer.mask is not None and layer.mask.bbox == bbox
+    after = layer.mask.topil()
+    assert after is not None and after.tobytes() == before.tobytes()
+    psd.save(tmp_path / "masked.psd")
+    again = PSDImage.open(tmp_path / "masked.psd")
+    reopened = next(x for x in again.descendants() if isinstance(x, TypeLayer))
+    assert reopened.mask is not None and reopened.mask.bbox == bbox
+    saved = reopened.mask.topil()
+    assert saved is not None and saved.tobytes() == before.tobytes()
+    assert reopened.composite() is not None
+
+
 def test_rasterize_rewrites_text_bounds(luckiest_guy_path: str) -> None:
     psd = PSDImage.open(full_name("layers/type-layer.psd"))
     layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
@@ -312,7 +338,7 @@ def test_unedited_document_saves_byte_identical(tmp_path: Any) -> None:
         assert f.read() == g.read()
 
 
-@pytest.mark.parametrize("which", [0, 1, 4])
+@pytest.mark.parametrize("which", [0, 1, 5])
 def test_corpus_edit_round_trip(
     corpus_fonts: FontMap, which: int, tmp_path: Any
 ) -> None:

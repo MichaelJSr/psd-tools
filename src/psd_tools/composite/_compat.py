@@ -26,14 +26,6 @@ try:
 except ImportError:
     HAS_SCIPY = False
 
-try:
-    import freetype  # noqa: F401
-    import uharfbuzz  # noqa: F401
-
-    HAS_TEXT = True
-except ImportError:
-    HAS_TEXT = False
-
 
 def require_aggdraw(func: F) -> F:
     """
@@ -92,31 +84,6 @@ def require_scipy(func: F) -> F:
                 "    pip install 'psd-tools[composite]'\n"
                 "Or:\n"
                 "    pip install scipy"
-            )
-        return func(*args, **kwargs)
-
-    return wrapper  # type: ignore[return-value]
-
-
-def require_text(func: F) -> F:
-    """
-    Decorator to check if the text extra is available before calling the function.
-
-    Required for rendering type layers from their EngineData.
-
-    Raises:
-        ImportError: If uharfbuzz or freetype-py is not installed.
-    """
-
-    @functools.wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if not HAS_TEXT:
-            raise ImportError(
-                "Type layer rendering requires: uharfbuzz, freetype-py\n\n"
-                "Install with:\n"
-                "    pip install 'psd-tools[text]'\n"
-                "Or:\n"
-                "    pip install uharfbuzz freetype-py"
             )
         return func(*args, **kwargs)
 

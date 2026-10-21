@@ -11,7 +11,7 @@ Installation
 Rendering needs the ``text`` extra (HarfBuzz for shaping, FreeType for
 rasterization)::
 
-    pip install psd-tools[text]
+    pip install 'psd-tools[text]'
 
 Editing needs nothing beyond psd-tools.
 
@@ -50,7 +50,7 @@ text continues the run before it, and paragraphs are rebuilt from ``'\r'``.
 
 Edits never render. Until :py:meth:`~psd_tools.api.layers.TypeLayer.rasterize`
 runs, the layer's pixels, ``composite()`` and a saved file still show
-Photoshop's raster of the old text; ``layer._text_dirty`` says so.
+Photoshop's raster of the old text.
 
 Rendering
 ---------

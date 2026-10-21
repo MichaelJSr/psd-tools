@@ -7,7 +7,6 @@ import pytest
 freetype = pytest.importorskip("freetype")
 hb = pytest.importorskip("uharfbuzz")
 
-from psd_tools.composite import _compat  # noqa: E402
 from psd_tools.composite.text import fonts as fonts_module  # noqa: E402
 from psd_tools.composite.text.fonts import (  # noqa: E402
     FontMap,
@@ -44,16 +43,6 @@ def _platform_face() -> tuple[str, int, str] | None:
                 if face.postscript_name:
                     return path, 0, face.postscript_name.decode("latin-1")
     return None
-
-
-def test_compat_flag() -> None:
-    assert _compat.HAS_TEXT
-
-    @_compat.require_text
-    def f() -> int:
-        return 1
-
-    assert f() == 1
 
 
 def test_norm() -> None:
