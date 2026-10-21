@@ -4,11 +4,11 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
-- [fix] The spread of a drop shadow, outer glow, inner shadow or inner glow
-  grows the layer's coverage by whole pixels, as Photoshop does, so a
-  feathered or faint edge casts a hard, full shadow under any spread of a
-  pixel or more; it grew each coverage level on its own, which left such
-  shadows narrow and light
+- [fix] The spread of a drop shadow or outer glow grows the layer's coverage
+  by whole pixels, as Photoshop does, so a feathered or faint edge casts a
+  hard, full shadow under any spread of a pixel or more; it grew each
+  coverage level on its own, which left such shadows narrow and light. An
+  inner shadow's or inner glow's choke shrinks the coverage the same way
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

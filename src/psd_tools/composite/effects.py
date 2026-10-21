@@ -994,7 +994,9 @@ def _spread(alpha: np.ndarray, pixels: int) -> np.ndarray:
     """
     from scipy.ndimage import distance_transform_edt  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    inside = alpha >= _SPREAD_FLOOR
+    # A hair under the floor: the complement of an 8-bit level, taken in
+    # float32, lands an ulp short of it.
+    inside = alpha >= _SPREAD_FLOOR * (1.0 - 1e-6)
     if inside.all():
         return np.ones(alpha.shape, dtype=np.float32)
     if not inside.any():

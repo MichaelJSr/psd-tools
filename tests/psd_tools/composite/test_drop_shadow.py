@@ -240,7 +240,7 @@ def _grown_and_blurred(
     from scipy.ndimage import distance_transform_edt, gaussian_filter  # type: ignore[import-untyped]  # noqa: PLC0415
 
     alpha = shape[:, :, 0]
-    covered = alpha > 0.0
+    covered = alpha >= effects._SPREAD_FLOOR
     outside, nearest = distance_transform_edt(~covered, return_indices=True)
     rim = alpha[nearest[0], nearest[1]]
     matte = np.where(covered, 1.0, np.clip(pixels + rim - outside, 0.0, 1.0))
@@ -298,23 +298,27 @@ def _half_coverage(shadow: np.ndarray) -> float:
     return 40 + index - 1 + (above - 0.5) / (above - below)
 
 
-def test_the_spread_edge_follows_the_rim_pixels_own_coverage() -> None:
-    """A grown edge lies the spread past where the rim's coverage ends.
+@pytest.mark.parametrize("rim", [(1.0,), (0.2,), (0.5, 0.2)])
+def test_the_spread_edge_follows_the_rim_pixels_own_coverage(
+    rim: tuple[float, ...],
+) -> None:
+    """A grown edge lies the spread past where the outermost rim pixel ends.
 
     A fully covered rim pixel ends half a pixel past its centre; one a
     fifth covered ends a fifth of the way across it. Unblurred, the pixel
-    the grown edge crosses carries just that share.
+    the grown edge crosses carries just that share, and the pixels between
+    are opaque whatever the feather behind the rim held: grown level by
+    level, a two-pixel feather would leave them part covered.
     """
     square = np.zeros((41, 41, 1), dtype=np.float32)
     square[10:31, 10:31] = 1.0
-    for rim in (1.0, 0.2):
-        shape = square.copy()
-        shape[10:31, 30] = rim
-        grown = effects.draw_drop_shadow(
-            (0, 0, 41, 41), shape, distance=0.0, angle=0.0, size=3.0, spread=100.0
-        )
-        row = grown[20, 30:36, 0]
-        assert np.allclose(row, [1.0, 1.0, 1.0, rim, 0.0, 0.0], atol=1e-6), row
+    shape = square.copy()
+    shape[10:31, 31 - len(rim) : 31, 0] = rim
+    grown = effects.draw_drop_shadow(
+        (0, 0, 41, 41), shape, distance=0.0, angle=0.0, size=3.0, spread=100.0
+    )
+    row = grown[20, 30:36, 0]
+    assert np.allclose(row, [1.0, 1.0, 1.0, rim[-1], 0.0, 0.0], atol=1e-6), row
 
 
 def test_spread_grows_the_coverage_not_its_level() -> None:
@@ -322,7 +326,8 @@ def test_spread_grows_the_coverage_not_its_level() -> None:
 
     Spread reads the silhouette as covered or not, so a square at half
     coverage grows into an opaque matte, where without spread the blur of
-    it never passes a half.
+    it never passes a half. This follows from the rule the feathered edges
+    fit; no export shows a flat half-covered layer on its own.
     """
     shape = np.zeros((41, 41, 1), dtype=np.float32)
     shape[15:26, 15:26] = 0.5
@@ -347,9 +352,10 @@ def test_spread_is_taken_in_whole_pixels(
 ) -> None:
     """Photoshop dilates by whole pixels, rounding a half pixel up.
 
-    Fitted against its exports: a feathered layer under a spread that rounds
-    to nothing keeps its feather, and ``layer_params.psb``'s 2.5 px spread
-    renders as 3 (the fidelity bound below pins it).
+    Fitted against its exports: a feathered layer under a spread of a third
+    of a pixel keeps its feather, which rules out rounding up, and
+    ``layer_params.psb``'s 2.5 px spread renders as 3 (the fidelity bound
+    below pins it), which rules out rounding down.
     """
     assert effects._spread_pixels(size, spread) == pixels
 
@@ -386,6 +392,32 @@ def test_a_fringe_fainter_than_a_matte_can_hold_is_not_spread() -> None:
     held = np.maximum(disc, _disc(81, 20.0) * (1.0 / 255.0)).astype(np.float32)
     grown = effects.draw_drop_shadow((0, 0, 81, 81), held, **settings)
     assert float(grown[40, 40 + 20 + 3, 0]) == 1.0
+
+
+def test_the_complement_of_an_almost_opaque_pixel_is_spread() -> None:
+    """A choke reads a pixel one level short of opaque as uncovered.
+
+    Inner effects spread the complement of the silhouette, and the
+    complement of 254/255, taken in float32, lands a hair under a 255th;
+    it still counts as covered, so a square at that level is choked all the
+    way through, where an opaque one keeps a clear centre. The rule applied
+    to the complement; no export pins it on its own.
+    """
+    settings: dict[str, Any] = {
+        "distance": 0.0,
+        "angle": 0.0,
+        "size": 4.0,
+        "choke": 100.0,
+    }
+    almost = np.zeros((41, 41, 1), dtype=np.float32)
+    almost[10:31, 10:31] = 254.0 / 255.0
+    opaque = np.zeros((41, 41, 1), dtype=np.float32)
+    opaque[10:31, 10:31] = 1.0
+    choked = effects.draw_inner_shadow((0, 0, 41, 41), almost, **settings)
+    banded = effects.draw_inner_shadow((0, 0, 41, 41), opaque, **settings)
+    assert float(choked[20, 20, 0]) == pytest.approx(254.0 / 255.0, abs=1e-6)
+    assert float(banded[20, 20, 0]) == 0.0
+    assert float(banded[20, 12, 0]) == 1.0
 
 
 # -- Compositing ------------------------------------------------------------ #
