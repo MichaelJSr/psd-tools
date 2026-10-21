@@ -22,7 +22,7 @@ from PIL import Image
 from psd_tools.api.effects import DropShadow, Stroke
 from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import composite, effects, utils
+from psd_tools.composite import _compat, composite, effects, utils
 from psd_tools.composite.composite import (
     Compositor,
     _content_bbox,
@@ -32,11 +32,20 @@ from psd_tools.composite.composite import (
 )
 from psd_tools.constants import BlendMode, Resource, Tag
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List, String
+from psd_tools.psd.descriptor import (
+    Bool,
+    Descriptor,
+    Double,
+    Enumerated,
+    List,
+    String,
+)
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
 from .test_composite import _mse
+
+pytest.importorskip("scipy")
 
 logger = logging.getLogger(__name__)
 
@@ -493,7 +502,7 @@ def test_the_knockout_cuts_the_shadow_under_the_layers_stroke_too() -> None:
     ],
 )
 def test_the_knockout_adds_the_stroke_band_to_the_silhouette(
-    style: bytes, at_edge: float, beyond_edge: float
+    monkeypatch: pytest.MonkeyPatch, style: bytes, at_edge: float, beyond_edge: float
 ) -> None:
     """Only the part of the band outside the boundary adds to the silhouette.
 
@@ -504,6 +513,9 @@ def test_the_knockout_adds_the_stroke_band_to_the_silhouette(
     layer, and on that pixel equals its coverage: added it would cut the
     shadow from under the uncovered half too, so the knockout there stays at
     the coverage. A centred band is half each.
+
+    The band is traced from the silhouette here, as it is for a pixel layer,
+    so that the silhouette can be one with a known edge.
     """
     psd = PSDImage.open(full_name("masks/2.psd"))
     layer = next(layer for layer in psd if layer.name == "ellipse3")
@@ -525,11 +537,85 @@ def test_the_knockout_adds_the_stroke_band_to_the_silhouette(
         np.ones((41, 41, 3), dtype=np.float32),
         np.zeros((41, 41, 1), dtype=np.float32),
     )
+    monkeypatch.setattr(
+        compositor,
+        "_read_trace",
+        lambda layer, box, traces_mask: paste(box, viewport, silhouette),
+    )
     knockout = compositor._knockout_shape(layer, viewport, silhouette)
     assert float(knockout[20, 20, 0]) == 1.0
     assert float(knockout[20, 30, 0]) == pytest.approx(at_edge, abs=1e-3)
     assert float(knockout[20, 31, 0]) == pytest.approx(beyond_edge, abs=1e-3)
     assert float(knockout[20, 34, 0]) == 0.0
+
+
+def test_a_groups_knockout_traces_its_stroke_from_the_groups_coverage() -> None:
+    """The band is traced from what the group's stroke is drawn around.
+
+    The icons cover their pixels fully at 40% opacity. Their alpha, which
+    casts the shadow, states a partial edge at every one of those pixels;
+    traced from it, the outset band would run through the icons and cut the
+    shadow from under them. Traced from their coverage it lies outside them,
+    and inside an icon the knockout is the icon's alpha alone.
+    """
+    from scipy.ndimage import binary_erosion  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    social = _social(BlendMode.NORMAL)
+    _, band = _header(BlendMode.PASS_THROUGH)
+    social.tagged_blocks.set_data(
+        Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
+        copy.deepcopy(band.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)),
+    )
+    assert _strokes(social), "no stroke to trace"
+    viewport = _SOCIAL_VIEWPORT
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    compositor = Compositor(
+        viewport,
+        np.ones((height, width, 3), dtype=np.float32),
+        np.zeros((height, width, 1), dtype=np.float32),
+    )
+    silhouette = compositor._cast_shape(social, viewport)
+    knockout = compositor._knockout_shape(social, viewport, silhouette)
+
+    # Three pixels into an icon, past the reach of the band around it.
+    icons = np.isclose(silhouette[:, :, 0], 102 / 255.0, atol=1e-6)
+    inside = binary_erosion(icons, iterations=3)
+    assert inside.any(), "no icon interior"
+    assert np.allclose(knockout[inside], silhouette[inside], atol=1e-6)
+
+
+def _strokes(layer: Layer) -> list[Stroke]:
+    return [cast(Stroke, effect) for effect in layer.effects.find("stroke")]
+
+
+def test_a_stroke_too_large_to_draw_does_not_cut_the_shadow() -> None:
+    """A stroke the document's budget refuses is not drawn, and cuts nothing.
+
+    The budget holds the shadow's canvas and not the stroke's, so the layer
+    renders as it does with the stroke switched off.
+    """
+    psd = PSDImage.open(full_name("masks.psb"))
+    band = next(layer for layer in psd.descendants() if layer.name == "Rectangle 2")
+    stroke = _strokes(band)[0]
+    stroke.descriptor[Key.SizeKey] = Double(100.0)
+    shadow = _shadow_descriptor(band)
+    for key, value in ((Key.Blur, 0.0), (Key.Distance, 20.0), (Key.Opacity, 100.0)):
+        shadow[key] = Double(value)
+    distance, size, _ = effects.shadow_geometry(shadow)
+    grown = effects.drop_shadow_bbox(
+        band.bbox, distance, _drop_shadow(band).angle, size
+    )
+    budget = (grown[2] - grown[0]) * (grown[3] - grown[1]) * effects._SHADOW_BYTES
+    with pytest.raises(ValueError):
+        effects.stroke_bbox(band.bbox, stroke.descriptor, budget)
+    psd.max_alloc_bytes = budget
+    viewport = (0, 0, 640, 300)
+
+    alpha = _alone(band, viewport)
+    stroke.descriptor[Key.Enabled] = False
+    assert np.array_equal(alpha, _alone(band, viewport))
+    # The shadow is drawn, just past the band's bottom edge.
+    assert float(alpha[band.bbox[3] + 4, 320, 0]) == pytest.approx(1.0)
 
 
 def test_a_pass_through_group_keeps_its_shadow_beneath_it() -> None:
@@ -740,6 +826,25 @@ def test_a_masked_pixel_layer_casts_its_shadow_from_its_pixels(force: bool) -> N
     assert float(alpha[40, 4, 0]) == pytest.approx(layer.opacity / 255.0)
 
 
+@pytest.mark.parametrize("force", [False, True])
+def test_a_stroke_only_shape_casts_its_shadow_from_its_stroke(force: bool) -> None:
+    """A shape with its fill off casts from the stroke it paints, not its path.
+
+    ``stroke-outer-no-fill.psd`` is a 10 px outer stroke round an unfilled
+    40 x 40 rectangle. Its shadow, hard and cast 10 px left with the
+    knockout off, falls where the stroke's left side would, and nothing
+    falls in the empty middle. Redrawn under ``force``, the shape casts what
+    its stored pixels do.
+    """
+    psd = PSDImage.open(full_name("stroke-outer-no-fill.psd"))
+    layer = next(layer for layer in psd if layer.name == "Rectangle 1")
+    shadow = _forge_shadow(layer, angle=0.0, Blur=0.0, Distance=10.0, Opacity=100.0)
+    shadow[b"layerConceals"] = Bool(False)
+    alpha = _alone(layer, psd.viewbox, force=force)
+    assert float(alpha[50, 50, 0]) == 0.0
+    assert float(alpha[50, 14, 0]) == pytest.approx(1.0)
+
+
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:
     return lambda desc: desc.__setitem__(key, value)
 
@@ -786,6 +891,57 @@ def test_an_unreadable_drop_shadow_is_dropped_and_the_document_renders(
     rendered = _rendered(_UNDRAWABLE[defect])
     assert np.isfinite(rendered).all()
     assert np.array_equal(rendered, disabled)
+
+
+def test_without_scipy_a_drop_shadow_is_skipped_and_the_document_renders(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A missing scipy costs the shadow, with a warning, not the render."""
+    psd, layer = _masks_card()
+    viewport = _around(layer)
+    shadow = _shadow_descriptor(layer)
+    shadow[Key.Enabled] = False
+    disabled = _alone(layer, viewport)
+    shadow[Key.Enabled] = True
+    monkeypatch.setattr(_compat, "HAS_SCIPY", False)
+    monkeypatch.setattr(effects, "HAS_SCIPY", False)
+    with caplog.at_level(logging.WARNING, logger="psd_tools.composite.composite"):
+        rendered = _alone(layer, viewport)
+    assert np.array_equal(rendered, disabled)
+    assert "install scipy" in caplog.text
+
+
+def _over_grey(layer: Layer, viewport: tuple[int, int, int, int]) -> np.ndarray:
+    """The layer's colour, composited alone over an opaque mid grey."""
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    compositor = Compositor(
+        viewport,
+        np.full((height, width, 3), 0.5, dtype=np.float32),
+        np.ones((height, width, 1), dtype=np.float32),
+    )
+    compositor.apply(layer)
+    return compositor.finish()[0]
+
+
+def test_a_drop_shadow_with_no_blend_mode_multiplies() -> None:
+    """Photoshop's default for a drop shadow is Multiply, as an inner shadow's is.
+
+    A red shadow tells the two apart over grey: multiplied it darkens the
+    grey, painted Normal it covers it.
+    """
+    psd, layer = _masks_card()
+    viewport = _around(layer)
+    shadow = _shadow_descriptor(layer)
+    for key, value in ((Key.Blur, 0.0), (Key.Distance, 20.0), (Key.Opacity, 100.0)):
+        shadow[key] = Double(value)
+    shadow[Key.Color][Key.Red] = Double(255.0)
+    multiplied = _over_grey(layer, viewport)
+    shadow[Key.Mode] = Enumerated(Type.BlendMode, Enum.Normal)
+    normal = _over_grey(layer, viewport)
+    del shadow[Key.Mode]
+    unstated = _over_grey(layer, viewport)
+    assert not np.allclose(multiplied, normal)
+    assert np.array_equal(unstated, multiplied)
 
 
 # -- Fidelity against Photoshop's own render ------------------------------- #
@@ -952,6 +1108,31 @@ def test_a_two_point_contour_is_a_straight_line() -> None:
     assert np.all(table[:65] == 0.0)
     assert np.all(table[128:] == 1.0)
     assert np.all(np.diff(table[64:129]) > 0.0)
+
+
+def test_a_corner_point_turns_the_contour_sharply() -> None:
+    """A point marked as a corner ends one run of the curve and starts the next.
+
+    Photoshop's "Cone" peaks at a corner, so each side is a straight line,
+    where a spline through all three points rounds the peak off. A run of
+    three or more points beside a corner is still curved, and needs scipy.
+    """
+    cone = _contour([(0.0, 0.0), (128.0, 255.0), (255.0, 0.0)])
+    rounded = effects.contour_table(cone)
+    cone[Key.Curve][1][Key.Continuity] = Bool(False)
+    sharp = effects.contour_table(cone)
+    assert rounded is not None and sharp is not None
+    grid = np.arange(effects._CONTOUR_STEPS)
+    assert np.allclose(sharp, np.interp(grid, [0, 128, 255], [0.0, 1.0, 0.0]))
+    assert float(rounded[64]) > float(sharp[64]) + 0.1
+
+    shoulder = _contour([(0.0, 0.0), (64.0, 32.0), (128.0, 255.0), (255.0, 0.0)])
+    shoulder[Key.Curve][2][Key.Continuity] = Bool(False)
+    table = effects.contour_table(shoulder)
+    assert table is not None
+    assert float(table[64]) == pytest.approx(32.0 / 255.0, abs=1e-6)
+    assert not np.allclose(table[:65], np.linspace(0.0, 32.0 / 255.0, 65))
+    assert np.allclose(table[128:], np.interp(grid[128:], [128, 255], [1.0, 0.0]))
 
 
 def test_a_contour_reshapes_the_falloff_of_a_drop_shadow() -> None:

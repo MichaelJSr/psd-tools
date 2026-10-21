@@ -328,9 +328,13 @@ class _AngleMixin(_EffectProtocol):
 
     @property
     def angle(self) -> float:
-        """Angle value."""
+        """Angle value.
+
+        With global light on, the document's global angle, or Photoshop's
+        default of 120 degrees when the document does not state one.
+        """
         if self.use_global_light:
-            return self._image_resources.get_data(Resource.GLOBAL_ANGLE, 30.0)
+            return self._image_resources.get_data(Resource.GLOBAL_ANGLE, 120.0)
         return get_scalar(self.descriptor, Key.LocalLightingAngle, float, 0.0)
 
 

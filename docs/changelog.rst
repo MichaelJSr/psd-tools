@@ -13,13 +13,18 @@ Changelog
 - [fix] A drop shadow layer effect is now rendered when a document is
   composited from its layers, instead of being dropped. Distance, size,
   spread, contour, global light, opacity, blend mode and the layer knockout
-  are honoured; noise is read but not applied, and the blur approximates
-  Photoshop's. Needs ``scipy``, as a stroke effect does (#679)
+  are honoured; noise is read but not applied, and a soft shadow's falloff
+  can differ from Photoshop's. Without ``scipy`` it is skipped with a warning
+  (#679)
 - [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
   jitter (#679)
 - [fix] Inner shadow and inner glow layer effects are now rendered when a
   document is composited from its layers. Solid colours only: a gradient
-  glow is still dropped, and noise is read but not applied. Needs ``scipy``
+  glow is still dropped, and noise is read but not applied. Without ``scipy``
+  they are skipped with a warning
+- [fix] The ``angle`` of a shadow or bevel lit by the global light is
+  Photoshop's default, 120, in a document that states no global angle; it
+  was 30
 
 1.25.0 (2026-10-14)
 -------------------

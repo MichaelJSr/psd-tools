@@ -788,8 +788,9 @@ def contour_table(desc: Descriptor | None) -> np.ndarray | None:
 
     A contour maps the coverage of a blurred matte to the coverage painted,
     along a curve through the points the descriptor lists. Photoshop draws a
-    smooth curve through them; this is a monotone cubic through the same
-    points, which neither overshoots a point nor turns back between two, and
+    smooth curve through them, turning sharply at a point marked as a
+    corner; this is a monotone cubic through each run of points between two
+    corners, which neither overshoots a point nor turns back between two, and
     a straight line between two points is reproduced exactly. Past the first
     and last point the table holds their values.
 
@@ -808,21 +809,45 @@ def contour_table(desc: Descriptor | None) -> np.ndarray | None:
     ys = np.array([float(point[Key.Vertical]) for point in points]) / 255.0
     if not (np.isfinite(xs).all() and np.isfinite(ys).all()):
         raise ValueError("Contour points must be finite.")
+    # Photoshop marks a corner point with continuity off.
+    smooth = [bool(point.get(Key.Continuity, True)) for point in points]
     order = np.argsort(xs, kind="stable")
     xs, ys = xs[order], ys[order]
+    smooth = [smooth[index] for index in order]
     if len(xs) == 2 and np.array_equal(xs, ys) and xs[0] == 0.0 and xs[1] == 1.0:
         return None
     grid = np.linspace(0.0, 1.0, _CONTOUR_STEPS)
-    if len(xs) > 2 and np.all(np.diff(xs) > 0.0):
+    # Straight segments, which hold the end values past the ends on their
+    # own; each run of three or more points is then curved over its span.
+    table = np.interp(grid, xs, ys)
+    curved = [(a, b) for a, b in _contour_runs(xs, smooth) if b - a >= 2]
+    if curved:
         _require_scipy("Drop shadow effects")
         from scipy.interpolate import PchipInterpolator  # type: ignore[import-untyped]  # noqa: PLC0415
 
-        table = PchipInterpolator(xs, ys)(np.clip(grid, xs[0], xs[-1]))
-    else:
-        # Two points, or a step the spline cannot pass through: straight
-        # segments, which hold the end values past the ends on their own.
-        table = np.interp(grid, xs, ys)
+        for a, b in curved:
+            span = (grid >= xs[a]) & (grid <= xs[b])
+            table[span] = PchipInterpolator(xs[a : b + 1], ys[a : b + 1])(grid[span])
     return np.clip(table, 0.0, 1.0).astype(np.float32)
+
+
+def _contour_runs(xs: np.ndarray, smooth: list[bool]) -> list[tuple[int, int]]:
+    """The first and last index of each run of a contour's sorted points.
+
+    A run ends at a corner, which the next run starts from, and before a
+    step, two points at one input that no spline can pass through.
+    """
+    runs = []
+    start = 0
+    for index in range(1, len(xs)):
+        if xs[index] == xs[index - 1]:
+            runs.append((start, index - 1))
+            start = index
+        elif not smooth[index] and index < len(xs) - 1:
+            runs.append((start, index))
+            start = index
+    runs.append((start, len(xs) - 1))
+    return runs
 
 
 def _contoured(alpha: np.ndarray, table: np.ndarray, anti_aliased: bool) -> np.ndarray:

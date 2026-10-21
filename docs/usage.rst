@@ -333,7 +333,9 @@ option::
 
     Basic compositing works without them by using cached previews or simple
     pixel-based operations. If a feature requires missing dependencies, an
-    ``ImportError`` with installation instructions will be raised.
+    ``ImportError`` with installation instructions will be raised. Drop
+    shadows, inner shadows and inner glows are the exception: without
+    ``scipy`` they are skipped with a warning.
 
     Note that most layer effects are not supported. Adjustment layers have
     limited support (BrightnessContrast, Levels, Curves, Exposure, Invert,
