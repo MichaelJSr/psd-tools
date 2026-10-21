@@ -441,6 +441,35 @@ def test_partial_smoothness_mixes_the_linear_and_the_smooth_ramp() -> None:
     assert np.allclose(half, (linear + smooth) / 2, atol=1e-3)
 
 
+@pytest.mark.parametrize(
+    ("method", "tension"),
+    [(GradientMethod.PERCEPTUAL.value, 0.5), (GradientMethod.CLASSIC.value, 1.0)],
+)
+def test_a_perceptual_ramp_carries_half_the_slope_across_an_inner_stop(
+    method: bytes, tension: float
+) -> None:
+    """The share is fitted to the corpus' perceptual stat bars.
+
+    The_Big_Yellow_Cat's seven-stop ramp needs at least half the classic
+    slope, Kalecgos' three-stop one at most half.
+    """
+    dark, mid, light = (51.0,) * 3, (128.0,) * 3, (204.0,) * 3
+    desc = _gradient(
+        stops=[_stop(dark, 0), _stop(mid, 1024), _stop(light, 4096)],
+        method=method,
+        smoothness=1.0,
+    )
+    color, _ = paint.draw_gradient_fill((0, 0, 4097, 1), ColorMode.RGB, desc)
+    assert color is not None
+    space = paint._srgb_to_oklab if method == GradientMethod.PERCEPTUAL.value else None
+    ramp = color[0, 1022:1027].astype(np.float64)
+    ends = np.array([dark, light]) / 255.0
+    if space is not None:
+        ramp, ends = space(ramp), space(ends)
+    slope = (ramp[3, 0] - ramp[1, 0]) * 4096 / 2
+    assert slope == pytest.approx(tension * (ends[1, 0] - ends[0, 0]), rel=5e-3)
+
+
 def test_a_smooth_ramp_that_overshoots_is_held_to_the_gamut() -> None:
     """A slope carried across a stop near the gamut's edge can pass it."""
     ramp = _ramp(

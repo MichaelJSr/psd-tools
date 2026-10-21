@@ -656,16 +656,20 @@ _RAMP_SAMPLES = 4097
 
 
 def _blend_stops(
-    X: list[float], Y: list[np.ndarray], M: list[float], smoothness: float
+    X: list[float],
+    Y: list[np.ndarray],
+    M: list[float],
+    smoothness: float,
+    tension: float = 1.0,
 ) -> np.ndarray:
     """Sample the ramp through the stops at every ``Lctn`` unit.
 
     Within a segment the blend runs linearly to halfway at the end stop's
     midpoint and linearly on to the end; a midpoint on either end of its
     segment is ignored, as Photoshop's dialog cannot author one. Smoothness
-    eases that blend towards a cubic through the stops (see
-    :py:func:`_stop_slopes`), so a two-stop ramp at 100% lands halfway between
-    linear and a smoothstep.
+    eases that blend towards a cubic through the stops with the slopes
+    :py:func:`_stop_slopes` gives them, so a two-stop ramp at 100% lands
+    halfway between linear and a smoothstep.
     """
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
@@ -683,7 +687,7 @@ def _blend_stops(
     linear = values[k] * (1.0 - f) + values[k + 1] * f
     if smoothness <= 0.0:
         return linear
-    slopes = _stop_slopes(locations, values)
+    slopes = _stop_slopes(locations, values, tension)
     # The cubic Hermite basis on the segment, its slopes scaled to it.
     f2, f3 = f * f, f * f * f
     cubic = (
@@ -695,12 +699,15 @@ def _blend_stops(
     return linear + smoothness * (cubic - linear)
 
 
-def _stop_slopes(locations: np.ndarray, values: np.ndarray) -> np.ndarray:
+def _stop_slopes(
+    locations: np.ndarray, values: np.ndarray, tension: float = 1.0
+) -> np.ndarray:
     """The ramp's slope at each stop for the smooth blend.
 
-    An inner stop takes the slope from its left neighbour to its right one
-    (Catmull-Rom), an end stop half its segment's, and a stop beside a step
-    (two stops at one location) none. A step between equal values is no step.
+    An inner stop takes ``tension`` times the slope from its left neighbour to
+    its right one (Catmull-Rom), an end stop half its segment's, and a stop
+    beside a step (two stops at one location) none. A step between equal
+    values is no step.
     """
     count = len(locations)
     slopes = np.zeros_like(values)
@@ -716,8 +723,10 @@ def _stop_slopes(locations: np.ndarray, values: np.ndarray) -> np.ndarray:
         has_left = left >= 0 and locations[index] > locations[left]
         has_right = right < count and locations[right] > locations[index]
         if has_left and has_right:
-            slopes[index] = (values[right] - values[left]) / (
-                locations[right] - locations[left]
+            slopes[index] = (
+                tension
+                * (values[right] - values[left])
+                / (locations[right] - locations[left])
             )
         elif has_left and right == count:
             slopes[index] = (values[index] - values[left]) / (
@@ -815,6 +824,11 @@ _ALPHA_BLEND_SPACES: dict[bytes, _BlendSpace] = {
 }
 
 
+# The share of the classic slope a smooth ramp in this method carries across
+# an inner stop, fitted to the corpus' perceptual stat bars.
+_METHOD_TENSIONS: dict[bytes, float] = {GradientMethod.PERCEPTUAL.value: 0.5}
+
+
 def _canvas_rows(color_mode: ColorMode, rgb: np.ndarray) -> np.ndarray:
     """``rgb``'s rows brought into the document's arrays."""
     return np.array([_from_rgb(color_mode, tuple(row)) for row in rgb.tolist()])
@@ -845,8 +859,10 @@ def _make_linear_gradient_color(
             colors, lambda stop: np.array(_get_color(ColorMode.RGB, stop))
         )
         classic = _canvas_rows(color_mode, _blend_stops(X, Y, M, smoothness))
+        tension = _METHOD_TENSIONS.get(method or b"", 1.0)
         blended = _canvas_rows(
-            color_mode, decode(_blend_stops(X, [encode(y) for y in Y], M, smoothness))
+            color_mode,
+            decode(_blend_stops(X, [encode(y) for y in Y], M, smoothness, tension)),
         )
         # The method's blend as a shift from the classic one, so each stop
         # keeps its stored value: sRGB does not round-trip CMYK ink or a Lab
