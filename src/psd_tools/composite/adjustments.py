@@ -141,6 +141,8 @@ def _preserve_alpha(func: F) -> F:
             alpha = img[..., color_channels:]
 
             out = func(color, colormode, *args, **kwargs)
+            if out is None:
+                return None
             if out.shape[2] != color_channels:
                 raise ValueError(
                     f"Adjustment function returned {out.shape[2]} channels, "
@@ -746,15 +748,15 @@ def apply_channelmixer(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: ChannelMixer,
-) -> np.ndarray:
-    """Apply a channel mixer adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a channel mixer adjustment to an image, or None where it is not rendered."""
     if colormode != ColorMode.RGB:
         logger.info("Channel mixer isn't currently supported for %s.", colormode)
-        return img
+        return None
 
     records = _channelmixer_records(layer)
     if records is None:
-        return img
+        return None
     if layer.monochrome:
         records = np.repeat(records[:1], 3, axis=0)
 
@@ -792,13 +794,13 @@ def apply_blackandwhite(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: BlackAndWhite,
-) -> np.ndarray:
-    """Apply a black & white adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a black & white adjustment to an image, or None where it is not rendered."""
     if colormode != ColorMode.RGB:
         logger.info("Black & White isn't currently supported for %s.", colormode)
-        return img
+        return None
     if layer._data is None:
-        return img
+        return None
     if layer.use_tint:
         logger.info("Black & White tint is not rendered.")
 
@@ -825,11 +827,11 @@ def apply_gradientmap(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: GradientMap,
-) -> np.ndarray:
-    """Apply a gradient map adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a gradient map adjustment to an image, or None where it is not rendered."""
     lut = _gradientmap_lut(layer, colormode)
     if lut is None:
-        return img
+        return None
 
     luminance = np.clip(_gradientmap_luminance(img, colormode), 0, 1)
     if layer.reversed:
@@ -961,14 +963,14 @@ def apply_colorbalance(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: ColorBalance,
-) -> np.ndarray:
-    """Apply a color balance adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a color balance adjustment to an image, or None where it is not rendered."""
     if colormode != ColorMode.RGB:
         logger.info("Color balance isn't currently supported for %s.", colormode)
-        return img
+        return None
     shadows, midtones, highlights = layer.shadows, layer.midtones, layer.highlights
     if shadows is None or midtones is None or highlights is None:
-        return img
+        return None
 
     # A midtone amount is a per-channel gamma. A shadow or highlight amount
     # adds up to that many levels, weighted toward its own end of the range and
@@ -1009,11 +1011,11 @@ def apply_vibrance(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: Vibrance,
-) -> np.ndarray:
-    """Apply a vibrance adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a vibrance adjustment to an image, or None where it is not rendered."""
     if colormode != ColorMode.RGB:
         logger.info("Vibrance isn't currently supported for %s.", colormode)
-        return img
+        return None
     vibrance = layer.vibrance / 100.0
     saturation = layer.saturation / 100.0
     if vibrance == 0 and saturation == 0:
@@ -1083,7 +1085,9 @@ def _vibrance(
 
 
 """Adjustment function table."""
-AdjustmentFn = Callable[..., np.ndarray]
+# A function returns None for an adjustment it does not render, so that the
+# compositor leaves the canvas alone instead of blending it with itself.
+AdjustmentFn = Callable[..., np.ndarray | None]
 ADJUSTMENT_FUNC: dict[str, AdjustmentFn] = {
     "brightnesscontrast": apply_brightnesscontrast,
     "levels": apply_levels,

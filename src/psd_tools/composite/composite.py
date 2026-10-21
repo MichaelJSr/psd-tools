@@ -2316,6 +2316,11 @@ class Compositor:
             content_alpha = self._alpha
             content = self._color
         transformed_color = adjustment_fn(content, colormode, layer)
+        # An adjustment that is not rendered is not blended either: the
+        # content would blend with itself.
+        if transformed_color is None:
+            logger.debug("Adjustment layer not rendered: %s", layer.kind)
+            return
 
         if layer.has_clip_layers():
             transformed_color = self._apply_clip_layers(
