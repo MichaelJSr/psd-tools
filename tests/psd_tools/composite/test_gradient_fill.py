@@ -456,6 +456,37 @@ def test_a_smooth_ramp_runs_through_its_stops_as_photoshops_does(
     assert eased > eased_miss
 
 
+def test_the_fixtures_smooth_gradient_stroke_runs_through_its_crest_as_photoshops_does() -> (
+    None
+):
+    """``stroke-effects.psd``'s ``Gradient`` stroke against the composite it saved.
+
+    The Blue-Yellow-Blue ramp runs up column 33 over 30 rows from row 157, so
+    its stops land on rows 154, 142 and 130. Easing each segment on its own
+    would land halfway to yellow at a segment's midpoint.
+    """
+    psd = PSDImage.open(full_name("effects/stroke-effects.psd"))
+    layer = next(x for x in psd.descendants() if x.name == "Gradient")
+    gradient = next(layer.effects.find("stroke")).descriptor[Key.Gradient]
+    assert float(gradient[Key.Interpolation]) == 4096.0
+    stops: Stops = []
+    for stop in gradient[Key.Colors]:
+        rgb = stop[Key.Color]
+        color = (float(rgb[Key.Red]), float(rgb[Key.Green]), float(rgb[Key.Blue]))
+        stops.append((color, int(stop[Key.Location])))
+    assert [location for _, location in stops] == [410, 2048, 3686]
+    bottom, rows = 157, 30
+    pixels = psd.numpy()[:, 33, :3] * 255.0
+    readings: Readings = []
+    for row in range(130, 155):
+        levels = [int(round(v)) for v in pixels[row]]
+        location = round((bottom - row) * 4096 / rows)
+        readings.append((location, (levels[0], levels[1], levels[2])))
+    ours, eased = _photoshop_misses(stops, readings)
+    assert ours < 1.0
+    assert eased > 15.0
+
+
 def test_a_smooth_ramp_of_two_stops_has_no_inner_slope_to_carry() -> None:
     """With no inner stop, the ramp is the two-stop ease whatever the colours."""
     stops = [((15.0, 67.0, 240.0), 0), ((251.0, 28.0, 60.0), 4096)]

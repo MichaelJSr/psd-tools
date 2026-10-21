@@ -11,6 +11,8 @@ Changelog
   Linear Dodge, Color Burn, Linear Burn, Vivid Light, Linear Light or
   Difference fades by its colour at less than 100% opacity, as Photoshop
   does, instead of mixing the full-strength blend with the layer
+- [api] ``psd_tools.composite.blend.fade_source`` wraps a blend function so
+  that a source's opacity fades its colour in those modes
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

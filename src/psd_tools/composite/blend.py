@@ -738,12 +738,13 @@ def fade_source(
 ) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
     """*blend_fn* for a source composited at *opacity* that fades its source.
 
-    Photoshop fades a Color Dodge, Linear Burn, Vivid Light, Linear Light or
-    Difference overlay or satin by moving its colour towards the mode's
-    neutral one, so 60% dodges by 60% of the colour. The result is meant to be
-    composited at *opacity* as usual: it is the blend that, mixed with the
-    backdrop by *opacity*, lands where the faded source blends at full
-    strength. Any other mode, and an opacity of 0 or 1, answers *blend_fn*.
+    Photoshop fades a Color Dodge, Linear Dodge, Color Burn, Linear Burn,
+    Vivid Light, Linear Light or Difference overlay or satin by moving its
+    colour towards the mode's neutral one, so 60% dodges by 60% of the colour.
+    The result is meant to be composited at *opacity* as usual: it is the
+    blend that, mixed with the backdrop by *opacity*, lands where the faded
+    source blends at full strength. Any other mode, and an opacity of 0 or 1,
+    answers *blend_fn*.
     """
     neutral = _NEUTRAL_SOURCE.get(blend_mode)
     if neutral is None or not 0.0 < opacity < 1.0:
