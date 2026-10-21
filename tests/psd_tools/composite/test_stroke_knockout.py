@@ -21,11 +21,13 @@ _BLUE = [0.0, 0.0, 1.0]
 _OPACITY = 0.4
 
 
-def _square(psd: PSDImage, blend_mode: bytes = b"Nrml") -> Layer:
-    """``Size 3``: a blue 16x16 square under a red 3 px inset stroke, faded."""
+def _square(
+    psd: PSDImage, blend_mode: bytes = b"Nrml", opacity: float = _OPACITY
+) -> Layer:
+    """``Size 3``: a blue 16x16 square under a red 3 px stroke."""
     layer = next(x for x in psd if x.name == "Size 3")
     desc = layer.effects[0].descriptor
-    desc[b"Opct"] = Double(100.0 * _OPACITY)
+    desc[b"Opct"] = Double(100.0 * opacity)
     desc[b"Md  "] = Enumerated(typeID=b"BlnM", enum=blend_mode)
     return layer
 
@@ -42,7 +44,23 @@ def test_a_faded_inset_stroke_shows_the_backdrop_not_the_layer() -> None:
     assert alpha[row, 83, 0] == pytest.approx(1.0)
 
 
+def test_a_faded_centred_stroke_knocks_out_only_its_inner_half() -> None:
+    """``center-stroke-sizes.psd``: a 2 px centred stroke, 1 px each side."""
+    psd = PSDImage.open(full_name("effects/center-stroke-sizes.psd"))
+    layer = next(x for x in psd if x.name == "Size 2")
+    assert layer.bbox == (48, 16, 64, 32)
+    layer.effects[0].descriptor[b"Opct"] = Double(100.0 * _OPACITY)
+    color, _, alpha = composite(psd)
+    row = 24
+    np.testing.assert_allclose(alpha[row, 46, 0], 0.0, atol=1e-6)
+    np.testing.assert_allclose(color[row, 47:49], [_RED] * 2, atol=1e-6)
+    np.testing.assert_allclose(alpha[row, 47:49, 0], [_OPACITY] * 2, atol=1e-6)
+    np.testing.assert_allclose(color[row, 49], _BLUE, atol=1e-6)
+    assert alpha[row, 49, 0] == pytest.approx(1.0)
+
+
 def test_a_faded_multiply_inset_stroke_still_blends_with_the_layer() -> None:
+    """Pins the fork's rendering: Photoshop's is not calibrated for this."""
     psd = PSDImage.open(full_name("effects/inset-stroke-sizes.psd"))
     _square(psd, b"Mltp")
     color, _, alpha = composite(psd)
@@ -61,18 +79,18 @@ def test_an_inset_stroke_follows_a_layer_past_the_canvas(
 
     The canvas edge is not an edge of the layer: the column at x = 0 is the
     square's interior, and only its top, bottom and right bands are stroked.
+    The stroke is left opaque so that this holds apart from the knockout.
     """
     psd = PSDImage.open(full_name("effects/inset-stroke-sizes.psd"))
-    layer = _square(psd)
+    layer = _square(psd, opacity=1.0)
     layer.offset = (-8, 16)
     assert layer.bbox == (-8, 16, 8, 32)
     color, _, alpha = composite(psd, viewport=viewport)
     row = 24
     np.testing.assert_allclose(color[row, 0:5], [_BLUE] * 5, atol=1e-6)
-    np.testing.assert_allclose(alpha[row, 0:5, 0], [1.0] * 5, atol=1e-6)
     np.testing.assert_allclose(color[row, 5:8], [_RED] * 3, atol=1e-6)
-    np.testing.assert_allclose(alpha[row, 5:8, 0], [_OPACITY] * 3, atol=1e-6)
-    np.testing.assert_allclose(alpha[16:20, 0, 0], [_OPACITY] * 3 + [1.0], atol=1e-6)
+    np.testing.assert_allclose(alpha[row, 0:8, 0], [1.0] * 8, atol=1e-6)
+    np.testing.assert_allclose(color[16:20, 0], [_RED] * 3 + [_BLUE], atol=1e-6)
 
 
 def test_a_faded_inset_stroke_matches_photoshop() -> None:
@@ -80,7 +98,7 @@ def test_a_faded_inset_stroke_matches_photoshop() -> None:
 
     Photoshop's own save, over a yellow backdrop the band lets through: the
     preview's green and blue differ there, which a stroke over the layer's
-    red fill could not give.
+    own paint -- a red fill under a gradient overlay -- could not give.
     """
     psd = PSDImage.open(full_name("layer_comps.psb"))
     layer = next(x for x in psd.descendants() if x.name == "Фигура 5")

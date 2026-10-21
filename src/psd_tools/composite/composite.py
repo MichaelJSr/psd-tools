@@ -1590,7 +1590,11 @@ class _AdjustmentCanvas:
         self._compositor._apply_source(color, shape, shape * opacity, blend_mode)
 
     def replace(self, coverage: np.ndarray, color: np.ndarray, opacity: float) -> None:
-        """As :py:meth:`over` Normal: the layer has no paint to knock out."""
+        """As :py:meth:`over` Normal.
+
+        The adjustment is already applied to the backdrop under the band and
+        stays there; only the stroke's own opacity fades it.
+        """
         self.over(coverage, color, BlendMode.NORMAL, opacity)
 
 
