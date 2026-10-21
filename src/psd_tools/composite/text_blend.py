@@ -10,8 +10,9 @@ preference's default fits on Photoshop's own output.
 
 import numpy as np
 
-# Photoshop's "Blend Text Colors Using Gamma" preference, at its default.
-TEXT_BLEND_GAMMA = 1.45
+from psd_tools.constants import TEXT_BLEND_GAMMA
+
+__all__ = ["TEXT_BLEND_GAMMA", "from_text_space", "to_text_space"]
 
 _SRGB_LINEAR_CUTOFF = 0.04045
 _SRGB_LINEAR_SLOPE = 12.92

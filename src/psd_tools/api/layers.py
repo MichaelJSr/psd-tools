@@ -118,6 +118,7 @@ from psd_tools.api.utils import get_color_channels
 from psd_tools.color_convert import LAB_NEUTRAL_CHROMA, rgb_to_grayscale
 from psd_tools.compression import PSDDecompressionWarning
 from psd_tools.constants import (
+    TEXT_BLEND_GAMMA,
     BlendMode,
     ChannelID,
     Clipping,
@@ -999,6 +1000,7 @@ class Layer(LayerProtocol):
         alpha: float | np.ndarray = 0.0,
         layer_filter: Callable | None = None,
         apply_icc: bool = True,
+        text_gamma: float | None = TEXT_BLEND_GAMMA,
     ) -> Image.Image | None:
         """
         Composite layer and masks (mask, vector mask, and clipping layers).
@@ -1014,6 +1016,10 @@ class Layer(LayerProtocol):
         :param layer_filter: Callable that takes a layer as argument and
             returns whether if the layer is composited. Default is
             :py:func:`~psd_tools.api.layers.PixelLayer.is_visible`.
+        :param text_gamma: The gamma a type layer's anti-aliased edges are
+            blended in, as Photoshop's "Blend Text Colors Using Gamma"
+            preference. ``None`` mixes them in the document's encoding like
+            any other layer.
         :return: :py:class:`PIL.Image.Image` or `None`.
         """
         from psd_tools.composite import composite_pil  # noqa: PLC0415
@@ -1022,7 +1028,14 @@ class Layer(LayerProtocol):
             force = True
 
         return composite_pil(
-            self, color, alpha, viewport, layer_filter, force, apply_icc=apply_icc
+            self,
+            color,
+            alpha,
+            viewport,
+            layer_filter,
+            force,
+            apply_icc=apply_icc,
+            text_gamma=text_gamma,
         )
 
     def has_clip_layers(self, visible: bool = False) -> bool:
@@ -2340,6 +2353,7 @@ class Group(GroupMixin, Layer):
         alpha: float | np.ndarray = 0.0,
         layer_filter: Callable | None = None,
         apply_icc: bool = True,
+        text_gamma: float | None = TEXT_BLEND_GAMMA,
     ) -> Image.Image | None:
         """
         Composite layer and masks (mask, vector mask, and clipping layers).
@@ -2355,6 +2369,10 @@ class Group(GroupMixin, Layer):
         :param layer_filter: Callable that takes a layer as argument and
             returns whether if the layer is composited. Default is
             :py:func:`~psd_tools.api.layers.PixelLayer.is_visible`.
+        :param text_gamma: The gamma a type layer's anti-aliased edges are
+            blended in, as Photoshop's "Blend Text Colors Using Gamma"
+            preference. ``None`` mixes them in the document's encoding like
+            any other layer.
         :return: :py:class:`PIL.Image.Image`.
         """
         from psd_tools.composite import composite_pil  # noqa: PLC0415
@@ -2368,6 +2386,7 @@ class Group(GroupMixin, Layer):
             force,
             as_layer=True,
             apply_icc=apply_icc,
+            text_gamma=text_gamma,
         )
 
     @staticmethod
@@ -2543,6 +2562,7 @@ class Artboard(Group):
         alpha: float | np.ndarray | None = None,
         layer_filter: Callable | None = None,
         apply_icc: bool = True,
+        text_gamma: float | None = TEXT_BLEND_GAMMA,
     ) -> Image.Image | None:
         """
         Composite layer, automatically applying the artboard's background color.
@@ -2567,6 +2587,7 @@ class Artboard(Group):
             alpha=alpha,
             layer_filter=layer_filter,
             apply_icc=apply_icc,
+            text_gamma=text_gamma,
         )
 
     def _artboard_background_defaults(

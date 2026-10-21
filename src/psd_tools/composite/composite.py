@@ -549,6 +549,7 @@ def composite_pil(
     force: bool,
     as_layer: bool = False,
     apply_icc: bool = True,
+    text_gamma: float | None = TEXT_BLEND_GAMMA,
 ) -> Image.Image | None:
     """
     Composite layers and return a PIL Image.
@@ -566,6 +567,9 @@ def composite_pil(
         force: If True, force re-rendering of all layers (ignore cached pixels)
         as_layer: If True, apply layer blend modes (default: False for document-level compositing)
         apply_icc: If True, apply ICC profile color correction (default: True)
+        text_gamma: The gamma a type layer's anti-aliased edges are blended in,
+            as Photoshop's "Blend Text Colors Using Gamma" preference; None
+            mixes them in the document's encoding like any other layer
 
     Returns:
         PIL Image with composited result, or None if viewport is empty
@@ -610,6 +614,7 @@ def composite_pil(
         layer_filter=layer_filter,
         force=force,
         as_layer=as_layer,
+        text_gamma=text_gamma,
     )
 
     mode = pil_io.get_pil_mode(color_mode)
@@ -725,6 +730,7 @@ def composite(
     layer_filter: Callable[[Layer], bool] | None = None,
     force: bool = False,
     as_layer: bool = False,
+    text_gamma: float | None = TEXT_BLEND_GAMMA,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Composite layers and return NumPy arrays.
@@ -743,6 +749,9 @@ def composite(
         layer_filter: Optional callable(layer) -> bool to filter which layers to composite
         force: If True, force re-rendering of all layers including vector shapes and fills
         as_layer: If True, treat the group as a layer (apply blend mode to backdrop)
+        text_gamma: The gamma a type layer's anti-aliased edges are blended in,
+            as Photoshop's "Blend Text Colors Using Gamma" preference; None
+            mixes them in the document's encoding like any other layer
 
     Returns:
         Tuple of (color, shape, alpha) as float32 ndarrays with shape (height, width, channels):
@@ -766,6 +775,10 @@ def composite(
           for vector shape rendering, gradient fills, and layer effects.
         - Adjustment layers have limited support.
         - Text rendering is not supported (text layers show as raster if available).
+          In an RGB document a type layer's stored raster is blended in
+          ``text_gamma``, as Photoshop composites it, unless Photoshop kept
+          the raster as pixels (a substituted font, text data without
+          ``bounds``) or the document is 32-bit.
         - Multichannel documents are composited over every spot channel the
           file declares. That is more than Photoshop does: Photoshop discards
           the layer records when it opens a multichannel document and displays
@@ -882,6 +895,7 @@ def composite(
         document_backdrop=lambda: _document_backdrop(_psd, viewport),
         widen=_widen_fn,
         color_mode=_psd.color_mode,
+        text_gamma=text_gamma,
     )
     target_group = group if isinstance(group, GroupMixin) and not as_layer else [group]
     for layer in target_group:  # type: ignore
@@ -1181,6 +1195,26 @@ class _Source:
     # The gamma a type layer's edge coverage blends in, or None to blend in
     # the document's encoding like every other source.
     text_gamma: float | None = None
+
+
+def _blends_in_text_space(layer: Layer, color_mode: ColorMode | None) -> bool:
+    """Whether Photoshop mixes this layer's glyph edges in the text gamma.
+
+    Only a type layer in an RGB document, and only one Photoshop renders
+    itself: a layer whose font was substituted (``substitutesUsed``) or whose
+    text data predates the ``bounds`` key keeps its stored raster and is
+    composited straight, like a pixel layer. A 32-bit document's channels
+    are linear already and mix straight too.
+    """
+    if not isinstance(layer, TypeLayer):
+        return False
+    if color_mode not in (None, ColorMode.RGB) or layer._psd.depth == 32:
+        return False
+    # Unreadable text data leaves nothing but the stored pixels.
+    if layer._type_data is None:
+        return False
+    text_data = layer._type_data.text_data
+    return b"bounds" in text_data and not text_data.get(b"substitutesUsed", False)
 
 
 def _composites_as_passthrough(source: _Source, blend_mode: BlendMode) -> bool:
@@ -1612,7 +1646,11 @@ class Compositor:
             knockout=knockout,
             adjustment_isolated=adjustment_isolated,
             knockout_shape=shape,
-            text_gamma=self._text_gamma if isinstance(layer, TypeLayer) else None,
+            text_gamma=(
+                self._text_gamma
+                if _blends_in_text_space(layer, self._color_mode)
+                else None
+            ),
         )
 
     def _composite_source(self, source: _Source, blend_mode: BlendMode) -> None:

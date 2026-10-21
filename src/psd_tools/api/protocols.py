@@ -26,6 +26,7 @@ import numpy as np
 from PIL import Image
 
 from psd_tools.constants import (
+    TEXT_BLEND_GAMMA,
     BlendMode,
     ChannelID,
     ColorMode,
@@ -292,6 +293,7 @@ class LayerProtocol(Protocol):
         alpha: float | np.ndarray = 0.0,
         layer_filter: Callable | None = None,
         apply_icc: bool = True,
+        text_gamma: float | None = TEXT_BLEND_GAMMA,
     ) -> Image.Image | None:
         """
         Composite the layer.
@@ -302,6 +304,7 @@ class LayerProtocol(Protocol):
         :param alpha: Backdrop alpha (float or ndarray).
         :param layer_filter: Layer filter callable.
         :param apply_icc: Whether to apply ICC profile conversion.
+        :param text_gamma: Gamma a type layer's edges blend in; None for straight.
         :return: PIL Image, or None if composition not available.
         """
         ...
@@ -576,6 +579,7 @@ class PSDProtocol(GroupMixinProtocol, Protocol):
         layer_filter: Callable | None = None,
         ignore_preview: bool = False,
         apply_icc: bool = True,
+        text_gamma: float | None = TEXT_BLEND_GAMMA,
     ) -> Image.Image:
         """
         Composite the PSD document.
@@ -587,6 +591,7 @@ class PSDProtocol(GroupMixinProtocol, Protocol):
         :param layer_filter: Layer filter callable.
         :param ignore_preview: Whether to skip using pre-composed preview.
         :param apply_icc: Whether to apply ICC profile conversion.
+        :param text_gamma: Gamma a type layer's edges blend in; None for straight.
         :return: PIL Image.
         """
         ...
