@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from psd_tools.composite.text.compose import Decision, Line, break_lines
-from psd_tools.composite.text.constants import BOX_ABSOLUTE_FRAME_L
+from psd_tools.composite.text.constants import BOX_ABSOLUTE_FRAME_L, FAUX_BOLD_EM
 from psd_tools.composite.text.fonts import Face, FontMap, Resolved
 from psd_tools.composite.text.model import RGB, Style, TextModel
 from psd_tools.composite.text.shape import (
@@ -195,7 +195,10 @@ def layout(
             return None
         if face.metrics.ascent_glyph != "d":
             warn(f"ascent_fallback_{face.metrics.ascent_glyph}")
-        return face.metrics.ascent_units / face.metrics.upem * style.size
+        # The faux-bold stroke raises the ascent by its half-width, at the
+        # nominal size like the ascent itself.
+        stroke = FAUX_BOLD_EM / 2 if style.faux_bold else 0.0
+        return (face.metrics.ascent_units / face.metrics.upem + stroke) * style.size
 
     box = frame(model)
     width = box[2] if box else None

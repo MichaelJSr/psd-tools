@@ -10,7 +10,7 @@ def test_values() -> None:
     assert c.ASCENT_GLYPHS == ("d", "h", "l", "b")
     assert c.BOX_ABSOLUTE_FRAME_L == 1.5
     assert c.WORD_SPACING_MIN == 0.8
-    assert c.FAUX_BOLD_EM == 1 / 30
+    assert c.FAUX_BOLD_EM == 0.027
     assert c.FAUX_ITALIC_SHEAR == 0.2126
     assert c.STRONG_EMBOLDEN_26_6 == 19
     assert pytest.approx(0.5 ** (1 / 1.25), abs=5e-4) == c.NONE_THRESHOLD

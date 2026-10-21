@@ -8,6 +8,7 @@ pytest.importorskip("freetype")
 pytest.importorskip("uharfbuzz")
 
 from psd_tools.composite.text import fonts as fonts_module
+from psd_tools.composite.text.constants import FAUX_BOLD_EM
 from psd_tools.composite.text.fonts import FontMap, MissingFontError
 from psd_tools.composite.text.layout import Layout, frame, layout, pieces
 from psd_tools.composite.text.model import Paragraph, Run, Style, TextModel
@@ -200,6 +201,22 @@ def test_max_ascent_on_line_one(fonts: FontMap) -> None:
     m = model("I\rI\r", style(), style(size=20.0), cuts=(2,), box=(0, 0, 100, 50))
     lay = layout(m, fonts)
     assert lay.lines[0].y == pytest.approx(7.5)
+
+
+def test_faux_bold_raises_the_first_line(fonts: FontMap) -> None:
+    # A faux-bold run on line 1 lowers the first baseline by the stroke's
+    # half-width at the nominal size, subscript or not; later lines follow.
+    m = model("I\rI\r", style(faux_bold=True), style(), cuts=(2,), box=(0, 0, 100, 50))
+    lay = layout(m, fonts)
+    y1 = (ASCENT_D + FAUX_BOLD_EM / 2) * SIZE
+    assert [line.y for line in lay.lines] == pytest.approx([y1, y1 + LEADING])
+    m = model("I\r", style(faux_bold=True, baseline=2), box=(0, 0, 100, 50))
+    assert layout(m, fonts).lines[0].y == pytest.approx(y1)
+    # A faux-bold run only on line 2, or in point text, moves nothing.
+    m = model("I\rI\r", style(), style(faux_bold=True), cuts=(2,), box=(0, 0, 100, 50))
+    lay = layout(m, fonts)
+    assert [line.y for line in lay.lines] == pytest.approx([7.5, 7.5 + LEADING])
+    assert layout(model("I\r", style(faux_bold=True)), fonts).lines[0].y == 0.0
 
 
 def test_max_leading_on_line(fonts: FontMap) -> None:

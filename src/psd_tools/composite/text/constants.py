@@ -21,8 +21,10 @@ BOX_ABSOLUTE_FRAME_L = 1.5
 # word-space factor stays at or above this.
 WORD_SPACING_MIN = 0.8
 
-# Faux bold widens each advance by this fraction of the em.
-FAUX_BOLD_EM = 1 / 30
+# Faux bold strokes the outline by this fraction of the rendered em and
+# widens each advance by the same amount; a faux-bold run's ascent grows by
+# half of it at the nominal size.
+FAUX_BOLD_EM = 0.027
 
 # Faux italic shears the outline by tan 12 degrees.
 FAUX_ITALIC_SHEAR = 0.2126

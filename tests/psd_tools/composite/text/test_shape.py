@@ -8,6 +8,7 @@ pytest.importorskip("freetype")
 pytest.importorskip("uharfbuzz")
 
 from psd_tools.composite.text import fonts as fonts_module
+from psd_tools.composite.text.constants import FAUX_BOLD_EM
 from psd_tools.composite.text.fonts import FontMap
 from psd_tools.composite.text.model import Run, Style
 from psd_tools.composite.text.shape import (
@@ -162,7 +163,7 @@ def test_faux_bold_widens(fonts: FontMap) -> None:
     shaped = shape_piece(
         text, 0, 1, runs_for(text, style(size=30.0, faux_bold=True)), fonts
     )
-    assert shaped.glyphs[0].adv == pytest.approx(adv("I", 30.0) + 30.0 / 30)
+    assert shaped.glyphs[0].adv == pytest.approx(adv("I", 30.0) + 30.0 * FAUX_BOLD_EM)
 
 
 def test_segment_spans_colour_runs(fonts: FontMap) -> None:
