@@ -4,9 +4,9 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
-- [fix] A smooth gradient with more than two colour stops curves through its
-  inner stops as Photoshop does, instead of flattening at each one; a stop
-  after a hard edge starts level. Two-stop gradients are unchanged
+- [fix] A smooth gradient with more than two colour or opacity stops curves
+  through its stops as Photoshop does, instead of flattening at each one, and
+  each segment is held between its two stops. Two-stop gradients are unchanged
 - [fix] A colour, gradient or pattern overlay or a satin in Color Dodge,
   Linear Dodge, Color Burn, Linear Burn, Vivid Light, Linear Light or
   Difference fades by its colour at less than 100% opacity, as Photoshop

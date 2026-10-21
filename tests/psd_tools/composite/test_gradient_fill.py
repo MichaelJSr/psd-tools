@@ -331,9 +331,11 @@ def test_a_smooth_ramp_matches_photoshops_own_pixels() -> None:
     )
 
 
-def _ramp(stops: list[Descriptor], smoothness: float = 1.0) -> np.ndarray:
+def _ramp(
+    stops: list[Descriptor], smoothness: float = 1.0, method: bytes | None = None
+) -> np.ndarray:
     """``stops`` drawn on a 4097 px row in 0-255 levels: pixel ``x`` is ``Lctn`` x."""
-    desc = _gradient(stops=stops, smoothness=smoothness)
+    desc = _gradient(stops=stops, smoothness=smoothness, method=method)
     color, _ = paint.draw_gradient_fill((0, 0, 4097, 1), ColorMode.RGB, desc)
     assert color is not None
     return color[0] * 255.0
@@ -350,39 +352,108 @@ def _eased_per_segment(
     raise ValueError(location)
 
 
-# Supreme_Jeh'Oul's stat bars, at 100% smoothness: the stops, and Photoshop's
-# ramp at a location, read off the card's export in the document's profile.
-_BAR_STOPS = [
-    ((15.0, 67.0, 240.0), 0),
-    ((132.0, 124.0, 241.0), 819),
-    ((251.0, 28.0, 60.0), 2048),
-    ((0.0, 0.0, 0.0), 4096),
-]
-_BAR_RAMP = [
-    (814, (135, 125, 239)),
-    (1242, (191, 98, 183)),
-    (1637, (240, 60, 116)),
-    (1834, (251, 42, 85)),
-    (2064, (250, 27, 58)),
-    (2459, (219, 17, 39)),
-    (2887, (161, 10, 24)),
-    (3314, (94, 6, 13)),
-]
+Stops = list[tuple[tuple[float, float, float], int]]
+Readings = list[tuple[int, tuple[int, int, int]]]
 
 
-def test_a_smooth_ramp_runs_through_its_inner_stops_as_photoshops_does() -> None:
-    """An inner stop takes the slope from its left neighbour to its right one.
+def _photoshop_misses(
+    stops: Stops, readings: Readings
+) -> tuple[np.ndarray, np.ndarray]:
+    """(ours, per-segment ease) each as its largest miss of Photoshop's readings."""
+    ramp = _ramp([_stop(color, location) for color, location in stops])
+    locations = [location for location, _ in readings]
+    photoshop = np.array([color for _, color in readings], dtype=float)
+    visible = [
+        (c, x) for i, (c, x) in enumerate(stops) if i == 0 or x > stops[i - 1][1]
+    ]
+    eased = np.array([_eased_per_segment(visible, x) for x in locations])
+    return np.abs(ramp[locations] - photoshop).max(), np.abs(eased - photoshop).max()
+
+
+# Each card's stat bar at 100% smoothness: its stops, and Photoshop's ramp at
+# a location, read off the card's export in the document's profile.
+_JEH_OUL: tuple[Stops, Readings] = (
+    [
+        ((15.0, 67.0, 240.0), 0),
+        ((132.0, 124.0, 241.0), 819),
+        ((251.0, 28.0, 60.0), 2048),
+        ((0.0, 0.0, 0.0), 4096),
+    ],
+    [
+        (813, (131, 125, 241)),
+        (1073, (163, 114, 213)),
+        (1333, (200, 92, 172)),
+        (1918, (251, 37, 76)),
+        (2178, (245, 24, 53)),
+        (2438, (223, 18, 40)),
+        (2698, (190, 13, 30)),
+        (2958, (151, 9, 22)),
+        (3218, (109, 6, 15)),
+    ],
+)
+_FUZZY_HORDE: tuple[Stops, Readings] = (
+    [((255.0, 255.0, 255.0), 0), ((203.0, 8.0, 20.0), 2523), ((43.0, 1.0, 1.0), 4096)],
+    [
+        (813, (246, 185, 189)),
+        (1073, (242, 155, 160)),
+        (1333, (238, 123, 130)),
+        (1593, (232, 92, 101)),
+        (1853, (226, 63, 73)),
+        (2113, (218, 37, 49)),
+        (2373, (209, 17, 29)),
+    ],
+)
+# Springtrap's bar: a stop hidden under the first one still lends its colour.
+_SPRINGTRAP: tuple[Stops, Readings] = (
+    [
+        ((159.0, 126.0, 26.0), 0),
+        ((229.0, 114.0, 13.0), 0),
+        ((245.0, 214.0, 69.0), 4096),
+    ],
+    [
+        (1983, (241, 161, 39)),
+        (2276, (242, 170, 44)),
+        (2536, (242, 178, 49)),
+        (2796, (243, 186, 53)),
+        (3056, (243, 193, 57)),
+        (3316, (244, 200, 61)),
+    ],
+)
+# Spuder's bar: the red would fall below its stop and is held there instead.
+_SPUDER: tuple[Stops, Readings] = (
+    [((232.0, 216.0, 145.0), 0), ((82.0, 48.0, 35.0), 0), ((72.0, 65.0, 55.0), 4096)],
+    [
+        (813, (72, 48, 35)),
+        (1333, (72, 48, 35)),
+        (1853, (72, 48, 37)),
+        (2373, (72, 49, 42)),
+        (2893, (72, 55, 47)),
+        (3153, (72, 58, 49)),
+    ],
+)
+
+
+@pytest.mark.parametrize(
+    ("card", "tolerance", "eased_miss"),
+    [
+        (_JEH_OUL, 1.5, 20.0),
+        (_FUZZY_HORDE, 1.0, 11.0),
+        (_SPRINGTRAP, 1.0, 4.0),
+        (_SPUDER, 1.0, 8.0),
+    ],
+    ids=["Jeh'Oul", "Fuzzy_Horde", "Springtrap", "Spuder"],
+)
+def test_a_smooth_ramp_runs_through_its_stops_as_photoshops_does(
+    card: tuple[Stops, Readings], tolerance: float, eased_miss: float
+) -> None:
+    """A stop's tangent is half the difference between its neighbours.
 
     Easing each segment on its own flattens the ramp at every stop instead,
-    and misses Photoshop's by 15 levels just short of the red stop.
+    and misses Photoshop's readings by the levels ``eased_miss`` names.
     """
-    ramp = _ramp([_stop(color, location) for color, location in _BAR_STOPS])
-    locations = [location for location, _ in _BAR_RAMP]
-    photoshop = np.array([color for _, color in _BAR_RAMP], dtype=float)
-    assert np.abs(ramp[locations] - photoshop).max() < 5.5
-
-    eased = np.array([_eased_per_segment(_BAR_STOPS, x) for x in locations])
-    assert np.abs(eased - photoshop).max() > 15.0
+    ours, eased = _photoshop_misses(*card)
+    assert ours < tolerance
+    assert eased > eased_miss
 
 
 def test_a_smooth_ramp_of_two_stops_has_no_inner_slope_to_carry() -> None:
@@ -396,35 +467,13 @@ def test_a_smooth_ramp_of_two_stops_has_no_inner_slope_to_carry() -> None:
     assert np.allclose(ramp, expected, atol=1e-3)
 
 
-# Monkey_D_Vour's stat bars: a white stop hidden under the first one, then
-# Photoshop's red and green levels along the ramp, read as above.
-_STEP_STOPS = [
-    ((255.0, 255.0, 255.0), 0),
-    ((142.0, 87.0, 0.0), 0),
-    ((247.0, 87.0, 87.0), 4096),
-]
-_STEP_RAMP = [
-    (913, (153, 87)),
-    (1571, (172, 87)),
-    (2097, (190, 87)),
-    (2624, (208, 87)),
-    (3282, (229, 87)),
-]
-
-
-def test_a_stop_beside_a_hard_edge_leaves_the_ramp_flat() -> None:
-    """The stop after a hard edge has no left neighbour to take a slope from.
-
-    The ramp leaves it level, where the two-stop ease would start it at half
-    its segment's slope and run up to 6 levels above Photoshop's.
-    """
-    ramp = _ramp([_stop(color, location) for color, location in _STEP_STOPS])
-    locations = [location for location, _ in _STEP_RAMP]
-    photoshop = np.array([levels for _, levels in _STEP_RAMP], dtype=float)
-    assert np.abs(ramp[locations, :2] - photoshop).max() < 2.0
-
-    eased = np.array([_eased_per_segment(_STEP_STOPS[1:], x)[:2] for x in locations])
-    assert np.abs(eased - photoshop).max() > 5.0
+def test_a_segment_between_equal_stops_stays_flat() -> None:
+    """The_Queen's bar: grey to the same grey, then white, keeps its grey level."""
+    grey = (147.0,) * 3
+    ramp = _ramp([_stop(grey, 0), _stop(grey, 1937), _stop(WHITE, 2351)])
+    assert np.allclose(ramp[: 1937 + 1], 147.0)
+    assert np.allclose(ramp[2351:], 255.0)
+    assert ramp[2113, 0] == pytest.approx(191.0, abs=1.0)
 
 
 def test_a_hard_edge_between_equal_stops_is_no_edge() -> None:
@@ -436,46 +485,55 @@ def test_a_hard_edge_between_equal_stops_is_no_edge() -> None:
 
 
 def test_partial_smoothness_mixes_the_linear_and_the_smooth_ramp() -> None:
-    stops = [_stop(color, location) for color, location in _BAR_STOPS]
+    stops = [_stop(color, location) for color, location in _JEH_OUL[0]]
     linear, smooth, half = _ramp(stops, 0.0), _ramp(stops, 1.0), _ramp(stops, 0.5)
     assert np.allclose(half, (linear + smooth) / 2, atol=1e-3)
 
 
 @pytest.mark.parametrize(
-    ("method", "tension"),
-    [(GradientMethod.PERCEPTUAL.value, 0.5), (GradientMethod.CLASSIC.value, 1.0)],
+    "method",
+    [None, GradientMethod.PERCEPTUAL.value, GradientMethod.LINEAR.value],
+    ids=["classic", "perceptual", "linear"],
 )
-def test_a_perceptual_ramp_carries_half_the_slope_across_an_inner_stop(
-    method: bytes, tension: float
+def test_a_smooth_ramp_is_held_between_each_segments_stops(
+    method: bytes | None,
 ) -> None:
-    """The share is fitted to the corpus' perceptual stat bars.
+    """A tangent carried across a stop cannot push a segment past its ends."""
+    stops = [
+        _stop(BLACK, 0),
+        _stop(BLACK, 1638),
+        _stop(WHITE, 2048),
+        _stop(WHITE, 4096),
+    ]
+    ramp = _ramp(stops, method=method)
+    assert np.allclose(ramp[: 1638 + 1], 0.0, atol=0.5)
+    assert np.allclose(ramp[2048:], 255.0, atol=0.5)
+    assert np.all(np.diff(ramp[1638:2049, 0]) >= -1e-6)
 
-    The_Big_Yellow_Cat's seven-stop ramp needs at least half the classic
-    slope, Kalecgos' three-stop one at most half.
-    """
-    dark, mid, light = (51.0,) * 3, (128.0,) * 3, (204.0,) * 3
+
+@pytest.mark.parametrize(
+    "method",
+    [None, GradientMethod.PERCEPTUAL.value],
+    ids=["classic", "perceptual"],
+)
+def test_a_smooth_transparency_ramp_is_held_between_its_stops(
+    method: bytes | None,
+) -> None:
+    """Opacity never leaves 0-100%, so the perceptual ease has no NaN to make."""
     desc = _gradient(
-        stops=[_stop(dark, 0), _stop(mid, 1024), _stop(light, 4096)],
+        transparency=[
+            _opacity_stop(100.0, 0),
+            _opacity_stop(0.0, 410),
+            _opacity_stop(0.0, 4096),
+        ],
         method=method,
         smoothness=1.0,
     )
-    color, _ = paint.draw_gradient_fill((0, 0, 4097, 1), ColorMode.RGB, desc)
-    assert color is not None
-    space = paint._srgb_to_oklab if method == GradientMethod.PERCEPTUAL.value else None
-    ramp = color[0, 1022:1027].astype(np.float64)
-    ends = np.array([dark, light]) / 255.0
-    if space is not None:
-        ramp, ends = space(ramp), space(ends)
-    slope = (ramp[3, 0] - ramp[1, 0]) * 4096 / 2
-    assert slope == pytest.approx(tension * (ends[1, 0] - ends[0, 0]), rel=5e-3)
-
-
-def test_a_smooth_ramp_that_overshoots_is_held_to_the_gamut() -> None:
-    """A slope carried across a stop near the gamut's edge can pass it."""
-    ramp = _ramp(
-        [_stop(BLACK, 0), _stop(WHITE, 1024), _stop(WHITE, 1100), _stop(BLACK, 4096)]
-    )
-    assert ramp.min() >= 0.0 and ramp.max() <= 255.0
+    _, alpha = paint.draw_gradient_fill((0, 0, 4097, 1), ColorMode.RGB, desc)
+    assert alpha is not None
+    assert np.isfinite(alpha).all()
+    assert alpha.min() >= 0.0 and alpha.max() <= 1.0
+    assert np.allclose(alpha[0, 410:, 0], 0.0)
 
 
 def test_a_transparency_midpoint_shapes_the_alpha_ramp_alone() -> None:

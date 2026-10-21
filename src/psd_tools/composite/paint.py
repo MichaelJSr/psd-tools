@@ -656,20 +656,17 @@ _RAMP_SAMPLES = 4097
 
 
 def _blend_stops(
-    X: list[float],
-    Y: list[np.ndarray],
-    M: list[float],
-    smoothness: float,
-    tension: float = 1.0,
+    X: list[float], Y: list[np.ndarray], M: list[float], smoothness: float
 ) -> np.ndarray:
     """Sample the ramp through the stops at every ``Lctn`` unit.
 
     Within a segment the blend runs linearly to halfway at the end stop's
     midpoint and linearly on to the end; a midpoint on either end of its
     segment is ignored, as Photoshop's dialog cannot author one. Smoothness
-    eases that blend towards a cubic through the stops with the slopes
-    :py:func:`_stop_slopes` gives them, so a two-stop ramp at 100% lands
-    halfway between linear and a smoothstep.
+    eases that blend towards a cubic through the stops with the tangents
+    :py:func:`_stop_tangents` gives them, each channel held between the
+    segment's two stop values; a two-stop ramp at 100% lands halfway between
+    linear and a smoothstep.
     """
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
@@ -682,61 +679,34 @@ def _blend_stops(
         bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
     f = np.where((m > 0.0) & (m < 1.0), bent, u)
     values = np.asarray(Y, dtype=np.float64)
-    shape = (-1,) + (1,) * (values.ndim - 1)
-    f, span = f.reshape(shape), span.reshape(shape)
-    linear = values[k] * (1.0 - f) + values[k + 1] * f
+    f = f.reshape((-1,) + (1,) * (values.ndim - 1))
+    start, end = values[k], values[k + 1]
+    linear = start * (1.0 - f) + end * f
     if smoothness <= 0.0:
         return linear
-    slopes = _stop_slopes(locations, values, tension)
-    # The cubic Hermite basis on the segment, its slopes scaled to it.
+    tangents = _stop_tangents(values)
+    # The cubic Hermite basis on the segment.
     f2, f3 = f * f, f * f * f
     cubic = (
-        (2.0 * f3 - 3.0 * f2 + 1.0) * values[k]
-        + (f3 - 2.0 * f2 + f) * span * slopes[k]
-        + (3.0 * f2 - 2.0 * f3) * values[k + 1]
-        + (f3 - f2) * span * slopes[k + 1]
+        (2.0 * f3 - 3.0 * f2 + 1.0) * start
+        + (f3 - 2.0 * f2 + f) * tangents[k]
+        + (3.0 * f2 - 2.0 * f3) * end
+        + (f3 - f2) * tangents[k + 1]
     )
+    cubic = np.clip(cubic, np.minimum(start, end), np.maximum(start, end))
     return linear + smoothness * (cubic - linear)
 
 
-def _stop_slopes(
-    locations: np.ndarray, values: np.ndarray, tension: float = 1.0
-) -> np.ndarray:
-    """The ramp's slope at each stop for the smooth blend.
+def _stop_tangents(values: np.ndarray) -> np.ndarray:
+    """Each stop's tangent for the smooth blend, over one segment.
 
-    An inner stop takes ``tension`` times the slope from its left neighbour to
-    its right one (Catmull-Rom), an end stop half its segment's, and a stop
-    beside a step (two stops at one location) none. A step between equal
-    values is no step.
+    It is half the difference between the stop's neighbours' values, whatever
+    their distance, so a stop sharing a location still counts; an end stop
+    stands in for its own missing neighbour.
     """
-    count = len(locations)
-    slopes = np.zeros_like(values)
-    width = np.diff(locations)
-    same = np.all(np.diff(values, axis=0).reshape(count - 1, -1) == 0.0, axis=1)
-    for index in range(count):
-        left = index - 1
-        while left >= 0 and width[left] == 0.0 and same[left]:
-            left -= 1
-        right = index + 1
-        while right < count and width[right - 1] == 0.0 and same[right - 1]:
-            right += 1
-        has_left = left >= 0 and locations[index] > locations[left]
-        has_right = right < count and locations[right] > locations[index]
-        if has_left and has_right:
-            slopes[index] = (
-                tension
-                * (values[right] - values[left])
-                / (locations[right] - locations[left])
-            )
-        elif has_left and right == count:
-            slopes[index] = (values[index] - values[left]) / (
-                2.0 * (locations[index] - locations[left])
-            )
-        elif has_right and left < 0:
-            slopes[index] = (values[right] - values[index]) / (
-                2.0 * (locations[right] - locations[index])
-            )
-    return slopes
+    before = np.concatenate([values[:1], values[:-1]])
+    after = np.concatenate([values[1:], values[-1:]])
+    return 0.5 * (after - before)
 
 
 # ``color_convert``'s sRGB transfer functions over an array. That module is
@@ -824,11 +794,6 @@ _ALPHA_BLEND_SPACES: dict[bytes, _BlendSpace] = {
 }
 
 
-# The share of the classic slope a smooth ramp in this method carries across
-# an inner stop, fitted to the corpus' perceptual stat bars.
-_METHOD_TENSIONS: dict[bytes, float] = {GradientMethod.PERCEPTUAL.value: 0.5}
-
-
 def _canvas_rows(color_mode: ColorMode, rgb: np.ndarray) -> np.ndarray:
     """``rgb``'s rows brought into the document's arrays."""
     return np.array([_from_rgb(color_mode, tuple(row)) for row in rgb.tolist()])
@@ -841,16 +806,9 @@ def _make_linear_gradient_color(
 
     smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
     colors = grad.get(Key.Colors, [])
-    # The smooth blend can overshoot a stop; Photoshop holds it to the gamut.
-    table = np.clip(
-        _blend_stops(
-            *_collect_stops(
-                colors, lambda stop: np.array(_get_color(color_mode, stop))
-            ),
-            smoothness,
-        ),
-        0.0,
-        1.0,
+    table = _blend_stops(
+        *_collect_stops(colors, lambda stop: np.array(_get_color(color_mode, stop))),
+        smoothness,
     )
     space = _BLEND_SPACES.get(method) if method is not None else None
     if space is not None:
@@ -859,10 +817,8 @@ def _make_linear_gradient_color(
             colors, lambda stop: np.array(_get_color(ColorMode.RGB, stop))
         )
         classic = _canvas_rows(color_mode, _blend_stops(X, Y, M, smoothness))
-        tension = _METHOD_TENSIONS.get(method or b"", 1.0)
         blended = _canvas_rows(
-            color_mode,
-            decode(_blend_stops(X, [encode(y) for y in Y], M, smoothness, tension)),
+            color_mode, decode(_blend_stops(X, [encode(y) for y in Y], M, smoothness))
         )
         # The method's blend as a shift from the classic one, so each stop
         # keeps its stored value: sRGB does not round-trip CMYK ink or a Lab
@@ -887,7 +843,7 @@ def _make_linear_gradient_color(
     stops = grad.get(Key.Transparency)
     alpha_space = _ALPHA_BLEND_SPACES.get(method) if method is not None else None
     if alpha_space is None:
-        alpha = np.clip(_blend_stops(*_collect_stops(stops, opacity), smoothness), 0, 1)
+        alpha = _blend_stops(*_collect_stops(stops, opacity), smoothness)
     else:
         encode, decode = alpha_space
         alpha = decode(
