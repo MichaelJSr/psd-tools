@@ -25,6 +25,7 @@ from psd_tools.terminology import Key
 
 from ..utils import full_name
 from .test_composite import _mse
+from .test_drop_shadow import _contour
 
 _SQUARE = (0, 0, 40, 40)
 
@@ -236,6 +237,42 @@ def test_a_chisel_hard_bevel_lights_its_faces_flat() -> None:
     assert float(shadow[24:36, 24:36].max()) == 0.0
 
 
+def test_a_gloss_contour_leaves_the_flat_layer_alone() -> None:
+    """The contour maps the lighting, the flat layer's with it.
+
+    A contour that is not the identity moves the flat level, so the plateau
+    inside the band would be lit or shaded against the old one; it is read
+    against the new one and gets neither. The faces are still mapped: the
+    inverted contour lights what was shaded.
+    """
+    shape = np.zeros((60, 60, 1), dtype=np.float32)
+    shape[10:50, 10:50] = 1.0
+    plain = _bevel(shape, technique=BevelTechnique.PRECISE_MATTE, size=8.0)
+    for contour in (
+        _contour([(0.0, 0.0), (128.0, 200.0), (255.0, 255.0)]),
+        _contour([(0.0, 255.0), (255.0, 0.0)]),
+    ):
+        highlight, shadow = _bevel(
+            shape,
+            technique=BevelTechnique.PRECISE_MATTE,
+            size=8.0,
+            contour=effects.contour_table(contour),
+        )
+        assert float(highlight[24:36, 24:36].max()) == 0.0
+        assert float(shadow[24:36, 24:36].max()) == 0.0
+        assert highlight.any() and shadow.any()
+    inverted = _bevel(
+        shape,
+        technique=BevelTechnique.PRECISE_MATTE,
+        size=8.0,
+        contour=effects.contour_table(_contour([(0.0, 255.0), (255.0, 0.0)])),
+    )
+    assert (plain[0][12:16, 30] > 0.0).all() and (inverted[1][12:16, 30] > 0.0).all()
+    assert (plain[1][44:48, 30] > 0.0).all() and (inverted[0][44:48, 30] > 0.0).all()
+    assert float(inverted[0][12:16, 30].max()) == 0.0
+    assert float(inverted[1][44:48, 30].max()) == 0.0
+
+
 def test_soften_blurs_a_bevels_lighting() -> None:
     """Softened, the chisel's top face is no longer one flat value."""
     shape = np.zeros((60, 60, 1), dtype=np.float32)
@@ -327,6 +364,34 @@ def test_a_cut_through_a_bevel_or_a_satin_renders_what_the_whole_does(
     psd = PSDImage.open(full_name("layer_effects.psd"))
     left, top, right, bottom = viewport
     assert np.array_equal(_rendered(psd, viewport), whole[top:bottom, left:right])
+
+
+@pytest.mark.parametrize("technique", _TECHNIQUES)
+def test_a_cut_through_a_wide_chisel_renders_what_the_whole_does(
+    technique: BevelTechnique,
+) -> None:
+    """Each technique reads a different distance past the band; the reach covers it.
+
+    ``layer_comps.psb``'s inner bevels are made wide, steep chisels, and the
+    disc is cut through its band, where a rounding read from past the canvas
+    would show.
+    """
+
+    def rendered(viewport: tuple[int, int, int, int] | None) -> np.ndarray:
+        psd = PSDImage.open(full_name("layer_comps.psb"))
+        for layer in psd.descendants():
+            for effect in layer.effects.find("bevelemboss"):
+                effect.descriptor[Key.BevelTechnique] = Enumerated(
+                    typeID=Key.BevelTechnique, enum=technique.value
+                )
+                effect.descriptor[Key.Blur] = Double(40.0)
+                effect.descriptor[Key.StrengthRatio] = Double(500.0)
+        return _rendered(psd, viewport)
+
+    whole = rendered(None)
+    for viewport in ((60, 90, 75, 110), (80, 90, 100, 110)):
+        left, top, right, bottom = viewport
+        assert np.array_equal(rendered(viewport), whole[top:bottom, left:right])
 
 
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:
@@ -425,8 +490,7 @@ def test_satin_and_bevel_render_to_photoshops_preview(
 # The fitted constants: the gaussian widths per pixel of size of the satin's
 # blur, of the blur that rounds a smooth bevel and of soften, and the slope
 # of a bevel's faces at 100% depth. The cases above hold them to Photoshop's
-# previews; the cards in the TTSCardMaker corpus with a soften and a 979%
-# depth agree with the same values.
+# previews.
 _FITTED = {
     "_SATIN_SIGMA_PER_SIZE": 0.45,
     "_BEVEL_SIGMA_PER_SIZE": 0.45,
@@ -434,9 +498,13 @@ _FITTED = {
     "_BEVEL_SLOPE_PER_DEPTH": 1.0,
 }
 
+# Not fitted: no preview carries a chisel soft bevel. Pinned so that a
+# change to it is a deliberate one.
+_ASSUMED = {"_SLOPE_LIMIT_SIGMA_PER_SIZE": 0.125}
+
 
 def test_the_fitted_constants_are_pinned() -> None:
-    for name, value in _FITTED.items():
+    for name, value in (_FITTED | _ASSUMED).items():
         assert getattr(effects, name) == value, name
 
 

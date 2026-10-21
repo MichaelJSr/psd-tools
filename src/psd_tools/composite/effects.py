@@ -32,7 +32,8 @@ Currently supported effects:
   - Inner, outer, emboss and pillow emboss styles; smooth, chisel hard and
     chisel soft techniques; depth, direction, size, soften, gloss contour and
     the highlight and shadow colors, modes and opacities
-  - Stroke emboss and the texture are not drawn, and the blurs are gaussian
+  - Stroke emboss, the shape contour and the texture are not drawn, chisel
+    soft rounds its faces by a guess, and the blurs are gaussian
     approximations of Photoshop's own
 
 Not drawn: inner shadow, outer glow, inner glow.
@@ -972,17 +973,21 @@ _BEVEL_SIGMA_PER_SIZE = 0.45
 _SOFTEN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SLOPE_PER_DEPTH = 1.0
 
-# How far a chisel soft bevel rounds its faces, per pixel of size.
+# How wide the gaussian that rounds a chisel soft bevel's faces is, per pixel
+# of size, and how far it reads, in sigmas. Not fitted: no fixture preview
+# carries the technique. The reach is what ``bevel_reach`` adds for it.
 _SLOPE_LIMIT_SIGMA_PER_SIZE = 0.125
+_SLOPE_LIMIT_TRUNCATE = 4.0
 
 # What a pixel of a satin's or a bevel's canvas costs at its peak: the
 # silhouette, two shifted and blurred mattes or a height field and its two
 # gradients, and the float64 transients of the filters.
 _INNER_BYTES = 64
 
-# Photoshop's bevel defaults, for a descriptor that leaves a value out.
-_BEVEL_DEPTH = 100.0
-_BEVEL_SIZE = 5.0
+# What a satin's distance and size, and a bevel's depth and size, read as
+# for a descriptor that leaves them out: the same values as the API getters.
+_SATIN_DEFAULT = 120.0
+_BEVEL_DEFAULT = 0.0
 
 # The styles whose surface stands beside the layer.
 _BEVEL_BESIDE = (BevelStyle.OUTER_BEVEL, BevelStyle.EMBOSS, BevelStyle.PILLOW_EMBOSS)
@@ -1042,8 +1047,8 @@ def inner_bbox(
 
 def satin_geometry(desc: Descriptor) -> tuple[float, float]:
     """A satin's ``(distance, size)``, read as :py:func:`shadow_geometry` reads."""
-    distance = float(desc.get(Key.Distance, 0.0))
-    size = float(desc.get(Key.Blur, 0.0))
+    distance = float(desc.get(Key.Distance, _SATIN_DEFAULT))
+    size = float(desc.get(Key.Blur, _SATIN_DEFAULT))
     _finite("Satin", distance=distance, size=size)
     return distance, min(max(size, 0.0), _MAX_STROKE_SIZE)
 
@@ -1101,8 +1106,8 @@ def bevel_geometry(desc: Descriptor) -> tuple[float, float, float]:
     Depth is in percent, size and soften in pixels; each is held to zero or
     more, and size and soften to what Photoshop can write.
     """
-    depth = float(desc.get(Key.StrengthRatio, _BEVEL_DEPTH))
-    size = float(desc.get(Key.Blur, _BEVEL_SIZE))
+    depth = float(desc.get(Key.StrengthRatio, _BEVEL_DEFAULT))
+    size = float(desc.get(Key.Blur, _BEVEL_DEFAULT))
     soften = float(desc.get(Key.Softness, 0.0))
     _finite("Bevel", depth=depth, size=size, soften=soften)
     return (
@@ -1112,12 +1117,16 @@ def bevel_geometry(desc: Descriptor) -> tuple[float, float, float]:
     )
 
 
-def bevel_reach(size: float, soften: float) -> float:
+def bevel_reach(size: float, soften: float, technique: bytes) -> float:
     """How far a bevel's canvas has to reach past the layer.
 
-    The widest band beside it, and the blurs that read across the edge.
+    The widest band beside it, the blurs that read across the edge, and for
+    a chisel soft bevel the rounding that reads past the band.
     """
-    return size + soften
+    reach = size + soften
+    if technique == BevelTechnique.SLOPE_LIMIT_MATTE:
+        reach += size * _SLOPE_LIMIT_SIGMA_PER_SIZE * _SLOPE_LIMIT_TRUNCATE
+    return reach
 
 
 def bevel_beside(style: bytes) -> bool:
@@ -1176,7 +1185,9 @@ def _bevel_height(
 
         sigma = size * _SLOPE_LIMIT_SIGMA_PER_SIZE
         if sigma > 1e-3:
-            height = ndimage.gaussian_filter(height, sigma, mode="nearest")
+            height = ndimage.gaussian_filter(
+                height, sigma, mode="nearest", truncate=_SLOPE_LIMIT_TRUNCATE
+            )
     return height
 
 
@@ -1205,7 +1216,8 @@ def draw_bevel(
     proportion to how far toward none; the flat layer takes neither.
     ``soften`` blurs the lighting before that split, and ``contour`` (the
     gloss contour, read as :py:func:`draw_drop_shadow` reads one) maps the
-    lighting first.
+    lighting first, the flat layer's with it, so a flat face takes neither
+    under any contour.
 
     Both results are ``(height, width, 1)`` over the whole canvas; the caller
     keeps the parts the style paints, inside the silhouette and beside it,
@@ -1242,14 +1254,20 @@ def draw_bevel(
             light, sigma, mode="nearest", truncate=soften / sigma
         )
     light = np.clip(light, 0.0, 1.0)
+    flat = lz
     if contour is not None:
         light = _contoured(light, contour, anti_aliased)
+        flat = float(
+            _contoured(np.array([lz], dtype=np.float32), contour, anti_aliased)[0]
+        )
     highlight = (
-        np.clip((light - lz) / (1.0 - lz), 0.0, 1.0)
-        if lz < 1.0
+        np.clip((light - flat) / (1.0 - flat), 0.0, 1.0)
+        if flat < 1.0
         else np.zeros_like(light)
     )
-    shadow = np.clip((lz - light) / lz, 0.0, 1.0) if lz > 0.0 else np.zeros_like(light)
+    shadow = (
+        np.clip((flat - light) / flat, 0.0, 1.0) if flat > 0.0 else np.zeros_like(light)
+    )
     return (
         highlight[:, :, None].astype(np.float32),
         shadow[:, :, None].astype(np.float32),

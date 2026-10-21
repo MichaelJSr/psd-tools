@@ -363,7 +363,7 @@ def _bevel_reach(
                 bbox,
                 inner_bbox(
                     _cast_bbox(layer, memo),
-                    bevel_reach(size, soften),
+                    bevel_reach(size, soften, _bevel_technique(bevel)),
                     layer._psd._max_alloc_bytes,
                 ),
             )
@@ -375,6 +375,11 @@ def _bevel_reach(
 def _bevel_style(bevel: BevelEmboss) -> BevelStyle:
     """The bevel's style, inner where the descriptor does not say."""
     return bevel.bevel_style or BevelStyle.INNER_BEVEL
+
+
+def _bevel_technique(bevel: BevelEmboss) -> BevelTechnique:
+    """The bevel's technique, smooth where the descriptor does not say."""
+    return bevel.bevel_type or BevelTechnique.SOFT_MATTE
 
 
 def _effect_reach(
@@ -2748,7 +2753,7 @@ class Compositor:
         layer, over everything else inside it; what an outer bevel, an emboss or
         a pillow emboss puts beside it is an outer effect, as an outset
         stroke is. A stroke emboss, which bevels the stroke rather than the
-        layer, and a texture are not drawn.
+        layer, a shape contour and a texture are not drawn.
         """
         for effect in _readable(layer, "bevelemboss"):
             bevel = cast(BevelEmboss, effect)
@@ -2758,7 +2763,7 @@ class Compositor:
                     logger.debug("A stroke emboss of %s is not drawn", layer)
                     continue
                 depth, size, soften = bevel_geometry(bevel.descriptor)
-                technique = bevel.bevel_type or BevelTechnique.SOFT_MATTE
+                technique = _bevel_technique(bevel)
                 up = bevel.direction != BevelDirection.STAMP_OUT
                 angle, altitude = bevel.angle, bevel.altitude
                 contour = contour_table(bevel.contour)
@@ -2781,12 +2786,14 @@ class Compositor:
                         self._viewport, layer._psd.color_mode, paint_desc
                     )
                     halves.append((color, blend_mode, opacity))
-                bbox = self._inner_box(layer, bevel_reach(size, soften))
+                bbox = self._inner_box(layer, bevel_reach(size, soften, technique))
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a bevel of %s: %s", layer, error)
                 continue
             if bbox == (0, 0, 0, 0):
                 continue
+            if bevel.use_shape:
+                logger.debug("The shape contour of a bevel of %s is not applied", layer)
             if bevel.use_texture:
                 logger.debug("The texture of a bevel of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)

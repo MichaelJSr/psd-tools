@@ -18,9 +18,10 @@ Changelog
 - [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
   jitter (#679)
 - [fix] Satin and bevel/emboss layer effects are now rendered when a document
-  is composited from its layers. All bevel styles but stroke emboss and all
-  three techniques are drawn; a bevel's texture is not, and the blurs
-  approximate Photoshop's. Needs ``scipy``
+  is composited from its layers. All bevel styles but stroke emboss are drawn;
+  the chisel soft technique, the shape contour and the texture are
+  approximated or left out, and the blurs approximate Photoshop's. Needs
+  ``scipy``
 - [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
   the effect uses global light
 
