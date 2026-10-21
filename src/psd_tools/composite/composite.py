@@ -596,8 +596,9 @@ class _PassCache:
 
     ``group_alphas`` holds the alpha of the same composites, under the same
     keys, for a group's drop shadow or outer glow: those are cast from how
-    opaque the contents are rather than from what they cover. One composite
-    fills both, so a stroke and a shadow asking on one box share it.
+    opaque the contents are rather than from what they cover. A composite keeps only
+    the canvas it was asked for: a stroke and a shadow on one group ask on
+    different boxes, so the other would not be read.
 
     ``scipy_warned`` is set once a pass has logged that its effects are left
     out for want of scipy, so a document with many of them says it once.
@@ -3162,10 +3163,10 @@ class Compositor:
         is composited from and an outset one beside it, which
         ``group-clips-child-stroke.psd`` measures.
 
-        ``alpha`` hands back the same composite's alpha instead, memoised
-        beside the coverage. It reads no backdrop either: it starts at zero,
-        and a knockout inside the group reaches for this transparent
-        backdrop, so it can only cut the group's own alpha away.
+        ``alpha`` hands back the same composite's alpha instead, memoised on
+        its own. It reads no backdrop either: it starts at zero, and a
+        knockout inside the group reaches for this transparent backdrop, so it
+        can only cut the group's own alpha away.
         """
         inner = viewport
         if layer.blend_mode != BlendMode.PASS_THROUGH:
@@ -3177,8 +3178,7 @@ class Compositor:
             return np.zeros((height, width, 1), dtype=np.float32)
 
         key = (id(layer), inner)
-        shapes, alphas = self._cache.group_shapes, self._cache.group_alphas
-        cached = alphas if alpha else shapes
+        cached = self._cache.group_alphas if alpha else self._cache.group_shapes
         shape = cached.get(key)
         if shape is None:
             inner_h, inner_w = inner[3] - inner[1], inner[2] - inner[0]
@@ -3194,9 +3194,8 @@ class Compositor:
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
-            shapes[key] = group_compositor.shape
-            alphas[key] = group_compositor.alpha
-            shape = cached[key]
+            shape = group_compositor.alpha if alpha else group_compositor.shape
+            cached[key] = shape
         return paste(viewport, inner, shape)
 
     def _cast_shape(

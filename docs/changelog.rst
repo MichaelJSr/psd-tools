@@ -6,7 +6,10 @@ Changelog
 
 - [fix] Compositing a viewport draws each layer effect only on the part of
   its box that can reach the viewport, so a small viewport of a large styled
-  document renders in a fraction of the time; the pixels are unchanged
+  document renders in a fraction of the time and is the full render cropped
+- [fix] A vector path's fill no longer leaves rounding residue on the pixels
+  it does not cover, which could put stray stroke pixels beside a shape
+  rendered with ``force=True``
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

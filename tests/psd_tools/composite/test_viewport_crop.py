@@ -14,11 +14,18 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-from psd_tools.api.effects import DropShadow
+from psd_tools.api.effects import (
+    DropShadow,
+    InnerGlow,
+    InnerShadow,
+    OuterGlow,
+    Stroke,
+)
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite, effects
 from psd_tools.composite.composite import Compositor, _within_reach
+from psd_tools.constants import GlowTechnique
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated
 from psd_tools.terminology import Enum, Key, Type
 
@@ -61,34 +68,12 @@ _STYLED_FIXTURES = [
     "transparency/fill-opacity.psd",
 ]
 
-# Fixtures whose redrawn vector paths meet the viewport: aggdraw's coverage
-# of one path differs by an ulp from one viewport to another, and a stroke
-# traced from it reads a pixel at ``1 - ulp`` as an edge the whole pixel is not.
-# The stored-pixel render is unaffected.
-_REDRAWN_PER_VIEWPORT = {
-    "effects/shape-fx2.psd",
-    "effects/shape-stroke-raster-mask-density.psd",
-    "effects/shape-stroke-raster-mask.psd",
-    "effects/stroke-composite.psd",
-    "effects/stroke-effects.psd",
-}
-
 _Box = tuple[int, int, int, int]
 
 
 def _case(filename: str, force: bool) -> Any:
-    marks = []
-    if force and filename in _REDRAWN_PER_VIEWPORT:
-        marks.append(
-            pytest.mark.xfail(
-                strict=True, reason="aggdraw rasterizes a path differently per viewport"
-            )
-        )
     return pytest.param(
-        filename,
-        force,
-        id=f"{filename}-{'redrawn' if force else 'stored'}",
-        marks=marks,
+        filename, force, id=f"{filename}-{'redrawn' if force else 'stored'}"
     )
 
 
@@ -213,6 +198,81 @@ def test_a_precise_glow_is_bounded_whatever_its_spread() -> None:
     assert effects.glow_reach(5.0, 0.0, precise=False) == 8
 
 
+_Cut = DropShadow | Stroke | OuterGlow | InnerShadow | InnerGlow
+
+
+def _reach(effect: _Cut) -> int | None:
+    """The reach the compositor cuts the effect's box by, read as it reads it."""
+    desc = effect.descriptor
+    if isinstance(effect, Stroke):
+        return effects.stroke_reach(desc)
+    if isinstance(effect, OuterGlow):
+        size, spread, _ = effects.glow_geometry(desc)
+        precise = effect.glow_type == GlowTechnique.PRECISE_MATTE
+        return effects.glow_reach(size, spread, precise)
+    if isinstance(effect, InnerGlow):
+        geometry = effects.shadow_geometry(desc, 0.0, "Inner glow")
+        precise = effect.glow_type == GlowTechnique.PRECISE_MATTE
+        return effects.glow_reach(geometry.size, geometry.spread, precise)
+    geometry = effects.shadow_geometry(desc, effect.angle)
+    return effects.cast_reach(
+        geometry.distance, geometry.angle, geometry.size, geometry.spread
+    )
+
+
+def _record_boxes(
+    monkeypatch: pytest.MonkeyPatch, drawn_by: str
+) -> list[tuple[int, int, int, int]]:
+    """Every box the compositor hands the effects function ``drawn_by``."""
+    drawn: list[tuple[int, int, int, int]] = []
+    module = importlib.import_module("psd_tools.composite.composite")
+    original = getattr(module, drawn_by)
+
+    def recording(box: tuple[int, int, int, int], *args: Any, **kwargs: Any) -> Any:
+        drawn.append(box)
+        return original(box, *args, **kwargs)
+
+    monkeypatch.setattr(module, drawn_by, recording)
+    return drawn
+
+
+@pytest.mark.parametrize(
+    "layer_name, kind, drawn_by",
+    [
+        ("Drop Shadow", "dropshadow", "draw_drop_shadow"),
+        ("Stroke", "stroke", "draw_stroke_effect_split"),
+        ("Outer Glow", "outerglow", "glow_paint"),
+        ("Inner Shadow", "innershadow", "draw_inner_shadow"),
+        ("Inner Glow", "innerglow", "draw_inner_glow"),
+    ],
+    ids=["drop shadow", "stroke", "outer glow", "inner shadow", "inner glow"],
+)
+def test_a_small_viewport_draws_an_effect_on_a_box_near_it(
+    layer_name: str, kind: str, drawn_by: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cost of a viewport render follows the viewport, not the layer.
+
+    Each styled row of ``layer_effects.psd`` is far wider than the window
+    asked for inside it; its effect is drawn on a box no further from that
+    window than the effect's reach, and so narrower than the layer.
+    """
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    layer = next(sub for sub in psd.descendants() if sub.name == layer_name)
+    effect = cast(_Cut, next(iter(layer.effects.find(kind))))
+    reach = _reach(effect)
+    assert reach is not None
+    left, top, right, bottom = layer.bbox
+    middle_x, middle_y = (left + right) // 2, (top + bottom) // 2
+    viewport = (middle_x - 20, middle_y - 10, middle_x + 20, middle_y + 10)
+    drawn = _record_boxes(monkeypatch, drawn_by)
+    composite(psd, viewport=viewport)
+    assert drawn
+    for box in drawn:
+        assert box[0] >= viewport[0] - reach and box[1] >= viewport[1] - reach, box
+        assert box[2] <= viewport[2] + reach and box[3] <= viewport[3] + reach, box
+        assert box[2] - box[0] < layer.width
+
+
 def test_a_small_viewport_draws_a_wide_layers_shadow_on_a_box_near_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -231,15 +291,7 @@ def test_a_small_viewport_draws_a_wide_layers_shadow_on_a_box_near_it(
     )
     assert reach is not None
     viewport = (300, 20, 340, 60)
-    drawn: list[_Box] = []
-    original = effects.draw_drop_shadow
-
-    def recording(box: _Box, *args: Any, **kwargs: Any) -> np.ndarray:
-        drawn.append(box)
-        return original(box, *args, **kwargs)
-
-    module = importlib.import_module("psd_tools.composite.composite")
-    monkeypatch.setattr(module, "draw_drop_shadow", recording)
+    drawn = _record_boxes(monkeypatch, "draw_drop_shadow")
     composite(psd, viewport=viewport)
     assert drawn
     left, top, right, bottom = viewport
@@ -250,8 +302,12 @@ def test_a_small_viewport_draws_a_wide_layers_shadow_on_a_box_near_it(
         assert box[2] - box[0] < layer.width
 
 
-def test_one_group_composite_serves_a_stroke_and_a_shadow_on_one_box() -> None:
-    """Tracing a group fills both the coverage and the alpha memo."""
+def test_a_traced_group_is_memoised_per_box_and_per_kind() -> None:
+    """A group's trace is kept under its box, coverage and alpha apart.
+
+    Only the kind asked for is composited and kept; a second ask on the same
+    box reads the memo, which is shown by planting a value in it.
+    """
     psd = PSDImage.open(full_name("effects/group-stroke-off-canvas.psd"))
     group = next(layer for layer in psd if layer.name == "Inside")
     compositor = Compositor(
@@ -263,5 +319,10 @@ def test_one_group_composite_serves_a_stroke_and_a_shadow_on_one_box() -> None:
     shape = compositor._get_group_shape(group, box)
     key = (id(group), box)
     assert key in compositor._cache.group_shapes
+    assert key not in compositor._cache.group_alphas
+    planted = np.full_like(shape, 0.25)
+    compositor._cache.group_shapes[key] = planted
+    assert np.array_equal(compositor._get_group_shape(group, box), planted)
+    alpha = compositor._get_group_shape(group, box, alpha=True)
     assert key in compositor._cache.group_alphas
-    assert np.array_equal(compositor._get_group_shape(group, box, alpha=True), shape)
+    assert not np.array_equal(alpha, planted)
