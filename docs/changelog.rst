@@ -41,6 +41,15 @@ Changelog
   ``aligned`` to True where the descriptor omits them, as Photoshop does.
   ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
   ``interpolation``, the ``gs99`` method as a new ``GradientInterpolation`` enum
+- [fix] The compositor renders channel mixer, black & white, colour balance
+  and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
+  grayscale and CMYK documents, instead of skipping them. Channel mixer is
+  exact, black & white is exact without its tint; gradient maps interpolate
+  classic, linear and perceptual gradients; colour balance midtones and
+  vibrance are fitted to Photoshop output
+- [fix] An adjustment inside a pass-through group that carries an enabled
+  layer style stays within the group, as in Photoshop, instead of passing
+  through to the layers beneath
 
 1.25.0 (2026-10-14)
 -------------------

@@ -134,6 +134,15 @@ _UNREADABLE = (
 )
 
 
+def _has_enabled_effects(layer: Layer) -> bool:
+    """Whether the layer carries a layer style Photoshop would draw."""
+    try:
+        effects = layer.effects
+        return effects.enabled and any(effect.enabled for effect in effects)
+    except _UNREADABLE:
+        return False
+
+
 def _readable(layer: Layer, name: str) -> list[_StyledEffect]:
     """The layer's enabled effects of one kind, empty if they cannot be listed.
 
@@ -1390,7 +1399,7 @@ class Compositor:
         alpha: np.ndarray,
         layer_filter: Callable[[Layer], bool] | None = None,
         force: bool = False,
-        adjustment_isolated: bool = False,
+        adjustment_isolated: bool | np.ndarray = False,
         document_backdrop: Callable[[], tuple[np.ndarray, np.ndarray] | None]
         | None = None,
         widen: _Widen = _widen,
@@ -1416,7 +1425,14 @@ class Compositor:
         # enclosing group. A compositor built without one starts a pass of its
         # own, which is what the public entry points and the tests do.
         self._cache: _PassCache = _PassCache() if cache is None else cache
-        self._adjustment_isolated = adjustment_isolated
+        # Whether adjustments stop at what the enclosing isolated group has
+        # painted. An array is that painted shape so far, handed down to a
+        # nested group that does not isolate on its own; True starts a fresh
+        # isolated group, whose adjustments stop at its own content.
+        self._adjustment_isolated = adjustment_isolated is not False
+        self._enclosing_shape: np.ndarray | None = (
+            adjustment_isolated if isinstance(adjustment_isolated, np.ndarray) else None
+        )
         # What Knockout.DEEP knocks out to. Inherited by pass-through
         # sub-compositors and reset at every isolation boundary, so deep
         # knockout escapes pass-through groups but stops at an isolated one.
@@ -1859,12 +1875,19 @@ class Compositor:
 
         if self._adjustment_isolated:
             self._color = utils.clip(
-                backdrop_color + self._shape_g * opacity * (blended - backdrop_color)
+                backdrop_color
+                + self._isolation_shape() * opacity * (blended - backdrop_color)
             )
         else:
             self._color = utils.clip(
                 backdrop_color + opacity * (blended - backdrop_color)
             )
+
+    def _isolation_shape(self) -> np.ndarray:
+        """What the isolated group has painted so far, enclosing groups included."""
+        if self._enclosing_shape is None:
+            return self._shape_g
+        return cast(np.ndarray, utils.union(self._enclosing_shape, self._shape_g))
 
     def finish(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return the isolated result, the shape and the alpha."""
@@ -1949,9 +1972,16 @@ class Compositor:
             color_b = self._color
             alpha_b = self._alpha
 
-        # adjustments don't pass-through layers if the group layer has clip layers or its fill attribute is not 100.
+        # Photoshop keeps an adjustment inside a group that has clip layers, a
+        # fill under 100 or a layer style within the group's shape instead of
+        # passing it through; the children's own blend modes still reach the
+        # backdrop. A non-pass-through group is composited on its own anyway.
         shape_const, _ = self._get_const(layer)
-        isolate_adjustments = shape_const < 1.0 or layer.has_clip_layers()
+        isolate_adjustments = (
+            shape_const < 1.0
+            or layer.has_clip_layers()
+            or (is_passthrough and _has_enabled_effects(layer))
+        )
 
         # A pass-through group is not an isolation boundary, so deep knockout
         # inside it still reaches the document backdrop; an isolated group is,
@@ -1982,13 +2012,18 @@ class Compositor:
                 dtype=np.float32,
             )
         )
+        adjustment_isolated: bool | np.ndarray = isolate_adjustments
+        if not isolate_adjustments and self._adjustment_isolated:
+            adjustment_isolated = paste(
+                viewport, self._viewport, self._isolation_shape()
+            )
         group_compositor = Compositor(
             viewport,
             color=paste(viewport, self._viewport, color_b, 1.0),
             alpha=group_alpha,
             layer_filter=self._layer_filter,
             force=self._force,
-            adjustment_isolated=self._adjustment_isolated or isolate_adjustments,
+            adjustment_isolated=adjustment_isolated,
             document_backdrop=document_backdrop,
             widen=self._widen,
             color_mode=self._color_mode,
