@@ -311,19 +311,32 @@ def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
     own: its mask is its shape, so the mask's box stands in -- empty when the
     mask hides everything -- and the whole canvas where there is no mask or
     the mask reveals what lies outside its box. A vector mask narrows it as
-    it narrows the shape.
+    it narrows the shape. A mask under full density reveals the layer
+    everywhere, as :py:meth:`Compositor._get_mask` folds it in, and narrows
+    nothing.
     """
     if not isinstance(layer, AdjustmentLayer):
         return layer.bbox
     psd = layer._psd
     bbox = (0, 0, psd.width, psd.height)
     mask = layer.mask
-    if mask is not None and not mask.disabled and mask.background_color == 0:
+    parameters = mask.parameters if mask is not None else None
+    vector_density = parameters.vector_mask_density if parameters else None
+    user_density = parameters.user_mask_density if parameters else None
+    if user_density is None:
+        user_density = vector_density
+    if (
+        mask is not None
+        and not mask.disabled
+        and mask.background_color == 0
+        and user_density in (None, 255)
+    ):
         bbox = mask.bbox
     vector = layer.vector_mask if layer.has_vector_mask() else None
     if (
         vector is not None
         and not vector.disabled
+        and vector_density in (None, 255)
         and any(len(path) for path in vector.paths)
     ):
         bbox = utils.intersect(bbox, _path_bbox(layer))
