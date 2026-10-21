@@ -1809,6 +1809,7 @@ def _partial_source(compositor: Compositor, coverage: float, fill: float) -> Any
         knockout=Knockout.NONE,
         adjustment_isolated=None,
         knockout_shape=covered,
+        region=covered,
     )
 
 

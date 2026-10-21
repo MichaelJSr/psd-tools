@@ -50,6 +50,11 @@ Changelog
 - [fix] An adjustment inside a pass-through group that carries an enabled
   layer style stays within the group, as in Photoshop, instead of passing
   through to the layers beneath
+- [fix] A group's overlays and inner effects cover the group's composited
+  alpha, its children's effects included, instead of its children's
+  coverage, and a pass-through group's gradient or pattern overlay is laid
+  out across the document canvas, as in Photoshop. Every gradient overlay on
+  a pass-through group renders differently
 
 1.25.0 (2026-10-14)
 -------------------

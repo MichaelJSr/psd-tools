@@ -1488,20 +1488,14 @@ def test_an_unreadable_overlay_is_dropped_and_the_document_still_renders() -> No
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="an overlay on a pass-through group covers the group's box, not its alpha",
-)
 def test_an_overlay_on_a_pass_through_group_covers_the_groups_alpha() -> None:
     """The overlay of a pass-through group paints only where the group does.
 
     ``masks.psb``'s header group, pass-through, holds a band faded to a
     hundredth of its opacity and is given the divider's gradient overlay.
-    Photoshop paints the overlay over the band's own alpha, so over grey
-    the band's middle stays grey to within that hundredth. Here the
-    overlay is painted at full strength instead: the group's source is the
-    backdrop with the band over it, and the effect canvas paints over the
-    group's whole box as if that source were the group alone (#707).
+    The overlay covers the group's composited alpha, not the band's
+    coverage, so over grey the band's middle stays grey to within that
+    hundredth.
     """
     psd = PSDImage.open(full_name("masks.psb"))
     header = next(layer for layer in psd if layer.name == "Header")
@@ -1526,6 +1520,81 @@ def test_an_overlay_on_a_pass_through_group_covers_the_groups_alpha() -> None:
     compositor.apply(header)
     middle = compositor.result_over_backdrop()[(band.bbox[1] + band.bbox[3]) // 2, 320]
     assert np.allclose(middle, 0.5, atol=3 / 255.0 + 1e-6), middle
+
+
+def _forge_group_overlay(
+    psd: PSDImage, group_name: str, filename: str, layer_name: str
+) -> Any:
+    """``group_name`` given the overlays of ``filename``'s ``layer_name`` alone."""
+    group = next(layer for layer in psd.descendants() if layer.name == group_name)
+    source = PSDImage.open(full_name(filename))
+    donor = next(layer for layer in source.descendants() if layer.name == layer_name)
+    group.tagged_blocks.set_data(
+        Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
+        donor.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO),
+    )
+    for effect in group.effects:
+        if not type(effect).__name__.endswith("Overlay"):
+            effect.descriptor[Key.Enabled] = False
+    return group
+
+
+@pytest.mark.parametrize(("group_name", "left"), [("Outset", 0), ("Pass Through", 64)])
+def test_a_group_overlay_covers_its_childrens_effects(
+    group_name: str, left: int
+) -> None:
+    """A group's overlay paints its children's strokes too, past its own box.
+
+    ``group-clips-child-stroke.psd``'s ``Outset`` (Normal) and ``Pass
+    Through`` groups each hold a 16x16 blue square at ``x = 8 + left`` with
+    a 3 px outset red stroke, outside ``Group.bbox``. Given a colour overlay,
+    the ring takes the overlay's colour like the square does.
+    """
+    overlay = (0, 0, 153)  # Clip+Effects' colour overlay
+    psd = PSDImage.open(full_name("effects/group-clips-child-stroke.psd"))
+    group = _forge_group_overlay(
+        psd, group_name, "effects/stroke-composite.psd", "Clip+Effects"
+    )
+    assert group.bbox == (8 + left, 8, 24 + left, 24)
+    image = psd.composite(ignore_preview=True)
+    assert image is not None
+    row = np.asarray(image.convert("RGB"))[16, left : left + 32]
+    assert [tuple(pixel) for pixel in row[5:12]] == [overlay] * 7
+    assert tuple(row[4]) == (255, 255, 255)
+
+
+@pytest.mark.parametrize("group_name", ["Outset", "Pass Through"])
+def test_a_pass_through_groups_gradient_overlay_is_laid_out_on_the_canvas(
+    group_name: str,
+) -> None:
+    """A pass-through group's gradient spans the document, an isolated one's its box.
+
+    Photoshop lays a pass-through group's aligned gradient overlay out
+    across the document canvas rather than the group's contents.
+    ``layer_effects.psd``'s opaque violet-orange overlay, turned horizontal,
+    on ``group-clips-child-stroke.psd``'s groups: across the 96 px canvas
+    for ``Pass Through``, across the 16 px group box for the Normal
+    ``Outset``.
+    """
+    psd = PSDImage.open(full_name("effects/group-clips-child-stroke.psd"))
+    group = _forge_group_overlay(
+        psd, group_name, "layer_effects.psd", "Gradient Overlay"
+    )
+    passthrough = group.blend_mode is BlendMode.PASS_THROUGH
+    assert passthrough == (group_name == "Pass Through")
+    desc = next(group.effects.find("gradientoverlay")).descriptor
+    desc[Key.Angle] = Double(0.0)
+    left, top, right, bottom = group.bbox
+    layout = psd.viewbox if passthrough else group.bbox
+    expected, _ = paint.draw_gradient_fill(
+        (left, 16, right, 17), psd.color_mode, desc, layout
+    )
+    assert expected is not None
+
+    image = psd.composite(ignore_preview=True)
+    assert image is not None
+    row = np.asarray(image.convert("RGB"))[16, left:right] / 255.0
+    assert np.allclose(row, expected[0], atol=1 / 255.0 + 1e-6)
 
 
 @pytest.mark.parametrize("force", [False, True])
