@@ -35,6 +35,11 @@ STRONG_EMBOLDEN_26_6 = 19
 # AntA None keeps a pixel whose coverage exceeds 0.5 ** (1 / 1.25).
 NONE_THRESHOLD = 0.574
 
+# AntA Crisp snaps glyph origins to whole pixels in y and, in x, to a grid
+# that gets finer for smaller text: ``(pixel-size bound, positions per
+# pixel)`` for sizes below each bound, one position from the last bound up.
+CRISP_SUBPIXEL_X = ((24.0, 4), (32.0, 2))
+
 # An off-diagonal transform coefficient above this makes the transform
 # "general": a shear or rotation rather than a scale or flip.
 GENERAL_TRANSFORM_EPS = 0.01

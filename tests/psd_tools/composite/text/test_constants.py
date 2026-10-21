@@ -14,6 +14,7 @@ def test_values() -> None:
     assert c.FAUX_ITALIC_SHEAR == 0.2126
     assert c.STRONG_EMBOLDEN_26_6 == 19
     assert pytest.approx(0.5 ** (1 / 1.25), abs=5e-4) == c.NONE_THRESHOLD
+    assert c.CRISP_SUBPIXEL_X == ((24.0, 4), (32.0, 2))
     assert c.GENERAL_TRANSFORM_EPS == 0.01
     assert c.MAX_CANVAS_PIXELS == 64_000_000
     assert c.GLYPH_CACHE_SIZE == 8192

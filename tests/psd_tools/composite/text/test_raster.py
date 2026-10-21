@@ -149,6 +149,28 @@ def test_crisp_rounds_origin(face: Face) -> None:
     assert rgba[-1, 1, 3] == 1.0
 
 
+@pytest.mark.parametrize(
+    "em, x, cols",
+    [
+        (32.0, 0.3, [1, 1, 1, 0.2]),  # whole pixels from 32 px up
+        (32 * (1 - 1e-12), 0.3, [1, 1, 1, 0.2]),  # 32 px within 26.6 precision
+        (31.0, 0.3, [0.5, 1, 1, 0.6]),  # half pixels below 32 px: 0.5
+        (24.0, 0.3, [0.5, 1, 0.9]),  # 2.4 px stem at 0.5
+        (23.0, 0.3, [0.75, 1, 0.55]),  # quarter pixels below 24 px: 0.25
+        (20.0, 0.6, [0.5, 1, 0.5]),  # 0.6 rounds to 0.5
+    ],
+)
+def test_crisp_subpixel_x_grows_finer_with_small_text(
+    face: Face, em: float, x: float, cols: list[float]
+) -> None:
+    rgba, bbox = render([glyph(face, "I", x, 100.3, em=em)], CRISP)
+    assert bbox[0] == 0
+    assert rgba[5, :, 3] == pytest.approx(cols, abs=TOL)
+    # y snaps to whole pixels at every size.
+    assert bbox[3] == 100
+    assert rgba[-1, 1, 3] == 1.0
+
+
 def test_crisp_keeps_fraction_under_shear(face: Face) -> None:
     shear: Transform = (1.0, 0.0, 2 * GENERAL_TRANSFORM_EPS, 1.0, 0.25, 100.0)
     rgba, bbox = render([glyph(face, "I", 0.0, 0.0)], CRISP, shear)

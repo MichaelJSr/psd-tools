@@ -22,6 +22,7 @@ import numpy as np
 
 from psd_tools.composite.scanline import fill_coverage
 from psd_tools.composite.text.constants import (
+    CRISP_SUBPIXEL_X,
     FAUX_BOLD_EM,
     FAUX_ITALIC_SHEAR,
     GENERAL_TRANSFORM_EPS,
@@ -63,10 +64,10 @@ class Options:
     max_canvas_pixels: int = MAX_CANVAS_PIXELS
 
 
-#: Where a glyph origin lands: as computed, on whole pixels, or on whole
-#: pixels only under a scale or flip (Crisp snaps to the grid Photoshop's
-#: stem hinter works on, which a rotation or shear does not have).
-_Origin = Literal["fractional", "integer", "integer_diagonal"]
+#: Where a glyph origin lands: as computed, on whole pixels, or (Crisp) on
+#: whole pixels in y and :func:`crisp_x_steps` positions per pixel in x, only
+#: under a scale or flip: a rotation or shear has no grid to snap to.
+_Origin = Literal["fractional", "integer", "crisp"]
 
 
 @dataclass(frozen=True)
@@ -79,15 +80,13 @@ class _Mode:
     threshold: float | None  #: binarise the final coverage above this
 
     def snaps(self, general: bool) -> bool:
-        return self.origin == "integer" or (
-            self.origin == "integer_diagonal" and not general
-        )
+        return self.origin == "integer" or (self.origin == "crisp" and not general)
 
 
 _STRONG = _Mode(_UNHINTED, STRONG_EMBOLDEN_26_6, "fractional", None)
 _MODES: dict[int, _Mode] = {
     0: _Mode(_UNHINTED, 0, "fractional", NONE_THRESHOLD),
-    1: _Mode(_UNHINTED, 0, "integer_diagonal", None),
+    1: _Mode(_UNHINTED, 0, "crisp", None),
     2: _STRONG,
     3: _STRONG,
     4: _Mode(_LIGHT, 0, "integer", None),
@@ -122,6 +121,18 @@ def is_general(transform: Transform) -> bool:
         abs(transform[1]) > GENERAL_TRANSFORM_EPS
         or abs(transform[2]) > GENERAL_TRANSFORM_EPS
     )
+
+
+def crisp_x_steps(size66_h: int) -> int:
+    """Glyph origin positions per pixel in x for Crisp text ``size66_h`` tall.
+
+    The height is the 26.6 char size the glyph is loaded at, so a size that
+    only floating point puts below a bound counts as on it.
+    """
+    for bound, steps in CRISP_SUBPIXEL_X:
+        if size66_h < bound * 64:
+            return steps
+    return 1
 
 
 def strike_scale(px_h: float, strikes: frozenset[int]) -> int:
@@ -249,7 +260,8 @@ def _glyph_items(
         x = xx * g.x + yx * g.y + tx
         y = xy * g.x + yy * g.y + ty
         if snap:
-            x, y = float(round(x)), float(round(y))
+            steps = crisp_x_steps(size66[1] // k) if mode.origin == "crisp" else 1
+            x, y = round(x * steps) / steps, float(round(y))
         ix, iy = math.floor(x), math.floor(y)
         dx, dy = round((x - ix) * 64), round((y - iy) * 64)
         if dx == 64:
