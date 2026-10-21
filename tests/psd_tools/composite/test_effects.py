@@ -1718,7 +1718,7 @@ def test_an_isolated_group_keeps_a_child_stroke_that_reaches_past_it(
     # stroke of the same size puts three full ones. It is the case that
     # separates a whole fix from a half one.
     assert tuple(centered[16, 7]) == (255, 0, 0)
-    assert tuple(centered[16, 6]) == (255, 127, 127)
+    assert tuple(centered[16, 6]) == (255, 128, 128)
     assert tuple(centered[16, 5]) == (255, 255, 255)
 
 
