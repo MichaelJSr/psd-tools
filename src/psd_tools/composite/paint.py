@@ -11,6 +11,10 @@ from PIL import Image
 from psd_tools.api import numpy_io
 from psd_tools.api.utils import check_growth, check_pixel_size
 from psd_tools.color_convert import (
+    SRGB_CUTOFF,
+    SRGB_GAMMA,
+    SRGB_OFFSET,
+    SRGB_SLOPE,
     cmyk_to_rgb,
     gray_to_cmyk,
     gray_to_rgb,
@@ -22,17 +26,15 @@ from psd_tools.color_convert import (
 )
 from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.utils import is_fill_disabled
-from psd_tools.constants import ColorMode, GradientInterpolation, Tag
+from psd_tools.constants import GRADIENT_METHOD_KEY, ColorMode, GradientMethod, Tag
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import Layer
+    from psd_tools.api.protocols import PSDProtocol
 
 logger = logging.getLogger(__name__)
-
-# The gradient interpolation method's descriptor key; not in the terminology.
-_INTERPOLATION_KEY = b"gs99"
 
 # How many times its own area a pattern panel may be scaled up to, past the
 # floor check_growth() allows.
@@ -245,17 +247,27 @@ def create_fill_desc(
     if desc.classID == b"patternLayer":
         return draw_pattern_fill(viewport, layer._psd, desc, anchor)
     if desc.classID == b"gradientLayer":
-        return draw_gradient_fill(viewport, layer._psd.color_mode, desc, anchor)
+        return draw_gradient_fill(
+            viewport,
+            layer._psd.color_mode,
+            desc,
+            gradient_anchor(layer._psd, desc, anchor),
+        )
     return None, None
 
 
 def gradient_anchor(
-    layer: "Layer", desc: Descriptor
+    psd: "PSDProtocol",
+    desc: Descriptor,
+    box: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int] | None:
-    """The box a gradient is laid out on: the layer's, or the document's with ``Algn`` off."""
+    """The box a gradient is laid out on: ``box``, or the document's with ``Algn`` off.
+
+    ``None`` lays the gradient out on the viewport it is drawn on.
+    """
     if bool(desc.get(Key.Alignment, True)):
-        return None
-    return layer._psd.viewbox
+        return box
+    return psd.viewbox
 
 
 def create_fill(
@@ -272,7 +284,7 @@ def create_fill(
         return draw_pattern_fill(viewport, layer._psd, desc)
     if (desc := blocks.get_data(Tag.GRADIENT_FILL_SETTING)) is not None:
         return draw_gradient_fill(
-            viewport, layer._psd.color_mode, desc, gradient_anchor(layer, desc)
+            viewport, layer._psd.color_mode, desc, gradient_anchor(layer._psd, desc)
         )
     if (desc := blocks.get_data(Tag.VECTOR_STROKE_CONTENT_DATA)) is not None:
         if Key.Color in desc:
@@ -280,7 +292,9 @@ def create_fill(
         elif Key.Pattern in desc:
             return draw_pattern_fill(viewport, layer._psd, desc)
         elif Key.Gradient in desc:
-            return draw_gradient_fill(viewport, layer._psd.color_mode, desc)
+            return draw_gradient_fill(
+                viewport, layer._psd.color_mode, desc, gradient_anchor(layer._psd, desc)
+            )
     return None, None
 
 
@@ -459,11 +473,9 @@ def draw_gradient_fill(
     scale = float(desc.get(Key.Scale, 100.0)) / 100.0
     scale *= _gradient_length(angle, box_width, box_height)
     # ``Ofst`` moves the ramp's centre by a share of the box.
-    shift_x = shift_y = 0.0
     offset = desc.get(Key.Offset)
-    if offset is not None:
-        shift_x = box_width * float(offset.get(Key.Horizontal, 0.0)) / 100.0
-        shift_y = box_height * float(offset.get(Key.Vertical, 0.0)) / 100.0
+    shift_x = box_width * _offset_share(offset, Key.Horizontal)
+    shift_y = box_height * _offset_share(offset, Key.Vertical)
     X, Y = np.meshgrid(
         _ramp_axis(viewport[0] - box[0] - shift_x, width, box_width, scale),
         _ramp_axis(viewport[1] - box[1] - shift_y, height, box_height, scale),
@@ -492,7 +504,7 @@ def draw_gradient_fill(
     G, Ga = _make_gradient_color(
         color_mode,
         desc.get(Key.Gradient),
-        getattr(desc.get(_INTERPOLATION_KEY), "enum", None),
+        getattr(desc.get(GRADIENT_METHOD_KEY), "enum", None),
     )
     color = G(Z) if G is not None else None
     shape = np.expand_dims(Ga(Z), 2) if Ga is not None else None
@@ -512,6 +524,21 @@ def _gradient_length(angle: float, width: float, height: float) -> float:
     if sine < 1e-9:
         return float(width)
     return min(width / cosine, height / sine)
+
+
+# ``Ofst`` percent beyond this leaves the box wholly past the ramp at any scale
+# the dialog allows; the clamp keeps a forged offset finite in float32.
+_OFFSET_LIMIT = 10_000.0
+
+
+def _offset_share(point: Descriptor | None, key: bytes) -> float:
+    """One axis of ``Ofst`` as a share of the box; NaN and infinity read as none."""
+    if point is None:
+        return 0.0
+    value = float(point.get(key, 0.0))
+    if not math.isfinite(value):
+        return 0.0
+    return min(_OFFSET_LIMIT, max(-_OFFSET_LIMIT, value)) / 100.0
 
 
 def _ramp_axis(start: float, count: int, extent: int, scale: float) -> np.ndarray:
@@ -577,9 +604,9 @@ def _collect_stops(
 ) -> tuple[list[float], list[np.ndarray], list[float]]:
     """Collect gradient stop (location, value, midpoint) triples in ramp order.
 
-    Co-located stops keep the last one listed. A stop's ``Mdpn`` is where, as
-    a fraction of the segment that ends at it, the blend from the previous
-    stop is halfway.
+    Co-located stops make a step: at their location the ramp takes the later
+    listed. A stop's ``Mdpn`` is where, as a fraction of the segment that ends
+    at it, the blend from the previous stop is halfway.
     """
     triples = sorted(
         (
@@ -592,24 +619,14 @@ def _collect_stops(
         ),
         key=lambda triple: triple[0],
     )
-    X: list[float] = []
-    Y: list[np.ndarray] = []
-    M: list[float] = []
-    for location, value, midpoint in triples:
-        if X and X[-1] == location:
-            logger.debug("Duplicate stop at %s", location)
-            X.pop()
-            Y.pop()
-            M.pop()
-        X.append(location)
-        Y.append(value)
-        M.append(midpoint)
-    if not X:
+    if not triples:
         raise ValueError("Gradient has no stops.")
-    if len(X) == 1:
-        X = [0.0, 1.0]
-        Y = [Y[0], Y[0]]
-        M = [0.5, 0.5]
+    if len(triples) == 1:
+        value = triples[0][1]
+        return [0.0, 1.0], [value, value], [0.5, 0.5]
+    X = [location for location, _, _ in triples]
+    Y = [value for _, value, _ in triples]
+    M = [midpoint for _, _, midpoint in triples]
     return X, Y, M
 
 
@@ -631,9 +648,11 @@ def _blend_stops(
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
     k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(X) - 2)
-    u = np.clip((t - locations[k]) / (locations[k + 1] - locations[k]), 0.0, 1.0)
+    span = locations[k + 1] - locations[k]
     m = np.asarray(M)[k + 1]
     with np.errstate(divide="ignore", invalid="ignore"):
+        # A sample falls in a segment of no width only on its end stop.
+        u = np.where(span > 0.0, np.clip((t - locations[k]) / span, 0.0, 1.0), 1.0)
         bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
     f = np.where((m > 0.0) & (m < 1.0), bent, u)
     f += smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
@@ -642,13 +661,23 @@ def _blend_stops(
     return values[k] * (1.0 - f) + values[k + 1] * f
 
 
+# ``color_convert``'s sRGB transfer functions over an array. That module is
+# scalar by design, so it is the pieces that are shared, not the functions.
 def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
-    return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    return np.where(
+        rgb <= SRGB_SLOPE * SRGB_CUTOFF,
+        rgb / SRGB_SLOPE,
+        ((rgb + SRGB_OFFSET) / (1.0 + SRGB_OFFSET)) ** SRGB_GAMMA,
+    )
 
 
 def _linear_to_srgb(rgb: np.ndarray) -> np.ndarray:
     rgb = np.clip(rgb, 0.0, 1.0)
-    return np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb ** (1 / 2.4) - 0.055)
+    return np.where(
+        rgb <= SRGB_CUTOFF,
+        rgb * SRGB_SLOPE,
+        (1.0 + SRGB_OFFSET) * rgb ** (1.0 / SRGB_GAMMA) - SRGB_OFFSET,
+    )
 
 
 # Oklab's two matrices (Ottosson 2020): linear sRGB to LMS, and cube-rooted
@@ -683,13 +712,18 @@ _BlendSpace = tuple[
     Callable[[np.ndarray], np.ndarray], Callable[[np.ndarray], np.ndarray]
 ]
 
-# ``gs99`` methods that blend somewhere other than the document's own arrays:
-# perceptual in Oklab, linear in linear-light sRGB. Classic, and a missing or
-# unknown key, blend the canvas values directly.
+# Methods that blend somewhere other than the document's own arrays:
+# perceptual in Oklab, linear in linear-light sRGB. Classic and smooth, and a
+# missing or unknown key, blend the canvas values directly.
 _BLEND_SPACES: dict[bytes, _BlendSpace] = {
-    GradientInterpolation.PERCEPTUAL.value: (_srgb_to_oklab, _oklab_to_srgb),
-    GradientInterpolation.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),
+    GradientMethod.PERCEPTUAL.value: (_srgb_to_oklab, _oklab_to_srgb),
+    GradientMethod.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),
 }
+
+
+def _canvas_rows(color_mode: ColorMode, rgb: np.ndarray) -> np.ndarray:
+    """``rgb``'s rows brought into the document's arrays."""
+    return np.array([_from_rgb(color_mode, tuple(row)) for row in rgb.tolist()])
 
 
 def _make_linear_gradient_color(
@@ -699,26 +733,24 @@ def _make_linear_gradient_color(
 
     smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
     colors = grad.get(Key.Colors, [])
+    table = _blend_stops(
+        *_collect_stops(colors, lambda stop: np.array(_get_color(color_mode, stop))),
+        smoothness,
+    )
     space = _BLEND_SPACES.get(method) if method is not None else None
-    if space is None:
-        table = _blend_stops(
-            *_collect_stops(
-                colors, lambda stop: np.array(_get_color(color_mode, stop))
-            ),
-            smoothness,
-        )
-    else:
+    if space is not None:
         encode, decode = space
-        blended = _blend_stops(
-            *_collect_stops(
-                colors, lambda stop: encode(np.array(_get_color(ColorMode.RGB, stop)))
-            ),
-            smoothness,
+        X, Y, M = _collect_stops(
+            colors, lambda stop: np.array(_get_color(ColorMode.RGB, stop))
         )
-        # Blended as sRGB, then brought into the document's arrays row by row.
-        table = np.array(
-            [_from_rgb(color_mode, tuple(row)) for row in decode(blended).tolist()]
+        classic = _canvas_rows(color_mode, _blend_stops(X, Y, M, smoothness))
+        blended = _canvas_rows(
+            color_mode, decode(_blend_stops(X, [encode(y) for y in Y], M, smoothness))
         )
+        # The method's blend as a shift from the classic one, so each stop
+        # keeps its stored value: sRGB does not round-trip CMYK ink or a Lab
+        # colour beyond its gamut.
+        table = np.clip(blended + (table - classic), 0.0, 1.0)
 
     samples = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
 

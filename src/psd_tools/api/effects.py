@@ -26,13 +26,14 @@ from typing import Any, Protocol
 from psd_tools.api._descriptor import get_blend_mode, get_enum, get_scalar
 from psd_tools.api.protocols import LayerProtocol
 from psd_tools.constants import (
+    GRADIENT_METHOD_KEY,
     BevelDirection,
     BevelStyle,
     BevelTechnique,
     BlendMode,
     GlowSource,
     GlowTechnique,
-    GradientInterpolation,
+    GradientMethod,
     GradientType,
     Resource,
     StrokeFillType,
@@ -373,15 +374,14 @@ class _GradientMixin(_EffectProtocol):
         return self.descriptor.get(Key.Offset)
 
     @property
-    def interpolation(self) -> GradientInterpolation:
-        """Interpolation method, classic where the descriptor does not say."""
-        # ``gs99`` is the key Photoshop writes; it is not in the terminology.
-        return get_enum(
-            self.descriptor,
-            b"gs99",
-            GradientInterpolation,
-            GradientInterpolation.CLASSIC,
-        )
+    def method(self) -> GradientMethod | None:
+        """Gradient method, classic where the descriptor does not say.
+
+        ``None`` for a method this version does not know.
+        """
+        if GRADIENT_METHOD_KEY not in self.descriptor:
+            return GradientMethod.CLASSIC
+        return get_enum(self.descriptor, GRADIENT_METHOD_KEY, GradientMethod)
 
 
 class _PatternMixin(_EffectProtocol):

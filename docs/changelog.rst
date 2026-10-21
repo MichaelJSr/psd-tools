@@ -11,14 +11,15 @@ Changelog
 - [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
   ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
 - [fix] A gradient's ramp spans the line through its box at the gradient's
-  angle, so a vertical gradient on a wide layer is no longer a flat band; the
-  offset, stop midpoints, smoothness, "align with layer" and the perceptual
-  and linear interpolation methods (``gs99``) are honoured. Every gradient
-  overlay, fill layer and gradient stroke renders differently
-- [api] ``GradientOverlay`` and ``PatternOverlay`` default ``scale`` to 100 and
-  ``aligned`` to True where the descriptor omits them, as Photoshop does.
-  ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
-  ``interpolation``, the ``gs99`` method as a new ``GradientInterpolation`` enum
+  angle, so a vertical gradient on a wide layer is no longer a flat band, and
+  its offset, stop midpoints, smoothness, hard edges, "align with layer" and
+  method (classic, perceptual or linear) are honoured. Every gradient overlay,
+  fill layer and gradient stroke renders differently
+- [api] ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
+  ``method``, the gradient's method as a new ``GradientMethod`` enum.
+  Backwards-incompatible: ``GradientOverlay`` and ``PatternOverlay`` now
+  default ``scale`` to 100.0 and ``aligned`` to True where the descriptor
+  omits them, as Photoshop does; they were 1.0 and False
 
 1.25.0 (2026-10-14)
 -------------------

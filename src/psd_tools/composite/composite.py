@@ -168,7 +168,7 @@ def _draw_gradient_overlay(
         layer.bbox,
         layer._psd.color_mode,
         descriptor,
-        paint.gradient_anchor(layer, descriptor),
+        paint.gradient_anchor(layer._psd, descriptor),
     )
 
 

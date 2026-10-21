@@ -9,13 +9,14 @@ from psd_tools.api import effects
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.constants import (
+    GRADIENT_METHOD_KEY,
     BevelDirection,
     BevelStyle,
     BevelTechnique,
     BlendMode,
     GlowSource,
     GlowTechnique,
-    GradientInterpolation,
+    GradientMethod,
     GradientType,
     StrokeFillType,
     StrokePosition,
@@ -196,7 +197,7 @@ def test_gradient_overlay(fixture: PSDImage) -> None:
     assert effect.reversed is False
     assert effect.scale == 100.0
     assert effect.type == Enum.Linear
-    assert effect.interpolation is GradientInterpolation.CLASSIC
+    assert effect.method is GradientMethod.CLASSIC
 
 
 def test_pattern_overlay(fixture: PSDImage) -> None:
@@ -804,17 +805,29 @@ def test_photoshop_writes_every_blend_mode_but_pass_through() -> None:
 def test_gradient_overlay_defaults_are_photoshops() -> None:
     """A descriptor that omits the keys reads as the dialog's defaults.
 
-    That is 100% scale, aligned with the layer, classic interpolation.
+    That is 100% scale, aligned with the layer, the classic method.
     """
     bare = effects.GradientOverlay(Descriptor(classID=b"GrFl"), ImageResources())
     assert bare.scale == 100.0
     assert bare.aligned is True
-    assert bare.interpolation is GradientInterpolation.CLASSIC
+    assert bare.method is GradientMethod.CLASSIC
 
+
+@pytest.mark.parametrize(
+    ("code", "method"),
+    [
+        (b"Perc", GradientMethod.PERCEPTUAL),
+        (b"Smoo", GradientMethod.SMOOTH),
+        (b"XXXX", None),
+    ],
+    ids=["perceptual", "smooth", "unknown"],
+)
+def test_gradient_overlay_reads_the_method_it_stores(
+    code: bytes, method: GradientMethod | None
+) -> None:
+    """A method this version does not know is ``None``, not the default."""
     descriptor = Descriptor(classID=b"GrFl")
-    descriptor[b"gs99"] = Enumerated(
-        typeID=b"gradientInterpolationMethodType", enum=b"Perc"
+    descriptor[GRADIENT_METHOD_KEY] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=code
     )
-    perceptual = effects.GradientOverlay(descriptor, ImageResources())
-    assert perceptual.interpolation is GradientInterpolation.PERCEPTUAL
-    assert perceptual.interpolation == b"Perc"
+    assert effects.GradientOverlay(descriptor, ImageResources()).method is method

@@ -527,12 +527,22 @@ class GradientType(bytes, Enum):
     SHAPE_BURST = b"shapeburst"  # Stroke effect only; not in the terminology.
 
 
-class GradientInterpolation(bytes, Enum):
-    """Gradient interpolation method, the ``gs99`` key of a gradient effect."""
+#: The descriptor key of a gradient's :py:class:`GradientMethod`. Photoshop
+#: writes it; it is not in the terminology.
+GRADIENT_METHOD_KEY = b"gs99"
+
+
+class GradientMethod(bytes, Enum):
+    """How a gradient's stops blend; Photoshop's gradient editor calls it Method.
+
+    A gradient effect stores it under :py:data:`GRADIENT_METHOD_KEY`, a
+    gradient map in ``GradientMap.method``.
+    """
 
     CLASSIC = b"Gcls"
     PERCEPTUAL = b"Perc"
     LINEAR = b"Lnr "
+    SMOOTH = b"Smoo"
 
 
 class StrokeFillType(bytes, Enum):
