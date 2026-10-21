@@ -763,11 +763,18 @@ _GLOW_SIGMA_PER_SIZE = 0.45
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
 
-# The sizes between which an outer glow stops being cast from the layer's
-# opacity and is cast from its coverage instead. Fitted against Photoshop's
-# renders of soft-edged layers at glow sizes from a few pixels to hundreds;
-# the tests pin the values and the crossing.
-_GLOW_COVERAGE_SIZES = (10.0, 30.0)
+# The spread, in pixels, from which an outer glow is cast from the layer's
+# coverage rather than its opacity: half a pixel, the least that rounds to a
+# whole one. And what the opacity is scaled by, held to one, to read as
+# coverage. Both fitted against Photoshop's renders of soft-edged layers;
+# the tests pin the values.
+_GLOW_SPREAD_PIXELS = 0.5
+_GLOW_COVERAGE_GAIN = 20.0
+
+# How far below one a coverage still counts as opaque when the coverage
+# reading looks for an antialiased edge: one 8-bit step, so a layer painted
+# a step short of solid, or a 32-bit one a rounding short, still has edges.
+_OPAQUE_STEP = 1.0 / 255.0
 
 # What a glow's range is held above, in the same percent, when its falloff is
 # squeezed: a range read as the inverse of the slider would draw a 1% range as
@@ -1205,32 +1212,28 @@ def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
 
 
-def _glow_coverage(alpha: np.ndarray, size: float) -> np.ndarray:
-    """What a glow of ``size`` is cast from.
+def _glow_coverage(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
+    """What a glow of ``size`` and ``spread`` is cast from.
 
-    Photoshop casts a small glow from the layer's opacity and a large one
-    from its coverage: from where the layer is rather than how opaque it is,
-    so a soft-edged layer glows as the hard shape its edge fades out to and
-    a faint ray casts as much as a solid one. The two readings are crossed
-    between the sizes of :data:`_GLOW_COVERAGE_SIZES`.
-
-    A partial pixel that borders both a clear pixel and an opaque one is an
-    antialiased edge and keeps its coverage, which leaves a hard shape
-    casting from exactly where its edge lies; every other pixel with any
-    coverage counts whole. The neighbours are read along the axes, as
-    :py:func:`_signed_distance` reads a hard step.
+    A glow with no spread is cast from the layer's opacity. One spread by
+    half a pixel or more (:data:`_GLOW_SPREAD_PIXELS`) is cast from its
+    coverage: the opacity scaled by :data:`_GLOW_COVERAGE_GAIN` and held to
+    one, so a soft-edged or faint layer glows as the shape it fades out to
+    and only its faintest pixels cast less than a solid one. A partial pixel
+    that borders both a clear pixel and an opaque one is an antialiased edge
+    and keeps its opacity, which leaves a hard shape casting from exactly
+    where its edge lies; the neighbours are read along the axes, as
+    :py:func:`_signed_distance` reads a hard step. Photoshop's renders of
+    such layers split the same way.
     """
     alpha = alpha.astype(np.float32)
-    low, high = _GLOW_COVERAGE_SIZES
-    weight = min(max((size - low) / (high - low), 0.0), 1.0)
-    if weight <= 0.0:
+    grow = max(float(size), 0.0) * min(max(float(spread), 0.0), 100.0) / 100.0
+    if grow < _GLOW_SPREAD_PIXELS:
         return alpha
     covered = alpha > 0.0
-    edge = covered & _grow(~covered) & _grow(alpha >= 1.0)
-    coverage = np.where(edge, alpha, covered).astype(np.float32)
-    if weight >= 1.0:
-        return coverage
-    return (alpha + weight * (coverage - alpha)).astype(np.float32)
+    edge = covered & _grow(~covered) & _grow(alpha >= 1.0 - _OPAQUE_STEP)
+    coverage = np.clip(alpha * _GLOW_COVERAGE_GAIN, 0.0, 1.0)
+    return np.where(edge, alpha, coverage).astype(np.float32)
 
 
 def glow_falloff(
@@ -1249,10 +1252,10 @@ def glow_falloff(
     :py:func:`outer_glow_bbox` sizes; the result is ``(height, width)`` on
     it, one at the silhouette's edge and dying away over ``size`` pixels: a
     shadow's matte cast nowhere, squeezed by the range (:py:func:`_ranged`)
-    and then mapped by the contour. A large glow is cast from the
+    and then mapped by the contour. A spread glow is cast from the
     silhouette's coverage rather than its opacity (:py:func:`_glow_coverage`),
-    so a soft edge glows as the hard shape it fades out to. It is not cut
-    under the silhouette.
+    so a soft edge glows as the shape it fades out to. It is not cut under
+    the silhouette.
 
     ``precise`` ramps the matte by its distance from the silhouette instead
     of blurring it (:py:func:`_precise_matte`). A size of zero draws nothing
@@ -1267,8 +1270,10 @@ def glow_falloff(
             "Outer glow parameters must be finite: size=%r spread=%r range=%r"
             % (size, spread, range_)
         )
-    alpha = _glow_coverage(shape[:, :, 0], size)
-    if size <= 0.0 or not alpha.any():
+    if size <= 0.0:
+        return np.zeros(shape.shape[:2], dtype=np.float32)
+    alpha = _glow_coverage(shape[:, :, 0], size, spread)
+    if not alpha.any():
         return np.zeros(alpha.shape, dtype=np.float32)
     if precise:
         matte = _precise_matte(alpha, size, spread)
