@@ -258,9 +258,9 @@ def test_shadow_geometry_names_the_effect_whose_value_is_not_finite(
     desc[Key.Blur] = Double(float("nan"))
     with pytest.raises(ValueError, match=message + " parameters must be finite"):
         if what is None:
-            effects.shadow_geometry(desc)
+            effects.shadow_geometry(desc, 0.0)
         else:
-            effects.shadow_geometry(desc, what)
+            effects.shadow_geometry(desc, 0.0, what)
 
 
 @pytest.mark.parametrize(
@@ -530,7 +530,7 @@ def test_an_inner_effect_over_the_documents_budget_is_dropped_not_drawn(
     desc[Key.Enabled] = True
     assert not np.array_equal(_render(psd)[0], disabled)
 
-    _, size, _ = effects.shadow_geometry(desc)
+    size = effects.shadow_geometry(desc, 0.0).size
     grown = effects.drop_shadow_bbox(layer.bbox, 0.0, 0.0, size)
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1

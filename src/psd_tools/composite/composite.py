@@ -32,6 +32,7 @@ from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import check_growth, check_pixel_size, get_color_channels
 from psd_tools.composite import paint, utils, vector
+from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
 from psd_tools.composite.blend import get_blend_func, normal
 from psd_tools.composite.effects import (
@@ -340,7 +341,9 @@ def _reach_base(layer: Layer) -> tuple[int, int, int, int]:
     return layer.bbox
 
 
-def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
+def _stroke_reach(
+    layer: Layer, memo: "_ContentBBoxes | None" = None
+) -> tuple[int, int, int, int]:
     """``layer.bbox`` grown to every box its strokes are drawn on.
 
     A stroke, effect or vector, is one of the things in this module that reach
@@ -353,7 +356,9 @@ def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     ``find("stroke")`` rather than a descriptor walk, so this stays in lockstep
     with the loop in :py:meth:`Compositor._add_stroke_effects` that actually
     draws them: both skip a disabled effect and both skip every effect when the
-    layer's master switch is off.
+    layer's master switch is off. Each box is :py:func:`_stroke_box`, the one
+    that loop draws on, so a group's stroke is measured around everything its
+    contents paint and not around its own box alone.
 
     Two callers ask it for different reasons: :py:func:`_paint_bbox`, how wide
     a canvas a group has to composite its children on (#808), and
@@ -375,10 +380,7 @@ def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     bbox = utils.union_bbox(base, _vector_stroke_reach(layer))
     for effect in _readable(layer, "stroke"):
         try:
-            bbox = utils.union_bbox(
-                bbox,
-                stroke_bbox(base, effect.descriptor, layer._psd._max_alloc_bytes),
-            )
+            bbox = utils.union_bbox(bbox, _stroke_box(layer, effect.descriptor, memo))
         except _UNREADABLE as error:
             logger.debug("Cannot measure a stroke effect of %s: %s", layer, error)
     return bbox
@@ -387,17 +389,33 @@ def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
 def _cast_bbox(
     layer: Layer, memo: "_ContentBBoxes | None" = None
 ) -> tuple[int, int, int, int]:
-    """The box a layer's silhouette can cover, which is what casts its shadow.
+    """The box a layer's silhouette can cover: what its effects are traced from.
 
     A layer's own box, except for a group: its silhouette is its composited
     contents, effects included, and a child's stroke or shadow runs past the
     group's box, which is the union of its children's own. The group's
-    content box is every box those contents paint on (#808). An adjustment
-    layer casts from its style box, as it has no pixels.
+    content box is every box those contents paint on. An adjustment layer
+    casts from its style box, as it has no pixels.
     """
     if layer.is_group():
         return _content_bbox(layer, memo)
     return _style_bbox(layer)
+
+
+def _stroke_box(
+    layer: Layer, desc: Descriptor, memo: "_ContentBBoxes | None" = None
+) -> tuple[int, int, int, int]:
+    """The box one stroke effect of the layer is drawn on.
+
+    :py:func:`_cast_bbox` grown by the stroke's reach, since the stroke is
+    traced from the silhouette and a group's runs past the group's box.
+    Spelled once because :py:func:`_stroke_reach`,
+    :py:meth:`Compositor._add_stroke_effects` and
+    :py:meth:`Compositor._knockout_shape` have to agree on it: a band drawn
+    on a box other than the one reserved for it is clipped, and one cut from
+    under a shadow on a different box is cut where nothing is painted.
+    """
+    return stroke_bbox(_cast_bbox(layer, memo), desc, layer._psd._max_alloc_bytes)
 
 
 def _beneath_reach(
@@ -430,9 +448,16 @@ def _beneath_reach(
     for effect in shadows:
         shadow = cast(DropShadow, effect)
         try:
-            distance, size, _ = shadow_geometry(shadow.descriptor)
+            geometry = shadow_geometry(shadow.descriptor, shadow.angle)
             bbox = utils.union_bbox(
-                bbox, drop_shadow_bbox(cast_from, distance, shadow.angle, size, budget)
+                bbox,
+                drop_shadow_bbox(
+                    cast_from,
+                    geometry.distance,
+                    geometry.angle,
+                    geometry.size,
+                    budget,
+                ),
             )
         except _UNREADABLE as error:
             logger.debug("Cannot measure a drop shadow of %s: %s", layer, error)
@@ -500,7 +525,7 @@ def _effect_reach(
     own box has cleared the viewport can still cast a shadow back into it.
     """
     return utils.union_bbox(
-        utils.union_bbox(_stroke_reach(layer), _beneath_reach(layer, memo)),
+        utils.union_bbox(_stroke_reach(layer, memo), _beneath_reach(layer, memo)),
         _bevel_reach(layer, memo),
     )
 
@@ -545,11 +570,15 @@ class _PassCache:
     opaque the contents are rather than from what they cover. A composite keeps only
     the canvas it was asked for: a stroke and a shadow on one group ask on
     different boxes, so the other would not be read.
+
+    ``scipy_warned`` is set once a pass has said that its drop shadows are
+    left out for want of scipy, so a document with many of them says it once.
     """
 
     content_bboxes: _ContentBBoxes = field(default_factory=dict)
     group_shapes: _GroupShapes = field(default_factory=dict)
     group_alphas: _GroupShapes = field(default_factory=dict)
+    scipy_warned: bool = False
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -2621,12 +2650,24 @@ class Compositor:
             ] = 1.0
         return covered
 
-    def _get_object_shape(
+    def _get_object_coverage(
         self, layer: Layer, viewport: tuple[int, int, int, int]
     ) -> np.ndarray:
-        """The layer's own coverage on ``viewport``, before its mask."""
-        color, shape = self._read_object(layer)
-        return self._place_object_shape(color, shape, layer.bbox, viewport)
+        """What the layer paints on ``viewport``, under its mask.
+
+        The coverage :py:meth:`_resolve_source` gives a layer's source, read
+        on a box of the caller's: the fill, gone where the fill is switched
+        off and the layer is redrawn, plus what a redrawn vector stroke covers
+        of its own. A shadow is cast from this and a stroke effect traced
+        from it, so the two follow the layer as it is painted and not the raw
+        fill under it.
+        """
+        _, shape, _, stroke = self._get_object(layer, viewport)
+        shape = shape * self._get_mask(layer, viewport)
+        if stroke is not None:
+            stroke_mask = self._get_mask(layer, viewport, clip_to_path=False)
+            shape = np.minimum(shape + stroke[0] * stroke_mask, 1.0)
+        return shape
 
     def _has_redrawn_stroke(self, layer: Layer) -> bool:
         """Whether this layer's vector stroke is drawn from the path.
@@ -2641,31 +2682,34 @@ class Compositor:
         )
 
     def _get_object(
-        self, layer: Layer
+        self, layer: Layer, viewport: tuple[int, int, int, int] | None = None
     ) -> tuple[
         np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray] | None
     ]:
-        """Get object attributes.
+        """Get object attributes, on ``viewport`` or this compositor's.
 
         The last item is the coverage and alpha a redrawn stroke has of its own,
         where the fill leaves any. Unlike the fill it is not clipped to the
         vector mask, which a centred or outer stroke reaches past.
         """
+        if viewport is None:
+            viewport = self._viewport
+        height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
         color, own_shape = self._read_object(layer)
-        shape = self._place_object_shape(color, own_shape, layer.bbox, self._viewport)
+        shape = self._place_object_shape(color, own_shape, layer.bbox, viewport)
 
         if color is None:
-            color = np.ones((self.height, self.width, 1), dtype=np.float32)
+            color = np.ones((height, width, 1), dtype=np.float32)
         else:
-            color = paste(self._viewport, layer.bbox, color, 1.0)
+            color = paste(viewport, layer.bbox, color, 1.0)
 
         alpha = shape * 1.0  # Constant factor is always 1.
         fill_off = utils.is_fill_disabled(layer)
 
         if self._has_redrawn_stroke(layer):
             assert layer.stroke is not None
-            path = None if fill_off else vector.draw_vector_mask(layer, self._viewport)
-            color_s, shape_s, alpha_s = self._get_stroke(layer, path)
+            path = None if fill_off else vector.draw_vector_mask(layer, viewport)
+            color_s, shape_s, alpha_s = self._get_stroke(layer, path, viewport)
             # An inner stroke stays inside the path, so with the fill off the
             # path's own coverage is the bound.
             inner = layer.stroke.line_alignment is StrokeAlignment.INNER
@@ -2679,7 +2723,7 @@ class Compositor:
             assert path is not None
             covered = alpha if inner else alpha * path
             compositor = Compositor(
-                self._viewport,
+                viewport,
                 self._widen(color, self.channels),
                 covered,
                 widen=self._widen,
@@ -2854,19 +2898,24 @@ class Compositor:
         return float(shape), opacity
 
     def _get_stroke(
-        self, layer: Layer, path: np.ndarray | None = None
+        self,
+        layer: Layer,
+        path: np.ndarray | None = None,
+        viewport: tuple[int, int, int, int] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Get stroke source.
+        """Get stroke source, on ``viewport`` or this compositor's.
 
         The fill is drawn on the layer's box grown by the stroke width and
-        pasted onto this compositor's viewport, but laid out across the path's
-        own box: Photoshop maps a pattern's phase and a gradient's ramp across
-        the path whatever the width. The coverage is rasterized straight onto
+        pasted onto the viewport, but laid out across the path's own box:
+        Photoshop maps a pattern's phase and a gradient's ramp across the
+        path whatever the width. The coverage is rasterized straight onto
         that viewport: a path is placed in document coordinates,
         so asking for the viewport is what puts the stroke where the fill
         already is, whether or not the viewport happens to share the
         document's dimensions (#807).
         """
+        if viewport is None:
+            viewport = self._viewport
         if layer.stroke is None:
             raise ValueError("Layer does not have stroke data.")
         desc = layer.stroke._data
@@ -2885,7 +2934,7 @@ class Compositor:
         if fill_bbox[0] < fill_bbox[2] and fill_bbox[1] < fill_bbox[3]:
             check_growth(
                 (fill_bbox[2] - fill_bbox[0]) * (fill_bbox[3] - fill_bbox[1]),
-                max(_pixels(self._viewport), _pixels(layer.bbox)),
+                max(_pixels(viewport), _pixels(layer.bbox)),
                 _STROKE_GROWTH,
             )
             check_pixel_size(
@@ -2909,8 +2958,8 @@ class Compositor:
             raise ValueError(
                 "Unsupported stroke fill descriptor in layer strokeStyleContent"
             )
-        color = paste(self._viewport, fill_bbox, color, 1.0)
-        shape = vector.draw_stroke(layer, self._viewport, path)
+        color = paste(viewport, fill_bbox, color, 1.0)
+        shape = vector.draw_stroke(layer, viewport, path)
         opacity = desc.get("strokeStyleOpacity", 100.0) / 100.0
         alpha = shape * opacity
         return color, shape, alpha
@@ -2986,14 +3035,28 @@ class Compositor:
 
         A group has no stored coverage to re-read, so its contents are
         composited a second time on that box instead -- unless its stroke
-        traces its mask, which is the one branch below that never consults a
-        layer's contents at all (#808).
+        traces its mask, which is the one branch of :py:meth:`_read_traced`
+        that never consults a layer's contents at all (#808).
         """
         x0, y0, x1, y1 = viewport
         vx0, vy0, vx1, vy1 = self._viewport
         if vx0 <= x0 and vy0 <= y0 and x1 <= vx1 and y1 <= vy1:
             return paste(viewport, self._viewport, shape)
+        return self._read_traced(layer, viewport, traces_mask)
 
+    def _read_traced(
+        self, layer: Layer, viewport: tuple[int, int, int, int], traces_mask: bool
+    ) -> np.ndarray:
+        """What a stroke effect of the layer is traced from, read on ``viewport``.
+
+        The coverage :py:meth:`_compose_effects` hands :py:meth:`_add_stroke_effects`
+        on this compositor's viewport, read afresh on a box of the caller's:
+        the mask when the stroke follows it, otherwise what the layer paints
+        under its mask, with a shape layer's path interior held whole. The
+        drop shadow's knockout reads its stroke bands from this too, so a
+        band is cut from under the shadow exactly where it is drawn.
+        """
+        x0, y0, x1, y1 = viewport
         # TODO: a group whose stroke traces its mask -- ``force`` with a vector
         # mask on the group -- gets the mask outline alone, which for a group
         # bears no relation to where its contents are. Pre-existing, unreachable
@@ -3007,12 +3070,10 @@ class Compositor:
             # Reading a group as an object finds no pixel data and no fill, so
             # the only route to its coverage outside this viewport is to
             # composite its contents again on the box asked for.
-            own = (
-                self._get_group_shape(layer, viewport)
-                if isinstance(layer, GroupMixin)
-                else self._get_object_shape(layer, viewport)
-            )
-            traced = own * mask
+            if isinstance(layer, GroupMixin):
+                traced = self._get_group_shape(layer, viewport) * mask
+            else:
+                traced = self._get_object_coverage(layer, viewport)
             if _is_shape_layer(layer):
                 traced = self._path_interior(layer, viewport, mask, traced)
         if not isinstance(traced, np.ndarray):
@@ -3116,10 +3177,11 @@ class Compositor:
         """What casts the layer's drop shadow or outer glow, on ``viewport``.
 
         How opaque the layer is, before its opacity and fill opacity, and
-        under its mask: an object's own coverage, and a group's composited
-        alpha, so a child faded to nothing casts nothing. Not the outline of
-        a vector mask, which a stroke follows under ``force``: on a pixel
-        layer that would cast a shadow from the mask's empty margin.
+        under its mask: what an object paints (:py:meth:`_get_object_coverage`),
+        and a group's composited alpha, so a child faded to nothing casts
+        nothing. Not the outline of a vector mask, which a stroke follows
+        under ``force``: on a pixel layer that would cast a shadow from the
+        mask's empty margin.
 
         Read afresh on ``viewport`` rather than taken from the resolved
         source, which :py:meth:`_trace_shape` pastes from where it can. Both
@@ -3133,13 +3195,10 @@ class Compositor:
         """
         if isinstance(layer, AdjustmentLayer):
             return self._adjustment_shape(layer, viewport)
-        mask = self._get_mask(layer, viewport)
-        own = (
-            self._get_group_shape(layer, viewport, alpha=True)
-            if isinstance(layer, GroupMixin)
-            else self._get_object_shape(layer, viewport)
-        )
-        return utils.clip(own * mask)
+        if isinstance(layer, GroupMixin):
+            alpha = self._get_group_shape(layer, viewport, alpha=True)
+            return utils.clip(alpha * self._get_mask(layer, viewport))
+        return utils.clip(self._get_object_coverage(layer, viewport))
 
     def _knockout_shape(
         self, layer: Layer, viewport: tuple[int, int, int, int], silhouette: np.ndarray
@@ -3160,26 +3219,37 @@ class Compositor:
         it is left out. A stroke whose band cannot be drawn cuts nothing, as
         it draws nothing.
 
-        The band is traced from what the stroke itself is traced from past
-        the viewport (:py:meth:`_trace_shape`): the mask when the stroke
-        follows it, the silhouette otherwise.
+        Each band is drawn as :py:meth:`_add_stroke_effects` draws it, on its
+        own :py:func:`_stroke_box` and traced from :py:meth:`_read_traced`,
+        then pasted onto the shadow's canvas: a group's silhouette is its
+        alpha and its stroke follows its coverage, and the two part company
+        wherever the contents are translucent, so a band traced from the
+        silhouette would cut the shadow where no stroke is painted. The
+        stroke's box is the one ``stroke_bbox()`` checked against the
+        budget, so the band costs what a stroke does and no more.
         """
         knockout = silhouette
         strokes = _readable(layer, "stroke")
         if not strokes:
             return knockout
-        traced: float | np.ndarray = silhouette
-        if self._traces_mask(layer):
-            traced = self._get_mask(layer, viewport)
+        traces_mask = self._traces_mask(layer)
         for effect in strokes:
             try:
-                band, inside = stroke_band(viewport, traced, effect.descriptor)
+                bbox = _stroke_box(layer, effect.descriptor, self._cache.content_bboxes)
+            except _UNREADABLE as error:
+                logger.debug("Cannot measure a stroke effect of %s: %s", layer, error)
+                continue
+            if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+                continue
+            traced = self._read_traced(layer, bbox, traces_mask)
+            try:
+                band, inside = stroke_band(bbox, traced, effect.descriptor)
             except _UNREADABLE as error:
                 logger.debug(
                     "Cannot cut a drop shadow under a stroke of %s: %s", layer, error
                 )
                 continue
-            knockout = np.minimum(knockout + (band - inside), 1.0)
+            knockout = np.minimum(knockout + paste(viewport, bbox, band - inside), 1.0)
         return knockout
 
     def _apply_beneath_effects(self, layer: Layer) -> None:
@@ -3198,7 +3268,7 @@ class Compositor:
         is drawn on its own box, grown from :py:func:`_cast_bbox` so a group's
         has room for its children's effects, and cast from
         :py:meth:`_cast_shape` read on that box, so a layer that runs past the
-        viewport still casts from the part of it out of view (#804).
+        viewport still casts from the part of it out of view.
 
         The layer opacity fades the shadow with the layer, as it fades an
         outer stroke. Fill opacity does not: it fades the layer's own paint
@@ -3211,12 +3281,24 @@ class Compositor:
 
         Each effect is guarded as the strokes are, with the silhouette read
         outside both guards so that a fault compositing a group's contents is
-        not taken for an unreadable effect. A parameter that parses to NaN or
-        infinity is unreadable too: nothing on the way raises for it, and
-        composited it would take every pixel of the canvas with it.
+        not taken for an unreadable effect.
+
+        Without scipy the shadows are left out and the document still renders,
+        as it did before they were drawn at all; the one warning a pass gives
+        names the package. That is not the per-effect guard: a missing package
+        is a property of the environment, not of the file, which is why
+        ``ImportError`` stays out of ``_UNREADABLE``.
         """
         shadows = _readable(layer, "dropshadow")
         if not shadows:
+            return
+        if not HAS_SCIPY:
+            if not self._cache.scipy_warned:
+                self._cache.scipy_warned = True
+                logger.warning(
+                    "Drop shadow effects are not drawn: they require scipy. "
+                    "Install with: pip install 'psd-tools[composite]'"
+                )
             return
         _, opacity = self._get_const(layer)
         if opacity <= 0.0:
@@ -3225,8 +3307,7 @@ class Compositor:
         for effect in shadows:
             shadow = cast(DropShadow, effect)
             try:
-                distance, size, spread = shadow_geometry(shadow.descriptor)
-                angle = shadow.angle
+                geometry = shadow_geometry(shadow.descriptor, shadow.angle)
                 effect_opacity = shadow.opacity / 100.0
                 if not math.isfinite(effect_opacity):
                     raise ValueError("opacity %r is not finite" % effect_opacity)
@@ -3236,7 +3317,11 @@ class Compositor:
                 anti_aliased = shadow.anti_aliased
                 noise = shadow.noise
                 bbox = drop_shadow_bbox(
-                    cast_from, distance, angle, size, layer._psd._max_alloc_bytes
+                    cast_from,
+                    geometry.distance,
+                    geometry.angle,
+                    geometry.size,
+                    layer._psd._max_alloc_bytes,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a drop shadow of %s: %s", layer, error)
@@ -3250,10 +3335,10 @@ class Compositor:
                 coverage = draw_drop_shadow(
                     bbox,
                     silhouette,
-                    distance=distance,
-                    angle=angle,
-                    size=size,
-                    spread=spread,
+                    distance=geometry.distance,
+                    angle=geometry.angle,
+                    size=geometry.size,
+                    spread=geometry.spread,
                     contour=contour,
                     anti_aliased=anti_aliased,
                 )
@@ -3462,14 +3547,15 @@ class Compositor:
         inner = cast(InnerShadow | InnerGlow, effect)
         desc = inner.descriptor
         what = "Inner shadow" if isinstance(inner, InnerShadow) else "Inner glow"
-        distance, size, choke = shadow_geometry(desc, what)
+        angle = inner.angle if isinstance(inner, InnerShadow) else 0.0
+        geometry = shadow_geometry(desc, angle, what)
+        distance, size, choke = geometry.distance, geometry.size, geometry.spread
         contour = contour_table(inner.contour)
         anti_aliased = inner.anti_aliased
         if inner.noise > 0.0:
             logger.debug("The noise of an inner effect of %s is not applied", layer)
         bbox = drop_shadow_bbox(cast_from, 0.0, 0.0, size, layer._psd._max_alloc_bytes)
         if isinstance(inner, InnerShadow):
-            angle = inner.angle
 
             def draw_shadow(
                 box: tuple[int, int, int, int], shape: np.ndarray
@@ -3628,9 +3714,7 @@ class Compositor:
                 # Effect must happen at the layer viewport, grown so an outset
                 # or centered stroke has room for the part of itself that
                 # falls outside the layer (#792).
-                bbox = stroke_bbox(
-                    _style_bbox(layer), effect.descriptor, layer._psd._max_alloc_bytes
-                )
+                bbox = _stroke_box(layer, effect.descriptor, self._cache.content_bboxes)
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a stroke effect of %s: %s", layer, error)
                 continue

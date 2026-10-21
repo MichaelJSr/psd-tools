@@ -36,7 +36,10 @@ Changelog
   composited from its layers, instead of being dropped. Distance, size,
   spread, contour, global light, opacity, blend mode and the layer knockout
   are honoured; noise is read but not applied, and the blur approximates
-  Photoshop's. Needs ``scipy``, as a stroke effect does (#679)
+  Photoshop's. Without ``scipy`` the shadow is left out, with a warning (#679)
+- [fix] A stroke effect on a group is drawn around everything the group
+  paints, a child's stroke or shadow included, where it stopped at the
+  group's own box (#679)
 - [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
   jitter (#679)
 - [fix] An outer glow layer effect is now rendered when a document is

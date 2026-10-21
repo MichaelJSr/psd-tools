@@ -32,11 +32,20 @@ from psd_tools.composite.composite import (
 )
 from psd_tools.constants import BlendMode, Resource, Tag
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List, String
+from psd_tools.psd.descriptor import (
+    Bool,
+    Descriptor,
+    Double,
+    Enumerated,
+    List,
+    String,
+)
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
 from .test_composite import _mse
+
+pytest.importorskip("scipy")
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +146,18 @@ def test_a_drop_shadow_asks_for_scipy_by_name_when_it_is_missing(
             size=2.0,
             spread=0.0,
         )
+
+
+def test_shadow_geometry_is_where_the_files_values_are_checked() -> None:
+    """One value that is not finite, the angle included, is an unreadable shadow."""
+    _, card = _masks_card()
+    desc = _shadow_descriptor(card)
+    assert effects.shadow_geometry(desc, 90.0) == (2.0, 90.0, 50.0, 0.0)
+    with pytest.raises(ValueError, match="finite"):
+        effects.shadow_geometry(desc, float("nan"))
+    desc[Key.ChokeMatte] = Double(float("inf"))
+    with pytest.raises(ValueError, match="finite"):
+        effects.shadow_geometry(desc, 90.0)
 
 
 def test_drop_shadow_bbox_holds_the_layer_and_the_cast_shadow() -> None:
@@ -429,6 +450,20 @@ def _header(blend_mode: BlendMode) -> tuple[Layer, Layer]:
     return header, band
 
 
+def _forge_header_effects(layer: Layer) -> Descriptor:
+    """Give ``layer`` a copy of the header band's effects, and return the block.
+
+    The band carries a drop shadow and a faint 2 px outside stroke, which is
+    the pairing the knockout and a group's stroke are measured with.
+    """
+    _, band = _header(BlendMode.PASS_THROUGH)
+    block = copy.deepcopy(
+        band.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    )
+    layer.tagged_blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, block)
+    return block
+
+
 @pytest.mark.parametrize("blend_mode", [BlendMode.PASS_THROUGH, BlendMode.NORMAL])
 def test_a_group_casts_its_shadow_from_its_childrens_effects_too(
     blend_mode: BlendMode,
@@ -452,6 +487,41 @@ def test_a_group_casts_its_shadow_from_its_childrens_effects_too(
 
     _forge_shadow(header, Blur=0.0, Distance=20.0, Opacity=100.0)
     assert float(_alone(header, viewport)[y, x, 0]) == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("blend_mode", [BlendMode.PASS_THROUGH, BlendMode.NORMAL])
+def test_a_groups_stroke_follows_the_shadow_its_child_casts_past_it(
+    blend_mode: BlendMode,
+) -> None:
+    """A group's stroke is drawn on a box grown from what the group paints.
+
+    The band's shadow, made hard and cast 40 px down, runs 40 px past the
+    group's box, and an outside stroke on the group has to follow the
+    shadow's lower edge out there. Grown from the group's own box, the
+    stroke's canvas would end a few pixels below it, and the band along that
+    edge would never be drawn.
+    """
+    header, band = _header(blend_mode)
+    band_shadow = _shadow_descriptor(band)
+    for key, value in ((Key.Blur, 0.0), (Key.Distance, 40.0), (Key.Opacity, 100.0)):
+        band_shadow[key] = Double(value)
+    block = _forge_header_effects(header)
+    block[Klass.DropShadow][Key.Enabled] = False
+    stroke = block[Klass.FrameFX]
+    stroke[Key.Opacity] = Double(100.0)
+    stroke[Key.SizeKey] = Double(4.0)
+    stroke[Key.Style] = Enumerated(Type.FrameFill, Enum.OutsetFrame)
+
+    viewport = (0, 0, 640, 200)
+    stroke[Key.Enabled] = False
+    without = _alone(header, viewport)[:, 320, 0]
+    stroke[Key.Enabled] = True
+    alpha = _alone(header, viewport)[:, 320, 0]
+    # The first clear row below the band's shadow, well past the group's box.
+    edge = header.bbox[3] + int(np.argmax(without[header.bbox[3] :] == 0.0))
+    assert edge > header.bbox[3] + 8 and float(without[edge - 1]) == 1.0
+    assert np.all(alpha[edge : edge + 4] == pytest.approx(1.0, abs=1e-2))
+    assert float(alpha[edge + 6]) == 0.0
 
 
 def test_the_knockout_cuts_the_shadow_under_the_layers_stroke_too() -> None:
@@ -504,32 +574,75 @@ def test_the_knockout_adds_the_stroke_band_to_the_silhouette(
     layer, and on that pixel equals its coverage: added it would cut the
     shadow from under the uncovered half too, so the knockout there stays at
     the coverage. A centred band is half each.
+
+    The layer is a 21 px square whose last column is half covered, so the
+    boundary the band is traced from cuts that column's pixels in half.
     """
-    psd = PSDImage.open(full_name("masks/2.psd"))
-    layer = next(layer for layer in psd if layer.name == "ellipse3")
-    _, band = _header(BlendMode.PASS_THROUGH)
-    layer.tagged_blocks.set_data(
-        Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
-        copy.deepcopy(band.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)),
-    )
+    psd = PSDImage.new("RGB", (41, 41))
+    square = Image.new("RGBA", (21, 21), (255, 255, 255, 255))
+    for y in range(21):
+        square.putpixel((20, y), (255, 255, 255, 128))
+    layer = psd.create_pixel_layer(square, top=10, left=10)
+    assert layer.bbox == (10, 10, 31, 31)
+    _forge_header_effects(layer)
     stroke = cast(Stroke, next(iter(layer.effects.find("stroke"))))
     assert stroke.size == 2.0 and stroke.opacity < 100.0
     stroke.descriptor[Key.Style] = Enumerated(Type.FrameFill, style)
 
-    viewport = (0, 0, 41, 41)
-    silhouette = np.zeros((41, 41, 1), dtype=np.float32)
-    silhouette[10:31, 10:30] = 1.0
-    silhouette[10:31, 30] = 0.5
+    viewport = psd.viewbox
     compositor = Compositor(
         viewport,
         np.ones((41, 41, 3), dtype=np.float32),
         np.zeros((41, 41, 1), dtype=np.float32),
     )
+    silhouette = compositor._cast_shape(layer, viewport)
+    assert float(silhouette[20, 30, 0]) == pytest.approx(128 / 255.0)
     knockout = compositor._knockout_shape(layer, viewport, silhouette)
     assert float(knockout[20, 20, 0]) == 1.0
-    assert float(knockout[20, 30, 0]) == pytest.approx(at_edge, abs=1e-3)
-    assert float(knockout[20, 31, 0]) == pytest.approx(beyond_edge, abs=1e-3)
+    assert float(knockout[20, 30, 0]) == pytest.approx(at_edge, abs=1e-2)
+    assert float(knockout[20, 31, 0]) == pytest.approx(beyond_edge, abs=1e-2)
     assert float(knockout[20, 34, 0]) == 0.0
+
+
+@pytest.mark.parametrize("blend_mode", [BlendMode.PASS_THROUGH, BlendMode.NORMAL])
+def test_the_knockout_band_follows_the_groups_stroke_not_its_alpha(
+    blend_mode: BlendMode,
+) -> None:
+    """The band the knockout cuts under is the one the stroke is drawn from.
+
+    A group's silhouette is its alpha and its stroke follows its coverage. A
+    half-opaque child covers its pixels fully, so the group's outside stroke
+    lies beyond the child and nothing of it inside; traced from the alpha
+    instead, a flat half-coverage states a boundary at every pixel, and the
+    band would cover the whole child and cut the shadow from under all of
+    it. The shadow is cast straight down from that alpha, ``c``, so under
+    the child it is ``c`` cut by ``c``, and the child composites over what
+    is left.
+    """
+    psd = PSDImage.new("RGB", (60, 60))
+    child = psd.create_pixel_layer(
+        Image.new("RGBA", (20, 20), (255, 255, 255, 255)), top=20, left=20
+    )
+    child.opacity = 128
+    group = psd.create_group([child])
+    group.blend_mode = blend_mode
+    block = _forge_header_effects(group)
+    shadow = block[Klass.DropShadow]
+    shadow[Key.UseGlobalAngle] = False
+    for key, value in ((Key.Blur, 0.0), (Key.Distance, 0.0), (Key.Opacity, 100.0)):
+        shadow[key] = Double(value)
+    assert cast(
+        DropShadow, next(iter(group.effects.find("dropshadow")))
+    ).layer_knocks_out
+
+    c = 128 / 255.0
+    shadow_left = c * (1.0 - c)
+    alpha = _alone(group, psd.viewbox)
+    assert float(alpha[30, 30, 0]) == pytest.approx(
+        shadow_left + c - shadow_left * c, abs=1e-5
+    )
+    shadow[Key.Enabled] = False
+    assert float(_alone(group, psd.viewbox)[30, 30, 0]) == pytest.approx(c, abs=1e-5)
 
 
 def test_a_pass_through_group_keeps_its_shadow_beneath_it() -> None:
@@ -738,6 +851,71 @@ def test_a_masked_pixel_layer_casts_its_shadow_from_its_pixels(force: bool) -> N
     # Left of the ellipse, where only its shadow can be: opaque, faded by the
     # layer's own opacity.
     assert float(alpha[40, 4, 0]) == pytest.approx(layer.opacity / 255.0)
+
+
+def _stroked_rectangle(alignment: bytes, fill_enabled: bool) -> Layer:
+    """``stroke.psd``'s rectangle, its 1.47 px vector stroke moved and its fill set.
+
+    The shadow forged on it is lit from the right and hard, so it falls 6 px
+    to the left of the rectangle, where only the shadow can paint.
+    """
+    psd = PSDImage.open(full_name("stroke.psd"))
+    layer = next(x for x in psd.descendants() if x.name == "Rectangle 1")
+    stroke = layer.tagged_blocks.get_data(Tag.VECTOR_STROKE_DATA)
+    stroke[b"strokeStyleLineAlignment"] = Enumerated(
+        b"strokeStyleLineAlignment", alignment
+    )
+    stroke[b"fillEnabled"] = Bool(fill_enabled)
+    layer.tagged_blocks.set_data(Tag.VECTOR_STROKE_DATA, stroke)
+    _forge_shadow(layer, angle=0.0, Blur=0.0, Distance=6.0, Opacity=100.0)
+    return layer
+
+
+def test_a_shape_layer_with_its_fill_off_casts_its_shadow_from_its_stroke() -> None:
+    """The silhouette is what the layer paints, not the fill under it.
+
+    With the fill switched off and the layer redrawn from its path, the
+    layer is its inner vector stroke, a ring, and its shadow is that ring
+    moved: hollow inside. Cast from the fill it would be a solid block.
+    """
+    layer = _stroked_rectangle(b"strokeStyleAlignInside", fill_enabled=False)
+    viewport = _around(layer)
+    alpha = _alone(layer, viewport, force=True)
+    _shadow_descriptor(layer)[Key.Enabled] = False
+    ring = _alone(layer, viewport, force=True)
+
+    y = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1]
+    left = int(np.argmax(ring[y, :, 0] > 0.0))
+    assert float(ring[y, left, 0]) > 0.5 and float(ring[y, left + 4, 0]) == 0.0, (
+        "not a ring"
+    )
+    # Left of the ring only the shadow paints: the ring, moved 6 px.
+    assert np.allclose(alpha[:, left - 6 : left], ring[:, left : left + 6], atol=1e-6)
+
+
+def test_a_shape_layers_shadow_reaches_as_far_as_its_outer_vector_stroke() -> None:
+    """A redrawn outer stroke casts a shadow along with the fill it outlines.
+
+    The stroke reaches past the path, so the shadow of the stroked rectangle
+    starts a pixel further out than the fill's would.
+    """
+    layer = _stroked_rectangle(b"strokeStyleAlignOutside", fill_enabled=True)
+    viewport = _around(layer)
+    alpha = _alone(layer, viewport, force=True)
+    _shadow_descriptor(layer)[Key.Enabled] = False
+    stroked = _alone(layer, viewport, force=True)
+    layer.tagged_blocks.get_data(Tag.VECTOR_STROKE_DATA)[b"strokeEnabled"] = Bool(False)
+    filled = _alone(layer, viewport, force=True)
+
+    y = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1]
+    left = int(np.argmax(stroked[y, :, 0] > 0.0))
+    assert left < int(np.argmax(filled[y, :, 0] > 0.0)), (
+        "the stroke does not reach past the path"
+    )
+    # Left of the stroke only the shadow paints: the stroked layer, moved 6 px.
+    assert np.allclose(
+        alpha[:, left - 6 : left], stroked[:, left : left + 6], atol=1e-6
+    )
 
 
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:
@@ -1143,8 +1321,42 @@ def test_a_drop_shadow_over_the_documents_budget_is_dropped_not_drawn() -> None:
     shadow[Key.Enabled] = True
     assert not np.array_equal(_alone(layer, viewport), disabled)
 
-    distance, size, _ = effects.shadow_geometry(shadow)
-    grown = effects.drop_shadow_bbox(layer.bbox, distance, 90.0, size)
+    geometry = effects.shadow_geometry(shadow, 90.0)
+    grown = effects.drop_shadow_bbox(
+        layer.bbox, geometry.distance, geometry.angle, geometry.size
+    )
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1
     assert np.array_equal(_alone(layer, viewport), disabled)
+
+
+def test_without_scipy_the_shadows_are_left_out_and_the_document_renders(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A document with drop shadows still composites where scipy is missing.
+
+    The shadows are left out, as they were before they were drawn at all,
+    and the pass says so once, not once per layer: ``masks.psb`` carries
+    three.
+    """
+    psd = PSDImage.open(full_name("masks.psb"))
+    shadows = [
+        effect
+        for layer in psd.descendants()
+        for effect in layer.effects.find("dropshadow")
+    ]
+    assert len(shadows) == 3
+    for effect in shadows:
+        effect.descriptor[Key.Enabled] = False
+    color, _, alpha = composite(psd)
+    for effect in shadows:
+        effect.descriptor[Key.Enabled] = True
+
+    module = sys.modules["psd_tools.composite.composite"]
+    monkeypatch.setattr(module, "HAS_SCIPY", False)
+    with caplog.at_level(logging.WARNING, logger="psd_tools.composite.composite"):
+        without_color, _, without_alpha = composite(psd)
+    assert np.array_equal(without_color, color)
+    assert np.array_equal(without_alpha, alpha)
+    warned = [record for record in caplog.records if "scipy" in record.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
