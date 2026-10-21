@@ -1040,15 +1040,12 @@ def _precise_matte(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
 
 
 def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
-    """``matte`` with the contour's input squeezed to its inner ``range_`` percent.
+    """``matte`` scaled up by the inverse of its range and held to one.
 
-    Photoshop's range picks the part of the falloff the contour is laid over:
-    the matte is scaled up by the inverse of the range and held to one, so at
-    100% the contour sees the whole falloff and at 50% it sees the half
-    nearest the silhouette, with the rest painted at the contour's top. The
-    inverse is taken over the range and :data:`_GLOW_RANGE_FLOOR` together,
-    so a small range squeezes no harder than the floor does, and 100% is
-    the matte itself.
+    Photoshop's range picks the part of the falloff the contour is laid over.
+    The inverse is taken over the range and :data:`_GLOW_RANGE_FLOOR`
+    together, so a small range squeezes no harder than the floor does, and
+    100% is the matte itself.
     """
     scale = math.hypot(100.0, _GLOW_RANGE_FLOOR) / math.hypot(range_, _GLOW_RANGE_FLOOR)
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
