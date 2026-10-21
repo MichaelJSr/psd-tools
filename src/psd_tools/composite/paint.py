@@ -1,8 +1,9 @@
 """Paint and fill operations for compositing."""
 
 import logging
+import math
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PIL import Image
@@ -21,7 +22,7 @@ from psd_tools.color_convert import (
 )
 from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.utils import is_fill_disabled
-from psd_tools.constants import ColorMode, Tag
+from psd_tools.constants import ColorMode, GradientInterpolation, Tag
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key, Klass, Type
 
@@ -29,6 +30,9 @@ if TYPE_CHECKING:
     from psd_tools.api.layers import Layer
 
 logger = logging.getLogger(__name__)
+
+# The gradient interpolation method's descriptor key; not in the terminology.
+_INTERPOLATION_KEY = b"gs99"
 
 # How many times its own area a pattern panel may be scaled up to, past the
 # floor check_growth() allows.
@@ -245,6 +249,15 @@ def create_fill_desc(
     return None, None
 
 
+def gradient_anchor(
+    layer: "Layer", desc: Descriptor
+) -> tuple[int, int, int, int] | None:
+    """The box a gradient is laid out on: the layer's, or the document's with ``Algn`` off."""
+    if bool(desc.get(Key.Alignment, True)):
+        return None
+    return layer._psd.viewbox
+
+
 def create_fill(
     layer: "Layer",
     viewport: tuple[int, int, int, int],
@@ -258,7 +271,9 @@ def create_fill(
     if (desc := blocks.get_data(Tag.PATTERN_FILL_SETTING)) is not None:
         return draw_pattern_fill(viewport, layer._psd, desc)
     if (desc := blocks.get_data(Tag.GRADIENT_FILL_SETTING)) is not None:
-        return draw_gradient_fill(viewport, layer._psd.color_mode, desc)
+        return draw_gradient_fill(
+            viewport, layer._psd.color_mode, desc, gradient_anchor(layer, desc)
+        )
     if (desc := blocks.get_data(Tag.VECTOR_STROKE_CONTENT_DATA)) is not None:
         if Key.Color in desc:
             return draw_solid_color_fill(viewport, layer._psd.color_mode, desc)
@@ -442,11 +457,16 @@ def draw_gradient_fill(
 
     angle = float(desc.get(Key.Angle, 0))
     scale = float(desc.get(Key.Scale, 100.0)) / 100.0
-    ratio = angle % 90
-    scale *= (90.0 - ratio) / 90.0 * box_width + (ratio / 90.0) * box_height
+    scale *= _gradient_length(angle, box_width, box_height)
+    # ``Ofst`` moves the ramp's centre by a share of the box.
+    shift_x = shift_y = 0.0
+    offset = desc.get(Key.Offset)
+    if offset is not None:
+        shift_x = box_width * float(offset.get(Key.Horizontal, 0.0)) / 100.0
+        shift_y = box_height * float(offset.get(Key.Vertical, 0.0)) / 100.0
     X, Y = np.meshgrid(
-        _ramp_axis(viewport[0] - box[0], width, box_width, scale),
-        _ramp_axis(viewport[1] - box[1], height, box_height, scale),
+        _ramp_axis(viewport[0] - box[0] - shift_x, width, box_width, scale),
+        _ramp_axis(viewport[1] - box[1] - shift_y, height, box_height, scale),
     )
 
     gradient_kind = desc.get(Key.Type).enum
@@ -469,14 +489,37 @@ def draw_gradient_fill(
     if bool(desc.get(Key.Reverse, False)):
         Z = 1.0 - Z
 
-    G, Ga = _make_gradient_color(color_mode, desc.get(Key.Gradient))
+    G, Ga = _make_gradient_color(
+        color_mode,
+        desc.get(Key.Gradient),
+        getattr(desc.get(_INTERPOLATION_KEY), "enum", None),
+    )
     color = G(Z) if G is not None else None
     shape = np.expand_dims(Ga(Z), 2) if Ga is not None else None
     return color, shape
 
 
-def _ramp_axis(start: int, count: int, extent: int, scale: float) -> np.ndarray:
-    """``count`` ramp coordinates from pixel ``start``, ``extent`` pixels spanning -1 to 1."""
+def _gradient_length(angle: float, width: float, height: float) -> float:
+    """Length of the line through the box centre at ``angle``, clipped by the box.
+
+    The ramp of a 100% gradient spans exactly this, so a vertical ramp spans
+    the height and a horizontal one the width whatever the box's aspect.
+    """
+    theta = math.radians(angle)
+    cosine, sine = abs(math.cos(theta)), abs(math.sin(theta))
+    if cosine < 1e-9:
+        return float(height)
+    if sine < 1e-9:
+        return float(width)
+    return min(width / cosine, height / sine)
+
+
+def _ramp_axis(start: float, count: int, extent: int, scale: float) -> np.ndarray:
+    """``count`` ramp coordinates from pixel ``start``.
+
+    The box's first and last pixels sit at -extent/scale and extent/scale, so
+    a ramp as long as the box puts a stop on each end pixel, as Photoshop does.
+    """
     step = 2.0 * extent / scale / (extent - 1) if extent > 1 else 0.0
     return (-extent / scale + (start + np.arange(count)) * step).astype(np.float32)
 
@@ -517,67 +560,186 @@ def _make_diamond_gradient(X: np.ndarray, Y: np.ndarray, angle: float) -> np.nda
 
 
 def _make_gradient_color(
-    color_mode: ColorMode, grad: Descriptor
+    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
 ) -> tuple[Any | None, Any | None]:
     gradient_form = grad.get(Type.GradientForm).enum
     if gradient_form == Enum.ColorNoise:
         return _make_noise_gradient_color(color_mode, grad)
     elif gradient_form == Enum.CustomStops:
-        return _make_linear_gradient_color(color_mode, grad)
+        return _make_linear_gradient_color(color_mode, grad, method)
 
     logger.error("Unknown gradient form: %s", gradient_form)
     return None, None
 
 
-_T = TypeVar("_T")
-
-
 def _collect_stops(
-    stops: Sequence[Any], value_fn: Callable[[Any], _T]
-) -> tuple[list[float], list[_T]]:
-    """Collect gradient stop (location, value) pairs, deduplicating co-located stops."""
+    stops: Sequence[Any], value_fn: Callable[[Any], np.ndarray]
+) -> tuple[list[float], list[np.ndarray], list[float]]:
+    """Collect gradient stop (location, value, midpoint) triples in ramp order.
+
+    Co-located stops keep the last one listed. A stop's ``Mdpn`` is where, as
+    a fraction of the segment that ends at it, the blend from the previous
+    stop is halfway.
+    """
+    triples = sorted(
+        (
+            (
+                float(stop.get(Key.Location)) / 4096.0,
+                value_fn(stop),
+                float(stop.get(Key.Midpoint, 50.0)) / 100.0,
+            )
+            for stop in stops
+        ),
+        key=lambda triple: triple[0],
+    )
     X: list[float] = []
-    Y: list[_T] = []
-    for stop in stops:
-        location = float(stop.get(Key.Location)) / 4096.0
-        value = value_fn(stop)
+    Y: list[np.ndarray] = []
+    M: list[float] = []
+    for location, value, midpoint in triples:
         if X and X[-1] == location:
             logger.debug("Duplicate stop at %s", location)
             X.pop()
             Y.pop()
+            M.pop()
         X.append(location)
         Y.append(value)
+        M.append(midpoint)
     if not X:
         raise ValueError("Gradient has no stops.")
     if len(X) == 1:
         X = [0.0, 1.0]
         Y = [Y[0], Y[0]]
-    return X, Y
+        M = [0.5, 0.5]
+    return X, Y, M
+
+
+# One sample per ``Lctn`` unit, so every stop is a sample.
+_RAMP_SAMPLES = 4097
+
+
+def _blend_stops(
+    X: list[float], Y: list[np.ndarray], M: list[float], smoothness: float
+) -> np.ndarray:
+    """Sample the ramp through the stops at every ``Lctn`` unit.
+
+    Within a segment the blend runs linearly to halfway at the end stop's
+    midpoint and linearly on to the end; a midpoint on either end of its
+    segment is ignored, as Photoshop's dialog cannot author one. Smoothness
+    then eases the blend towards a smoothstep, with 100% landing halfway
+    between the two.
+    """
+    t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
+    locations = np.asarray(X)
+    k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(X) - 2)
+    u = np.clip((t - locations[k]) / (locations[k + 1] - locations[k]), 0.0, 1.0)
+    m = np.asarray(M)[k + 1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
+    f = np.where((m > 0.0) & (m < 1.0), bent, u)
+    f += smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+    values = np.asarray(Y, dtype=np.float64)
+    f = f.reshape((-1,) + (1,) * (values.ndim - 1))
+    return values[k] * (1.0 - f) + values[k + 1] * f
+
+
+def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
+    return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(rgb: np.ndarray) -> np.ndarray:
+    rgb = np.clip(rgb, 0.0, 1.0)
+    return np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb ** (1 / 2.4) - 0.055)
+
+
+# Oklab's two matrices (Ottosson 2020): linear sRGB to LMS, and cube-rooted
+# LMS to Lab.
+_OKLAB_LMS = np.array(
+    [
+        [0.4122214708, 0.5363325363, 0.0514459929],
+        [0.2119034982, 0.6806995451, 0.1073969566],
+        [0.0883024619, 0.2817188376, 0.6299787005],
+    ]
+)
+_OKLAB_LAB = np.array(
+    [
+        [0.2104542553, 0.7936177850, -0.0040720468],
+        [1.9779984951, -2.4285922050, 0.4505937099],
+        [0.0259040371, 0.7827717662, -0.8086757660],
+    ]
+)
+_OKLAB_LMS_INV = np.linalg.inv(_OKLAB_LMS)
+_OKLAB_LAB_INV = np.linalg.inv(_OKLAB_LAB)
+
+
+def _srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
+    return np.cbrt(_srgb_to_linear(rgb) @ _OKLAB_LMS.T) @ _OKLAB_LAB.T
+
+
+def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
+    return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ _OKLAB_LMS_INV.T)
+
+
+_BlendSpace = tuple[
+    Callable[[np.ndarray], np.ndarray], Callable[[np.ndarray], np.ndarray]
+]
+
+# ``gs99`` methods that blend somewhere other than the document's own arrays:
+# perceptual in Oklab, linear in linear-light sRGB. Classic, and a missing or
+# unknown key, blend the canvas values directly.
+_BLEND_SPACES: dict[bytes, _BlendSpace] = {
+    GradientInterpolation.PERCEPTUAL.value: (_srgb_to_oklab, _oklab_to_srgb),
+    GradientInterpolation.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),
+}
 
 
 def _make_linear_gradient_color(
-    color_mode: ColorMode, grad: Descriptor
+    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
 ) -> tuple[Any | None, Any | None]:
     from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    Xc, Yc = _collect_stops(
-        grad.get(Key.Colors, []),
-        lambda stop: np.array(_get_color(color_mode, stop), dtype=np.float32),
-    )
-    G = interpolate.interp1d(
-        Xc, Yc, axis=0, bounds_error=False, fill_value=(Yc[0], Yc[-1])
-    )
+    smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
+    colors = grad.get(Key.Colors, [])
+    space = _BLEND_SPACES.get(method) if method is not None else None
+    if space is None:
+        table = _blend_stops(
+            *_collect_stops(
+                colors, lambda stop: np.array(_get_color(color_mode, stop))
+            ),
+            smoothness,
+        )
+    else:
+        encode, decode = space
+        blended = _blend_stops(
+            *_collect_stops(
+                colors, lambda stop: encode(np.array(_get_color(ColorMode.RGB, stop)))
+            ),
+            smoothness,
+        )
+        # Blended as sRGB, then brought into the document's arrays row by row.
+        table = np.array(
+            [_from_rgb(color_mode, tuple(row)) for row in decode(blended).tolist()]
+        )
+
+    samples = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
+
+    def lookup(table: np.ndarray) -> Any:
+        table = table.astype(np.float32)
+        return interpolate.interp1d(
+            samples, table, axis=0, bounds_error=False, fill_value=(table[0], table[-1])
+        )
+
+    G = lookup(table)
     if Key.Transparency not in grad:
         return G, None
 
-    Xt, Yt = _collect_stops(
-        grad.get(Key.Transparency),
-        lambda stop: float(stop.get(Key.Opacity)) / 100.0,
+    alpha = _blend_stops(
+        *_collect_stops(
+            grad.get(Key.Transparency),
+            lambda stop: np.array(float(stop.get(Key.Opacity)) / 100.0),
+        ),
+        smoothness,
     )
-    Ga = interpolate.interp1d(
-        Xt, Yt, axis=0, bounds_error=False, fill_value=(Yt[0], Yt[-1])
-    )
-    return G, Ga
+    return G, lookup(alpha)
 
 
 def _noise_color_components(table: np.ndarray) -> np.ndarray:

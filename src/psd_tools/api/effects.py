@@ -32,6 +32,7 @@ from psd_tools.constants import (
     BlendMode,
     GlowSource,
     GlowTechnique,
+    GradientInterpolation,
     GradientType,
     Resource,
     StrokeFillType,
@@ -371,6 +372,17 @@ class _GradientMixin(_EffectProtocol):
         """Offset value in Pnt descriptor."""
         return self.descriptor.get(Key.Offset)
 
+    @property
+    def interpolation(self) -> GradientInterpolation:
+        """Interpolation method, classic where the descriptor does not say."""
+        # ``gs99`` is the key Photoshop writes; it is not in the terminology.
+        return get_enum(
+            self.descriptor,
+            b"gs99",
+            GradientInterpolation,
+            GradientInterpolation.CLASSIC,
+        )
+
 
 class _PatternMixin(_EffectProtocol):
     # ``b"Ptrn"`` and ``b"Lnkd"`` below are the codes Photoshop writes for
@@ -440,13 +452,13 @@ class _AlignScaleMixin(_EffectProtocol):
 
     @property
     def scale(self) -> float:
-        """Scale value."""
-        return get_scalar(self.descriptor, Key.Scale, float, 1.0)
+        """Scale in percent, 100.0 where the descriptor does not say."""
+        return get_scalar(self.descriptor, Key.Scale, float, 100.0)
 
     @property
     def aligned(self) -> bool:
-        """Aligned."""
-        return get_scalar(self.descriptor, Key.Alignment, bool, False)
+        """Align with layer, True where the descriptor does not say."""
+        return get_scalar(self.descriptor, Key.Alignment, bool, True)
 
 
 @register(Klass.DropShadow.value)

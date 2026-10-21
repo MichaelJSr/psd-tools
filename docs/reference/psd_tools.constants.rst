@@ -101,6 +101,13 @@ GlowTechnique
     :members:
     :undoc-members:
 
+GradientInterpolation
+---------------------
+
+.. autoclass:: psd_tools.constants.GradientInterpolation
+    :members:
+    :undoc-members:
+
 GradientType
 ------------
 

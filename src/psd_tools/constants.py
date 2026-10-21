@@ -527,6 +527,14 @@ class GradientType(bytes, Enum):
     SHAPE_BURST = b"shapeburst"  # Stroke effect only; not in the terminology.
 
 
+class GradientInterpolation(bytes, Enum):
+    """Gradient interpolation method, the ``gs99`` key of a gradient effect."""
+
+    CLASSIC = b"Gcls"
+    PERCEPTUAL = b"Perc"
+    LINEAR = b"Lnr "
+
+
 class StrokeFillType(bytes, Enum):
     """Stroke effect fill type."""
 
