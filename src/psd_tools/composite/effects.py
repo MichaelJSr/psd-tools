@@ -66,7 +66,7 @@ automatically applied when rendering layers that have effects enabled.
 
 import logging
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
@@ -152,26 +152,43 @@ def _stroke_size(desc: Descriptor) -> float:
     return min(size, _MAX_STROKE_SIZE)
 
 
-def shadow_geometry(desc: Descriptor) -> tuple[float, float, float]:
-    """A drop shadow's ``(distance, size, spread)``, as the file states them.
+class ShadowGeometry(NamedTuple):
+    """Where a drop shadow falls and how far it reaches, in pixels and degrees."""
 
-    Read off the descriptor rather than through :py:class:`~psd_tools.api.effects.DropShadow`,
-    whose properties read a value they cannot parse as its default: to the
-    compositor that value is an unreadable effect, as a stroke's size is to
+    distance: float
+    angle: float
+    size: float
+    spread: float
+
+
+def shadow_geometry(desc: Descriptor, angle: float) -> ShadowGeometry:
+    """A drop shadow's geometry, as the file states it, checked once for all.
+
+    The distance, size and spread are read off the descriptor rather than
+    through :py:class:`~psd_tools.api.effects.DropShadow`, whose properties
+    read a value they cannot parse as its default: to the compositor that
+    value is an unreadable effect, as a stroke's size is to
     :py:func:`stroke_bbox`, and the effect is dropped rather than drawn at
-    some invented size. Raises :class:`ValueError` or :class:`TypeError` for
-    a value that will not parse, and :class:`ValueError` for one that is not
-    finite. The size is held to what Photoshop can write, as a stroke's is.
+    some invented size. ``angle`` is passed in, since the global light it can
+    follow lives in the document and not in the descriptor.
+
+    Raises :class:`ValueError` or :class:`TypeError` for a value that will not
+    parse, and :class:`ValueError` for one that is not finite: NaN passes
+    through every step of :py:func:`draw_drop_shadow` without complaint, and
+    one NaN in the coverage spreads to the whole canvas it is composited on,
+    so this is the one place the values are checked. The size is held to what
+    Photoshop can write, as a stroke's is.
     """
     distance = float(desc.get(Key.Distance, 0.0))
     size = float(desc.get(Key.Blur, 0.0))
     spread = float(desc.get(Key.ChokeMatte, 0.0))
-    if not all(math.isfinite(value) for value in (distance, size, spread)):
+    angle = float(angle)
+    if not all(math.isfinite(value) for value in (distance, angle, size, spread)):
         raise ValueError(
-            "Drop shadow parameters must be finite: distance=%r size=%r spread=%r"
-            % (distance, size, spread)
+            "Drop shadow parameters must be finite: distance=%r angle=%r "
+            "size=%r spread=%r" % (distance, angle, size, spread)
         )
-    return distance, min(size, _MAX_STROKE_SIZE), spread
+    return ShadowGeometry(distance, angle, min(size, _MAX_STROKE_SIZE), spread)
 
 
 def stroke_bbox(
@@ -698,8 +715,10 @@ _SHADOW_SIGMA_PER_SIZE = 0.45
 # What one pixel of a shadow's canvas costs at the peak of
 # ``draw_drop_shadow()``: the silhouette it is cast from, the matte spread
 # grows and the distance transform and masks that grow it, the blurred matte
-# and the shifted one, with the group composite the silhouette of a group is
-# read from.
+# and the shifted one, with the object read or group composite the silhouette
+# is taken from. The knockout that follows holds less: the cut silhouette and
+# the stroke bands pasted onto it, each drawn on its own stroke's box, which
+# ``stroke_bbox()`` checks on its own.
 _SHADOW_BYTES = 64
 
 # Entries in a contour's transfer table. Photoshop states a contour's points
@@ -921,18 +940,12 @@ def draw_drop_shadow(
     it casts a shadow. The default for a blur is to reflect the edge instead,
     which doubles back any coverage that reaches it.
 
-    A parameter that is not finite raises ``ValueError``: NaN passes through
-    every step here without complaint, and one NaN in the coverage spreads to
-    the whole canvas it is composited on.
+    The parameters are taken as finite; :py:func:`shadow_geometry` is where
+    the file's values are checked.
     """
     _require_scipy("Drop shadow effects")
     from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    if not all(math.isfinite(value) for value in (distance, angle, size, spread)):
-        raise ValueError(
-            "Drop shadow parameters must be finite: distance=%r angle=%r "
-            "size=%r spread=%r" % (distance, angle, size, spread)
-        )
     alpha = shape[:, :, 0].astype(np.float32)
     size = max(float(size), 0.0)
     grow = size * min(max(float(spread), 0.0), 100.0) / 100.0

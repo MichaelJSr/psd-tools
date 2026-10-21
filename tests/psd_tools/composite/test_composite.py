@@ -2247,18 +2247,17 @@ def test_content_bbox_counts_a_nested_groups_own_stroke() -> None:
     just the boxes of that group's contents. Without that, the parent hands
     the nested group a viewport ending at the group's own edge, and its stroke
     paints fewer pixels than the identical group at the document root, where
-    the two should agree. It does not make a stroke on a group *correct* --
-    that is #808's other item, still open wherever the stroke box escapes the
-    viewport being composited on.
+    the two should agree.
 
     No fixture in the corpus puts a stroke effect on a group, so the effect
-    block is copied onto one from a layer that has it. Authoring that document
-    belongs with the fix for the root case.
+    block is copied onto one from a layer that has it.
 
     The borrowed stroke is size 7 while the layer inside carries size 1, so the
     group's own reach is the binding one: a helper that descended into the
     group without measuring the group would land on the layer's smaller box and
-    look right.
+    look right. The group's stroke is traced from what the group paints, the
+    layer's own stroke included, so its box grows from the layer's reach and
+    not from the group's box.
     """
     psd = PSDImage.open(full_name("effects/center-stroke-sizes.psd"))
     layer = next(sub for sub in psd if sub.name == "Size 1")
@@ -2269,9 +2268,9 @@ def test_content_bbox_counts_a_nested_groups_own_stroke() -> None:
     inner.tagged_blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, effects)
 
     assert _stroke_reach(layer) == (14, 14, 34, 34), "the layer's own size 1"
-    assert _stroke_reach(inner) == (11, 11, 37, 37), "the group's borrowed size 7"
+    assert _stroke_reach(inner) == (9, 9, 39, 39), "size 7 around the layer's reach"
     assert outer.bbox == (16, 16, 32, 32)
-    assert _content_bbox(outer) == (11, 11, 37, 37)
+    assert _content_bbox(outer) == (9, 9, 39, 39)
 
 
 def test_content_bbox_spans_every_child_not_just_one() -> None:
