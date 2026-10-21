@@ -212,66 +212,180 @@ def test_the_shadow_canvas_holds_the_whole_shadow() -> None:
         assert np.allclose(paste(roomy, canvas, tight), wide, atol=1e-6)
 
 
-@pytest.mark.parametrize("alpha", [127 / 255.0, 128 / 255.0])
-def test_spread_keeps_the_coverage_of_a_partial_silhouette(alpha: float) -> None:
-    """A half-covered silhouette grows into a half-covered matte.
+def _feathered_disc(size: int, radius: float, feather: float) -> np.ndarray:
+    """:py:func:`_disc` fading from full coverage ``feather`` pixels inside its rim.
 
-    Spread is a dilation of the matte, which takes the highest coverage
-    within reach and invents none. Grown as its half-coverage contour
-    instead, a matte at 128/255 would come out opaque and one at 127/255
-    would not grow at all.
+    The fade is quantised to 8-bit steps, as a layer's pixels are, so the rim
+    pixels keep a small coverage of their own and the disc covers exactly
+    what the hard one does.
+    """
+    centre = size // 2
+    yy, xx = np.mgrid[0:size, 0:size]
+    distance = np.hypot(xx - centre, yy - centre)
+    fade = np.clip((radius + 0.5 - distance) / feather, 0.0, 1.0)
+    quantised = np.rint(fade * 255.0) / 255.0
+    return (_disc(size, radius) * quantised[:, :, None]).astype(np.float32)
+
+
+def _grown_and_blurred(
+    shape: np.ndarray, pixels: int, size: float, sigma_per_size: float
+) -> np.ndarray:
+    """The closed form of a spread shadow cast nowhere.
+
+    The covered pixels, grown by ``pixels`` from where their coverage ends
+    (a covered pixel's rim lies its own coverage past its inner side, so a
+    full one ends half a pixel past its centre), and then blurred by what
+    is left of ``size``.
+    """
+    from scipy.ndimage import distance_transform_edt, gaussian_filter  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    alpha = shape[:, :, 0]
+    covered = alpha > 0.0
+    outside, nearest = distance_transform_edt(~covered, return_indices=True)
+    rim = alpha[nearest[0], nearest[1]]
+    matte = np.where(covered, 1.0, np.clip(pixels + rim - outside, 0.0, 1.0))
+    radius = size - pixels
+    sigma = radius * sigma_per_size
+    return gaussian_filter(
+        matte.astype(np.float32), sigma, mode="constant", truncate=radius / sigma
+    )
+
+
+def test_a_feathered_disc_spread_casts_the_shadow_of_a_hard_one() -> None:
+    """Spread grows the coverage, not its levels: a feather comes out hard.
+
+    Photoshop's spread counts every pixel the silhouette covers at all as
+    covered, so a disc feathered over its outer four pixels casts, at 60%
+    spread, the shadow of the hard disc with the same rim: opaque out to
+    the grown edge, then the blur. Fitted against Photoshop's exports of
+    feathered layers; a dilation that kept the feather's own levels draws
+    a shadow both narrower and lighter.
+    """
+    hard = _disc(81, 12.0)
+    soft = _feathered_disc(81, 12.0, 4.0)
+    assert np.array_equal(soft > 0.0, hard > 0.0)
+    assert 0.0 < float(soft[40, 52, 0]) < 0.3, "the rim is not feathered"
+    settings: dict[str, Any] = {
+        "distance": 0.0,
+        "angle": 0.0,
+        "size": 10.0,
+        "spread": 60.0,
+    }
+    shadow = effects.draw_drop_shadow((0, 0, 81, 81), soft, **settings)
+    pixels = effects._spread_pixels(10.0, 60.0)
+    assert pixels == 6
+    expected = _grown_and_blurred(soft, pixels, 10.0, effects._SHADOW_SIGMA_PER_SIZE)
+    assert np.allclose(shadow[:, :, 0], expected, atol=1e-6)
+    # Opaque over the feather and past the rim, and ending where the hard
+    # disc's shadow ends, to within the rim pixels' own coverage.
+    solid = effects.draw_drop_shadow((0, 0, 81, 81), hard, **settings)
+    for matte in (shadow, solid):
+        assert np.all(matte[40, 40:53, 0] > 0.99), matte[40, 40:60, 0]
+        assert np.all(matte[40, 53:56, 0] > 0.9), matte[40, 40:60, 0]
+    assert abs(_half_coverage(shadow) - _half_coverage(solid)) < 1.0
+    # Without spread the feather shows: the blur of a fading rim is lighter.
+    unspread: dict[str, Any] = {**settings, "spread": 0.0}
+    faded = effects.draw_drop_shadow((0, 0, 81, 81), soft, **unspread)
+    full = effects.draw_drop_shadow((0, 0, 81, 81), hard, **unspread)
+    assert float(faded[40, 50, 0]) < float(full[40, 50, 0]) - 0.1
+
+
+def _half_coverage(shadow: np.ndarray) -> float:
+    """Where a shadow's middle row falls through half coverage, rightwards."""
+    row = shadow[40, 40:, 0]
+    index = int(np.argmax(row < 0.5))
+    above, below = float(row[index - 1]), float(row[index])
+    return 40 + index - 1 + (above - 0.5) / (above - below)
+
+
+def test_the_spread_edge_follows_the_rim_pixels_own_coverage() -> None:
+    """A grown edge lies the spread past where the rim's coverage ends.
+
+    A fully covered rim pixel ends half a pixel past its centre; one a
+    fifth covered ends a fifth of the way across it. Unblurred, the pixel
+    the grown edge crosses carries just that share.
+    """
+    square = np.zeros((41, 41, 1), dtype=np.float32)
+    square[10:31, 10:31] = 1.0
+    for rim in (1.0, 0.2):
+        shape = square.copy()
+        shape[10:31, 30] = rim
+        grown = effects.draw_drop_shadow(
+            (0, 0, 41, 41), shape, distance=0.0, angle=0.0, size=3.0, spread=100.0
+        )
+        row = grown[20, 30:36, 0]
+        assert np.allclose(row, [1.0, 1.0, 1.0, rim, 0.0, 0.0], atol=1e-6), row
+
+
+def test_spread_grows_the_coverage_not_its_level() -> None:
+    """A half-covered silhouette casts an opaque spread shadow.
+
+    Spread reads the silhouette as covered or not, so a square at half
+    coverage grows into an opaque matte, where without spread the blur of
+    it never passes a half.
     """
     shape = np.zeros((41, 41, 1), dtype=np.float32)
-    shape[15:26, 15:26] = alpha
+    shape[15:26, 15:26] = 0.5
     grown = effects.draw_drop_shadow(
         (0, 0, 41, 41), shape, distance=0.0, angle=0.0, size=6.0, spread=100.0
     )
-    # Inside the square, and three pixels out from its edge.
-    assert float(grown[20, 20, 0]) == pytest.approx(alpha, abs=1e-6)
-    assert float(grown[20, 28, 0]) == pytest.approx(alpha, abs=1 / 16)
+    assert float(grown[20, 20, 0]) == 1.0
+    assert float(grown[20, 28, 0]) == 1.0
     assert float(grown[20, 35, 0]) == 0.0
+    blurred = effects.draw_drop_shadow(
+        (0, 0, 41, 41), shape, distance=0.0, angle=0.0, size=6.0, spread=0.0
+    )
+    assert float(blurred.max()) <= 0.5 + 1e-6
 
 
-def test_spread_grows_a_faint_feather_at_its_own_levels() -> None:
-    """A feather with more coverages than there are levels still grows.
+@pytest.mark.parametrize(
+    ("size", "spread", "pixels"),
+    [(5.0, 7.0, 0), (5.0, 9.0, 0), (5.0, 10.0, 1), (13.0, 59.0, 8), (5.0, 50.0, 3)],
+)
+def test_spread_is_taken_in_whole_pixels(
+    size: float, spread: float, pixels: int
+) -> None:
+    """Photoshop dilates by whole pixels, rounding a half pixel up.
 
-    The levels are picked from the silhouette's own coverages. Spaced evenly
-    over 0 to 1 instead, a feather that never passes 5% would fall below the
-    first of them and not grow at all.
+    Fitted against its exports: a feathered layer under a spread that rounds
+    to nothing keeps its feather, and ``layer_params.psb``'s 2.5 px spread
+    renders as 3 (the fidelity bound below pins it).
     """
-    shape = np.zeros((41, 41, 1), dtype=np.float32)
-    shape[15:26, 15:26, 0] = np.linspace(0.001, 0.05, 121).reshape(11, 11)
-    assert np.unique(shape[shape > 0]).size > effects._SPREAD_LEVELS
-    grown = effects.draw_drop_shadow(
-        (0, 0, 41, 41), shape, distance=0.0, angle=0.0, size=6.0, spread=100.0
-    )
-    assert (grown > 0).sum() > (shape > 0).sum()
-    # Three pixels past the square's densest corner, within a step of it.
-    assert float(grown[28, 28, 0]) == pytest.approx(0.05, abs=0.05 / 8)
+    assert effects._spread_pixels(size, spread) == pixels
 
 
-def test_a_pixel_elsewhere_does_not_drop_a_plateau_s_spread() -> None:
-    """The levels are spaced over coverage, not over the coverages present.
+def test_a_spread_that_rounds_to_nothing_leaves_a_feather_to_the_blur() -> None:
+    soft = _feathered_disc(81, 12.0, 4.0)
+    settings: dict[str, Any] = {"distance": 0.0, "angle": 0.0, "size": 5.0}
+    faint = effects.draw_drop_shadow((0, 0, 81, 81), soft, spread=7.0, **settings)
+    unspread = effects.draw_drop_shadow((0, 0, 81, 81), soft, spread=0.0, **settings)
+    assert np.array_equal(faint, unspread)
+    hardened = effects.draw_drop_shadow((0, 0, 81, 81), soft, spread=10.0, **settings)
+    assert float(hardened[40, 50, 0]) > float(unspread[40, 50, 0]) + 0.1
 
-    A plateau beside a faint feather of many coverages: picked from the
-    coverages present, the levels would leave none between the feather's top
-    and the plateau, and one opaque pixel added across the canvas, nowhere
-    near either, would move them all. Spaced over coverage, a level is never
-    more than a fifteenth of the range below what it grows.
+
+def test_a_fringe_fainter_than_a_matte_can_hold_is_not_spread() -> None:
+    """Spread reads the silhouette at 8 bits, as Photoshop's matte holds it.
+
+    A composited group's alpha can fall below a 255th and stay above zero
+    where a child's faint effect trails off; Photoshop's matte holds no such
+    coverage, and spread grows nothing from it.
     """
-    shape = np.zeros((41, 81, 1), dtype=np.float32)
-    shape[15:26, 15:26] = 0.99
-    shape[15:26, 45:74, 0] = np.linspace(0.001, 0.029, 29)
-    alone = effects.draw_drop_shadow(
-        (0, 0, 81, 41), shape, distance=0.0, angle=0.0, size=6.0, spread=100.0
+    disc = _disc(81, 12.0)
+    fringed = np.maximum(disc, _disc(81, 20.0) * (0.4 / 255.0)).astype(np.float32)
+    settings: dict[str, Any] = {
+        "distance": 0.0,
+        "angle": 0.0,
+        "size": 6.0,
+        "spread": 100.0,
+    }
+    assert np.array_equal(
+        effects.draw_drop_shadow((0, 0, 81, 81), fringed, **settings),
+        effects.draw_drop_shadow((0, 0, 81, 81), disc, **settings),
     )
-    shape[0, 80] = 1.0
-    beside = effects.draw_drop_shadow(
-        (0, 0, 81, 41), shape, distance=0.0, angle=0.0, size=6.0, spread=100.0
-    )
-    # Three pixels out from the plateau's left edge.
-    for grown in (alone, beside):
-        assert float(grown[20, 12, 0]) == pytest.approx(0.99, abs=1.0 / 15)
+    held = np.maximum(disc, _disc(81, 20.0) * (1.0 / 255.0)).astype(np.float32)
+    grown = effects.draw_drop_shadow((0, 0, 81, 81), held, **settings)
+    assert float(grown[40, 40 + 20 + 3, 0]) == 1.0
 
 
 # -- Compositing ------------------------------------------------------------ #
@@ -1159,8 +1273,9 @@ def test_a_drop_shadow_with_no_blend_mode_multiplies() -> None:
 #
 # - layer_effects.psd: the region stops short of the layer below.
 # - layer_params.psb: what is left is the outer glow on the same layer, drawn
-#   to a fit of its own. The bound is what pins spread: leaving it out, or
-#   shrinking the silhouette by it, scores above it.
+#   to a fit of its own. The bound is what pins spread: leaving it out,
+#   shrinking the silhouette by it, or rounding its half pixel down instead
+#   of up scores above it.
 # - layer_comps.psb: the rest lies along the shapes' edges and in the
 #   gradient overlays.
 # - masks.psb: the header band carries a stroke, and its bound is what pins
@@ -1169,7 +1284,7 @@ def test_a_drop_shadow_with_no_blend_mode_multiplies() -> None:
 _PREVIEWS = [
     ("layer_effects.psd", (60, 215, 620, 296), 1e-5, 1e-3),
     ("masks.psb", None, 1e-6, 1.5e-4),
-    ("layer_params.psb", (130, 230, 470, 560), 3.2e-4, 2e-2),
+    ("layer_params.psb", (130, 230, 470, 560), 2.3e-4, 2e-2),
     ("layer_comps.psb", None, 1.6e-3, 3e-3),
 ]
 
