@@ -591,8 +591,14 @@ _FITTED = {
 }
 
 # Not fitted: no preview carries a chisel soft bevel. Pinned so that a
-# change to it is a deliberate one.
-_ASSUMED = {"_SLOPE_LIMIT_SIGMA_PER_SIZE": 0.125}
+# change to it is a deliberate one. The texture height and the slope's
+# smoothing are fitted against a card's Photoshop export (the one textured
+# bevel in the corpus), not a preview fixture.
+_ASSUMED = {
+    "_SLOPE_LIMIT_SIGMA_PER_SIZE": 0.125,
+    "_TEXTURE_HEIGHT_PER_DEPTH": 1.0,
+    "_SLOPE_ACROSS": (0.25, 0.5, 0.25),
+}
 
 
 def test_the_fitted_constants_are_pinned() -> None:
@@ -620,3 +626,73 @@ def test_the_fit_is_a_minimum(
     for factor in (0.8, 1.2):
         monkeypatch.setattr(effects, name, _FITTED[name] * factor)
         assert _error(psd, region) > fitted, factor
+
+
+# -- Texture ---------------------------------------------------------------- #
+
+
+def _flat_layer(size: int = 24) -> np.ndarray:
+    """A layer filling the canvas: its own bevel is flat everywhere inside."""
+    return np.ones((size, size, 1), dtype=np.float32)
+
+
+def test_a_textures_dark_pixels_stand_as_high_as_the_bevel() -> None:
+    """At 100% a black texture pixel is ``size`` high and a white one flat;
+    the depth scales that and ``inverted`` turns it over."""
+    luminance = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
+    height = effects.texture_height(luminance, size=2.0, depth=100.0, inverted=False)
+    assert np.allclose(height, [[2.0, 1.0, 0.0]])
+    assert np.allclose(
+        effects.texture_height(luminance, size=2.0, depth=400.0, inverted=False),
+        [[8.0, 4.0, 0.0]],
+    )
+    assert np.allclose(
+        effects.texture_height(luminance, size=2.0, depth=100.0, inverted=True),
+        [[0.0, 1.0, 2.0]],
+    )
+    assert np.allclose(
+        effects.texture_height(luminance, size=2.0, depth=-100.0, inverted=False),
+        [[-2.0, -1.0, 0.0]],
+    )
+
+
+def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
+    """A dark block in the texture is a raised block: lit from above (angle
+    90) its top edge takes the highlight over the two rows astride the step,
+    its bottom edge the shadow, and its flat top and the flat layer around
+    it take neither."""
+    shape = _flat_layer()
+    luminance = np.ones((24, 24), dtype=np.float32)
+    luminance[8:16, 4:20] = 0.0
+    texture = effects.texture_height(luminance, size=2.0, depth=400.0, inverted=False)
+    highlight, shadow = _bevel(shape, size=2.0, texture=texture)
+    column = 12
+    assert highlight[7, column, 0] > 0.9 and highlight[8, column, 0] > 0.9
+    assert shadow[15, column, 0] > 0.9 and shadow[16, column, 0] > 0.9
+    assert highlight[6, column, 0] == 0.0 and highlight[9, column, 0] == 0.0
+    assert shadow[14, column, 0] == 0.0 and shadow[17, column, 0] == 0.0
+    assert highlight[11, column, 0] == 0.0 and shadow[11, column, 0] == 0.0
+    assert highlight[4, column, 0] == 0.0 and shadow[4, column, 0] == 0.0
+    without_h, without_s = _bevel(shape, size=2.0)
+    assert not without_h[4:20, 4:20].any() and not without_s[4:20, 4:20].any()
+
+
+def test_a_slope_is_smoothed_across_the_step() -> None:
+    """A one pixel step lights the two rows astride it equally; the step's
+    end columns carry three quarters of the slope and the columns beside
+    them a quarter, as Photoshop's export shows."""
+    height = np.zeros((9, 9), dtype=np.float32)
+    height[4:, 3:6] = 1.0
+    gy, gx = effects._slopes(height)
+    assert np.allclose(gy[3, 4], 0.5) and np.allclose(gy[4, 4], 0.5)
+    assert np.allclose(gy[3, 3], 0.375) and np.allclose(gy[3, 5], 0.375)
+    assert np.allclose(gy[3, 2], 0.125) and np.allclose(gy[3, 6], 0.125)
+    assert gy[2, 4] == 0.0 and gy[5, 4] == 0.0 and gy[3, 1] == 0.0
+    assert np.allclose(gx[6, 2], 0.5) and np.allclose(gx[6, 3], 0.5)
+    assert np.allclose(gx[4, 2], 0.375) and np.allclose(gx[3, 2], 0.125)
+
+
+def test_a_non_finite_texture_raises() -> None:
+    texture = np.full((24, 24), np.nan, dtype=np.float32)
+    with pytest.raises(ValueError):
+        _bevel(_flat_layer(), size=2.0, texture=texture)
