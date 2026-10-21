@@ -7,6 +7,15 @@ Changelog
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round
+- [fix] In an RGB document a type layer's anti-aliased edges are composited
+  the way Photoshop's "Blend Text Colors Using Gamma" preference does, not by
+  a straight mix. A layer Photoshop kept as pixels (a substituted font, text
+  data without ``bounds``) and a 32-bit document still mix straight. Inside a
+  group that carries a layer style the text meets only what the group itself
+  has painted, as Photoshop renders such a group as one layer.
+- [api] ``composite()``, ``composite_pil()`` and the ``composite()`` methods of
+  ``PSDImage``, ``Layer``, ``Group`` and ``Artboard`` take ``text_gamma``;
+  ``None`` restores the straight mix of earlier releases.
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a

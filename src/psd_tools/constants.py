@@ -669,3 +669,8 @@ class AlphaChannelMode(IntEnum):
     ALPHA = 0  # The channel stores alpha data.
     INVERTED_ALPHA = 1  # The channel stores inverted alpha data.
     SPOT = 2  #  The channel stores spot color data.
+
+
+# Photoshop's "Blend Text Colors Using Gamma" preference at its default: the
+# space a type layer's anti-aliased edge is mixed in.
+TEXT_BLEND_GAMMA = 1.45

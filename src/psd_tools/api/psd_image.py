@@ -72,6 +72,7 @@ from psd_tools.api.utils import (
     validate_alloc_budget,
 )
 from psd_tools.constants import (
+    TEXT_BLEND_GAMMA,
     ChannelID,
     ColorMode,
     CompatibilityMode,
@@ -390,6 +391,7 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         layer_filter: Callable | None = None,
         ignore_preview: bool = False,
         apply_icc: bool = True,
+        text_gamma: float | None = TEXT_BLEND_GAMMA,
     ) -> Image.Image:
         """
         Composite the PSD image.
@@ -407,6 +409,10 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         :param layer_filter: Callable that takes a layer as argument and
             returns whether if the layer is composited. Default is
             :py:func:`~psd_tools.api.layers.PixelLayer.is_visible`.
+        :param text_gamma: The gamma a type layer's anti-aliased edges are
+            blended in, as Photoshop's "Blend Text Colors Using Gamma"
+            preference. ``None`` mixes them in the document's encoding like
+            any other layer.
         :return: :py:class:`PIL.Image`.
         """
         from psd_tools.composite import composite_pil  # noqa: PLC0415
@@ -428,6 +434,7 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             layer_filter,
             force,
             apply_icc=apply_icc,
+            text_gamma=text_gamma,
         )
         if result is None:
             raise ValueError("Failed to composite PSD image")
