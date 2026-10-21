@@ -207,6 +207,14 @@ def _overlay_boxes(
     return box, layer.bbox
 
 
+def _reference_point(layer: Layer) -> tuple[float, float] | None:
+    """The layer's ``fxrp`` reference point, in document coordinates."""
+    point = layer.tagged_blocks.get_data(Tag.REFERENCE_POINT)
+    if point is None:
+        return None
+    return float(point[0]), float(point[1])
+
+
 def _draw_color_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -216,7 +224,12 @@ def _draw_color_overlay(
 def _draw_pattern_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    fill, shape = paint.draw_pattern_fill(box, layer._psd, descriptor, layout)
+    # A group's tiling starts at its layout box.
+    point = None if layer.is_group() else _reference_point(layer)
+    origin = paint.pattern_origin(descriptor, layout, point)
+    fill, shape = paint.draw_pattern_fill(
+        box, layer._psd, descriptor, layout, origin=origin
+    )
     if fill is None:
         return None, None
     # A pattern carries its own color mode, so a grayscale one reaches a CMYK
@@ -944,7 +957,7 @@ def composite(
     # the larger of the pair.
     # It bounds the canvas, not everything downstream: each stored-pixel read is
     # guarded on its own by `Layer.numpy()`, and the canvases a descriptor's size
-    # grows -- stroke effect, vector stroke, pattern scale -- on their own.
+    # grows -- stroke effect, vector stroke, pattern tiling -- on their own.
     # This keeps the returned-size spelling of the estimate where the two
     # image-data paths moved to a modelled peak (#767), and not for want of
     # trying: what follows this guard grows with the layer count, so there is no

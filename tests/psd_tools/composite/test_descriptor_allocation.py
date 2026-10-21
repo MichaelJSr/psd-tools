@@ -2,6 +2,7 @@
 
 import logging
 import tracemalloc
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -31,109 +32,67 @@ def _pattern() -> tuple[PSDImage, Descriptor, tuple[int, ...]]:
     return psd, desc, numpy_io.get_pattern(pattern).shape
 
 
-@pytest.mark.parametrize(
-    ("scale", "message"), [(HUGE, GROWN), (float("inf"), "not finite")]
-)
-def test_a_forged_pattern_scale_is_rejected_without_a_budget(
-    scale: float, message: str
-) -> None:
-    """A scale past the growth limit is a ValueError, and so is a non-finite one."""
+@pytest.mark.parametrize("scale", [float("inf"), float("nan")])
+def test_a_non_finite_pattern_scale_is_rejected(scale: float) -> None:
     psd, desc, _ = _pattern()
     desc[b"Scl "] = Double(scale)
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="not finite"):
         draw_pattern_fill(psd.viewbox, psd, desc)
 
 
-def test_a_scaled_pattern_is_resampled_in_pixel_values() -> None:
-    """A ramp doubled along each axis is the bilinear ramp, clamped at the edges."""
-    ramp = np.array([[[0.0], [1.0]]], dtype=np.float32)
-    wide = paint._resize_panel(ramp, (1, 4))
-    assert wide.shape == (1, 4, 1) and wide.dtype == np.float32
-    assert np.allclose(wide[0, :, 0], [0.0, 0.25, 0.75, 1.0])
-    tall = paint._resize_panel(ramp.transpose(1, 0, 2), (4, 1))
-    assert tall.shape == (4, 1, 1)
-    assert np.allclose(tall[:, 0, 0], [0.0, 0.25, 0.75, 1.0])
-
-
-def test_a_scaled_pattern_is_antialiased_on_a_reduction() -> None:
-    """A 2x reduction filters over a wider span than its own block, on both axes.
-
-    A ramp 0..3 halved is 5/7 and 16/7 rather than the block means 0.5 and 2.5.
-    """
-    ramp = np.tile(np.arange(4, dtype=np.float32), (4, 1))[:, :, None]
-    expected = [5 / 7, 16 / 7]
-    wide = paint._resize_panel(ramp, (2, 2))
-    assert np.allclose(wide[:, :, 0], [expected, expected], atol=1e-5)
-    tall = paint._resize_panel(ramp.transpose(1, 0, 2), (2, 2))
-    assert np.allclose(tall[:, :, 0], [[e, e] for e in expected], atol=1e-5)
-
-
-def test_the_resize_estimate_covers_every_buffer_live_at_once() -> None:
-    """Counted by hand for 100x100x3 float32 enlarged to 400x400."""
-    panel = np.zeros((100, 100, 3), dtype=np.float32)
-    live = (
-        120_000  # the panel
-        + 1_920_000  # the output array
-        + 2 * 40_000  # one source plane, contiguous and as a Pillow image
-        + 2 * 640_000  # the resized plane and its np.asarray copy
-    )
-    assert paint._resize_peak_bytes(panel, (400, 400)) >= live
-
-
-def test_a_downscale_is_checked_at_its_live_buffers() -> None:
-    """The source planes outweigh a shrunken output, so the output alone undercounts."""
+@pytest.mark.parametrize(("forged", "limit"), [(HUGE, 1000.0), (0.0, 1.0), (-5.0, 1.0)])
+def test_a_pattern_scale_past_photoshops_range_is_drawn_at_the_limit(
+    forged: float, limit: float
+) -> None:
     psd, desc, _ = _pattern()
-    desc[b"Scl "] = Double(40.0)
+    desc[b"Scl "] = Double(limit)
+    expected, _ = draw_pattern_fill(psd.viewbox, psd, desc)
+    desc[b"Scl "] = Double(forged)
+    drawn, _ = draw_pattern_fill(psd.viewbox, psd, desc)
+    assert expected is not None and drawn is not None
+    assert np.array_equal(drawn, expected)
+
+
+def _peak(run: Callable[[], object]) -> int:
+    tracemalloc.start()
+    try:
+        run()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return peak
+
+
+def test_the_sample_estimate_covers_its_peak() -> None:
+    panel = np.ones((37, 23, 4), dtype=np.float32)
+    viewport = (5, 7, 305, 207)
+    peak = _peak(lambda: paint._sample_tiling(panel, viewport, (0, 0), 1.7))
+    assert paint._sample_peak_bytes(panel, viewport) >= peak
+
+
+@pytest.mark.parametrize("width", [2, 8, 64])
+def test_the_box_estimate_covers_its_peak(width: int) -> None:
+    panel = np.ones((37, 23, 4), dtype=np.float32)
+    peak = _peak(lambda: paint._box_average(panel, width))
+    assert paint._box_peak_bytes(panel, width) >= peak
+
+
+@pytest.mark.parametrize("scale", [100.0, 7.0])
+def test_the_tiled_pattern_is_checked_at_its_estimate(scale: float) -> None:
+    psd, desc, _ = _pattern()
+    desc[b"Scl "] = Double(scale)
+    viewport = (0, 0, 2000, 2000)
     pattern = psd._get_pattern(desc[b"Ptrn"][Key.ID].value.rstrip("\x00"))
     assert pattern is not None
     panel = numpy_io.get_pattern(pattern)
-    rows, cols = int(panel.shape[0] * 0.4), int(panel.shape[1] * 0.4)
-    peak = paint._resize_peak_bytes(panel, (rows, cols))
-    assert peak > rows * cols * panel.shape[2] * 4 * 4 + panel.nbytes
+    needed = max(
+        paint._sample_peak_bytes(panel, viewport),
+        paint._box_peak_bytes(panel, paint._reduction_box(scale / 100)),
+    )
 
-    viewport = (0, 0, 1, 1)
-    psd._max_alloc_bytes = peak
+    psd._max_alloc_bytes = needed
     draw_pattern_fill(viewport, psd, desc)
-    psd._max_alloc_bytes = peak - 1
-    with pytest.raises(ValueError, match="over the configured budget"):
-        draw_pattern_fill(viewport, psd, desc)
-
-
-def test_a_resized_pattern_keeps_its_channels_apart() -> None:
-    panel = np.zeros((2, 2, 3), dtype=np.float32)
-    panel[..., 1] = 0.5
-    panel[..., 2] = 1.0
-    out = paint._resize_panel(panel, (6, 4))
-    assert out.shape == (6, 4, 3)
-    assert np.allclose(out.reshape(-1, 3), [0.0, 0.5, 1.0])
-
-
-def test_a_pattern_scale_is_bounded_by_its_own_panel(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    psd, desc, shape = _pattern()
-    percent = 400.0
-    desc[b"Scl "] = Double(percent)
-    scaled = int(shape[0] * percent / 100) * int(shape[1] * percent / 100)
-
-    monkeypatch.setattr(utils, "GROWTH_FLOOR_PIXELS", scaled)
-    draw_pattern_fill(psd.viewbox, psd, desc)
-    monkeypatch.setattr(utils, "GROWTH_FLOOR_PIXELS", scaled - 1)
-    monkeypatch.setattr(paint, "_SCALE_GROWTH", 1)
-    with pytest.raises(ValueError, match=GROWN):
-        draw_pattern_fill(psd.viewbox, psd, desc)
-
-
-def test_the_tiled_pattern_is_checked_at_the_viewport() -> None:
-    """A panel scaled down to a pixel is tiled up to the viewport's size."""
-    psd, desc, shape = _pattern()
-    desc[b"Scl "] = Double(0.0)
-    viewport = (0, 0, 2000, 2000)
-    tiled = 2000 * 2000 * shape[2] * 4 + shape[2] * 4  # plus the 1x1 panel
-
-    psd._max_alloc_bytes = tiled
-    draw_pattern_fill(viewport, psd, desc)
-    psd._max_alloc_bytes = tiled - 1
+    psd._max_alloc_bytes = needed - 1
     with pytest.raises(ValueError, match="over the configured budget"):
         draw_pattern_fill(viewport, psd, desc)
 

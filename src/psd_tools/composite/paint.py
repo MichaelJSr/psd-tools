@@ -6,10 +6,9 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from PIL import Image
 
 from psd_tools.api import numpy_io
-from psd_tools.api.utils import check_growth, check_pixel_size
+from psd_tools.api.utils import check_pixel_size
 from psd_tools.color_convert import (
     SRGB_CUTOFF,
     SRGB_GAMMA,
@@ -40,9 +39,9 @@ logger = logging.getLogger(__name__)
 # not in the terminology either.
 _FILL_METHOD_KEY = b"gradientsInterpolationMethod"
 
-# How many times its own area a pattern panel may be scaled up to, past the
-# floor check_growth() allows.
-_SCALE_GROWTH = 100
+# Photoshop's range for a pattern's scale, in percent.
+_MIN_SCALE = 1.0
+_MAX_SCALE = 1000.0
 
 # Per pixel, what a gradient fill peaks at: its coordinate grids and ramp
 # planes outweigh the float32 colour it returns.
@@ -274,6 +273,38 @@ def gradient_anchor(
     return psd.viewbox
 
 
+def pattern_origin(
+    desc: Descriptor,
+    box: tuple[int, int, int, int],
+    reference_point: Sequence[float] | None = None,
+) -> tuple[int, int]:
+    """Where a pattern's tiling starts, in document coordinates.
+
+    Aligned with the layer, it starts at the layer's reference point, or at
+    ``box``'s top-left without one, moved by the phase. With ``Algn`` off the
+    phase is measured from the document's origin.
+    """
+    phase = desc.get(b"phase")
+    shift = (0.0, 0.0)
+    if phase is not None:
+        shift = (
+            float(phase.get(Key.Horizontal, 0.0)),
+            float(phase.get(Key.Vertical, 0.0)),
+        )
+    start = (0.0, 0.0)
+    if bool(desc.get(Key.Alignment, True)):
+        start = (
+            (float(box[0]), float(box[1]))
+            if reference_point is None
+            else (float(reference_point[0]), float(reference_point[1]))
+        )
+    # Rounded to the pixel grid the tiling is drawn on.
+    return (
+        math.floor(start[0] + shift[0] + 0.5),
+        math.floor(start[1] + shift[1] + 0.5),
+    )
+
+
 def create_fill(
     layer: "Layer",
     viewport: tuple[int, int, int, int],
@@ -302,32 +333,110 @@ def create_fill(
     return None, None
 
 
-def _resize_panel(panel: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    """Bilinear-resize a float panel, one float32 plane at a time."""
-    height, width = shape
-    out = np.empty((height, width, panel.shape[2]), dtype=np.float32)
-    for channel in range(panel.shape[2]):
-        source = Image.fromarray(
-            np.ascontiguousarray(panel[:, :, channel], dtype=np.float32), "F"
-        )
-        out[:, :, channel] = np.asarray(
-            source.resize((width, height), Image.Resampling.BILINEAR)
-        )
-        del source
-    return out
+def _pattern_scale(desc: Descriptor) -> float:
+    """The pattern's ``Scl `` as a factor, within Photoshop's 1-1000% range."""
+    scale = float(desc.get(Key.Scale, 100.0))
+    if not math.isfinite(scale):
+        raise ValueError("Pattern scale is not finite.")
+    return min(max(scale, _MIN_SCALE), _MAX_SCALE) / 100.0
 
 
-def _resize_peak_bytes(panel: np.ndarray, shape: tuple[int, int]) -> int:
-    """What :py:func:`_resize_panel` holds at its peak, for one plane's resize."""
-    height, width = shape
-    plane = np.dtype(np.float32).itemsize
-    source = panel.shape[0] * panel.shape[1] * plane
+def _turn_panel(panel: np.ndarray, desc: Descriptor) -> np.ndarray:
+    """The panel turned counter-clockwise by ``Angl``, a multiple of 90 degrees.
+
+    Turned about the tiling's origin, the tiles are the turned panel laid
+    from that origin. Any other angle is left unturned.
+    """
+    angle = float(desc.get(Key.Angle, 0.0))
+    if not math.isfinite(angle):
+        raise ValueError("Pattern angle is not finite.")
+    turns = angle / 90.0
+    if turns != round(turns):
+        logger.debug("Pattern angle %s is not a right angle; not applied", angle)
+        return panel
+    return np.rot90(panel, int(round(turns)) % 4)
+
+
+def _reduction_box(scale: float) -> int:
+    """The box a pattern reduced by ``scale`` is averaged over: 2**L samples.
+
+    L is the deepest halving that does not reduce the panel past the scale.
+    """
+    width = 1
+    # A percentage over 100 can fall a hair short of the halving it names.
+    while width * 2 * scale <= 1.0 + 1e-9:
+        width *= 2
+    return width
+
+
+def _box_average(panel: np.ndarray, width: int) -> np.ndarray:
+    """Each sample averaged with the ``width - 1`` after it, wrapping, on both axes."""
+    for axis in (0, 1):
+        work = np.moveaxis(panel, axis, 0)
+        size = work.shape[0]
+        sums = np.zeros((size + width + 1,) + work.shape[1:], dtype=np.float64)
+        np.cumsum(work[np.arange(size + width) % size], axis=0, out=sums[1:])
+        total = np.subtract(sums[width : width + size], sums[:size])
+        total /= width
+        panel = np.moveaxis(total.astype(np.float32), 0, axis)
+    return panel
+
+
+def _box_peak_bytes(panel: np.ndarray, width: int) -> int:
+    """What :py:func:`_box_average` holds at its peak, for the shorter axis."""
+    size = min(panel.shape[0], panel.shape[1])
+    # The wrapped copy, its float64 sums and cumsum's cast of it, at 5x the
+    # panel per wrapped row; the float64 totals, the result and the input.
+    return -(-panel.nbytes * (5 * (size + width + 1) + 5 * size) // size)
+
+
+def _tile_axis(
+    start: int, length: int, origin: int, size: int, scale: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Panel indices and weights along one axis for a tiling scaled by ``scale``.
+
+    The sample at ``origin`` is the panel's first, and each output pixel
+    blends the two panel samples either side of its scaled position.
+    """
+    position = (np.arange(start, start + length, dtype=np.float64) - origin) / scale
+    first = np.floor(position)
+    weight = (position - first).astype(np.float32)
+    index = first.astype(np.int64) % size
+    return index, (index + 1) % size, weight
+
+
+def _sample_tiling(
+    panel: np.ndarray,
+    viewport: tuple[int, int, int, int],
+    origin: tuple[int, int],
+    scale: float,
+) -> np.ndarray:
+    """The panel tiled across ``viewport`` from ``origin``, bilinear and wrapping."""
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    top, bottom, down = _tile_axis(
+        viewport[1], height, origin[1], panel.shape[0], scale
+    )
+    left, right, across = _tile_axis(
+        viewport[0], width, origin[0], panel.shape[1], scale
+    )
+    rows = panel[top] * (1 - down)[:, None, None] + panel[bottom] * down[:, None, None]
+    return (
+        rows[:, left] * (1 - across)[None, :, None]
+        + rows[:, right] * across[None, :, None]
+    )
+
+
+def _sample_peak_bytes(panel: np.ndarray, viewport: tuple[int, int, int, int]) -> int:
+    """What :py:func:`_sample_tiling` holds at its peak."""
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    plane = panel.shape[2] * panel.dtype.itemsize
+    # The panel, three row-blend arrays, the output with its two terms, and
+    # per row and column two int64 indices, their float64 position and weights.
     return (
         panel.nbytes
-        + height * width * panel.shape[2] * plane  # the output
-        + 2 * source  # the contiguous copy and Pillow's own
-        + 2 * height * width * plane  # the resized plane and its np.asarray copy
-        + width * panel.shape[0] * plane  # the horizontal pass
+        + 3 * height * panel.shape[1] * plane
+        + 3 * height * width * plane
+        + 48 * (height + width)
     )
 
 
@@ -348,12 +457,16 @@ def draw_pattern_fill(
     psd: Any,
     desc: Descriptor,
     anchor: tuple[int, int, int, int] | None = None,
+    origin: tuple[int, int] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     r"""
     Create a pattern fill.
 
-    The tiling starts at the top-left of ``anchor``, which defaults to
-    ``viewport``, so a viewport larger than the anchor continues the same tiling.
+    The tiling starts at ``origin``, in document coordinates, or else at the
+    top-left of ``anchor``, which defaults to ``viewport``, so a viewport
+    larger than the anchor continues the same tiling. ``Angl`` turns the
+    tiles about that point, in right angles only; ``Scl `` scales them about
+    it, with a bilinear sample of the panel's box average on a reduction.
 
     Example descriptor::
 
@@ -385,56 +498,32 @@ def draw_pattern_fill(
     panel = numpy_io.get_pattern(pattern, budget)
     assert panel.shape[0] > 0
 
-    # The scale is the file's, so the panel it sizes and the tiling of that
-    # panel across the viewport are both checked before they are allocated.
-    scale = float(desc.get(Key.Scale, 100.0)) / 100.0
-    if scale != 1.0:
-        try:
-            new_shape = (
-                max(1, int(panel.shape[0] * scale)),
-                max(1, int(panel.shape[1] * scale)),
-            )
-        except OverflowError as error:
-            raise ValueError("Pattern scale is not finite.") from error
-        check_growth(
-            new_shape[0] * new_shape[1],
-            panel.shape[0] * panel.shape[1],
-            _SCALE_GROWTH,
-        )
+    scale = _pattern_scale(desc)
+    panel = _turn_panel(panel, desc)
+    box = _reduction_box(scale)
+    if box > 1:
         check_pixel_size(
-            new_shape[1],
-            new_shape[0],
+            panel.shape[1],
+            panel.shape[0],
             panel.shape[2],
             budget,
-            estimated_bytes=_resize_peak_bytes(panel, new_shape),
+            estimated_bytes=_box_peak_bytes(panel, box),
             warn=False,
         )
-        panel = _resize_panel(panel, new_shape)
+        panel = _box_average(panel, box)
 
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-    # The tiling is shifted so that it starts at the anchor, not the viewport.
-    shift_y = shift_x = 0
-    if anchor is not None:
-        shift_y = (viewport[1] - anchor[1]) % panel.shape[0]
-        shift_x = (viewport[0] - anchor[0]) % panel.shape[1]
-    reps = (
-        int(np.ceil(float(height + shift_y) / panel.shape[0])),
-        int(np.ceil(float(width + shift_x) / panel.shape[1])),
-        1,
-    )
-    if reps[0] > 0 and reps[1] > 0:
-        tiled = (reps[0] * panel.shape[0], reps[1] * panel.shape[1])
-        # The limit is on the viewport; the tile is rounded up past it.
+    if origin is None:
+        origin = (
+            (viewport[0], viewport[1]) if anchor is None else (anchor[0], anchor[1])
+        )
+    if height > 0 and width > 0:
         check_pixel_size(
             width,
             height,
             panel.shape[2],
             budget,
-            # The panel stays live while it is tiled.
-            estimated_bytes=(
-                tiled[0] * tiled[1] * panel.shape[2] * panel.dtype.itemsize
-                + panel.nbytes
-            ),
+            estimated_bytes=_sample_peak_bytes(panel, viewport),
             warn=False,
         )
     # Taken from the pattern's own slot layout rather than from its color mode.
@@ -445,9 +534,7 @@ def draw_pattern_fill(
     # never split off, and the array reached the canvas one plane too wide and
     # was rejected as inconsistent with it (#741).
     channels = numpy_io.get_pattern_color_channels(pattern)
-    pixels = np.tile(panel, reps)[
-        shift_y : shift_y + height, shift_x : shift_x + width, :
-    ]
+    pixels = _sample_tiling(panel, viewport, origin, scale)
     if pixels.shape[2] > channels:
         return pixels[:, :, :channels], pixels[:, :, -1:]
     return pixels, None
