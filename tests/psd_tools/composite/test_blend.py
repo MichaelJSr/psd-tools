@@ -14,6 +14,7 @@ from psd_tools.composite.blend import (
     color,
     color_dodge,
     darker_color,
+    fade_source,
     get_blend_func,
     hue,
     lighter_color,
@@ -849,3 +850,98 @@ def test_separable_matches_photoshop_on_cmyk(pair: int, mode: str) -> None:
     result = blend_fn(_cmyk_canvas_8bit(backdrop), _cmyk_canvas_8bit(source))
     ink = list((1.0 - result.reshape(4)) * 100.0)
     assert ink == pytest.approx(expected[mode], abs=2 * _ONE_STEP * 100.0)
+
+
+# Corpus cards whose overlay fades in one of these modes: the backdrop under
+# the overlay, the overlay's colour and opacity, and Photoshop's pixel.
+_FADED = [
+    pytest.param(
+        BlendMode.COLOR_DODGE,
+        0.60,
+        (53, 142, 198),
+        (102, 205, 223),
+        (69, 255, 255),
+        id="Crystal_Bits-color-dodge",
+    ),
+    pytest.param(
+        BlendMode.LINEAR_BURN,
+        0.35,
+        (124, 97, 79),
+        (69, 132, 124),
+        (59, 54, 32),
+        id="Gulka-linear-burn",
+    ),
+    pytest.param(
+        BlendMode.LINEAR_BURN,
+        0.63,
+        (26, 161, 44),
+        (246, 115, 126),
+        (17, 74, 0),
+        id="Clot_Black-linear-burn",
+    ),
+    pytest.param(
+        BlendMode.VIVID_LIGHT,
+        0.40,
+        (7, 51, 184),
+        (255, 11, 11),
+        (10, 0, 146),
+        id="Slugcat-vivid-light",
+    ),
+]
+
+
+@pytest.mark.parametrize(("mode", "opacity", "backdrop", "source", "photoshop"), _FADED)
+def test_a_faded_source_blends_as_photoshops_overlays_do(
+    mode: BlendMode,
+    opacity: float,
+    backdrop: tuple[int, int, int],
+    source: tuple[int, int, int],
+    photoshop: tuple[int, int, int],
+) -> None:
+    """Composited at ``opacity``, the faded blend lands on Photoshop's pixel.
+
+    Mixing the full-strength blend with the backdrop by ``opacity`` instead
+    misses it by more than 15 levels.
+    """
+    cb = np.array([backdrop], dtype=np.float32) / 255.0
+    cs = np.array([source], dtype=np.float32) / 255.0
+    blend_fn = BLEND_FUNC[mode]
+    faded = fade_source(blend_fn, mode, opacity)
+    result = (1.0 - opacity) * cb + opacity * faded(cb, cs)
+    mixed = (1.0 - opacity) * cb + opacity * blend_fn(cb, cs)
+    expected = np.array([photoshop]) / 255.0
+    assert np.abs(result - expected).max() * 255.0 < 3.5
+    assert np.abs(mixed - expected).max() * 255.0 > 15.0
+
+
+@pytest.mark.parametrize(
+    ("mode", "neutral"),
+    [
+        (BlendMode.COLOR_DODGE, 0.0),
+        (BlendMode.LINEAR_DODGE, 0.0),
+        (BlendMode.DIFFERENCE, 0.0),
+        (BlendMode.COLOR_BURN, 1.0),
+        (BlendMode.LINEAR_BURN, 1.0),
+        (BlendMode.VIVID_LIGHT, 0.5),
+        (BlendMode.LINEAR_LIGHT, 0.5),
+    ],
+)
+def test_a_faded_source_moves_towards_the_modes_neutral_colour(
+    mode: BlendMode, neutral: float
+) -> None:
+    cb = np.linspace(0.05, 0.95, 7, dtype=np.float32).reshape(7, 1)
+    cs = np.full((7, 1), 0.8, dtype=np.float32)
+    blend_fn = BLEND_FUNC[mode]
+    faded = fade_source(blend_fn, mode, 0.25)
+    result = 0.75 * cb + 0.25 * faded(cb, cs)
+    expected = blend_fn(cb, np.float32(neutral) + np.float32(0.25) * (cs - neutral))
+    assert np.allclose(result, expected, atol=1e-6)
+    assert np.allclose(blend_fn(cb, np.full_like(cs, neutral)), cb, atol=1e-6)
+
+
+@pytest.mark.parametrize("opacity", [0.0, 0.5, 1.0])
+def test_other_modes_and_whole_opacities_blend_as_they_are(opacity: float) -> None:
+    assert fade_source(multiply, BlendMode.MULTIPLY, opacity) is multiply
+    assert fade_source(normal, BlendMode.NORMAL, opacity) is normal
+    if opacity != 0.5:
+        assert fade_source(color_dodge, BlendMode.COLOR_DODGE, opacity) is color_dodge

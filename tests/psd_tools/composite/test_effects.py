@@ -1,3 +1,4 @@
+import copy
 import logging
 import math
 import warnings
@@ -1864,3 +1865,70 @@ def test_the_render_path_does_not_trip_its_own_deprecation() -> None:
         psd.composite(ignore_preview=True)
 
     assert not [w for w in caught if "'value' is deprecated" in str(w.message)]
+
+
+def _dodged_clip(group_mode: BlendMode, opacity: float) -> np.ndarray:
+    """``clipping-mask3.psd`` with its clipped rectangle dodged by an overlay.
+
+    'Rectangle 2' is clipped onto the group 'Group 1', whose 'Rectangle 1'
+    covers (10, 10, 31, 31). A Normal colour overlay paints the rectangle a
+    0.35 grey, and over it a flat 0.8 grey gradient overlay dodges in Color
+    Dodge at ``opacity``.
+    """
+    psd = PSDImage.open(full_name("clipping-mask3.psd"))
+    group = next(layer for layer in psd.descendants() if layer.name == "Group 1")
+    clipped = next(layer for layer in psd.descendants() if layer.name == "Rectangle 2")
+    assert [layer.name for layer in group.clip_layers] == ["Rectangle 2"]
+    group.blend_mode = group_mode
+    donor = PSDImage.open(full_name("layer_effects.psd"))
+    blocks = {
+        name: copy.deepcopy(
+            next(
+                layer for layer in donor.descendants() if layer.name == name
+            ).tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+        )
+        for name in ("Color Fill", "Gradient Overlay")
+    }
+    block = blocks["Gradient Overlay"]
+    del block[b"solidFillMulti"]
+    block[Klass.SolidFill] = fill = blocks["Color Fill"][Klass.SolidFill]
+    fill[Key.Mode] = Enumerated(typeID=b"BlnM", enum=Enum.Normal)
+    fill[Key.Opacity] = Double(100.0)
+    for key in (b"Rd  ", b"Grn ", b"Bl  "):
+        fill[Key.Color][key] = Double(0.35 * 255.0)
+    dodge = block[b"GrFl"]
+    dodge[Key.Mode] = Enumerated(typeID=b"BlnM", enum=Enum.ColorDodge)
+    dodge[Key.Opacity] = Double(100.0 * opacity)
+    for stop in dodge[Key.Gradient][Key.Colors]:
+        for key in (b"Rd  ", b"Grn ", b"Bl  "):
+            stop[Key.Color][key] = Double(0.8 * 255.0)
+    clipped.tagged_blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, block)
+    assert sorted(type(effect).__name__ for effect in clipped.effects) == [
+        "ColorOverlay",
+        "GradientOverlay",
+    ]
+    image = psd.composite(ignore_preview=True)
+    assert image is not None
+    return np.asarray(image.convert("RGB")).astype(float) / 255.0
+
+
+@pytest.mark.parametrize("group_mode", [BlendMode.NORMAL, BlendMode.PASS_THROUGH])
+def test_a_dodging_overlay_on_a_layer_clipped_to_a_group_fades_its_colour(
+    group_mode: BlendMode,
+) -> None:
+    """At 60% the overlay dodges by 60% of its colour, as Photoshop does.
+
+    It does not mix a full-strength dodge with the layer by 60%; outside the
+    group's content the clipped layer and its overlays are not painted.
+    """
+    pixels = _dodged_clip(group_mode, 0.6)
+    dodged = 0.35 / (1.0 - 0.6 * 0.8)
+    assert np.abs(pixels[16, 16] - dodged).max() < 1.5 / 255.0
+    mixed = 0.4 * 0.35 + 0.6 * min(1.0, 0.35 / (1.0 - 0.8))
+    assert np.abs(pixels[16, 16] - mixed).max() > 15 / 255.0
+    assert np.allclose(pixels[5, 5], 1.0)
+
+
+def test_a_dodging_overlay_at_full_opacity_is_unfaded() -> None:
+    pixels = _dodged_clip(BlendMode.PASS_THROUGH, 1.0)
+    assert np.allclose(pixels[16, 16], 1.0)
