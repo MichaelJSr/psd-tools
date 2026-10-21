@@ -8,8 +8,10 @@ Changelog
   instead of compositing the document, and ``update_preview=False`` to keep
   the stored preview after an edit. The default is unchanged.
 - [fix] ``PSDImage.save()`` marks the preview it regenerates or stores as
-  present in ``VersionInfo``, so a document saved without Maximize
-  Compatibility reports ``has_preview()`` ``True`` once saved.
+  present in ``VersionInfo`` when the stored planes hold the whole image, so
+  an opaque document saved without Maximize Compatibility reports
+  ``has_preview()`` ``True`` once saved. A partly transparent one with no
+  transparency channel is left as it was.
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from psd_tools.api import pil_io
 from psd_tools.api.layers import Group
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import get_transparency_index, has_transparency
@@ -1010,7 +1011,8 @@ def test_save_with_preview_marks_the_composite_present() -> None:
 def test_save_marks_the_regenerated_composite_present() -> None:
     pytest.importorskip("aggdraw")
     pytest.importorskip("scipy")
-    psd = PSDImage.open(full_name("layers-minimal/pixel-layer.psd"))
+    # Opaque on three channels: the colour planes alone are the composite.
+    psd = PSDImage.open(full_name("layers-minimal/solid-color-fill.psd"))
     psd.mark_updated()
     kept = io.BytesIO()
     psd.save(kept, update_preview=False)
@@ -1020,6 +1022,72 @@ def test_save_marks_the_regenerated_composite_present() -> None:
     psd.save(regenerated)
     regenerated.seek(0)
     assert PSDImage.open(regenerated).has_preview()
+
+
+@pytest.mark.parametrize("route", ["regenerated", "supplied"])
+def test_save_leaves_the_flag_where_the_colour_alone_is_stored(route: str) -> None:
+    pytest.importorskip("aggdraw")
+    pytest.importorskip("scipy")
+    # Three channels and no opaque pixel: no plane can take the alpha.
+    psd = PSDImage.open(full_name("masks/2.psd"))
+    assert psd.channels == 3 and not psd.has_preview()
+    layers = psd.composite()
+    assert layers.mode == "RGBA" and np.asarray(layers)[:, :, 3].max() < 255
+    buffer = io.BytesIO()
+    if route == "regenerated":
+        psd.mark_updated()
+        psd.save(buffer)
+    else:
+        psd.save(buffer, preview=layers)
+    buffer.seek(0)
+    reopened = PSDImage.open(buffer)
+    assert not reopened.has_preview()
+    assert np.array_equal(_bands(reopened.composite()), _bands(layers))
+
+    opaque = layers.convert("RGB")
+    buffer = io.BytesIO()
+    psd.save(buffer, preview=opaque)
+    buffer.seek(0)
+    reopened = PSDImage.open(buffer)
+    assert reopened.has_preview()
+    assert np.array_equal(_bands(reopened.composite()), _bands(opaque))
+
+
+def test_save_with_a_palette_preview_uses_its_transparency() -> None:
+    psd = PSDImage.open(full_name("colormodes/4x4_8bit_index_color.psd"))
+    image = psd.topil(apply_icc=False)
+    assert image is not None and image.mode == "P"
+    _, holds = pil_io.convert_pil_to_image_data(psd, image)
+    assert holds
+    # Marks one index clear; a one-channel document has no plane for that.
+    image.info["transparency"] = int(np.asarray(image)[0, 0])
+    _, holds = pil_io.convert_pil_to_image_data(psd, image)
+    assert not holds
+
+
+def test_save_with_cmyk_preview_writes_an_opaque_plane_over_nothing() -> None:
+    psd = PSDImage.open(full_name("blend-modes/cmyk-blend-modes.psd"))
+    transparency = get_transparency_index(psd)
+    image = psd.topil(apply_icc=False)
+    assert image is not None and image.mode == "CMYK"
+    psd._record.image_data.data = b""
+    buffer = io.BytesIO()
+    psd.save(buffer, preview=image)
+    buffer.seek(0)
+    reopened = PSDImage.open(buffer)
+    assert reopened.has_preview()
+    assert _planes(reopened)[transparency] == b"\xff" * (psd.width * psd.height)
+    readback = reopened.topil(apply_icc=False)
+    assert readback is not None
+    assert np.array_equal(_bands(readback), _bands(image))
+
+
+def test_save_with_preview_refuses_a_multichannel_document() -> None:
+    psd = PSDImage.open(full_name("colormodes/4x4_16bit_multichannel.psd"))
+    image = psd.topil(apply_icc=False)
+    assert image is not None and image.mode == "L"
+    with pytest.raises(ValueError, match="multichannel"):
+        psd.save(io.BytesIO(), preview=image)
 
 
 def test_save_with_preview_respects_the_allocation_budget() -> None:

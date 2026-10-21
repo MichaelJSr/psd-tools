@@ -11,6 +11,7 @@ from psd_tools.api.numpy_io import (
     _BACKGROUND_MODES,
     _encode_array,
     encode_image_data,
+    holds_composite,
 )
 from psd_tools.api.utils import (
     AllocBudget,
@@ -352,7 +353,9 @@ def convert_image_data_to_pil(
 _ALPHALESS_MODES = ("1", "P", "CMYK", "LAB")
 
 
-def convert_pil_to_image_data(psd: "PSDProtocol", image: Image.Image) -> list[bytes]:
+def convert_pil_to_image_data(
+    psd: "PSDProtocol", image: Image.Image
+) -> tuple[list[bytes], bool]:
     """Turn a flattened PIL image into the merged image data section's planes.
 
     The inverse of :py:meth:`~psd_tools.api.psd_image.PSDImage.composite` with
@@ -361,6 +364,9 @@ def convert_pil_to_image_data(psd: "PSDProtocol", image: Image.Image) -> list[by
     image stores an opaque preview; a mode with no alpha band (``1``, ``P``,
     ``CMYK``, ``LAB``) keeps the document's stored transparency plane. A ``P``
     image on the document's own table stores its indices as they are.
+
+    Returns the planes and whether they hold the whole image, as
+    :func:`~psd_tools.api.numpy_io.holds_composite` decides.
 
     :raises TypeError: if *image* is not a PIL image.
     :raises ValueError: if *image* is not the document's size, its mode does
@@ -404,7 +410,10 @@ def convert_pil_to_image_data(psd: "PSDProtocol", image: Image.Image) -> list[by
         if image.mode == "P" and "transparency" not in image.info:
             indices = _own_indices(image, table)
             if indices is not None:
-                return encode_image_data(psd, indices, alpha)
+                return (
+                    encode_image_data(psd, indices, alpha),
+                    holds_composite(psd, indices, alpha),
+                )
             image = image.convert("RGB")
         else:
             image = image.convert("RGBA")
@@ -421,7 +430,7 @@ def convert_pil_to_image_data(psd: "PSDProtocol", image: Image.Image) -> list[by
         color /= 255.0
     if alpha_band is not None:
         alpha = np.asarray(alpha_band, dtype=np.float32)[:, :, np.newaxis] / 255.0
-    return encode_image_data(psd, color, alpha)
+    return encode_image_data(psd, color, alpha), holds_composite(psd, color, alpha)
 
 
 def _own_indices(image: Image.Image, table: bytes) -> np.ndarray | None:

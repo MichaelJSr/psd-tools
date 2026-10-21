@@ -305,7 +305,10 @@ and one that wants the stored preview kept can say so::
 ``preview`` holds the document's own color values, as
 ``composite(apply_icc=False)`` returns them, at the document's size and in the
 PIL mode of its color mode, with or without alpha. CMYK and Lab have no PIL
-alpha band, so such a document keeps its stored transparency plane. In an
+alpha band, so such a document keeps its stored transparency plane, stale if
+the edit changed the coverage. A document with no transparency channel stores
+the colour alone and reports ``has_preview()`` ``True`` only when the image is
+opaque everywhere; otherwise ``composite()`` keeps rendering the layers. In an
 opaque 8-bit document, storing the image a regenerated preview reads back as
 with ``topil(apply_icc=False)`` writes the same bytes as regenerating it; one
 with transparency reads back within the rounding of the white matte the

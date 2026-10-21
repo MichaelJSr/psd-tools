@@ -855,6 +855,34 @@ def encode_image_data(
     return planes
 
 
+def holds_composite(
+    psdimage: "PSDProtocol", color: np.ndarray, alpha: np.ndarray | None
+) -> bool:
+    """Whether the planes :func:`encode_image_data` makes of these arrays are the composite.
+
+    They are not where the document has no transparency slot and *alpha* does
+    not store as opaque, so the colour goes in unmatted with its coverage
+    dropped, nor where an indexed document's short colour table makes it keep
+    the stored planes. ``VersionInfo.has_composite`` must then stay as it is:
+    marked, the reopened document would return that colour for its composite.
+    """
+    header = psdimage._record.header
+    depth = cast(Literal[1, 8, 16, 32], header.depth)
+    if (
+        psdimage.color_mode == ColorMode.INDEXED
+        and depth == 8
+        and color.shape[2] != 1
+        and len(psdimage._record.color_mode_data.value) < _COLOR_TABLE_SIZE
+    ):
+        return False
+    if alpha is None or _transparency_slot(psdimage, get_color_channels(psdimage)) >= 0:
+        return True
+    height, width = header.height, header.width
+    plane = _fit(alpha, height, width, 0.0)[:, :, 0]
+    opaque = np.ones((height, width), dtype=np.float32)
+    return _encode_array(plane, depth, width) == _encode_array(opaque, depth, width)
+
+
 def _stored_or_empty(psdimage: "PSDProtocol", indices: Collection[int]) -> list[bytes]:
     """Every plane carried over, or zero-filled where it cannot be.
 

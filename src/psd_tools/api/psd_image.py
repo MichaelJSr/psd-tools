@@ -319,22 +319,25 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             color mode with or without alpha (``"P"`` or ``"RGB"`` for an
             indexed one). An ``"L"`` or ``"RGB"`` image stores an opaque
             preview; a mode with no alpha band (``"CMYK"``, ``"LAB"``,
-            ``"P"``, ``"1"``) keeps the stored transparency plane. The saved
-            document reports :py:meth:`has_preview` ``True``.
+            ``"P"``, ``"1"``) keeps the stored transparency plane. A document
+            with no transparency channel stores the colour alone. The saved
+            document reports :py:meth:`has_preview` ``True`` when the stored
+            planes hold the whole image, which is whenever the alpha is kept
+            or is opaque everywhere.
         :param update_preview: ``False`` writes the stored preview unchanged,
             even after an edit.
         :raises TypeError: if ``preview`` is not a PIL image.
-        :raises ValueError: if ``preview`` does not fit the document, or is
+        :raises ValueError: if ``preview`` does not fit the document, is given
+            for a multichannel document, which PIL has no mode for, or is
             given with ``update_preview=False``.
         """
         if preview is not None:
             if not update_preview:
                 raise ValueError("preview cannot be given with update_preview=False")
-            self._record.image_data.set_data(
-                pil_io.convert_pil_to_image_data(self, preview),
-                self._record.header,
-            )
-            self._mark_composite()
+            planes, holds = pil_io.convert_pil_to_image_data(self, preview)
+            self._record.image_data.set_data(planes, self._record.header)
+            if holds:
+                self._mark_composite()
         elif update_preview and self.is_updated():
             try:
                 self._update_preview()
@@ -376,10 +379,17 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             numpy_io.encode_image_data(self, color, alpha),
             self._record.header,
         )
-        self._mark_composite()
+        if numpy_io.holds_composite(self, color, alpha):
+            self._mark_composite()
 
     def _mark_composite(self) -> None:
-        """Record in VersionInfo that the merged image data is a real composite."""
+        """Record in VersionInfo that the merged image data is a real composite.
+
+        Only ever set, and only by a caller whose planes hold the whole image:
+        a document with no transparency channel stores a partly transparent
+        composite as its colour alone, and marking that would hand the colour
+        back as the composite on reopening.
+        """
         version_info = self.image_resources.get_data(Resource.VERSION_INFO)
         if version_info is not None:
             version_info.has_composite = True

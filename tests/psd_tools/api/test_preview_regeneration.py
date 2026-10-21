@@ -30,6 +30,7 @@ from psd_tools.api.numpy_io import (
     _fit,
     _parse_array,
     encode_image_data,
+    holds_composite,
 )
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import get_transparency_index, has_transparency
@@ -342,6 +343,7 @@ def test_a_short_color_table_keeps_the_stored_index_plane(
         planes = encode_image_data(psd, color, alpha)
     assert "color table" in caplog.text
     assert planes == before, "the stored index plane was not kept"
+    assert not holds_composite(psd, color, alpha)
 
 
 def test_a_composite_off_the_declared_geometry_is_fitted() -> None:
