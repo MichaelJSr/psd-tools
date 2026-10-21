@@ -528,7 +528,11 @@ class GradientType(bytes, Enum):
 
 
 class GradientInterpolation(bytes, Enum):
-    """Gradient interpolation method, the ``gs99`` key of a gradient effect."""
+    """Gradient interpolation method.
+
+    A gradient overlay stores it under ``gs99``, a gradient fill layer or
+    stroke effect under ``gradientsInterpolationMethod``.
+    """
 
     CLASSIC = b"Gcls"
     PERCEPTUAL = b"Perc"

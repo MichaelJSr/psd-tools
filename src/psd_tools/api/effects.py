@@ -375,13 +375,13 @@ class _GradientMixin(_EffectProtocol):
     @property
     def interpolation(self) -> GradientInterpolation:
         """Interpolation method, classic where the descriptor does not say."""
-        # ``gs99`` is the key Photoshop writes; it is not in the terminology.
-        return get_enum(
-            self.descriptor,
-            b"gs99",
-            GradientInterpolation,
-            GradientInterpolation.CLASSIC,
-        )
+        # Neither key is in the terminology: an overlay writes ``gs99``, a
+        # stroke ``gradientsInterpolationMethod``.
+        for key in (b"gs99", b"gradientsInterpolationMethod"):
+            method = get_enum(self.descriptor, key, GradientInterpolation)
+            if method is not None:
+                return method
+        return GradientInterpolation.CLASSIC
 
 
 class _PatternMixin(_EffectProtocol):
