@@ -146,12 +146,15 @@ def _has_enabled_effects(layer: Layer) -> bool:
 def _readable(layer: Layer, name: str) -> list[_StyledEffect]:
     """The layer's enabled effects of one kind, empty if they cannot be listed.
 
+    In the order they are painted, bottom first: Photoshop shows the instance
+    it lists first on top, so the file order is reversed.
+
     ``Effects`` re-reads the layer's block on every access, so the walk
     ``find()`` makes can fail before it yields anything. The callers guard each
     effect they read; this covers the listing they stand on (#828).
     """
     try:
-        return list(_styled(layer.effects.find(name)))
+        return list(_styled(layer.effects.find(name)))[::-1]
     except _UNREADABLE as error:
         # Lazy arguments, not ``%``: a path that degrades must not depend on
         # formatting the layer it is degrading. ``logging`` absorbs a failed
