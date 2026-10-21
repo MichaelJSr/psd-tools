@@ -375,7 +375,7 @@ class SmartObject:
         return _flag(self.filters, b"filterMaskExtendWithWhite", True)
 
     def filter_effect(self) -> FilterEffect | None:
-        """The document's stored pre-filter raster and filter mask for this layer.
+        """Return the document's stored pre-filter raster and mask for this layer.
 
         Photoshop keeps, for each smart object carrying smart filters, the
         rendered object *before* the filters (colour channels plus
@@ -546,7 +546,7 @@ class SmartObject:
 
 
 def _flag(desc: Descriptor | None, key: bytes, default: bool) -> bool:
-    """A boolean descriptor field, or *default* when absent."""
+    """Return a boolean descriptor field, or *default* when absent."""
     if desc is None:
         return default
     value = desc.get(key)
