@@ -8,6 +8,7 @@ rendered grey is the ramp position itself, on boxes whose aspect tells the
 width from the height.
 """
 
+import itertools
 import math
 
 import numpy as np
@@ -328,6 +329,124 @@ def test_a_smooth_ramp_matches_photoshops_own_pixels() -> None:
         np.abs(linear[rows.start - 6 : rows.stop - 6, column - 44] - photoshop).max()
         > 8 / 255
     )
+
+
+def _ramp(stops: list[Descriptor], smoothness: float = 1.0) -> np.ndarray:
+    """``stops`` drawn on a 4097 px row in 0-255 levels: pixel ``x`` is ``Lctn`` x."""
+    desc = _gradient(stops=stops, smoothness=smoothness)
+    color, _ = paint.draw_gradient_fill((0, 0, 4097, 1), ColorMode.RGB, desc)
+    assert color is not None
+    return color[0] * 255.0
+
+
+def _eased_per_segment(
+    stops: list[tuple[tuple[float, float, float], int]], location: int
+) -> np.ndarray:
+    """The ramp at ``location`` if each segment were eased on its own."""
+    for (a, start), (b, end) in itertools.pairwise(stops):
+        if start <= location <= end:
+            along = float(_smoothed(np.array((location - start) / (end - start))))
+            return np.array(a) + (np.array(b) - np.array(a)) * along
+    raise ValueError(location)
+
+
+# Supreme_Jeh'Oul's stat bars, at 100% smoothness: the stops, and Photoshop's
+# ramp at a location, read off the card's export in the document's profile.
+_BAR_STOPS = [
+    ((15.0, 67.0, 240.0), 0),
+    ((132.0, 124.0, 241.0), 819),
+    ((251.0, 28.0, 60.0), 2048),
+    ((0.0, 0.0, 0.0), 4096),
+]
+_BAR_RAMP = [
+    (814, (135, 125, 239)),
+    (1242, (191, 98, 183)),
+    (1637, (240, 60, 116)),
+    (1834, (251, 42, 85)),
+    (2064, (250, 27, 58)),
+    (2459, (219, 17, 39)),
+    (2887, (161, 10, 24)),
+    (3314, (94, 6, 13)),
+]
+
+
+def test_a_smooth_ramp_runs_through_its_inner_stops_as_photoshops_does() -> None:
+    """An inner stop takes the slope from its left neighbour to its right one.
+
+    Easing each segment on its own flattens the ramp at every stop instead,
+    and misses Photoshop's by 15 levels just short of the red stop.
+    """
+    ramp = _ramp([_stop(color, location) for color, location in _BAR_STOPS])
+    locations = [location for location, _ in _BAR_RAMP]
+    photoshop = np.array([color for _, color in _BAR_RAMP], dtype=float)
+    assert np.abs(ramp[locations] - photoshop).max() < 5.5
+
+    eased = np.array([_eased_per_segment(_BAR_STOPS, x) for x in locations])
+    assert np.abs(eased - photoshop).max() > 15.0
+
+
+def test_a_smooth_ramp_of_two_stops_has_no_inner_slope_to_carry() -> None:
+    """With no inner stop, the ramp is the two-stop ease whatever the colours."""
+    stops = [((15.0, 67.0, 240.0), 0), ((251.0, 28.0, 60.0), 4096)]
+    ramp = _ramp([_stop(color, location) for color, location in stops])
+    along = np.arange(4097) / 4096
+    expected = np.array(stops[0][0]) + np.outer(
+        _smoothed(along), np.subtract(stops[1][0], stops[0][0])
+    )
+    assert np.allclose(ramp, expected, atol=1e-3)
+
+
+# Monkey_D_Vour's stat bars: a white stop hidden under the first one, then
+# Photoshop's red and green levels along the ramp, read as above.
+_STEP_STOPS = [
+    ((255.0, 255.0, 255.0), 0),
+    ((142.0, 87.0, 0.0), 0),
+    ((247.0, 87.0, 87.0), 4096),
+]
+_STEP_RAMP = [
+    (913, (153, 87)),
+    (1571, (172, 87)),
+    (2097, (190, 87)),
+    (2624, (208, 87)),
+    (3282, (229, 87)),
+]
+
+
+def test_a_stop_beside_a_hard_edge_leaves_the_ramp_flat() -> None:
+    """The stop after a hard edge has no left neighbour to take a slope from.
+
+    The ramp leaves it level, where the two-stop ease would start it at half
+    its segment's slope and run up to 6 levels above Photoshop's.
+    """
+    ramp = _ramp([_stop(color, location) for color, location in _STEP_STOPS])
+    locations = [location for location, _ in _STEP_RAMP]
+    photoshop = np.array([levels for _, levels in _STEP_RAMP], dtype=float)
+    assert np.abs(ramp[locations, :2] - photoshop).max() < 2.0
+
+    eased = np.array([_eased_per_segment(_STEP_STOPS[1:], x)[:2] for x in locations])
+    assert np.abs(eased - photoshop).max() > 5.0
+
+
+def test_a_hard_edge_between_equal_stops_is_no_edge() -> None:
+    """Two equal stops at one location ramp as one stop does."""
+    a, b = (199.0, 117.0, 0.0), (255.0, 240.0, 0.0)
+    doubled = _ramp([_stop(a, 0), _stop(a, 0), _stop(b, 4096)])
+    single = _ramp([_stop(a, 0), _stop(b, 4096)])
+    assert np.allclose(doubled, single, atol=1e-6)
+
+
+def test_partial_smoothness_mixes_the_linear_and_the_smooth_ramp() -> None:
+    stops = [_stop(color, location) for color, location in _BAR_STOPS]
+    linear, smooth, half = _ramp(stops, 0.0), _ramp(stops, 1.0), _ramp(stops, 0.5)
+    assert np.allclose(half, (linear + smooth) / 2, atol=1e-3)
+
+
+def test_a_smooth_ramp_that_overshoots_is_held_to_the_gamut() -> None:
+    """A slope carried across a stop near the gamut's edge can pass it."""
+    ramp = _ramp(
+        [_stop(BLACK, 0), _stop(WHITE, 1024), _stop(WHITE, 1100), _stop(BLACK, 4096)]
+    )
+    assert ramp.min() >= 0.0 and ramp.max() <= 255.0
 
 
 def test_a_transparency_midpoint_shapes_the_alpha_ramp_alone() -> None:

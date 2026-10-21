@@ -663,8 +663,9 @@ def _blend_stops(
     Within a segment the blend runs linearly to halfway at the end stop's
     midpoint and linearly on to the end; a midpoint on either end of its
     segment is ignored, as Photoshop's dialog cannot author one. Smoothness
-    then eases the blend towards a smoothstep, with 100% landing halfway
-    between the two.
+    eases that blend towards a cubic through the stops (see
+    :py:func:`_stop_slopes`), so a two-stop ramp at 100% lands halfway between
+    linear and a smoothstep.
     """
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
@@ -676,10 +677,57 @@ def _blend_stops(
         u = np.where(span > 0.0, np.clip((t - locations[k]) / span, 0.0, 1.0), 1.0)
         bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
     f = np.where((m > 0.0) & (m < 1.0), bent, u)
-    f += smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
     values = np.asarray(Y, dtype=np.float64)
-    f = f.reshape((-1,) + (1,) * (values.ndim - 1))
-    return values[k] * (1.0 - f) + values[k + 1] * f
+    shape = (-1,) + (1,) * (values.ndim - 1)
+    f, span = f.reshape(shape), span.reshape(shape)
+    linear = values[k] * (1.0 - f) + values[k + 1] * f
+    if smoothness <= 0.0:
+        return linear
+    slopes = _stop_slopes(locations, values)
+    # The cubic Hermite basis on the segment, its slopes scaled to it.
+    f2, f3 = f * f, f * f * f
+    cubic = (
+        (2.0 * f3 - 3.0 * f2 + 1.0) * values[k]
+        + (f3 - 2.0 * f2 + f) * span * slopes[k]
+        + (3.0 * f2 - 2.0 * f3) * values[k + 1]
+        + (f3 - f2) * span * slopes[k + 1]
+    )
+    return linear + smoothness * (cubic - linear)
+
+
+def _stop_slopes(locations: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """The ramp's slope at each stop for the smooth blend.
+
+    An inner stop takes the slope from its left neighbour to its right one
+    (Catmull-Rom), an end stop half its segment's, and a stop beside a step
+    (two stops at one location) none. A step between equal values is no step.
+    """
+    count = len(locations)
+    slopes = np.zeros_like(values)
+    width = np.diff(locations)
+    same = np.all(np.diff(values, axis=0).reshape(count - 1, -1) == 0.0, axis=1)
+    for index in range(count):
+        left = index - 1
+        while left >= 0 and width[left] == 0.0 and same[left]:
+            left -= 1
+        right = index + 1
+        while right < count and width[right - 1] == 0.0 and same[right - 1]:
+            right += 1
+        has_left = left >= 0 and locations[index] > locations[left]
+        has_right = right < count and locations[right] > locations[index]
+        if has_left and has_right:
+            slopes[index] = (values[right] - values[left]) / (
+                locations[right] - locations[left]
+            )
+        elif has_left and right == count:
+            slopes[index] = (values[index] - values[left]) / (
+                2.0 * (locations[index] - locations[left])
+            )
+        elif has_right and left < 0:
+            slopes[index] = (values[right] - values[index]) / (
+                2.0 * (locations[right] - locations[index])
+            )
+    return slopes
 
 
 # ``color_convert``'s sRGB transfer functions over an array. That module is
@@ -779,9 +827,16 @@ def _make_linear_gradient_color(
 
     smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
     colors = grad.get(Key.Colors, [])
-    table = _blend_stops(
-        *_collect_stops(colors, lambda stop: np.array(_get_color(color_mode, stop))),
-        smoothness,
+    # The smooth blend can overshoot a stop; Photoshop holds it to the gamut.
+    table = np.clip(
+        _blend_stops(
+            *_collect_stops(
+                colors, lambda stop: np.array(_get_color(color_mode, stop))
+            ),
+            smoothness,
+        ),
+        0.0,
+        1.0,
     )
     space = _BLEND_SPACES.get(method) if method is not None else None
     if space is not None:
@@ -816,7 +871,7 @@ def _make_linear_gradient_color(
     stops = grad.get(Key.Transparency)
     alpha_space = _ALPHA_BLEND_SPACES.get(method) if method is not None else None
     if alpha_space is None:
-        alpha = _blend_stops(*_collect_stops(stops, opacity), smoothness)
+        alpha = np.clip(_blend_stops(*_collect_stops(stops, opacity), smoothness), 0, 1)
     else:
         encode, decode = alpha_space
         alpha = decode(

@@ -4,6 +4,9 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A smooth gradient with more than two colour stops curves through its
+  inner stops as Photoshop does, instead of flattening at each one; a stop
+  after a hard edge starts level. Two-stop gradients are unchanged
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round
