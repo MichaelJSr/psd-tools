@@ -8,6 +8,7 @@ corpus does not isolate is checked on forged silhouettes, where the result has
 a closed form.
 """
 
+import importlib
 import math
 from collections.abc import Callable
 from typing import Any
@@ -26,6 +27,8 @@ from psd_tools.terminology import Key
 from ..utils import full_name
 from .test_composite import _mse
 from .test_drop_shadow import _contour
+
+pytest.importorskip("scipy")
 
 _SQUARE = (0, 0, 40, 40)
 
@@ -436,6 +439,82 @@ def test_an_unreadable_effect_is_dropped_and_the_document_renders(
     result = rendered(mutate)
     assert np.isfinite(result).all()
     assert np.array_equal(result, disabled)
+
+
+def test_a_bevel_deeper_than_photoshop_writes_is_drawn_at_the_deepest() -> None:
+    """A forged depth is held to what Photoshop writes, so its light is finite."""
+
+    def rendered(depth: float) -> np.ndarray:
+        psd = PSDImage.open(full_name("layer_effects.psd"))
+        for layer in psd.descendants():
+            for effect in layer.effects.find("bevelemboss"):
+                effect.descriptor[Key.StrengthRatio] = Double(depth)
+        return _rendered(psd, _AROUND["bevelemboss"])
+
+    forged = rendered(1e300)
+    assert np.isfinite(forged).all()
+    assert np.array_equal(forged, rendered(effects._MAX_BEVEL_DEPTH))
+
+
+@pytest.mark.parametrize("distance", [1e4, -1e4])
+def test_a_satin_further_than_photoshop_writes_is_drawn_at_the_furthest(
+    distance: float,
+) -> None:
+    """A forged distance is held to what Photoshop writes, keeping its side."""
+    desc = Descriptor()
+    desc[Key.Distance] = Double(distance)
+    held, _ = effects.satin_geometry(desc)
+    assert held == math.copysign(effects._MAX_STROKE_SIZE, distance)
+
+
+def test_a_satin_is_budgeted_on_the_box_it_is_drawn_on() -> None:
+    """Not on the whole viewport grown by its reach.
+
+    The budget is just under what the document's box grown by the satin's
+    reach would cost, and far over what the satin's own canvas does.
+    """
+    region = (slice(560, 608), slice(383, 563))
+
+    def rendered(enabled: bool) -> np.ndarray:
+        psd = PSDImage.open(full_name("layer_effects.psd"))
+        satin = next(iter(_layer(psd, "Satin").effects.find("satin")))
+        satin.descriptor[Key.Enabled] = enabled
+        distance, size = effects.satin_geometry(satin.descriptor)
+        left, top, right, bottom = effects.inner_bbox(
+            psd.viewbox, abs(distance) + size, "unlimited"
+        )
+        whole = (right - left) * (bottom - top) * effects._INNER_BYTES
+        psd.max_alloc_bytes = whole - 1
+        return _rendered(psd)[region]
+
+    assert not np.array_equal(rendered(True), rendered(False))
+
+
+def test_without_scipy_the_effects_are_left_out_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document with a drop shadow, a satin and a bevel still composites."""
+    kinds = ("dropshadow", "satin", "bevelemboss")
+
+    def rendered(enabled: bool) -> np.ndarray:
+        psd = PSDImage.open(full_name("layer_effects.psd"))
+        for layer in psd.descendants():
+            for kind in kinds:
+                for effect in layer.effects.find(kind):
+                    effect.descriptor[Key.Enabled] = enabled
+        return _rendered(psd)
+
+    plain = rendered(False)
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    monkeypatch.setattr(compositing, "HAS_SCIPY", False)
+    with pytest.warns(UserWarning, match="without scipy") as record:
+        result = rendered(True)
+    assert np.array_equal(result, plain)
+    assert {str(warning.message).split(" are ")[0] for warning in record} == {
+        "Drop shadows",
+        "Satins",
+        "Bevels",
+    }
 
 
 # -- Fidelity against Photoshop's own render ------------------------------- #

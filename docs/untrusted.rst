@@ -100,9 +100,10 @@ What it bounds
   decoded image; the JPEG decoder's own intermediates are not counted.
 - Each layer's ``numpy()`` and ``topil()``, at the layer's own size, including
   the reads that :py:meth:`~psd_tools.api.psd_image.PSDImage.composite` makes.
-- The canvas that ``composite()`` builds, and each canvas that a stroke size,
-  vector stroke width or pattern scale grows. A layer effect over the budget is
-  skipped; a vector stroke or fill layer over it raises.
+- The canvas that ``composite()`` builds, and each canvas that a layer
+  effect's size or distance, vector stroke width or pattern scale grows. A
+  layer effect over the budget is skipped; a vector stroke or fill layer over
+  it raises.
 - Each glyph, underline and canvas that
   :py:meth:`~psd_tools.api.layers.TypeLayer.rasterize` and the
   :py:mod:`~psd_tools.composite.text` functions draw, and the comparison

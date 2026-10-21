@@ -1746,6 +1746,8 @@ def test_one_unmeasurable_stroke_keeps_the_reach_of_the_other() -> None:
     tells the two apart (#798) -- its layer carries a 1 px outset and a 1 px
     inset stroke, which grow the box by different amounts -- so breaking the
     wider one leaves the narrower one's box behind rather than the layer's.
+    Each is measured around the layer's 1 px centred vector stroke, which a
+    redrawn shape paints past its path.
 
     Keeping it matters in the direction the box is used: over-measuring costs
     a group some canvas nobody draws on, while under-measuring clips a stroke
@@ -1754,10 +1756,11 @@ def test_one_unmeasurable_stroke_keeps_the_reach_of_the_other() -> None:
     psd = PSDImage.open(full_name("effects/double-stroke-effects.psd"))
     layer = psd[1]
     outset, inset = list(layer.effects.find("stroke"))
-    assert _stroke_reach(layer) == (0, -1, 32, 31), "both strokes measured"
+    assert _vector_stroke_reach(layer) == (1, 0, 31, 30)
+    assert _stroke_reach(layer) == (-1, -2, 33, 32), "both strokes measured"
 
     outset.descriptor[Key.SizeKey] = "wide"
-    assert _stroke_reach(layer) == (1, 0, 31, 30), "the inset stroke's own box"
+    assert _stroke_reach(layer) == (0, -1, 32, 31), "the inset stroke's own box"
     inset.descriptor[Key.SizeKey] = "wide"
     assert _stroke_reach(layer) == _vector_stroke_reach(layer), (
         "nothing left to measure"

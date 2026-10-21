@@ -918,6 +918,48 @@ def test_a_shape_layers_shadow_reaches_as_far_as_its_outer_vector_stroke() -> No
     )
 
 
+@pytest.mark.parametrize(
+    "name", ["stroke-outer-no-fill.psd", "stroke-center-no-fill.psd"]
+)
+def test_a_shape_with_its_fill_off_casts_its_shadow_from_its_stroke(name: str) -> None:
+    """Redrawn from its path, an outline-only shape casts what it paints.
+
+    Each rectangle has its fill switched off and only its vector stroke on,
+    so it casts a ring: the shadow shows through the hollow middle, which
+    is not knocked out, and nothing is cast from the path's interior. The
+    stored pixels hold the same ring, so both force modes cast the same shadow.
+    """
+    psd = PSDImage.open(full_name(name))
+    layer = next(layer for layer in psd if layer.name == "Rectangle 1")
+    assert utils.is_fill_disabled(layer)
+    _forge_shadow(layer, Blur=0.0, Distance=6.0, Opacity=100.0)
+    alpha = _alone(layer, psd.viewbox, force=True)
+    # The redrawn ring's antialiasing is the stored one's to an 8-bit level.
+    assert np.allclose(alpha, _alone(layer, psd.viewbox), atol=1 / 255)
+    # Inside the hollow, just under the top of the ring, which casts there.
+    assert layer.stroke is not None
+    top = layer.bbox[1] + int(layer.stroke.line_width)
+    assert float(alpha[top + 2, 50, 0]) == pytest.approx(1.0)
+    assert float(alpha[50, 50, 0]) == 0.0
+
+
+def test_a_shadow_canvas_out_of_proportion_to_its_layer_is_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The distance is the file's, so the canvas it grows is held in proportion.
+
+    Cast this far, the card's shadow needs a canvas past what the growth
+    guard allows a layer and viewport this size, under any budget.
+    """
+    psd, layer = _masks_card()
+    psd.max_alloc_bytes = "unlimited"
+    _forge_shadow(layer, angle=45.0, Distance=8000.0)
+    with caplog.at_level(logging.DEBUG, logger="psd_tools.composite.composite"):
+        _alone(layer, _around(layer))
+    assert "Cannot measure a drop shadow" in caplog.text
+    assert "allowed for it" in caplog.text
+
+
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:
     return lambda desc: desc.__setitem__(key, value)
 
@@ -1114,7 +1156,7 @@ def test_a_curved_contour_asks_for_scipy_by_name_when_it_is_missing(
 ) -> None:
     """The spline through three or more points needs scipy, and says so."""
     monkeypatch.setattr(effects, "HAS_SCIPY", False)
-    with pytest.raises(ImportError, match="Drop shadow effects require: scipy"):
+    with pytest.raises(ImportError, match="Layer effect contours require: scipy"):
         effects.contour_table(_contour([(0.0, 0.0), (128.0, 64.0), (255.0, 255.0)]))
     # Two points need no spline.
     assert effects.contour_table(_contour([(0.0, 51.0), (255.0, 255.0)])) is not None

@@ -90,7 +90,7 @@ import numpy as np
 from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite import paint
 from psd_tools.composite._compat import HAS_SCIPY
-from psd_tools.composite.utils import divide
+from psd_tools.composite.utils import divide, intersect
 from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key
@@ -120,7 +120,8 @@ _BANDS: dict[bytes, tuple[float, float]] = {
 # canvas reserved for it, and the position Photoshop itself defaults to.
 _UNRECOGNISED = _BANDS[Enum.OutsetFrame]
 
-# The widest stroke Photoshop writes; a larger size can only be a forged one.
+# The widest stroke Photoshop writes, and the largest size, soften or satin
+# distance of any effect; a larger one can only be a forged one.
 _MAX_STROKE_SIZE = 250.0
 
 # What a stroke canvas costs per pixel at its peak: the signed-distance
@@ -915,7 +916,7 @@ def contour_table(desc: Descriptor | None) -> np.ndarray | None:
         return None
     grid = np.linspace(0.0, 1.0, _CONTOUR_STEPS)
     if len(xs) > 2 and np.all(np.diff(xs) > 0.0):
-        _require_scipy("Drop shadow effects")
+        _require_scipy("Layer effect contours")
         from scipy.interpolate import PchipInterpolator  # type: ignore[import-untyped]  # noqa: PLC0415
 
         table = PchipInterpolator(xs, ys)(np.clip(grid, xs[0], xs[-1]))
@@ -1351,6 +1352,9 @@ _SLOPE_LIMIT_TRUNCATE = 4.0
 # gradients, and the float64 transients of the filters.
 _INNER_BYTES = 64
 
+# The deepest bevel Photoshop writes, in percent.
+_MAX_BEVEL_DEPTH = 1000.0
+
 # What a satin's distance and size, and a bevel's depth and size, read as
 # for a descriptor that leaves them out: the same values as the API getters.
 _SATIN_DEFAULT = 120.0
@@ -1387,20 +1391,36 @@ def inner_bbox(
     bbox: tuple[int, int, int, int],
     reach: float,
     max_alloc_bytes: AllocBudget | None = None,
+    within: tuple[int, int, int, int] | None = None,
 ) -> tuple[int, int, int, int]:
     """The canvas a satin or a bevel is drawn on: ``bbox`` grown by ``reach``.
 
     The silhouette is read on this box, so that a blur or an offset near the
     viewport's edge sees the layer past it rather than an edge that is not
-    there (#804). The two pixels added on top are the blur's antialiased
-    fringe and the offset's interpolation. Checked against the per-axis limit
+    there. The two pixels added on top are the blur's antialiased fringe and
+    the offset's interpolation. ``within``, when given, holds the box to no
+    further than the same reach past it, since nothing beyond that reaches
+    back into it. The box that is left is checked against the per-axis limit
     and ``max_alloc_bytes`` as :py:func:`drop_shadow_bbox` is, raising
-    :class:`ValueError`. An empty ``bbox`` is returned untouched.
+    :class:`ValueError`. An empty ``bbox`` is returned untouched, and an empty
+    intersection with ``within`` comes back as ``(0, 0, 0, 0)``.
     """
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     margin = math.ceil(max(reach, 0.0)) + 2
     grown = (bbox[0] - margin, bbox[1] - margin, bbox[2] + margin, bbox[3] + margin)
+    if within is not None:
+        grown = intersect(
+            grown,
+            (
+                within[0] - margin,
+                within[1] - margin,
+                within[2] + margin,
+                within[3] + margin,
+            ),
+        )
+        if grown == (0, 0, 0, 0):
+            return grown
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     check_pixel_size(
         width,
@@ -1413,11 +1433,17 @@ def inner_bbox(
 
 
 def satin_geometry(desc: Descriptor) -> tuple[float, float]:
-    """A satin's ``(distance, size)``, read as :py:func:`shadow_geometry` reads."""
+    """A satin's ``(distance, size)``, read as :py:func:`shadow_geometry` reads.
+
+    Both are held to what Photoshop can write, the distance keeping its sign.
+    """
     distance = float(desc.get(Key.Distance, _SATIN_DEFAULT))
     size = float(desc.get(Key.Blur, _SATIN_DEFAULT))
     _finite("Satin", distance=distance, size=size)
-    return distance, min(max(size, 0.0), _MAX_STROKE_SIZE)
+    return (
+        math.copysign(min(abs(distance), _MAX_STROKE_SIZE), distance),
+        min(max(size, 0.0), _MAX_STROKE_SIZE),
+    )
 
 
 def draw_satin(
@@ -1471,14 +1497,14 @@ def bevel_geometry(desc: Descriptor) -> tuple[float, float, float]:
     """A bevel's ``(depth, size, soften)``, read as :py:func:`shadow_geometry` reads.
 
     Depth is in percent, size and soften in pixels; each is held to zero or
-    more, and size and soften to what Photoshop can write.
+    more and to what Photoshop can write.
     """
     depth = float(desc.get(Key.StrengthRatio, _BEVEL_DEFAULT))
     size = float(desc.get(Key.Blur, _BEVEL_DEFAULT))
     soften = float(desc.get(Key.Softness, 0.0))
     _finite("Bevel", depth=depth, size=size, soften=soften)
     return (
-        max(depth, 0.0),
+        min(max(depth, 0.0), _MAX_BEVEL_DEPTH),
         min(max(size, 0.0), _MAX_STROKE_SIZE),
         min(max(soften, 0.0), _MAX_STROKE_SIZE),
     )
