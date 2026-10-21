@@ -343,7 +343,8 @@ def test_a_faint_stroke_over_a_wide_one_leaves_the_text_on_the_backdrop() -> Non
     """A 1 px ring at 0 % listed over a 6 px ring cuts the wide ring back.
 
     The glyph edge then meets the backdrop, in the gamma, as it does with no
-    style at all, where the wide ring alone would put its grey there.
+    style at all, where the wide ring alone would put its grey there. An
+    opaque ring on top reaches the edge as the wide ring alone does.
     """
     psd = PSDImage.open(full_name("text.psb"))
     layer = next(_type_layers(psd))
