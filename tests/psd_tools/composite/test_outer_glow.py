@@ -727,19 +727,8 @@ def _empty_gradient(desc: Descriptor) -> None:
     desc[Key.Gradient] = gradient
 
 
-def _nan_stop(stops: bytes, key: bytes) -> Callable[[Descriptor], None]:
-    """``layer_params.psb``'s gradient on the glow, ``key`` of its first stop NaN."""
-
-    def mutate(desc: Descriptor) -> None:
-        gradient = copy.deepcopy(_gradient_glow()[0][Key.Gradient])
-        gradient[stops][0][key] = Double(float("nan"))
-        desc[Key.Gradient] = gradient
-
-    return mutate
-
-
 # Ways a glow's descriptor can defeat the reads that draw it, as a shadow's
-# can, plus a gradient with nothing to paint or nothing finite to paint.
+# can, plus a gradient with nothing to paint.
 _UNDRAWABLE: dict[str, Callable[[Descriptor], Any]] = {
     "size": _setting(Key.Blur, "wide"),
     "infinite-size": _setting(Key.Blur, Double(float("inf"))),
@@ -750,7 +739,6 @@ _UNDRAWABLE: dict[str, Callable[[Descriptor], Any]] = {
     "no-color": lambda desc: desc.pop(Key.Color),
     "color-class": lambda desc: setattr(desc[Key.Color], "classID", b"XXXX"),
     "empty-gradient": _empty_gradient,
-    "nan-stop-opacity": _nan_stop(Key.Transparency, Key.Opacity),
 }
 
 
@@ -775,6 +763,30 @@ def test_an_unreadable_outer_glow_is_dropped_and_the_document_renders(
     rendered = _rendered(_UNDRAWABLE[defect])
     assert np.isfinite(rendered).all()
     assert np.array_equal(rendered, disabled)
+
+
+@pytest.mark.parametrize(
+    ("stops", "key"),
+    [
+        (Key.Transparency, Key.Opacity),
+        (Key.Transparency, Key.Location),
+        (Key.Colors, Key.Location),
+    ],
+    ids=["opacity", "transparency-location", "colour-location"],
+)
+def test_a_glow_whose_gradient_stop_is_nan_still_renders_finite(
+    stops: bytes, key: bytes
+) -> None:
+    """The stop is held in range where it is read, so the glow is still drawn."""
+
+    def nan_stop(desc: Descriptor) -> None:
+        gradient = copy.deepcopy(_gradient_glow()[0][Key.Gradient])
+        gradient[stops][-1][key] = Double(float("nan"))
+        desc[Key.Gradient] = gradient
+
+    rendered = _rendered(nan_stop)
+    assert np.isfinite(rendered).all()
+    assert not np.array_equal(rendered, _rendered(_setting(Key.Enabled, False)))
 
 
 # -- Fidelity against Photoshop's own render ------------------------------- #

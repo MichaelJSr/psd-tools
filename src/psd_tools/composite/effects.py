@@ -1145,9 +1145,7 @@ def glow_paint(
     and a translucent stop holds the glow at its opacity for as long as the
     falloff is above it. The gradient's reverse flag turns it around. Either
     way the coverage is cut away under the silhouette. A descriptor with
-    neither raises as the solid colour reader does, and a gradient that
-    reads as anything not finite raises ``ValueError``, for the reason
-    :py:func:`draw_drop_shadow` gives.
+    neither raises as the solid colour reader does.
     """
     if Key.Gradient not in desc:
         color, _ = paint.draw_solid_color_fill(viewport, color_mode, desc)
@@ -1162,7 +1160,4 @@ def glow_paint(
     coverage = falloff
     if opacities is not None:
         coverage = np.minimum(coverage, np.asarray(opacities(along), dtype=np.float32))
-    # The stops are the file's and read unclamped, and np.clip keeps a NaN.
-    if not (np.isfinite(color).all() and np.isfinite(coverage).all()):
-        raise ValueError("Outer glow gradient stops must be finite.")
     return color, _beside(coverage, shape)

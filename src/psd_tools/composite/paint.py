@@ -535,12 +535,22 @@ _T = TypeVar("_T")
 def _collect_stops(
     stops: Sequence[Any], value_fn: Callable[[Any], _T]
 ) -> tuple[list[float], list[_T]]:
-    """Collect gradient stop (location, value) pairs, deduplicating co-located stops."""
+    """Collect gradient stop (location, value) pairs in order along the gradient.
+
+    A location is the file's, so it is held to the gradient's length as a
+    colour component is (#757). Co-located stops keep the last the file
+    lists: ``interp1d`` divides by the gap between neighbouring stops, so
+    two at one place turn the colour there into NaN.
+    """
+    located = [
+        (_clamp01(float(stop.get(Key.Location)) / 4096.0), value_fn(stop))
+        for stop in stops
+    ]
+    # Stable, so co-located stops stay in the file's order.
+    located.sort(key=lambda pair: pair[0])
     X: list[float] = []
     Y: list[_T] = []
-    for stop in stops:
-        location = float(stop.get(Key.Location)) / 4096.0
-        value = value_fn(stop)
+    for location, value in located:
         if X and X[-1] == location:
             logger.debug("Duplicate stop at %s", location)
             X.pop()
@@ -572,7 +582,7 @@ def _make_linear_gradient_color(
 
     Xt, Yt = _collect_stops(
         grad.get(Key.Transparency),
-        lambda stop: float(stop.get(Key.Opacity)) / 100.0,
+        lambda stop: _clamp01(float(stop.get(Key.Opacity)) / 100.0),
     )
     Ga = interpolate.interp1d(
         Xt, Yt, axis=0, bounds_error=False, fill_value=(Yt[0], Yt[-1])
@@ -705,8 +715,9 @@ def _make_noise_gradient_color(
     if not grad.get(Key.ShowTransparency):
         return G, None
     # Clamped like the color components, and from the same raw ``Mnm ``/``Mxm ``
-    # values (#757).
-    Ya = np.clip(Y[:, -1], 0.0, 1.0)
+    # values (#757). ``np.clip`` keeps a NaN, so it goes to 0.0 first, as
+    # ``_clamp01`` sends it.
+    Ya = np.clip(np.nan_to_num(Y[:, -1], nan=0.0), 0.0, 1.0)
     Ga = interpolate.interp1d(
         X, Ya, axis=0, bounds_error=False, fill_value=(Ya[0], Ya[-1])
     )
