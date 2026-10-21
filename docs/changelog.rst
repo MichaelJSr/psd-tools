@@ -10,15 +10,12 @@ Changelog
   file whose version 8 entry is missing it (#1011, #1012)
 - [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
   ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
-- [fix] The compositor renders channel mixer, black & white, colour balance
-  and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
-  grayscale and CMYK documents, instead of skipping them. Channel mixer is
-  exact, black & white is exact without its tint; gradient maps interpolate
-  classic, linear and perceptual gradients; colour balance midtones and
-  vibrance are fitted to Photoshop output
-- [fix] An adjustment inside a pass-through group that carries an enabled
-  layer style stays within the group, as in Photoshop, instead of passing
-  through to the layers beneath
+- [fix] The compositor renders channel mixer, black & white, colour balance and
+  vibrance adjustments on RGB documents, and gradient maps on RGB, grayscale and
+  CMYK documents, instead of skipping them. Colour balance and vibrance are
+  approximate, and a black & white tint is not drawn
+- [fix] An adjustment inside a pass-through group with an enabled layer style
+  stays within the group instead of reaching the layers beneath
 
 1.25.0 (2026-10-14)
 -------------------

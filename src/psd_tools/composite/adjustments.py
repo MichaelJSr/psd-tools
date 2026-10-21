@@ -848,10 +848,12 @@ def _gradientmap_luminance(
     return _get_luminance(img, colormode)
 
 
-# A gradient map stop's colour space id and the scale of its components.
+# A gradient map stop's colour space id and the scale of its components. A
+# gray component is ink, so 0 is white.
 _STOP_SPACE_RGB = 0
 _STOP_SPACE_GRAYSCALE = 8
 _STOP_COMPONENT_MAX = np.float32(65535.0)
+_STOP_GRAY_MAX = np.float32(10000.0)
 _STOP_LOCATION_MAX = 4096.0
 
 
@@ -868,12 +870,12 @@ def _gradientmap_lut(
         return None
     locations: list[float] = []
     midpoints: list[float] = []
-    colors: list[NDArray[np.float32]] = []
+    colors: list[list[float]] = []
     for stop in stops:
         if stop.mode == _STOP_SPACE_RGB:
-            rgb = np.array(stop.color[:3], dtype=np.float32) / _STOP_COMPONENT_MAX
+            rgb = [component / _STOP_COMPONENT_MAX for component in stop.color[:3]]
         elif stop.mode == _STOP_SPACE_GRAYSCALE:
-            rgb = np.full(3, stop.color[0] / _STOP_COMPONENT_MAX, dtype=np.float32)
+            rgb = [1.0 - stop.color[0] / _STOP_GRAY_MAX] * 3
         else:
             logger.info(
                 "Gradient map stop colour space %d is not supported.", stop.mode
@@ -881,11 +883,15 @@ def _gradientmap_lut(
             return None
         locations.append(stop.location / _STOP_LOCATION_MAX)
         midpoints.append(float(stop.midpoint) / 100.0)
-        colors.append(np.clip(rgb, _0, _1))
+        colors.append(rgb)
 
     size = _get_lut_size(layer)
     ramp = _gradient_ramp(
-        _lut_domain(size), locations, midpoints, np.array(colors), block.method
+        _lut_domain(size),
+        np.array(locations),
+        np.array(midpoints),
+        np.clip(np.array(colors, dtype=np.float32), _0, _1),
+        block.method,
     )
     return _rows_from_rgb(colormode, ramp)
 
@@ -910,34 +916,35 @@ _BT601_LUMINANCE = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 def _gradient_ramp(
     t: NDArray[np.float32],
-    locations: list[float],
-    midpoints: list[float],
+    locations: NDArray[np.float64],
+    midpoints: NDArray[np.float64],
     colors: NDArray[np.float32],
     method: bytes,
 ) -> NDArray[np.float32]:
     """Sample a stop gradient at ``t``; ends are clamped to the end stops.
 
-    Two stops at one location make a hard edge: the segment into it ends in
-    the first stop's colour and the segment out of it starts in the second's.
+    Stops are taken in location order. Two stops at one location make a hard
+    edge: the segment into it ends in the first stop's colour and the segment
+    out of it starts in the second's.
     """
     if len(locations) == 1:
         return np.repeat(colors[:1], len(t), axis=0)
+    order = np.argsort(locations, kind="stable")
+    locations, midpoints = locations[order], midpoints[order]
     to_space, from_space = _GRADIENT_SPACES.get(method, _GRADIENT_SPACES[b"Gcls"])
-    values = to_space(colors)
-    out = np.empty((len(t), colors.shape[1]), dtype=np.float32)
+    values = to_space(colors[order])
+    # The segment holding each sample starts at the last stop at or before it,
+    # so a hard edge's zero-length segment is never picked.
+    k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(locations) - 2)
+    left, span = locations[k], locations[k + 1] - locations[k]
+    u = np.divide(t - left, span, out=np.ones_like(left), where=span > 0)
+    # A stop's midpoint is where the blend of the segment ending at it reaches
+    # one half.
+    m = np.clip(midpoints[k + 1], 0.01, 0.99)
+    u = np.where(u <= m, _HALF * u / m, _HALF + _HALF * (u - m) / (1 - m))
+    out = values[k] + u[:, None] * (values[k + 1] - values[k])
     out[t < locations[0]] = values[0]
     out[t >= locations[-1]] = values[-1]
-    for k in range(len(locations) - 1):
-        left, right = locations[k], locations[k + 1]
-        if right <= left:
-            continue
-        inside = (t >= left) & (t < right)
-        u = (t[inside] - left) / (right - left)
-        # A stop's midpoint is where the blend of the segment ending at it
-        # reaches one half.
-        m = min(max(midpoints[k + 1], 0.01), 0.99)
-        u = np.where(u <= m, _HALF * u / m, _HALF + _HALF * (u - m) / (1 - m))
-        out[inside] = values[k] + u[:, None] * (values[k + 1] - values[k])
     return from_space(out).astype(np.float32, copy=False)
 
 
@@ -1006,39 +1013,38 @@ def apply_colorbalance(
     if shadows is None or midtones is None or highlights is None:
         return img
 
-    # A midtone amount is a per-channel gamma. Preserve Luminosity centres the
-    # three amounts on their mean, so that a shift toward one primary darkens
-    # the other two instead of brightening the pixel.
-    gammas = np.array(midtones, dtype=np.float32) / _100
+    # A midtone amount is a per-channel gamma. A shadow or highlight amount
+    # adds up to that many levels, weighted toward its own end of the range and
+    # zero at black and white; that weight is a shape choice, not a fit.
+    # Preserve Luminosity centres each range's three amounts on their mean, so
+    # that a shift toward one primary darkens the other two instead of
+    # brightening the pixel.
+    amounts = np.array([shadows, midtones, highlights], dtype=np.float32)
     if layer.luminosity:
-        gammas -= gammas.mean()
-    size = _get_lut_size(layer)
-    level = _lut_domain(size) * _255
+        amounts -= amounts.mean(axis=1, keepdims=True)
+    lows, gammas, highs = amounts[0] / _255, amounts[1] / _100, amounts[2] / _255
+    level = _lut_domain(_get_lut_size(layer))
     luts: dict[int, NDArray[np.float32]] = {}
-    for channel, (low, gamma, high) in enumerate(
-        zip(shadows, gammas, highlights, strict=True)
-    ):
+    for channel in range(3):
         value = level
-        if low:
-            value = value + low * _colorbalance_shadows(value, low > 0)
-        if high:
-            value = value + high * _colorbalance_highlights(value, high > 0)
-        value = np.clip(value / _255, _0, _1) ** np.exp2(-gamma)
+        if lows[channel]:
+            weight = _colorbalance_shadows(value)
+            value = np.clip(value + lows[channel] * weight, _0, _1)
+        if highs[channel]:
+            weight = _colorbalance_shadows(_1 - value)
+            value = np.clip(value + highs[channel] * weight, _0, _1)
+        value = value ** np.exp2(-gammas[channel])
         luts[channel + 1] = value.astype(np.float32, copy=False)
     return _apply_luts(luts, img, colormode)
 
 
-def _colorbalance_low(level: np.ndarray) -> np.ndarray:
-    """How much a shadow or highlight shift moves a level, peaking at the dark end."""
-    return np.clip(1.075 - 1 / (level / 16 + 1), 0, 1)
+# ``t * (1 - t) ** 2`` peaks at t = 1/3 with 4/27.
+_COLORBALANCE_PEAK = np.float32(27 / 4)
 
 
-def _colorbalance_shadows(level: np.ndarray, add: bool) -> np.ndarray:
-    return _colorbalance_low(level if add else 255 - level)
-
-
-def _colorbalance_highlights(level: np.ndarray, add: bool) -> np.ndarray:
-    return _colorbalance_low(255 - level if add else level)
+def _colorbalance_shadows(level: np.ndarray) -> np.ndarray:
+    """How much of a shadow shift reaches a level; a highlight shift mirrors it."""
+    return _COLORBALANCE_PEAK * level * (_1 - level) ** 2
 
 
 @_preserve_alpha

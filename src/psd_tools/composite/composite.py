@@ -100,8 +100,7 @@ _UNREADABLE = (
 def _has_enabled_effects(layer: Layer) -> bool:
     """Whether the layer carries a layer style Photoshop would draw."""
     try:
-        effects = layer.effects
-        return effects.enabled and any(effect.enabled for effect in effects)
+        return layer.has_effects()
     except _UNREADABLE:
         return False
 
@@ -1820,8 +1819,10 @@ class Compositor:
                 dtype=np.float32,
             )
         )
+        # A non-pass-through group is seeded transparent, so its colour is its
+        # own content and the enclosing group's shape does not weigh on it.
         adjustment_isolated: bool | np.ndarray = isolate_adjustments
-        if not isolate_adjustments and self._adjustment_isolated:
+        if not isolate_adjustments and is_passthrough and self._adjustment_isolated:
             adjustment_isolated = paste(
                 viewport, self._viewport, self._isolation_shape()
             )

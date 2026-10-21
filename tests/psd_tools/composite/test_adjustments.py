@@ -3,6 +3,7 @@ import importlib
 import logging
 import struct
 from collections.abc import Callable
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from psd_tools.api import adjustments
 from psd_tools.api.layers import Group
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite.adjustments import (
+    _rows_from_rgb,
     apply_blackandwhite,
     apply_channelmixer,
     apply_colorbalance,
@@ -23,6 +25,7 @@ from psd_tools.composite.adjustments import (
     apply_threshold,
     apply_vibrance,
 )
+from psd_tools.composite.paint import _from_rgb
 from psd_tools.constants import BlendMode, ColorMode, Tag
 from psd_tools.psd.adjustments import ChannelMixer as ChannelMixerData
 from psd_tools.psd.adjustments import ColorBalance as ColorBalanceData
@@ -418,6 +421,38 @@ def test_a_style_on_a_normal_group_changes_nothing_about_its_adjustments(
     assert not np.array_equal(render(True, styled=True), render(True, styled=False))
 
 
+def test_a_normal_group_in_a_styled_group_adjusts_its_soft_edges_in_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Normal group nested in an isolating group keeps its own adjustments.
+
+    ``Curves 9`` is moved above ``Layer 16``, whose edge is mostly partial
+    coverage, into a Normal group inside ``Group 6``. Styling ``Group 6`` must
+    not weaken the curve on those edge pixels. The style is faked as in the
+    test above.
+    """
+
+    def render(styled: bool, curves_visible: bool = True) -> np.ndarray:
+        psd = PSDImage.open(
+            full_name("adjustments/adjustment_nested_composition_3.psd")
+        )
+        group = psd[4]
+        assert isinstance(group, Group)
+        curves, content = group[0], group[3]
+        assert isinstance(curves, adjustments.Curves)
+        assert content.name == "Layer 16"
+        curves.visible = curves_visible
+        group.create_group([content, curves], blend_mode=BlendMode.NORMAL)
+        monkeypatch.setattr(
+            composite_module, "_has_enabled_effects", lambda layer: styled
+        )
+        return np.asarray(psd.composite(force=True).convert("RGB"), dtype=np.int16)
+
+    plain = render(styled=False)
+    assert np.abs(plain - render(styled=False, curves_visible=False)).max() > 1
+    assert np.abs(render(styled=True) - plain).max() <= 1
+
+
 # Channel mixer
 _IDENTITY_MIX = [[100, 0, 0, 0, 0], [0, 100, 0, 0, 0], [0, 0, 100, 0, 0]]
 _FOURTH_MIX = [0, 0, 0, 100, 0]
@@ -557,6 +592,7 @@ def _gradient_map_layer(data: GradientMapData) -> adjustments.GradientMap:
 _BLACK = (0.0, 0.0, 0.0)
 _WHITE = (1.0, 1.0, 1.0)
 _PRIMARIES = np.array([[[1, 0, 0], [0, 1, 0], [0, 0, 1], [0.5, 0.5, 0.5]]], np.float32)
+_RAMP = np.linspace(0.0, 1.0, 11, dtype=np.float32)[None, :, None].repeat(3, axis=2)
 
 
 def test_gradient_map_maps_luminance_through_the_gradient() -> None:
@@ -652,6 +688,39 @@ def test_gradient_map_clamps_luminance_outside_the_unit_range() -> None:
     assert np.allclose(out[0, 1], blue, atol=1 / 255)
 
 
+def test_gradient_map_reads_a_gray_stop_as_ink() -> None:
+    """A gray stop's component runs 0..10000 from white to black."""
+    data = _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)])
+    for stop, ink in zip(data.color_stops, (10000, 2500), strict=True):
+        stop.mode = 8
+        stop.color = (ink, 0, 0, 0)
+    layer = _gradient_map_layer(data)
+    image = np.array([[[0, 0, 0], [1, 1, 1]]], dtype=np.float32)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    assert np.allclose(out[0, 0], 0.0, atol=1 / 255)
+    assert np.allclose(out[0, 1], 0.75, atol=1 / 255)
+
+
+def test_gradient_map_draws_stops_in_location_order() -> None:
+    red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+    listed = _gradient_map_layer(_gradient_map_data([(4096, 50, blue), (0, 50, red)]))
+    ordered = _gradient_map_layer(_gradient_map_data([(0, 50, red), (4096, 50, blue)]))
+    out = apply_gradientmap(_RAMP, ColorMode.RGB, listed)
+    assert np.array_equal(out, apply_gradientmap(_RAMP, ColorMode.RGB, ordered))
+
+
+@pytest.mark.parametrize("colormode", [ColorMode.CMYK, ColorMode.GRAYSCALE])
+def test_gradient_map_converts_its_table_as_a_fill_would(
+    colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE],
+) -> None:
+    rgb = np.array(
+        [[0, 0, 0], [1, 1, 1], [1, 0, 0], [0.2, 0.5, 0.9], [0.5, 0.5, 0.5]],
+        dtype=np.float32,
+    )
+    expected = [_from_rgb(colormode, tuple(float(v) for v in row)) for row in rgb]
+    assert np.allclose(_rows_from_rgb(colormode, rgb), expected, atol=1e-6)
+
+
 def test_gradient_map_with_a_noise_gradient_leaves_the_image_alone() -> None:
     layer = _gradient_map_layer(
         _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], mode=1)
@@ -662,15 +731,18 @@ def test_gradient_map_with_a_noise_gradient_leaves_the_image_alone() -> None:
 
 # Colour balance
 def _color_balance_layer(
-    midtones: tuple[int, int, int], luminosity: bool
+    midtones: tuple[int, int, int] = (0, 0, 0),
+    *,
+    luminosity: bool,
+    shadows: tuple[int, int, int] = (0, 0, 0),
+    highlights: tuple[int, int, int] = (0, 0, 0),
 ) -> adjustments.ColorBalance:
     layer = PSDImage.open(full_name("fill_adjustments.psd"))[10]
     assert isinstance(layer, adjustments.ColorBalance)
-    layer._data = ColorBalanceData(midtones=midtones, luminosity=luminosity)
+    layer._data = ColorBalanceData(
+        shadows=shadows, midtones=midtones, highlights=highlights, luminosity=luminosity
+    )
     return layer
-
-
-_RAMP = np.linspace(0.0, 1.0, 11, dtype=np.float32)[None, :, None].repeat(3, axis=2)
 
 
 def test_color_balance_midtones_are_a_gamma_per_channel() -> None:
@@ -694,6 +766,34 @@ def test_color_balance_preserving_luminosity_centres_the_amounts() -> None:
     out = apply_colorbalance(_RAMP, ColorMode.RGB, balanced)
     assert np.allclose(out[..., 0], np.sqrt(_RAMP[..., 0]), atol=1 / 255)
     assert np.allclose(out[..., 1], _RAMP[..., 1] ** 2, atol=1 / 255)
+
+
+def test_color_balance_shadows_and_highlights_work_their_own_end() -> None:
+    """A shadow shift moves dark levels most, a highlight shift light ones.
+
+    Neither moves black or white, in either direction, nor another channel.
+    """
+    dark, light = 3, 7
+    for amount in (100, -100):
+        for name, near, far in (("shadows", dark, light), ("highlights", light, dark)):
+            layer = _color_balance_layer(luminosity=False, **{name: (amount, 0, 0)})
+            out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+            shift = out[0, :, 0] - _RAMP[0, :, 0]
+            assert np.allclose(shift[[0, -1]], 0.0, atol=1e-6)
+            assert np.all(np.sign(shift[1:-1]) == np.sign(amount))
+            assert abs(shift[near]) > abs(shift[far])
+            assert np.allclose(out[..., 1:], _RAMP[..., 1:], atol=1 / 255)
+
+
+@pytest.mark.parametrize("name", ["shadows", "highlights"])
+def test_color_balance_preserving_luminosity_centres_every_range(name: str) -> None:
+    preserved = _color_balance_layer(luminosity=True, **{name: (60, 0, 0)})
+    centred = _color_balance_layer(luminosity=False, **{name: (40, -20, -20)})
+    out = apply_colorbalance(_RAMP, ColorMode.RGB, preserved)
+    assert np.allclose(
+        out, apply_colorbalance(_RAMP, ColorMode.RGB, centred), atol=1e-6
+    )
+    assert out[0, 5, 0] > _RAMP[0, 5, 0] > out[0, 5, 1]
 
 
 # Per-channel exponents measured on a Photoshop render of
