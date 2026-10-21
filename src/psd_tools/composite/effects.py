@@ -763,6 +763,12 @@ _GLOW_SIGMA_PER_SIZE = 0.45
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
 
+# The sizes between which an outer glow stops being cast from the layer's
+# opacity and is cast from its coverage instead. Fitted against Photoshop's
+# renders of soft-edged layers at glow sizes from a few pixels to hundreds;
+# the tests pin the values and the crossing.
+_GLOW_COVERAGE_SIZES = (10.0, 30.0)
+
 # What a glow's range is held above, in the same percent, when its falloff is
 # squeezed: a range read as the inverse of the slider would draw a 1% range as
 # a hard band, and Photoshop draws a soft halo. Fitted against Photoshop's
@@ -1199,6 +1205,34 @@ def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
 
 
+def _glow_coverage(alpha: np.ndarray, size: float) -> np.ndarray:
+    """What a glow of ``size`` is cast from.
+
+    Photoshop casts a small glow from the layer's opacity and a large one
+    from its coverage: from where the layer is rather than how opaque it is,
+    so a soft-edged layer glows as the hard shape its edge fades out to and
+    a faint ray casts as much as a solid one. The two readings are crossed
+    between the sizes of :data:`_GLOW_COVERAGE_SIZES`.
+
+    A partial pixel that borders both a clear pixel and an opaque one is an
+    antialiased edge and keeps its coverage, which leaves a hard shape
+    casting from exactly where its edge lies; every other pixel with any
+    coverage counts whole. The neighbours are read along the axes, as
+    :py:func:`_signed_distance` reads a hard step.
+    """
+    alpha = alpha.astype(np.float32)
+    low, high = _GLOW_COVERAGE_SIZES
+    weight = min(max((size - low) / (high - low), 0.0), 1.0)
+    if weight <= 0.0:
+        return alpha
+    covered = alpha > 0.0
+    edge = covered & _grow(~covered) & _grow(alpha >= 1.0)
+    coverage = np.where(edge, alpha, covered).astype(np.float32)
+    if weight >= 1.0:
+        return coverage
+    return (alpha + weight * (coverage - alpha)).astype(np.float32)
+
+
 def glow_falloff(
     shape: np.ndarray,
     *,
@@ -1215,7 +1249,10 @@ def glow_falloff(
     :py:func:`outer_glow_bbox` sizes; the result is ``(height, width)`` on
     it, one at the silhouette's edge and dying away over ``size`` pixels: a
     shadow's matte cast nowhere, squeezed by the range (:py:func:`_ranged`)
-    and then mapped by the contour. It is not cut under the silhouette.
+    and then mapped by the contour. A large glow is cast from the
+    silhouette's coverage rather than its opacity (:py:func:`_glow_coverage`),
+    so a soft edge glows as the hard shape it fades out to. It is not cut
+    under the silhouette.
 
     ``precise`` ramps the matte by its distance from the silhouette instead
     of blurring it (:py:func:`_precise_matte`). A size of zero draws nothing
@@ -1230,7 +1267,7 @@ def glow_falloff(
             "Outer glow parameters must be finite: size=%r spread=%r range=%r"
             % (size, spread, range_)
         )
-    alpha = shape[:, :, 0].astype(np.float32)
+    alpha = _glow_coverage(shape[:, :, 0], size)
     if size <= 0.0 or not alpha.any():
         return np.zeros(alpha.shape, dtype=np.float32)
     if precise:
@@ -1243,15 +1280,25 @@ def glow_falloff(
     return np.clip(falloff, 0.0, 1.0).astype(np.float32)
 
 
-def _beside(coverage: np.ndarray, shape: np.ndarray) -> np.ndarray:
+def _beside(coverage: np.ndarray, shape: np.ndarray, over: float = 0.0) -> np.ndarray:
     """``coverage`` cut away under the silhouette, as ``(height, width, 1)``.
 
-    Cut whatever the layer's own opacity, since Photoshop never shows an
-    outer glow through its layer.
+    The glow has what the silhouette leaves of each pixel, ``1 - shape``,
+    whatever the layer's own opacity: Photoshop never shows an outer glow
+    through its layer. ``over`` is how much of its silhouette the layer
+    paints when it is composited on top, its fill opacity and opacity
+    together. That compositing keeps ``1 - shape * over`` of what lies
+    beneath, so the glow goes on at the ratio of the two and shows at
+    ``1 - shape`` once the layer is on, rather than faded by the layer's
+    edge twice. At zero it is the plain complement, which is what the layer
+    leaves when it paints nothing.
     """
-    return np.clip(coverage * (1.0 - shape[:, :, 0]), 0.0, 1.0).astype(np.float32)[
-        :, :, None
-    ]
+    silhouette = shape[:, :, 0]
+    beside = 1.0 - silhouette
+    if over > 0.0:
+        under = 1.0 - silhouette * over
+        beside = np.divide(beside, under, out=np.zeros_like(beside), where=under > 0.0)
+    return np.clip(coverage * beside, 0.0, 1.0).astype(np.float32)[:, :, None]
 
 
 def glow_paint(
@@ -1260,6 +1307,7 @@ def glow_paint(
     desc: Descriptor,
     shape: np.ndarray,
     falloff: np.ndarray,
+    over: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """What an outer glow is painted with, on ``viewport``: its colour and coverage.
 
@@ -1274,12 +1322,13 @@ def glow_paint(
     less, so a gradient opaque at both ends paints what a solid colour would
     and a translucent stop holds the glow at its opacity for as long as the
     falloff is above it. The gradient's reverse flag turns it around. Either
-    way the coverage is cut away under the silhouette. A descriptor with
-    neither raises as the solid colour reader does.
+    way the coverage is cut away under the silhouette, with ``over`` as
+    :py:func:`_beside` takes it. A descriptor with neither raises as the
+    solid colour reader does.
     """
     if Key.Gradient not in desc:
         color, _ = paint.draw_solid_color_fill(viewport, color_mode, desc)
-        return color, _beside(falloff, shape)
+        return color, _beside(falloff, shape, over)
     along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
@@ -1290,7 +1339,7 @@ def glow_paint(
     coverage = falloff
     if opacities is not None:
         coverage = np.minimum(coverage, np.asarray(opacities(along), dtype=np.float32))
-    return color, _beside(coverage, shape)
+    return color, _beside(coverage, shape, over)
 
 
 def _glow_range(matte: np.ndarray, glow_range: float) -> np.ndarray:

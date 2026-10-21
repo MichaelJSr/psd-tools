@@ -34,7 +34,7 @@ from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
-from .test_composite import _mse
+from .test_composite import _feathered_stroke_layer, _mse
 from .test_drop_shadow import _alone, _around, _contour, _disc, _masks_card
 
 logger = logging.getLogger(__name__)
@@ -130,6 +130,117 @@ def test_a_soft_glow_is_a_drop_shadow_cast_nowhere() -> None:
         _CANVAS, disc, distance=0.0, angle=0.0, size=6.0, spread=30.0
     )
     assert np.allclose(glow, shadow * (1.0 - disc), atol=1e-6)
+
+
+def _soft_disc(size: int, radius: float, hard_radius: float) -> np.ndarray:
+    """A disc fading from opaque at ``hard_radius`` to faint at ``radius``.
+
+    Every pixel of the hard disc of ``radius`` keeps some coverage, so the
+    two discs have the same extent; the ramp is wider than the edge of
+    either, so no pixel of it is an antialiased edge.
+    """
+    centre = size // 2
+    yy, xx = np.mgrid[0:size, 0:size]
+    distance = np.hypot(xx - centre, yy - centre)
+    ramp = np.clip((radius + 1.0 - distance) / (radius + 1.0 - hard_radius), 0.0, 1.0)
+    return (_disc(size, radius)[:, :, 0] * ramp).astype(np.float32)[:, :, None]
+
+
+# The sizes between which a glow crosses from being cast from the layer's
+# opacity to being cast from its coverage, fitted on Photoshop's renders of a
+# corpus of soft-edged layers: lens flares and feathered rings carrying glows
+# from a few pixels to hundreds. Below the crossing their glow is the blur of
+# their opacity to within a few percent; above it, the blur of their coverage.
+_FITTED_COVERAGE_SIZES = (10.0, 30.0)
+_COVERAGE_SIZE = 32.0
+
+
+def test_the_coverage_crossing_sizes_are_the_fitted_constants() -> None:
+    """A fit, so a change to it is a measured change."""
+    assert effects._GLOW_COVERAGE_SIZES == _FITTED_COVERAGE_SIZES
+
+
+@pytest.mark.parametrize("precise", [False, True], ids=["soft", "precise"])
+def test_a_large_glow_on_a_soft_edged_disc_is_the_hard_discs(precise: bool) -> None:
+    """A large glow is cast from the silhouette's coverage, not its opacity.
+
+    Outside the ramp the soft disc's glow is the hard disc's, pixel for
+    pixel; over the ramp it is the hard disc's falloff cut by what the ramp
+    leaves. Cast from the opacity it would be a fraction of that, since most
+    of the soft disc is faint.
+    """
+    hard = _disc(121, _RADIUS)
+    soft = _soft_disc(121, _RADIUS, 4.0)
+    partial = (soft > 0.0) & (soft < 1.0)
+    assert partial.sum() > 0.8 * (hard > 0.0).sum(), "the disc is not soft"
+
+    falloff = effects.glow_falloff(
+        hard, size=_COVERAGE_SIZE, spread=0.0, range_=100.0, precise=precise
+    )
+    glow = _glow(soft, size=_COVERAGE_SIZE, precise=precise)
+    assert np.allclose(glow, falloff[:, :, None] * (1.0 - soft), atol=1e-6)
+    outside = hard[:, :, 0] == 0.0
+    hard_glow = _glow(hard, size=_COVERAGE_SIZE, precise=precise)
+    assert np.array_equal(glow[outside], hard_glow[outside])
+    if not precise:
+        from_opacity = effects._soft_matte(soft[:, :, 0], _COVERAGE_SIZE, 0.0, 0.45)
+        assert float(glow[outside].max()) > 1.5 * float(from_opacity[outside].max())
+
+
+def test_a_small_glow_on_a_soft_edged_disc_is_cast_from_its_opacity() -> None:
+    """Below the crossing the soft disc glows by its opacity, and so fainter.
+
+    Between the two sizes the glow is crossed from one reading to the other,
+    so it sits strictly between them.
+    """
+    hard = _disc(81, _RADIUS)
+    soft = _soft_disc(81, _RADIUS, 4.0)
+    outside = hard[:, :, 0] == 0.0
+    low, high = _FITTED_COVERAGE_SIZES
+    small, large = _glow(soft, size=low)[outside], _glow(hard, size=low)[outside]
+    assert float(small.max()) < 0.5 * float(large.max())
+    assert np.allclose(
+        small,
+        effects._beside(effects._soft_matte(soft[:, :, 0], low, 0.0, 0.45), soft)[
+            outside
+        ],
+    )
+    middle = (low + high) / 2.0
+    between = _glow(soft, size=middle)[outside]
+    from_opacity = effects._beside(
+        effects._soft_matte(soft[:, :, 0], middle, 0.0, 0.45), soft
+    )
+    from_coverage = _glow(hard, size=middle)
+    assert np.all(between >= from_opacity[outside] - 1e-6)
+    assert np.all(between <= from_coverage[outside] + 1e-6)
+    assert float((between - from_opacity[outside]).max()) > 0.05
+    assert float((from_coverage[outside] - between).max()) > 0.05
+
+
+def test_the_coverage_keeps_an_antialiased_edge_and_counts_the_rest_whole() -> None:
+    """A partial pixel between clear and opaque keeps its value; any other counts as one.
+
+    A hard shape's antialiased edge is left where it lies, so its glow starts
+    where the edge does. A feather's pixels border other partial pixels and
+    a faint ray borders nothing opaque, and both are cast from whole.
+    """
+    alpha = np.zeros((9, 9), dtype=np.float32)
+    alpha[:, :4] = 1.0
+    alpha[:, 4] = 0.3  # an antialiased edge: opaque on one side, clear on the other
+    alpha[1, 7] = 0.05  # a faint, isolated pixel
+    alpha[6:8, 6:9] = 0.4  # a patch with no opaque neighbour
+    coverage = effects._glow_coverage(alpha, _COVERAGE_SIZE)
+    assert np.all(coverage[:, :4] == 1.0)
+    assert np.allclose(coverage[:, 4], 0.3)
+    assert coverage[1, 7] == 1.0
+    assert np.all(coverage[6:8, 6:9] == 1.0)
+    assert np.all(coverage[alpha == 0.0] == 0.0)
+
+    feather = np.zeros((5, 12), dtype=np.float32)
+    feather[:, :6] = np.linspace(1.0, 0.1, 6)[None, :]
+    assert np.all(effects._glow_coverage(feather, _COVERAGE_SIZE)[:, :6] == 1.0)
+    low = _FITTED_COVERAGE_SIZES[0]
+    assert np.array_equal(effects._glow_coverage(feather, low), feather)
 
 
 # The width of the gaussian that stands in for Photoshop's blur, per pixel of
@@ -493,6 +604,38 @@ def test_fill_opacity_leaves_the_glow_alone_and_the_layer_still_hides_it() -> No
     assert float(faded[y, under, 0]) == 0.0
 
 
+def test_a_layer_over_its_glow_leaves_it_what_its_coverage_leaves() -> None:
+    """Under a partial pixel the glow shows for the part the layer does not paint.
+
+    ``feathered-stroke.psd``'s square fades across a 6 px mask ramp. Its hard
+    glow, large enough to be cast from the square's coverage, reaches past
+    the viewport on every side, and over the ramp the glow and the
+    square together cover every pixel whole: the glow has ``1 - alpha`` of
+    each. Cut by ``1 - alpha`` and then composited under the layer as well,
+    it would have ``(1 - alpha)`` squared and leave the ramp translucent. At
+    fill opacity zero the square paints nothing, and the glow has the plain
+    ``1 - alpha``.
+    """
+    psd, layer = _feathered_stroke_layer("Outset 6")
+    _hard_glow(layer, size=_COVERAGE_SIZE)
+    viewport = _around(layer, 8)
+    mask = layer.numpy("mask")
+    assert mask is not None
+    ramp = mask[mask.shape[0] // 2, :, 0]
+    assert np.all((ramp[:6] > 0.0) & (ramp[:6] < 1.0)), ramp
+
+    alpha = _alone(layer, viewport)
+    y = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1]
+    x0 = layer.bbox[0] - viewport[0]
+    row = alpha[y, :, 0]
+    assert np.allclose(row, 1.0, atol=1e-6), row
+
+    layer.tagged_blocks.set_data(Tag.BLEND_FILL_OPACITY, ByteElement(0))
+    unpainted = _alone(layer, viewport)[y, :, 0]
+    assert np.allclose(unpainted[x0 : x0 + 6], 1.0 - ramp[:6], atol=1e-6)
+    assert np.allclose(unpainted[x0 - 4 : x0], 1.0, atol=1e-6)
+
+
 def _over_grey(layer: Layer, viewport: tuple[int, int, int, int]) -> np.ndarray:
     """The layer composited over an opaque mid-grey backdrop."""
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
@@ -803,7 +946,7 @@ def test_a_glow_whose_gradient_stop_is_nan_still_renders_finite(
 #   gradient's transparency as a cap on the falloff: scaling the falloff by
 #   it scores above it.
 _PREVIEWS = [
-    ("layer_effects.psd", (56, 98, 541, 164), 1.7e-4, 4e-3),
+    ("layer_effects.psd", (56, 98, 541, 164), 1e-5, 4e-3),
     ("layer_params.psb", (130, 230, 470, 560), 3.2e-4, 5e-3),
 ]
 
