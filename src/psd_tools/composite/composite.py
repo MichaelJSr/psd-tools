@@ -3189,6 +3189,8 @@ class Compositor:
                 widen=self._widen,
                 color_mode=self._color_mode,
                 cache=self._cache,
+                # Only the alpha and shape are read, which text gamma leaves.
+                text_gamma=None,
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
