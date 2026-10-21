@@ -3,8 +3,11 @@
 Three fixtures carry a type layer Photoshop composited under its "Blend Text
 Colors Using Gamma" preference into their preview -- ``text.psb``,
 ``masks2.psb`` and ``artboard.psd`` -- and ``layer_effects.psd`` adds one
-with each effect. The cases the corpus does not pair with a type layer (a
-styled group around one, a blend mode, a grey or CMYK canvas) are forged.
+with each effect. Four carry type layers Photoshop composited straight, as
+stored pixels: ``masks.psb`` (fonts substituted), ``text.psd`` (text data
+without ``bounds``) and the 32-bit ``pen-text.psd`` and ``pen-text.psb``.
+The cases the corpus does not pair with a type layer (a styled group around
+one, a blend mode) are forged.
 """
 
 import copy
@@ -15,8 +18,9 @@ import pytest
 
 from psd_tools.api.layers import Group, Layer, TypeLayer
 from psd_tools.api.psd_image import PSDImage
+from psd_tools.composite import composite
 from psd_tools.composite.blend import get_blend_func
-from psd_tools.composite.composite import Compositor
+from psd_tools.composite.composite import Compositor, _blends_in_text_space
 from psd_tools.composite.text_blend import (
     TEXT_BLEND_GAMMA,
     from_text_space,
@@ -127,6 +131,102 @@ def test_pixels_the_text_leaves_alone_are_untouched() -> None:
     assert not np.array_equal(
         straight[top:bottom, left:right], blended[top:bottom, left:right]
     )
+
+
+# -- Which layers Photoshop blends in the gamma ----------------------------- #
+
+
+def _edge_errors(psd: PSDImage, text_gamma: float | None) -> list[float]:
+    """The edge error of every visible type layer, composited through the API."""
+    color, _, _ = composite(psd, force=True, text_gamma=text_gamma)
+    return [_edge_error(psd, color, layer) for layer in _type_layers(psd)]
+
+
+def test_a_substituted_font_keeps_its_stored_raster() -> None:
+    """A flagged layer mixes straight; the same layer unflagged mixes in the gamma.
+
+    ``masks.psb`` carries ``substitutesUsed`` on every type layer, its twin
+    ``masks.psd`` on none.
+    """
+    substituted = PSDImage.open(full_name("masks.psb"))
+    assert all(
+        layer._data.text_data.get(b"substitutesUsed")
+        for layer in _type_layers(substituted)
+    )
+    default, _, _ = composite(substituted, force=True)
+    straight, _, _ = composite(substituted, force=True, text_gamma=None)
+    assert np.array_equal(default, straight)
+    assert max(_edge_errors(substituted, TEXT_BLEND_GAMMA)) <= _EDGE_BOUND
+
+    rendered = PSDImage.open(full_name("masks.psd"))
+    assert not any(
+        layer._data.text_data.get(b"substitutesUsed")
+        for layer in _type_layers(rendered)
+    )
+    blended = _edge_errors(rendered, TEXT_BLEND_GAMMA)
+    mixed = _edge_errors(rendered, None)
+    assert len(blended) == 6
+    assert all(b < m - 2.0 for b, m in zip(blended, mixed, strict=True))
+
+
+def test_text_data_without_bounds_keeps_its_stored_raster() -> None:
+    """``text.psd`` lacks the ``bounds`` key its ``text.psb`` twin carries."""
+    stale = PSDImage.open(full_name("text.psd"))
+    assert b"bounds" not in next(_type_layers(stale))._data.text_data
+    assert _edge_errors(stale, TEXT_BLEND_GAMMA) == _edge_errors(stale, None)
+    assert max(_edge_errors(stale, TEXT_BLEND_GAMMA)) <= _EDGE_BOUND
+
+    current = PSDImage.open(full_name("text.psb"))
+    assert b"bounds" in next(_type_layers(current))._data.text_data
+    assert max(_edge_errors(current, TEXT_BLEND_GAMMA)) <= _EDGE_BOUND
+    assert min(_edge_errors(current, None)) > 20.0
+
+
+@pytest.mark.parametrize("filename", ["pen-text.psd", "pen-text.psb"])
+def test_a_32_bit_document_mixes_straight(filename: str) -> None:
+    """Linear channels are mixed as they are, ``bounds`` or not."""
+    psd = PSDImage.open(full_name(filename))
+    assert psd.depth == 32
+    assert _edge_errors(psd, TEXT_BLEND_GAMMA) == _edge_errors(psd, None)
+    assert max(_edge_errors(psd, TEXT_BLEND_GAMMA)) <= _EDGE_BOUND
+
+
+def test_only_an_rgb_document_blends_in_the_gamma() -> None:
+    """The space is built on the sRGB curve, which no other mode's channels follow."""
+    psd = PSDImage.open(full_name("text.psb"))
+    layer = next(_type_layers(psd))
+    assert _blends_in_text_space(layer, ColorMode.RGB)
+    assert _blends_in_text_space(layer, None)
+    assert not _blends_in_text_space(layer, ColorMode.CMYK)
+    assert not _blends_in_text_space(layer, ColorMode.GRAYSCALE)
+    pixels = next(
+        layer
+        for layer in PSDImage.open(full_name("masks.psd")).descendants()
+        if not isinstance(layer, TypeLayer)
+    )
+    assert not _blends_in_text_space(pixels, ColorMode.RGB)
+
+
+def test_text_gamma_reaches_every_composite_method() -> None:
+    """``None`` on the document, a layer and an artboard restores the straight mix."""
+    psd = PSDImage.open(full_name("text.psb"))
+    assert not np.array_equal(
+        np.asarray(psd.composite(force=True)),
+        np.asarray(psd.composite(force=True, text_gamma=None)),
+    )
+    # A layer composites over a transparent backdrop, so the difference needs
+    # something of the layer's own under the glyph edge: its stroke band.
+    _, layer = _layer_effects("Stroke")
+    default = layer.composite(force=True)
+    straight = layer.composite(force=True, text_gamma=None)
+    assert default is not None and straight is not None
+    assert not np.array_equal(np.asarray(default), np.asarray(straight))
+
+    artboard = PSDImage.open(full_name("artboard.psd"))[0]
+    default = artboard.composite(force=True)
+    straight = artboard.composite(force=True, text_gamma=None)
+    assert default is not None and straight is not None
+    assert not np.array_equal(np.asarray(default), np.asarray(straight))
 
 
 # -- Effects ---------------------------------------------------------------- #
@@ -254,21 +354,11 @@ def _expected(
     return float(from_text_space(mixed)[0])
 
 
-@pytest.mark.parametrize(
-    ("channels", "color_mode"),
-    [(3, ColorMode.RGB), (1, ColorMode.GRAYSCALE), (4, ColorMode.CMYK)],
-)
 @pytest.mark.parametrize("blend_mode", [BlendMode.NORMAL, BlendMode.MULTIPLY])
-def test_the_mix_is_by_coverage_in_the_text_space(
-    channels: int, color_mode: ColorMode, blend_mode: BlendMode
-) -> None:
-    """Every channel of every mode takes the same mix.
-
-    The blend mode still sees the document's values; only the mix by
-    coverage is in the text space.
-    """
-    pixel = _mixed_pixel(channels, color_mode, 0.8, 0.3, 0.5, blend_mode)
+def test_the_mix_is_by_coverage_in_the_text_space(blend_mode: BlendMode) -> None:
+    """The blend mode sees the document's values; the mix by coverage does not."""
+    pixel = _mixed_pixel(3, ColorMode.RGB, 0.8, 0.3, 0.5, blend_mode)
     expected = _expected(0.8, 0.3, 0.5, blend_mode)
-    assert pixel == pytest.approx(np.full(channels, expected), abs=1e-6)
+    assert pixel == pytest.approx(np.full(3, expected), abs=1e-6)
     straight = 0.5 * 0.3 * (1 if blend_mode == BlendMode.NORMAL else 0.8) + 0.5 * 0.8
     assert abs(expected - straight) > 0.02
