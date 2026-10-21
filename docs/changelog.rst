@@ -4,6 +4,12 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A type layer's anti-aliased edges are now composited the way
+  Photoshop's "Blend Text Colors Using Gamma" preference does at its default
+  of 1.45, instead of by a straight mix; glyph edges in a document composited
+  from its layers match Photoshop's. Inside a group that carries a layer
+  style the text meets only what the group itself has painted, as Photoshop
+  renders such a group as one layer
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a

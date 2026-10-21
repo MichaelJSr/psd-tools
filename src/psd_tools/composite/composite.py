@@ -26,6 +26,7 @@ from psd_tools.api.layers import (
     GroupMixin,
     Layer,
     ShapeLayer,
+    TypeLayer,
 )
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.psd_image import PSDImage
@@ -55,6 +56,11 @@ from psd_tools.composite.effects import (
     shadow_geometry,
     stroke_band,
     stroke_bbox,
+)
+from psd_tools.composite.text_blend import (
+    TEXT_BLEND_GAMMA,
+    from_text_space,
+    to_text_space,
 )
 from psd_tools.composite.widen import make_widen
 from psd_tools.constants import (
@@ -1172,6 +1178,9 @@ class _Source:
     # in: fill opacity fades the layer's own paint without narrowing the hole
     # it punches, which is what makes "fill 0 under a knockout" a hole at all.
     knockout_shape: np.ndarray
+    # The gamma a type layer's edge coverage blends in, or None to blend in
+    # the document's encoding like every other source.
+    text_gamma: float | None = None
 
 
 def _composites_as_passthrough(source: _Source, blend_mode: BlendMode) -> bool:
@@ -1405,10 +1414,20 @@ class Compositor:
         widen: _Widen = _widen,
         color_mode: ColorMode | None = None,
         cache: _PassCache | None = None,
+        text_gamma: float | None = TEXT_BLEND_GAMMA,
+        text_isolated: bool = False,
     ):
         self._viewport = viewport
         self._layer_filter = layer_filter
         self._force = force
+        # The space a type layer's edge blends in, or None for the document's
+        # encoding. ``text_isolated`` is whether that edge meets only what
+        # this compositor has painted itself: Photoshop renders a group it
+        # cannot pass through -- one that carries a layer style -- as one
+        # layer, so the text inside never meets the backdrop the group was
+        # seeded with here for its children's blend modes.
+        self._text_gamma = text_gamma
+        self._text_isolated = text_isolated
         self._mask_repeats: dict[int, bool] = {}
         # How a one-channel array becomes this compositor's width. Carried
         # rather than derived because the four sites that need it below are
@@ -1593,6 +1612,7 @@ class Compositor:
             knockout=knockout,
             adjustment_isolated=adjustment_isolated,
             knockout_shape=shape,
+            text_gamma=self._text_gamma if isinstance(layer, TypeLayer) else None,
         )
 
     def _composite_source(self, source: _Source, blend_mode: BlendMode) -> None:
@@ -1618,6 +1638,7 @@ class Compositor:
             source.alpha * source.fill_opacity,
             blend_mode,
             source.knockout,
+            text_gamma=source.text_gamma,
         )
 
     def _compose_effects(
@@ -1804,10 +1825,19 @@ class Compositor:
         alpha: np.ndarray,
         blend_mode: BlendMode,
         knockout: Knockout = Knockout.NONE,
+        text_gamma: float | None = None,
     ) -> None:
+        """Put a source on the canvases.
+
+        ``text_gamma`` is the space a type layer's coverage mixes its colour
+        with the backdrop in -- see :py:mod:`psd_tools.composite.text_blend`.
+        The blend mode still sees the document's values; only the mix by
+        coverage moves into that space.
+        """
         color = self._fit_source(color)
         knockout_color, knockout_alpha = self._knockout_backdrop(knockout)
 
+        alpha_g_previous = self._alpha_g
         self._shape_g = cast(np.ndarray, utils.union(self._shape_g, shape))
         if knockout:
             self._alpha_g = (
@@ -1822,6 +1852,20 @@ class Compositor:
         color_b = knockout_color if knockout else self._color
 
         blend_fn = get_blend_func(blend_mode, self._color_mode)
+        if text_gamma is not None:
+            self._color = self._mix_in_text_space(
+                color,
+                shape,
+                alpha,
+                alpha_previous,
+                alpha_g_previous,
+                color_b,
+                alpha_b,
+                blend_fn,
+                text_gamma,
+                isolated=self._text_isolated and not knockout,
+            )
+            return
         color_t = (shape - alpha) * alpha_b * color_b + alpha * (
             (1.0 - alpha_b) * color + alpha_b * blend_fn(color_b, color)
         )
@@ -1830,6 +1874,87 @@ class Compositor:
                 (1.0 - shape) * alpha_previous * self._color + color_t, self._alpha
             )
         )
+
+    def _mix_in_text_space(
+        self,
+        color: np.ndarray,
+        shape: np.ndarray,
+        alpha: np.ndarray,
+        alpha_previous: np.ndarray,
+        alpha_g_previous: np.ndarray,
+        color_b: np.ndarray,
+        alpha_b: np.ndarray,
+        blend_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+        text_gamma: float,
+        isolated: bool,
+    ) -> np.ndarray:
+        """The colour canvas after a type layer goes on.
+
+        The same mix as :py:meth:`_apply_source`, with every colour taken into
+        the text blend space first and the result brought back. Computed in
+        double precision and only on the rows and columns the source covers:
+        the transform is a round trip for every pixel the source leaves
+        alone, which single precision does not return exactly.
+
+        ``isolated`` mixes against what this compositor has painted on its own
+        -- the canvas with the seeded backdrop taken back out, as
+        :py:meth:`result_isolated` does -- and puts the result back over that
+        backdrop, so the canvas keeps standing over it for the layers to come.
+        The blend mode still sees the canvas: a pass-through group's children
+        blend with the backdrop whether or not the group is styled.
+        """
+        rows = np.flatnonzero(shape.any(axis=(1, 2)))
+        columns = np.flatnonzero(shape.any(axis=(0, 2)))
+        if not len(rows) or not len(columns):
+            return self._color
+        box = (slice(rows[0], rows[-1] + 1), slice(columns[0], columns[-1] + 1))
+        color = color[box].astype(np.float64)
+        previous: np.ndarray = self._color[box].astype(np.float64)
+        shape = shape[box]
+        alpha = alpha[box]
+        alpha_new = self._alpha[box]
+        alpha_b = alpha_b[box].astype(np.float64)
+        backdrop = (
+            previous if color_b is self._color else color_b[box].astype(np.float64)
+        )
+        source = to_text_space(
+            (1.0 - alpha_b) * color + alpha_b * blend_fn(backdrop, color), text_gamma
+        )
+        if isolated:
+            color_0 = self._color_0[box].astype(np.float64)
+            alpha_0 = self._alpha_0[box].astype(np.float64)
+            alpha_b = alpha_g_previous[box].astype(np.float64)
+            # The content so far, un-mixed from the backdrop it stands over;
+            # where there is none its colour carries no weight below.
+            previous = utils.divide(
+                previous * alpha_previous[box] - (1.0 - alpha_b) * alpha_0 * color_0,
+                alpha_b,
+                fill=0.0,
+            )
+            backdrop = previous
+            alpha_new = self._alpha_g[box]
+        previous = to_text_space(previous, text_gamma)
+        backdrop = (
+            previous if backdrop is previous else to_text_space(backdrop, text_gamma)
+        )
+        if isolated:
+            kept = (1.0 - alpha) * alpha_b * previous
+        else:
+            kept = (1.0 - shape) * alpha_previous[box] * previous + (
+                shape - alpha
+            ) * alpha_b * backdrop
+        mixed = from_text_space(
+            utils.divide(kept + alpha * source, alpha_new), text_gamma
+        )
+        if isolated:
+            mixed = utils.divide(
+                alpha_new * mixed + (1.0 - alpha_new) * alpha_0 * color_0,
+                self._alpha[box],
+                fill=mixed,
+            )
+        result = self._color.copy()
+        result[box] = utils.clip(mixed)
+        return result
 
     def _apply_adjustment(self, layer: AdjustmentLayer) -> None:
         adjustment_fn = ADJUSTMENT_FUNC.get(layer.kind)
@@ -2028,6 +2153,10 @@ class Compositor:
             widen=self._widen,
             color_mode=self._color_mode,
             cache=self._cache,
+            text_gamma=self._text_gamma,
+            # A group composited as an ordinary source is rendered as one
+            # layer, and so is every group inside it.
+            text_isolated=self._text_isolated or isolate_adjustments,
         )
 
         for sublayer in cast(GroupMixin, layer):
@@ -2218,6 +2347,7 @@ class Compositor:
             widen=self._widen,
             color_mode=self._color_mode,
             cache=self._cache,
+            text_gamma=self._text_gamma,
         )
         for clip_layer in layer.clip_layers:
             compositor.apply(clip_layer, clip_compositing=True)
