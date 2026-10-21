@@ -573,7 +573,9 @@ class BevelEmboss(_Effect, _AngleMixin):
 
     @property
     def altitude(self) -> float:
-        """Altitude value in angle."""
+        """Altitude in degrees, the document's global one under global light."""
+        if self.use_global_light:
+            return float(self._image_resources.get_data(Resource.GLOBAL_ALTITUDE, 30))
         return get_scalar(self.descriptor, Key.LocalLightingAltitude, float, 30.0)
 
     @property

@@ -77,6 +77,18 @@ def test_bevel(fixture: PSDImage) -> None:
     assert effect.use_texture is False
 
 
+def test_bevel_altitude_follows_the_global_light() -> None:
+    """``layer_params.psb`` sets its global altitude to 40; the descriptor says 30."""
+    psd = PSDImage.open(full_name("layer_params.psb"))
+    layer = next(layer for layer in psd.descendants() if layer.name == "Test caption")
+    effect = next(iter(layer.effects.find("bevelemboss")))
+    assert isinstance(effect, effects.BevelEmboss)
+    assert effect.use_global_light is True
+    assert effect.altitude == 40.0
+    effect.descriptor[Key.UseGlobalAngle] = Bool(False)
+    assert effect.altitude == 30.0
+
+
 def test_emboss(fixture: PSDImage) -> None:
     effect = fixture[2].effects[0]
     assert isinstance(effect, effects.BevelEmboss)

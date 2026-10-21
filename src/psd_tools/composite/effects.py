@@ -34,7 +34,17 @@ Currently supported effects:
     blend mode, and an inner glow's source, technique and range; noise is
     read but not applied, and a gradient glow is not drawn
 
-Not supported: satin, bevel and emboss.
+- **Satin**: Two offset, blurred copies of the silhouette and their difference,
+  painted inside the layer
+  - Honors distance, angle, size, contour, invert, opacity and blend mode
+- **Bevel and emboss**: The silhouette as a height field, lit from the angle
+  and altitude (including global light)
+  - Inner, outer, emboss and pillow emboss styles; smooth, chisel hard and
+    chisel soft techniques; depth, direction, size, soften, gloss contour and
+    the highlight and shadow colors, modes and opacities
+  - Stroke emboss, the shape contour and the texture are not drawn, chisel
+    soft rounds its faces by a guess, and the blurs are gaussian
+    approximations of Photoshop's own
 
 The main function :py:func:`draw_stroke_effect` handles stroke rendering by:
 
@@ -81,7 +91,7 @@ from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite import paint
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.utils import divide
-from psd_tools.constants import ColorMode
+from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key
 
@@ -1308,3 +1318,314 @@ def draw_inner_glow(
     if contour is not None:
         matte = _contoured(matte, contour, anti_aliased)
     return (matte * alpha)[:, :, None]
+
+
+# How wide a gaussian stands in for the blur of a satin, and for the blur
+# that rounds a smooth bevel, per pixel of the effect's size; how far a
+# bevel's soften blurs its shading per pixel of soften; and how steep a
+# bevel's faces are at a depth of 100%. Fitted against Photoshop's previews,
+# and asserted in the tests.
+_SATIN_SIGMA_PER_SIZE = 0.45
+_BEVEL_SIGMA_PER_SIZE = 0.45
+_SOFTEN_SIGMA_PER_SIZE = 0.45
+_BEVEL_SLOPE_PER_DEPTH = 1.0
+
+# How wide the gaussian that rounds a chisel soft bevel's faces is, per pixel
+# of size, and how far it reads, in sigmas. Not fitted: no fixture preview
+# carries the technique. The reach is what ``bevel_reach`` adds for it.
+_SLOPE_LIMIT_SIGMA_PER_SIZE = 0.125
+_SLOPE_LIMIT_TRUNCATE = 4.0
+
+# What a pixel of a satin's or a bevel's canvas costs at its peak: the
+# silhouette, two shifted and blurred mattes or a height field and its two
+# gradients, and the float64 transients of the filters.
+_INNER_BYTES = 64
+
+# What a satin's distance and size, and a bevel's depth and size, read as
+# for a descriptor that leaves them out: the same values as the API getters.
+_SATIN_DEFAULT = 120.0
+_BEVEL_DEFAULT = 0.0
+
+# The styles whose surface stands beside the layer.
+_BEVEL_BESIDE = (BevelStyle.OUTER_BEVEL, BevelStyle.EMBOSS, BevelStyle.PILLOW_EMBOSS)
+
+
+def _finite(what: str, **values: float) -> None:
+    """Raise ``ValueError`` if any of ``values`` is not finite."""
+    if not all(math.isfinite(value) for value in values.values()):
+        raise ValueError(
+            "%s parameters must be finite: %s"
+            % (what, " ".join("%s=%r" % item for item in values.items()))
+        )
+
+
+def _blur(alpha: np.ndarray, sigma: float, radius: float) -> np.ndarray:
+    """``alpha`` blurred by a gaussian of ``sigma`` cut off at ``radius``.
+
+    What lies past the canvas is empty, as for a drop shadow's blur.
+    """
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    if sigma <= 1e-3 or radius < 1.0:
+        return alpha
+    return ndimage.gaussian_filter(
+        alpha, sigma, mode="constant", cval=0.0, truncate=radius / sigma
+    )
+
+
+def inner_bbox(
+    bbox: tuple[int, int, int, int],
+    reach: float,
+    max_alloc_bytes: AllocBudget | None = None,
+) -> tuple[int, int, int, int]:
+    """The canvas a satin or a bevel is drawn on: ``bbox`` grown by ``reach``.
+
+    The silhouette is read on this box, so that a blur or an offset near the
+    viewport's edge sees the layer past it rather than an edge that is not
+    there (#804). The two pixels added on top are the blur's antialiased
+    fringe and the offset's interpolation. Checked against the per-axis limit
+    and ``max_alloc_bytes`` as :py:func:`drop_shadow_bbox` is, raising
+    :class:`ValueError`. An empty ``bbox`` is returned untouched.
+    """
+    if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+        return bbox
+    margin = math.ceil(max(reach, 0.0)) + 2
+    grown = (bbox[0] - margin, bbox[1] - margin, bbox[2] + margin, bbox[3] + margin)
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    check_pixel_size(
+        width,
+        height,
+        max_alloc_bytes=max_alloc_bytes,
+        estimated_bytes=width * height * _INNER_BYTES,
+        warn=False,
+    )
+    return grown
+
+
+def satin_geometry(desc: Descriptor) -> tuple[float, float]:
+    """A satin's ``(distance, size)``, read as :py:func:`shadow_geometry` reads."""
+    distance = float(desc.get(Key.Distance, _SATIN_DEFAULT))
+    size = float(desc.get(Key.Blur, _SATIN_DEFAULT))
+    _finite("Satin", distance=distance, size=size)
+    return distance, min(max(size, 0.0), _MAX_STROKE_SIZE)
+
+
+def draw_satin(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    distance: float,
+    angle: float,
+    size: float,
+    inverted: bool,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+) -> np.ndarray:
+    """The coverage a satin paints inside ``shape``, on ``viewport``.
+
+    Two copies of the silhouette, moved ``distance`` either way along
+    ``angle`` and each blurred by ``size``, and the absolute difference of the
+    two: none where they agree, up to full where one edge passes the other. Photoshop
+    states it on the inverted silhouette, which comes to the same difference.
+    Then ``contour``, read as :py:func:`draw_drop_shadow` reads it, then the
+    inversion, and the result masked by ``shape``. ``(height, width, 1)``.
+
+    :py:func:`inner_bbox` grown by ``distance + size`` gives the canvas, which
+    keeps the edges the blur and the offsets bring in from past it away from
+    the layer.
+    """
+    _require_scipy("Satin effects")
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    _finite("Satin", distance=distance, angle=angle, size=size)
+    alpha = shape[:, :, 0].astype(np.float32)
+    dx, dy = _shadow_offset(distance, angle)
+    size = max(float(size), 0.0)
+    copies = []
+    for sign in (1.0, -1.0):
+        moved = alpha
+        if dx or dy:
+            moved = ndimage.shift(
+                alpha, (sign * dy, sign * dx), order=1, mode="constant", cval=0.0
+            )
+        copies.append(_blur(moved, size * _SATIN_SIGMA_PER_SIZE, size))
+    satin = np.clip(np.abs(copies[0] - copies[1]), 0.0, 1.0)
+    if contour is not None:
+        satin = _contoured(satin, contour, anti_aliased)
+    if inverted:
+        satin = 1.0 - satin
+    return (satin * alpha)[:, :, None].astype(np.float32)
+
+
+def bevel_geometry(desc: Descriptor) -> tuple[float, float, float]:
+    """A bevel's ``(depth, size, soften)``, read as :py:func:`shadow_geometry` reads.
+
+    Depth is in percent, size and soften in pixels; each is held to zero or
+    more, and size and soften to what Photoshop can write.
+    """
+    depth = float(desc.get(Key.StrengthRatio, _BEVEL_DEFAULT))
+    size = float(desc.get(Key.Blur, _BEVEL_DEFAULT))
+    soften = float(desc.get(Key.Softness, 0.0))
+    _finite("Bevel", depth=depth, size=size, soften=soften)
+    return (
+        max(depth, 0.0),
+        min(max(size, 0.0), _MAX_STROKE_SIZE),
+        min(max(soften, 0.0), _MAX_STROKE_SIZE),
+    )
+
+
+def bevel_reach(size: float, soften: float, technique: bytes) -> float:
+    """How far a bevel's canvas has to reach past the layer.
+
+    The widest band beside it, the blurs that read across the edge, and for
+    a chisel soft bevel the rounding that reads past the band.
+    """
+    reach = size + soften
+    if technique == BevelTechnique.SLOPE_LIMIT_MATTE:
+        reach += size * _SLOPE_LIMIT_SIGMA_PER_SIZE * _SLOPE_LIMIT_TRUNCATE
+    return reach
+
+
+def bevel_beside(style: bytes) -> bool:
+    """Whether a bevel style paints beside the layer, outside its silhouette."""
+    return style in _BEVEL_BESIDE
+
+
+def bevel_inside(style: bytes) -> bool:
+    """Whether a bevel style paints inside the layer's silhouette."""
+    return style != BevelStyle.OUTER_BEVEL
+
+
+def _bevel_height(
+    alpha: np.ndarray, style: bytes, technique: bytes, size: float
+) -> np.ndarray:
+    """The bevel's surface over the canvas, in pixels of height.
+
+    Each style is a band ``size`` pixels wide at the silhouette's edge,
+    rising toward the layer: inside it for an inner bevel, outside it for an
+    outer one, half on each side for an emboss. A pillow emboss is split as
+    an emboss is but rises away from the edge on both sides, which sinks the
+    edge into what lies under it.
+
+    A chisel hard bevel climbs that band at a constant slope along the
+    signed distance to the edge; a chisel soft one is the same surface
+    rounded off. A smooth bevel is the silhouette blurred across the band,
+    so it is steepest at the edge and flattens away from it.
+    """
+    half = style in (BevelStyle.EMBOSS, BevelStyle.PILLOW_EMBOSS)
+    width = size / 2.0 if half else size
+    if width <= 0.0:
+        return np.zeros(alpha.shape, dtype=np.float32)
+    if technique not in (
+        BevelTechnique.PRECISE_MATTE,
+        BevelTechnique.SLOPE_LIMIT_MATTE,
+    ):
+        # The blur reaches a pixel short of the band, so that the band's
+        # width counts the edge pixel.
+        height = _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
+        if style == BevelStyle.PILLOW_EMBOSS:
+            height = np.where(alpha >= 0.5, height, 1.0 - height)
+        return (height * width).astype(np.float32)
+
+    distance = _signed_distance(alpha, size + 1.0)
+    if style == BevelStyle.OUTER_BEVEL:
+        height = np.clip(width - distance, 0.0, width)
+    elif style == BevelStyle.EMBOSS:
+        height = np.clip(width - distance, 0.0, 2.0 * width)
+    elif style == BevelStyle.PILLOW_EMBOSS:
+        height = np.clip(np.abs(distance), 0.0, width)
+    else:
+        height = np.clip(-distance, 0.0, width)
+    height = height.astype(np.float32)
+    if technique == BevelTechnique.SLOPE_LIMIT_MATTE:
+        from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+        sigma = size * _SLOPE_LIMIT_SIGMA_PER_SIZE
+        if sigma > 1e-3:
+            height = ndimage.gaussian_filter(
+                height, sigma, mode="nearest", truncate=_SLOPE_LIMIT_TRUNCATE
+            )
+    return height
+
+
+def draw_bevel(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    style: bytes,
+    technique: bytes,
+    up: bool,
+    depth: float,
+    size: float,
+    soften: float,
+    angle: float,
+    altitude: float,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """How much highlight and how much shadow a bevel paints, on ``viewport``.
+
+    The surface from :py:func:`_bevel_height`, its slope scaled by ``depth``
+    and turned over when not ``up``, lit from ``angle`` (where the light comes
+    from, as a drop shadow's) and ``altitude`` above the horizon. A face lit
+    more than the flat layer is takes the highlight, in proportion to how far
+    it is from the flat toward full light, and one lit less the shadow, in
+    proportion to how far toward none; the flat layer takes neither.
+    ``soften`` blurs the lighting before that split, and ``contour`` (the
+    gloss contour, read as :py:func:`draw_drop_shadow` reads one) maps the
+    lighting first, the flat layer's with it, so a flat face takes neither
+    under any contour.
+
+    Both results are ``(height, width, 1)`` over the whole canvas; the caller
+    keeps the parts the style paints, inside the silhouette and beside it,
+    which :py:func:`bevel_inside` and :py:func:`bevel_beside` say.
+    """
+    _require_scipy("Bevel effects")
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    _finite(
+        "Bevel",
+        depth=depth,
+        size=size,
+        soften=soften,
+        angle=angle,
+        altitude=altitude,
+    )
+    alpha = shape[:, :, 0].astype(np.float32)
+    height = _bevel_height(alpha, style, technique, max(float(size), 0.0))
+    slope = max(float(depth), 0.0) / 100.0 * _BEVEL_SLOPE_PER_DEPTH
+    if not up:
+        slope = -slope
+    gy, gx = np.gradient(height)
+    nx, ny = -slope * gx, -slope * gy
+    norm = np.sqrt(nx * nx + ny * ny + 1.0)
+    theta, phi = math.radians(angle), math.radians(min(max(altitude, 0.0), 90.0))
+    lx = math.cos(phi) * math.cos(theta)
+    ly = -math.cos(phi) * math.sin(theta)
+    lz = math.sin(phi)
+    light = ((nx * lx + ny * ly + lz) / norm).astype(np.float32)
+    soften = max(float(soften), 0.0)
+    sigma = soften * _SOFTEN_SIGMA_PER_SIZE
+    if sigma > 1e-3 and soften >= 1.0:
+        light = ndimage.gaussian_filter(
+            light, sigma, mode="nearest", truncate=soften / sigma
+        )
+    light = np.clip(light, 0.0, 1.0)
+    flat = lz
+    if contour is not None:
+        light = _contoured(light, contour, anti_aliased)
+        flat = float(
+            _contoured(np.array([lz], dtype=np.float32), contour, anti_aliased)[0]
+        )
+    highlight = (
+        np.clip((light - flat) / (1.0 - flat), 0.0, 1.0)
+        if flat < 1.0
+        else np.zeros_like(light)
+    )
+    shadow = (
+        np.clip((flat - light) / flat, 0.0, 1.0) if flat > 0.0 else np.zeros_like(light)
+    )
+    return (
+        highlight[:, :, None].astype(np.float32),
+        shadow[:, :, None].astype(np.float32),
+    )

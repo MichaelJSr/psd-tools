@@ -25,6 +25,13 @@ Changelog
 - [fix] Inner shadow and inner glow layer effects are now rendered when a
   document is composited from its layers. Solid colours only: a gradient
   glow is still dropped, and noise is read but not applied. Needs ``scipy``
+- [fix] Satin and bevel/emboss layer effects are now rendered when a document
+  is composited from its layers. All bevel styles but stroke emboss are drawn;
+  the chisel soft technique, the shape contour and the texture are
+  approximated or left out, and the blurs approximate Photoshop's. Needs
+  ``scipy``
+- [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
+  the effect uses global light
 
 1.25.0 (2026-10-14)
 -------------------
