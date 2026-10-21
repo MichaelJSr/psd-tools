@@ -987,6 +987,62 @@ def test_a_shape_layers_shadow_reaches_as_far_as_its_outer_vector_stroke() -> No
     )
 
 
+@pytest.mark.parametrize("fill_enabled", [False, True], ids=["no fill", "fill"])
+@pytest.mark.parametrize(
+    "alignment",
+    [b"strokeStyleAlignInside", b"strokeStyleAlignCenter", b"strokeStyleAlignOutside"],
+    ids=["inside", "centre", "outside"],
+)
+def test_a_redrawn_shape_casts_what_it_is_resolved_to(
+    fill_enabled: bool, alignment: bytes
+) -> None:
+    """Under ``force`` the silhouette is the alpha the layer resolves to, before its opacity.
+
+    That is the fill and the stroke as the layer composites them: nothing
+    inside the path with the fill off, and the stroke wherever it is drawn.
+    """
+    layer = _stroked_rectangle(alignment, fill_enabled)
+    _shadow_descriptor(layer)[Key.Enabled] = False
+    viewport = _around(layer)
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    compositor = Compositor(
+        viewport,
+        np.ones((height, width, 3), dtype=np.float32),
+        np.zeros((height, width, 1), dtype=np.float32),
+        force=True,
+    )
+    source = compositor._resolve_source(layer)
+    silhouette = compositor._cast_shape(layer, viewport)
+    assert np.allclose(silhouette, source.alpha / source.opacity, atol=1e-6)
+    assert float(silhouette[height // 2, width // 2, 0]) == float(fill_enabled)
+    assert silhouette.max() > 0.0, "the stroke casts"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "stroke-center.psd",
+        "stroke-center-no-fill.psd",
+        "stroke-outer.psd",
+        "stroke-outer-no-fill.psd",
+    ],
+)
+def test_a_redrawn_vector_stroke_casts_the_shadow_its_pixels_do(filename: str) -> None:
+    """The silhouette is what the layer paints, its vector stroke included.
+
+    Each file is a 10 px stroke on a 40 x 40 rectangle, fill on and off,
+    authored in Photoshop, so its stored pixels hold the stroke and the fill
+    state. Redrawn under ``force``, the layer casts the shadow they do.
+    """
+    pytest.importorskip("aggdraw")
+    psd = PSDImage.open(full_name(filename))
+    layer = psd[1]
+    _forge_shadow(layer, angle=0.0, Blur=0.0, Distance=6.0, Opacity=100.0)
+    stored = _alone(layer, psd.viewbox)
+    redrawn = _alone(layer, psd.viewbox, force=True)
+    assert np.abs(redrawn - stored).max() <= 1 / 255 + 1e-6
+
+
 @pytest.mark.parametrize(
     "name", ["stroke-outer-no-fill.psd", "stroke-center-no-fill.psd"]
 )

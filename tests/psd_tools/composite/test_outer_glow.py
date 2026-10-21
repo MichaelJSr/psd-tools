@@ -45,6 +45,8 @@ from ..utils import full_name
 from .test_composite import _mse
 from .test_drop_shadow import _alone, _around, _contour, _disc, _masks_card
 
+pytest.importorskip("scipy")
+
 logger = logging.getLogger(__name__)
 
 _CANVAS = (0, 0, 81, 81)

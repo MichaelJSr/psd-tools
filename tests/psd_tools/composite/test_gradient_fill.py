@@ -33,6 +33,8 @@ from psd_tools.terminology import Enum, Key, Klass, Type, Unit
 
 from ..utils import full_name
 
+pytest.importorskip("scipy")
+
 BLACK = (0.0, 0.0, 0.0)
 WHITE = (255.0, 255.0, 255.0)
 
