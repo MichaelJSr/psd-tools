@@ -295,6 +295,19 @@ and every reader that trusts the preview, psd-tools included, shows the image
 from before the edit. The preview is all it marks, though: a wrapper that
 memoised the record you replaced goes on reporting what it read.
 
+Regenerating the preview composites the whole document, which can take
+seconds. A caller that already holds the flattened image can store it instead,
+and one that wants the stored preview kept can say so::
+
+    psdimage.save('output.psd', preview=flattened)
+    psdimage.save('output.psd', update_preview=False)
+
+``preview`` holds the document's own color values, as
+``composite(apply_icc=False)`` returns them, at the document's size and in the
+PIL mode of its color mode, with or without alpha. In an opaque 8-bit
+document, storing the image a regenerated preview reads back as with
+``topil(apply_icc=False)`` writes the same bytes as regenerating it.
+
 
 Exporting data to PIL
 ---------------------

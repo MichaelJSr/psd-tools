@@ -865,3 +865,152 @@ def test_new_writes_hdrt_only_at_depth_32(
     buffer.seek(0)
     reopened = PSDImage.open(buffer)
     assert reopened._record.color_mode_data.value == value
+
+
+def _bands(image: Image.Image) -> np.ndarray:
+    """The values each band holds, read band by band as ``"LAB"`` needs."""
+    return np.stack([np.asarray(band) for band in image.split()], axis=2)
+
+
+def _random_image(mode: str, size: tuple[int, int], seed: int = 0) -> Image.Image:
+    rng = np.random.default_rng(seed)
+    if mode == "1":
+        bits = rng.integers(0, 2, (size[1], size[0]), dtype=np.uint8) * 255
+        return Image.fromarray(bits, "L").convert("1", dither=Image.Dither.NONE)
+    planes = (size[1], size[0])
+    bands = [
+        Image.fromarray(rng.integers(0, 256, planes, dtype=np.uint8), "L")
+        for _ in range(len(Image.new(mode, (1, 1)).getbands()))
+    ]
+    return Image.merge(mode, bands)
+
+
+@pytest.mark.parametrize(
+    "filename, mode",
+    [
+        ("colormodes/4x4_8bit_rgb.psd", "RGB"),
+        ("colormodes/4x4_8bit_grayscale.psd", "L"),
+        ("colormodes/4x4_8bit_cmyk.psd", "CMYK"),
+        ("colormodes/4x4_8bit_lab.psd", "LAB"),
+        ("colormodes/4x4_8bit_duotone.psd", "L"),
+        ("colormodes/4x4_1bit_bitmap.psd", "1"),
+        ("colormodes/100x20_1bit_bitmap_rle.psd", "1"),
+        ("cmyk-spot.psd", "CMYK"),
+    ],
+)
+def test_save_with_preview_stores_it(filename: str, mode: str) -> None:
+    psd = PSDImage.open(full_name(filename))
+    image = _random_image(mode, psd.size)
+    buffer = io.BytesIO()
+    psd.save(buffer, preview=image)
+    buffer.seek(0)
+    stored = PSDImage.open(buffer).topil(apply_icc=False)
+    assert stored is not None
+    assert stored.mode == mode
+    assert np.array_equal(_bands(stored), _bands(image))
+
+
+def test_save_with_preview_stores_its_alpha() -> None:
+    psd = PSDImage.open(full_name("transparency/fill-opacity.psd"))
+    image = _random_image("RGBA", psd.size)
+    # Fully opaque or fully clear: in between, the white matte rounds.
+    alpha = np.where(np.asarray(image.getchannel("A")) >= 128, 255, 0)
+    image.putalpha(Image.fromarray(alpha.astype(np.uint8), "L"))
+    buffer = io.BytesIO()
+    psd.save(buffer, preview=image)
+    buffer.seek(0)
+    stored = PSDImage.open(buffer).topil(apply_icc=False)
+    assert stored is not None
+    assert stored.mode == "RGBA"
+    expected, actual = _bands(image), _bands(stored)
+    assert np.array_equal(actual[:, :, 3], expected[:, :, 3])
+    opaque = expected[:, :, 3] == 255
+    assert opaque.any() and not opaque.all()
+    assert np.array_equal(actual[opaque], expected[opaque])
+
+
+def test_save_with_indexed_preview() -> None:
+    quantization_step = 1
+    psd = PSDImage.open(full_name("colormodes/4x4_8bit_index_color.psd"))
+    original = psd.topil(apply_icc=False)
+    assert original is not None and original.mode == "P"
+    image = original.transpose(Image.Transpose.ROTATE_90)
+    for preview in (image, image.convert("RGB")):
+        buffer = io.BytesIO()
+        psd.save(buffer, preview=preview)
+        buffer.seek(0)
+        stored = PSDImage.open(buffer).topil(apply_icc=False)
+        assert stored is not None
+        # Requantized onto the document's table, which can land a step away.
+        difference = np.abs(
+            np.asarray(stored.convert("RGB"), dtype=np.int16)
+            - np.asarray(image.convert("RGB"), dtype=np.int16)
+        )
+        assert difference.max() <= quantization_step
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "colormodes/4x4_8bit_rgb.psd",
+        "colormodes/4x4_8bit_rgba.psd",
+        "colormodes/4x4_8bit_grayscale.psd",
+        "colormodes/4x4_8bit_cmyk.psd",
+        "colormodes/4x4_8bit_lab.psd",
+        "colormodes/4x4_8bit_duotone.psd",
+        "colormodes/4x4_8bit_index_color.psd",
+        "colormodes/4x4_1bit_bitmap.psd",
+        "cmyk-spot.psd",
+    ],
+)
+def test_save_with_the_regenerated_preview_is_byte_identical(filename: str) -> None:
+    pytest.importorskip("aggdraw")
+    pytest.importorskip("scipy")
+    psd = PSDImage.open(full_name(filename))
+    psd.mark_updated()
+    regenerated = io.BytesIO()
+    psd.save(regenerated)
+    preview = PSDImage.open(io.BytesIO(regenerated.getvalue())).topil(apply_icc=False)
+    assert preview is not None
+
+    psd = PSDImage.open(full_name(filename))
+    psd.mark_updated()
+    supplied = io.BytesIO()
+    with patch("psd_tools.composite.composite", side_effect=AssertionError):
+        psd.save(supplied, preview=preview)
+    assert supplied.getvalue() == regenerated.getvalue()
+
+
+def test_save_keeps_the_stored_preview_unless_asked(tmp_path: Path) -> None:
+    psd = PSDImage.open(full_name("layers/pixel-layer.psd"))
+    stored = psd._record.image_data.data
+
+    with patch("psd_tools.composite.composite", side_effect=AssertionError):
+        psd.save(tmp_path / "unedited.psd")
+        psd[0].visible = not psd[0].visible
+        assert psd.is_updated()
+        psd.save(tmp_path / "edited.psd", update_preview=False)
+
+    for name in ("unedited.psd", "edited.psd"):
+        assert PSDImage.open(tmp_path / name)._record.image_data.data == stored
+
+
+@pytest.mark.parametrize(
+    "preview, update_preview",
+    [
+        (Image.new("RGB", (4, 5)), True),
+        (Image.new("L", (4, 4)), True),
+        (Image.new("CMYK", (4, 4)), True),
+        (Image.new("RGB", (4, 4)), False),
+    ],
+)
+def test_save_with_preview_refuses_a_misfit(
+    tmp_path: Path, preview: Image.Image, update_preview: bool
+) -> None:
+    psd = PSDImage.open(full_name("colormodes/4x4_8bit_rgb.psd"))
+    stored = psd._record.image_data.data
+    output = tmp_path / "output.psd"
+    with pytest.raises(ValueError):
+        psd.save(output, preview=preview, update_preview=update_preview)
+    assert not output.exists()
+    assert psd._record.image_data.data == stored

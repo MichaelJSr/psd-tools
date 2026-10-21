@@ -4,6 +4,9 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [api] ``PSDImage.save()`` takes ``preview``, a flattened PIL image to store
+  instead of compositing the document, and ``update_preview=False`` to keep
+  the stored preview after an edit. The default is unchanged.
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

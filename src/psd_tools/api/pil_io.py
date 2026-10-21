@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Literal, cast
 import numpy as np
 from PIL import Image, ImageChops, ImageMath
 
-from psd_tools.api.numpy_io import _BACKGROUND_MODES, _encode_array
+from psd_tools.api.numpy_io import (
+    _BACKGROUND_MODES,
+    _encode_array,
+    encode_image_data,
+)
 from psd_tools.api.utils import (
     AllocBudget,
     check_pixel_size,
@@ -343,6 +347,52 @@ def convert_image_data_to_pil(
 
     image = post_process(image, alpha, icc)
     return _remove_white_background(image, psd.color_mode)
+
+
+def convert_pil_to_image_data(psd: "PSDProtocol", image: Image.Image) -> list[bytes]:
+    """Turn a flattened PIL image into the merged image data section's planes.
+
+    The inverse of :py:meth:`~psd_tools.api.psd_image.PSDImage.composite` with
+    ``apply_icc=False``: *image* holds the document's own color values, in the
+    PIL mode of its color mode, with or without alpha. An image without alpha
+    stores an opaque preview.
+
+    :raises ValueError: if *image* is not the document's size, or its mode does
+        not hold the document's color mode.
+    """
+    if image.size != (psd.width, psd.height):
+        raise ValueError(
+            f"Preview is {image.size[0]}x{image.size[1]}; the document is "
+            f"{psd.width}x{psd.height}"
+        )
+    if psd.color_mode == ColorMode.MULTICHANNEL:
+        raise ValueError("PIL has no mode for a multichannel preview")
+    allowed = {get_pil_mode(psd.color_mode), get_pil_mode(psd.color_mode, True)}
+    if psd.color_mode == ColorMode.INDEXED:
+        allowed = {"P", "RGB", "RGBA"}
+    if image.mode not in allowed:
+        raise ValueError(
+            f"Preview mode {image.mode!r} does not fit a {psd.color_mode.name} "
+            f"document; expected one of {sorted(allowed)}"
+        )
+    if image.mode == "P":
+        image = image.convert("RGB")
+
+    bands = list(image.split())
+    alpha_band = bands.pop() if image.mode in ("LA", "RGBA") else None
+    if image.mode == "CMYK":
+        # The compositor's arrays keep the file's inverted CMYK.
+        bands = [ImageChops.invert(band) for band in bands]
+    # Band by band: `np.asarray()` on a whole "LAB" image reads PIL's offset
+    # chroma buffer rather than the values the bands hold.
+    color = np.stack([np.asarray(band, dtype=np.float32) for band in bands], axis=2)
+    if image.mode != "1":
+        color /= 255.0
+    if alpha_band is None:
+        alpha = np.ones((psd.height, psd.width, 1), dtype=np.float32)
+    else:
+        alpha = np.asarray(alpha_band, dtype=np.float32)[:, :, np.newaxis] / 255.0
+    return encode_image_data(psd, color, alpha)
 
 
 def _layer_peak_bytes(
