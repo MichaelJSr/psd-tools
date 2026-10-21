@@ -23,10 +23,15 @@ Currently supported effects:
     knocks out drop shadow"
   - The blur is a gaussian approximation of Photoshop's own, so a soft
     shadow's falloff can differ; noise is read but not applied
+- **Outer glow**: The layer's silhouette, spread and blurred (softer) or
+  ramped by distance (precise), painted behind the layer and never under it
+  - Solid color or a gradient along the falloff; honors size, spread,
+    technique, range, contour and its anti-aliasing, opacity and blend mode
+  - Noise and jitter are read but not applied
 
 Partially supported or limited effects:
 
-- Inner shadow, outer glow, inner glow
+- Inner shadow, inner glow
 - These may render but with reduced accuracy
 
 The main function :py:func:`draw_stroke_effect` handles stroke rendering by:
@@ -74,6 +79,7 @@ from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite import paint
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.utils import divide
+from psd_tools.constants import ColorMode
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key
 
@@ -172,6 +178,25 @@ def shadow_geometry(desc: Descriptor) -> tuple[float, float, float]:
             % (distance, size, spread)
         )
     return distance, min(size, _MAX_STROKE_SIZE), spread
+
+
+def glow_geometry(desc: Descriptor) -> tuple[float, float, float]:
+    """An outer glow's ``(size, spread, range)``, as the file states them.
+
+    Read as :py:func:`shadow_geometry` reads a shadow's, and for the same
+    reason; raises the same way. The range defaults to Photoshop's when the
+    descriptor leaves it out, and is held to the percentages the dialog
+    offers, since the glow divides by it.
+    """
+    size = float(desc.get(Key.Blur, 0.0))
+    spread = float(desc.get(Key.ChokeMatte, 0.0))
+    range_ = float(desc.get(Key.InputRange, _DEFAULT_GLOW_RANGE))
+    if not all(math.isfinite(value) for value in (size, spread, range_)):
+        raise ValueError(
+            "Outer glow parameters must be finite: size=%r spread=%r range=%r"
+            % (size, spread, range_)
+        )
+    return min(size, _MAX_STROKE_SIZE), spread, min(max(range_, 1.0), 100.0)
 
 
 def stroke_bbox(
@@ -695,11 +720,25 @@ def stroke_band(
 # leaves the falloff too steep. The fit is asserted in the tests.
 _SHADOW_SIGMA_PER_SIZE = 0.45
 
-# What one pixel of a shadow's canvas costs at the peak of
-# ``draw_drop_shadow()``: the silhouette it is cast from, the matte spread
-# grows and the distance transform and masks that grow it, the blurred matte
-# and the shifted one, with the group composite the silhouette of a group is
-# read from.
+# The same for an outer glow, fitted on its own: a glow is not a shadow that
+# stays put, and Photoshop does not blur the two alike.
+_GLOW_SIGMA_PER_SIZE = 0.45
+
+# The range Photoshop gives a new glow, read where a descriptor has none.
+_DEFAULT_GLOW_RANGE = 50.0
+
+# What a glow's range is held above, in the same percent, when its falloff is
+# squeezed: a range read as the inverse of the slider would draw a 1% range as
+# a hard band, and Photoshop draws a soft halo. Fitted on its renders; the
+# fit is asserted in the tests.
+_GLOW_RANGE_FLOOR = 15.0
+
+# What one pixel of a shadow's or glow's canvas costs at the peak of
+# ``draw_drop_shadow()`` or ``draw_outer_glow()``: the silhouette it is cast
+# from, the matte spread grows and the distance transform and masks that grow
+# it, the blurred or ramped matte and the shifted one, or the gradient paint
+# laid along it, with the group composite the silhouette of a group is read
+# from.
 _SHADOW_BYTES = 64
 
 # Entries in a contour's transfer table. Photoshop states a contour's points
@@ -774,6 +813,20 @@ def drop_shadow_bbox(
         warn=False,
     )
     return grown
+
+
+def outer_glow_bbox(
+    bbox: tuple[int, int, int, int],
+    size: float,
+    max_alloc_bytes: AllocBudget | None = None,
+) -> tuple[int, int, int, int]:
+    """The canvas :py:func:`draw_outer_glow` needs to draw a glow on.
+
+    A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the size
+    on every side, with the same fringe, checked against the same budget and
+    raising the same way.
+    """
+    return drop_shadow_bbox(bbox, 0.0, 0.0, size, max_alloc_bytes)
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
@@ -907,19 +960,10 @@ def draw_drop_shadow(
     is read between its entries when ``anti_aliased`` and at the nearest
     one otherwise. Noise is not applied.
 
-    ``spread`` is a percentage of ``size``, which is how Photoshop's dialog
-    states it, even though the descriptor labels the value in pixels. It
-    *grows* the silhouette before the blur, and the blur takes what is left
-    of ``size``, so a shadow turns hard-edged at 100%. (The same key shrinks
-    the silhouette of an inner shadow, where the dialog calls it choke.)
-
-    The blur is cut off at that remaining radius, rounded to a whole pixel,
-    so the shadow reaches at most a pixel or two past ``size`` from the
-    silhouette, and the canvas :py:func:`drop_shadow_bbox` asks for holds all
-    of it; a gaussian left to its default reach runs on past both. Both
-    filters treat what lies past the canvas as empty, since nothing outside
-    it casts a shadow. The default for a blur is to reflect the edge instead,
-    which doubles back any coverage that reaches it.
+    ``spread`` and ``size`` make the matte as :py:func:`_soft_matte` says.
+    (The spread key shrinks the silhouette of an inner shadow, where the
+    dialog calls it choke.) The offset treats what lies past the canvas as
+    empty, as the blur does, since nothing outside it casts a shadow.
 
     A parameter that is not finite raises ``ValueError``: NaN passes through
     every step here without complaint, and one NaN in the coverage spreads to
@@ -933,17 +977,7 @@ def draw_drop_shadow(
             "Drop shadow parameters must be finite: distance=%r angle=%r "
             "size=%r spread=%r" % (distance, angle, size, spread)
         )
-    alpha = shape[:, :, 0].astype(np.float32)
-    size = max(float(size), 0.0)
-    grow = size * min(max(float(spread), 0.0), 100.0) / 100.0
-    if grow > 0.0 and alpha.any():
-        alpha = _spread(alpha, grow)
-    radius = size - grow
-    sigma = radius * _SHADOW_SIGMA_PER_SIZE
-    if sigma > 1e-3:
-        alpha = ndimage.gaussian_filter(
-            alpha, sigma, mode="constant", cval=0.0, truncate=radius / sigma
-        )
+    alpha = _soft_matte(shape[:, :, 0], size, spread, _SHADOW_SIGMA_PER_SIZE)
     dx, dy = _shadow_offset(distance, angle)
     if dx or dy:
         alpha = ndimage.shift(alpha, (dy, dx), order=1, mode="constant", cval=0.0)
@@ -951,3 +985,149 @@ def draw_drop_shadow(
     if contour is not None:
         alpha = _contoured(alpha, contour, anti_aliased)
     return alpha[:, :, None]
+
+
+def _soft_matte(
+    alpha: np.ndarray, size: float, spread: float, sigma_per_size: float
+) -> np.ndarray:
+    """``alpha`` grown by the spread and blurred by what is left of the size.
+
+    ``spread`` is a percentage of ``size``, which is how Photoshop's dialog
+    states it, even though the descriptor labels the value in pixels. It
+    *grows* the silhouette before the blur, and the blur takes what is left
+    of ``size``, so the matte turns hard-edged at 100%.
+
+    The blur is cut off at that remaining radius, rounded to a whole pixel,
+    so the matte reaches at most a pixel or two past ``size`` from the
+    silhouette, and the canvases the bbox functions ask for hold all of it;
+    a gaussian left to its default reach runs on past both. It treats what
+    lies past the canvas as empty, since nothing outside it casts anything.
+    The default for a blur is to reflect the edge instead, which doubles back
+    any coverage that reaches it.
+    """
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    alpha = alpha.astype(np.float32)
+    size = max(float(size), 0.0)
+    grow = size * min(max(float(spread), 0.0), 100.0) / 100.0
+    if grow > 0.0 and alpha.any():
+        alpha = _spread(alpha, grow)
+    radius = size - grow
+    sigma = radius * sigma_per_size
+    if sigma > 1e-3:
+        alpha = ndimage.gaussian_filter(
+            alpha, sigma, mode="constant", cval=0.0, truncate=radius / sigma
+        )
+    return alpha
+
+
+def _precise_matte(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
+    """``alpha`` ramped down with the distance from its boundary.
+
+    Photoshop's precise technique: full out to the spread, then a straight
+    ramp to nothing at ``size``, so the glow follows the silhouette's
+    corners as a stroke does rather than rounding them off as a blur does.
+    A ramp shorter than a pixel is drawn as an antialiased hard edge, the
+    way :py:func:`_distance_band` draws one.
+    """
+    size = max(float(size), 0.0)
+    grow = size * min(max(float(spread), 0.0), 100.0) / 100.0
+    distance = _signed_distance(alpha, size + 1.0)
+    ramp = size - grow
+    if ramp < 1.0:
+        return np.clip(size + 0.5 - distance, 0.0, 1.0).astype(np.float32)
+    return np.clip((size - distance) / ramp, 0.0, 1.0).astype(np.float32)
+
+
+def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
+    """``matte`` with the contour's input squeezed to its inner ``range_`` percent.
+
+    Photoshop's range picks the part of the falloff the contour is laid over:
+    the matte is scaled up by the inverse of the range and held to one, so at
+    100% the contour sees the whole falloff and at 50% it sees the half
+    nearest the silhouette, with the rest painted at the contour's top. The
+    inverse is taken over the range and :data:`_GLOW_RANGE_FLOOR` together,
+    so a small range squeezes no harder than the floor does, and 100% is
+    the matte itself.
+    """
+    scale = math.hypot(100.0, _GLOW_RANGE_FLOOR) / math.hypot(range_, _GLOW_RANGE_FLOOR)
+    return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
+
+
+def draw_outer_glow(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    size: float,
+    spread: float,
+    range_: float = _DEFAULT_GLOW_RANGE,
+    precise: bool = False,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+) -> np.ndarray:
+    """The coverage an outer glow spreads from ``shape``, on ``viewport``.
+
+    ``shape`` is the layer's silhouette on the same canvas, which
+    :py:func:`outer_glow_bbox` sizes. The result is ``(height, width, 1)``,
+    one at the silhouette's edge and dying away over ``size`` pixels: a
+    shadow cast nowhere, except that it is cut away under the silhouette
+    whatever the layer's own opacity, since Photoshop never shows an outer
+    glow through its layer, and that the range squeezes the falloff
+    (:py:func:`_ranged`) before the contour maps it.
+
+    ``precise`` ramps the matte by its distance from the silhouette instead
+    of blurring it (:py:func:`_precise_matte`). A size of zero draws nothing
+    either way.
+
+    A parameter that is not finite raises ``ValueError``, for the reason
+    :py:func:`draw_drop_shadow` gives.
+    """
+    _require_scipy("Outer glow effects")
+    if not all(math.isfinite(value) for value in (size, spread, range_)):
+        raise ValueError(
+            "Outer glow parameters must be finite: size=%r spread=%r range=%r"
+            % (size, spread, range_)
+        )
+    alpha = shape[:, :, 0].astype(np.float32)
+    if size <= 0.0 or not alpha.any():
+        return np.zeros(alpha.shape + (1,), dtype=np.float32)
+    if precise:
+        matte = _precise_matte(alpha, size, spread)
+    else:
+        matte = _soft_matte(alpha, size, spread, _GLOW_SIGMA_PER_SIZE)
+    matte = _ranged(np.clip(matte, 0.0, 1.0), min(max(range_, 1.0), 100.0))
+    if contour is not None:
+        matte = _contoured(matte, contour, anti_aliased)
+    matte = matte * (1.0 - alpha)
+    return np.clip(matte, 0.0, 1.0)[:, :, None]
+
+
+def glow_paint(
+    viewport: tuple[int, int, int, int],
+    color_mode: ColorMode,
+    desc: Descriptor,
+    coverage: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """What an outer glow is painted with, on ``viewport``: its colour and coverage.
+
+    A solid colour is the descriptor's, with ``coverage`` as it came. A
+    gradient is laid along the falloff instead: its start at the silhouette's
+    edge, where the coverage is full, and its end where the coverage dies
+    away, so the opaque end of Photoshop's default glow gradient sits
+    against the layer. Its transparency stops scale the coverage; its colour
+    stops are read at the same place. The gradient's reverse flag turns it
+    around. A descriptor with neither raises as the solid colour reader does.
+    """
+    if Key.Gradient not in desc:
+        color, _ = paint.draw_solid_color_fill(viewport, color_mode, desc)
+        return color, coverage
+    along = 1.0 - coverage[:, :, 0]
+    if bool(desc.get(Key.Reverse, False)):
+        along = 1.0 - along
+    colors, opacities = paint._make_gradient_color(color_mode, desc[Key.Gradient])
+    if colors is None:
+        raise ValueError("Outer glow gradient has no colour stops.")
+    color = np.asarray(colors(along), dtype=np.float32)
+    if opacities is not None:
+        coverage = coverage * np.asarray(opacities(along), dtype=np.float32)[:, :, None]
+    return color, coverage.astype(np.float32, copy=False)

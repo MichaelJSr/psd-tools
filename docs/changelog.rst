@@ -17,6 +17,11 @@ Changelog
   Photoshop's. Needs ``scipy``, as a stroke effect does (#679)
 - [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
   jitter (#679)
+- [fix] An outer glow layer effect is now rendered when a document is
+  composited from its layers, instead of being dropped. Size, spread,
+  technique, range, contour, a solid or gradient colour, opacity and blend
+  mode are honoured; noise and jitter are read but not applied, and the
+  blur and range approximate Photoshop's. Needs ``scipy`` (#680)
 
 1.25.0 (2026-10-14)
 -------------------
