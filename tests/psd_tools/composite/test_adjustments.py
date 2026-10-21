@@ -1,7 +1,7 @@
 import copy
+import importlib
 import logging
 import struct
-import sys
 from collections.abc import Callable
 
 import numpy as np
@@ -34,6 +34,9 @@ from psd_tools.psd.descriptor import Descriptor, Integer
 
 from ..utils import full_name
 from .test_composite import check_composite_quality, check_icc_composite_quality
+
+# The package's composite() shadows the submodule of the same name.
+composite_module = importlib.import_module("psd_tools.composite.composite")
 
 logger = logging.getLogger(__name__)
 
@@ -396,7 +399,6 @@ def test_a_style_on_a_normal_group_changes_nothing_about_its_adjustments(
     ``Curves 9``. The style is faked through ``_has_enabled_effects`` so that
     nothing but the rule itself can change the render.
     """
-    module = sys.modules["psd_tools.composite.composite"]
 
     def render(passthrough: bool, styled: bool) -> np.ndarray:
         psd = PSDImage.open(
@@ -407,7 +409,9 @@ def test_a_style_on_a_normal_group_changes_nothing_about_its_adjustments(
         assert isinstance(group[0], adjustments.Curves)
         if not passthrough:
             group.blend_mode = BlendMode.NORMAL
-        monkeypatch.setattr(module, "_has_enabled_effects", lambda layer: styled)
+        monkeypatch.setattr(
+            composite_module, "_has_enabled_effects", lambda layer: styled
+        )
         return np.asarray(psd.composite(force=True).convert("RGB"), dtype=np.int16)
 
     assert np.array_equal(render(False, styled=True), render(False, styled=False))
@@ -636,6 +640,16 @@ def test_gradient_map_writes_one_channel_on_a_grayscale_document() -> None:
     out = apply_gradientmap(image, ColorMode.GRAYSCALE, layer)
     assert out.shape == (1, 2, 1)
     assert np.allclose(out, 0.3, atol=1 / 255)
+
+
+def test_gradient_map_clamps_luminance_outside_the_unit_range() -> None:
+    """Unclipped 32-bit values take the end colours instead of indexing past the table."""
+    red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
+    layer = _gradient_map_layer(_gradient_map_data([(0, 50, red), (4096, 50, blue)]))
+    image = np.array([[[-0.5, -0.5, -0.5], [1.5, 1.5, 1.5]]], dtype=np.float32)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    assert np.allclose(out[0, 0], red, atol=1 / 255)
+    assert np.allclose(out[0, 1], blue, atol=1 / 255)
 
 
 def test_gradient_map_with_a_noise_gradient_leaves_the_image_alone() -> None:

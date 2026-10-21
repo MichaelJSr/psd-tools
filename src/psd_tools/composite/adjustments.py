@@ -830,7 +830,7 @@ def apply_gradientmap(
     if lut is None:
         return img
 
-    luminance = _gradientmap_luminance(img, colormode)
+    luminance = np.clip(_gradientmap_luminance(img, colormode), 0, 1)
     if layer.reversed:
         luminance = _1 - luminance
     index = np.rint(luminance[..., 0] * (lut.shape[0] - 1)).astype(np.intp)
