@@ -1,10 +1,11 @@
 """The ramp ``paint.draw_gradient_fill()`` lays out and the colours it blends.
 
 A gradient's descriptor says where its ramp runs -- ``Angl``, ``Scl ``,
-``Ofst``, ``Algn`` -- and how its stops blend -- ``Mdpn`` and ``gs99``. The
-closed forms below are for a black-to-white gradient, whose rendered grey is
-the ramp position itself, on boxes whose aspect tells the width from the
-height.
+``Ofst``, ``Algn`` -- and how its stops blend -- ``Mdpn`` and the method, under
+``gs99`` on an overlay and ``gradientsInterpolationMethod`` on a fill layer or
+stroke effect. The closed forms below are for a black-to-white gradient, whose
+rendered grey is the ramp position itself, on boxes whose aspect tells the
+width from the height.
 """
 
 import math
@@ -13,8 +14,10 @@ import numpy as np
 import pytest
 
 from psd_tools import PSDImage
+from psd_tools.api.layers import Layer
 from psd_tools.composite import paint
 from psd_tools.composite.composite import _draw_gradient_overlay, composite
+from psd_tools.composite.effects import draw_stroke_effect
 from psd_tools.constants import ColorMode, GradientInterpolation, Tag
 from psd_tools.psd.descriptor import (
     Bool,
@@ -302,6 +305,333 @@ def test_each_interpolation_method_blends_in_its_own_space(
         1.0, abs=1e-3
     )
     assert (np.diff(grey) >= 0).all()
+
+
+FILL_METHOD_KEY = b"gradientsInterpolationMethod"
+
+
+def test_an_unknown_method_under_gs99_yields_to_the_fill_layers_key() -> None:
+    """Both keys are read in order, skipping a value outside the enumeration."""
+    desc = _gradient(method=b"Smoo")
+    assert paint._interpolation_method(desc) is None
+    desc[FILL_METHOD_KEY] = Enumerated(
+        typeID=b"gradientInterpolationMethodType",
+        enum=GradientInterpolation.PERCEPTUAL.value,
+    )
+    assert paint._interpolation_method(desc) == GradientInterpolation.PERCEPTUAL.value
+    grey = _grey(desc, 101, 1)[0]
+    assert grey[50] == pytest.approx(
+        HALFWAY_GREY[GradientInterpolation.PERCEPTUAL.value], abs=0.002
+    )
+
+
+def _fill_layer(method: bytes | None) -> tuple[Layer, Descriptor]:
+    """The fixture's 32x32 red foreground-to-transparent fill at 90 degrees.
+
+    A fill layer stores its interpolation method under its own key rather
+    than an effect's ``gs99``; ``None`` leaves the key out, as the fixture does.
+    """
+    psd = PSDImage.open(full_name("layers/gradient-fill.psd"))
+    layer = psd[0]
+    desc = layer.tagged_blocks.get_data(Tag.GRADIENT_FILL_SETTING)
+    if method is not None:
+        desc[FILL_METHOD_KEY] = Enumerated(
+            typeID=b"gradientInterpolationMethodType", enum=method
+        )
+    return layer, desc
+
+
+@pytest.mark.parametrize(
+    "method",
+    [GradientInterpolation.CLASSIC.value, GradientInterpolation.PERCEPTUAL.value],
+    ids=str,
+)
+def test_a_fill_layer_names_its_interpolation_method_under_its_own_key(
+    method: bytes,
+) -> None:
+    """The fixture's stops forged black to white blend to the method's halfway grey."""
+    layer, desc = _fill_layer(method)
+    stops = desc[Key.Gradient][Key.Colors]
+    for stop, value in zip(stops, (BLACK, WHITE), strict=True):
+        rgb = stop[Key.Color]
+        rgb[Key.Red], rgb[Key.Green], rgb[Key.Blue] = (Double(c) for c in value)
+    color, _ = paint.create_fill(layer, layer.bbox)
+    assert color is not None and color.shape == (32, 32, 3)
+    grey = color[:, 0, 0]
+    assert np.allclose(color, grey[:, None, None])
+    # The midpoint sits between the two middle rows of an even-height ramp.
+    assert (grey[15] + grey[16]) / 2 == pytest.approx(HALFWAY_GREY[method], abs=0.003)
+
+
+def test_a_fill_layers_linear_method_renders_its_fixture_as_photoshop_did() -> None:
+    """``adjustment_clipping.psd``'s two fills say ``Lnr `` under the fill key.
+
+    Forced, so the fills are drawn rather than read back; the preview is 8-bit,
+    so the render is held to a couple of its steps.
+    """
+    psd = PSDImage.open(full_name("adjustments/adjustment_clipping.psd"))
+    fills = [layer for layer in psd if layer.kind == "gradientfill"]
+    methods = [
+        layer.tagged_blocks.get_data(Tag.GRADIENT_FILL_SETTING)[FILL_METHOD_KEY].enum
+        for layer in fills
+    ]
+    assert methods == [GradientInterpolation.LINEAR.value] * 2
+    color, _, _ = composite(psd, force=True)
+    error = np.mean((psd.numpy()[..., :3] - color[..., :3]) ** 2)
+    assert error < (2 / 255) ** 2
+
+
+def test_a_gradient_stroke_names_its_method_under_the_fill_layers_key() -> None:
+    """``stroke-effects.psd``'s ``Gradient`` stroke, its stops forged black to white.
+
+    Under either key the stroke's paint is the same perceptual ramp, which the
+    classic one it reads without a key is not.
+    """
+    psd = PSDImage.open(full_name("effects/stroke-effects.psd"))
+    layer = next(x for x in psd.descendants() if x.name == "Gradient")
+    desc = next(layer.effects.find("stroke")).descriptor
+    assert desc[Key.PaintType].enum == Enum.GradientFill.value
+    assert float(desc[Key.Angle]) == 90.0 and FILL_METHOD_KEY not in desc
+    stops = List()
+    stops.extend([_stop(BLACK, 0), _stop(WHITE, 4096)])
+    desc[Key.Gradient][Key.Colors] = stops
+    viewport = layer.bbox
+    shape = np.ones((viewport[3] - viewport[1], viewport[2] - viewport[0], 1))
+
+    def paint_of(key: bytes | None) -> np.ndarray:
+        desc.pop(b"gs99", None)
+        desc.pop(FILL_METHOD_KEY, None)
+        if key is not None:
+            desc[key] = Enumerated(
+                typeID=b"gradientInterpolationMethodType",
+                enum=GradientInterpolation.PERCEPTUAL.value,
+            )
+        color, _ = draw_stroke_effect(viewport, shape, desc, psd)
+        return color
+
+    classic, stroke_key, overlay_key = (
+        paint_of(key) for key in (None, FILL_METHOD_KEY, b"gs99")
+    )
+    assert np.array_equal(stroke_key, overlay_key)
+    assert not np.array_equal(stroke_key, classic)
+    grey = stroke_key[:, 0, 0]
+    assert np.allclose(stroke_key, grey[:, None, None])
+    rows = len(grey)
+    halfway = (grey[rows // 2 - 1] + grey[rows // 2]) / 2
+    assert halfway == pytest.approx(
+        HALFWAY_GREY[GradientInterpolation.PERCEPTUAL.value], abs=0.003
+    )
+
+
+def _cmyk_stop(ink: tuple[float, float, float, float], location: int) -> Descriptor:
+    """A ``CMYC`` stop, its inks in percent."""
+    color = Descriptor(classID=Klass.CMYKColor.value)
+    for key, value in zip(
+        (Key.Cyan, Key.Magenta, Key.Yellow, Key.Black), ink, strict=True
+    ):
+        color[key] = Double(value)
+    stop = _stop(BLACK, location)
+    stop[Key.Color] = color
+    return stop
+
+
+def _lab_stop(lab: tuple[float, float, float], location: int) -> Descriptor:
+    """An ``LbCl`` stop; chroma past sRGB's gamut does not survive a trip through it."""
+    color = Descriptor(classID=Klass.LabColor.value)
+    for key, value in zip((Key.Luminance, Key.A, Key.B), lab, strict=True):
+        color[key] = Double(value)
+    stop = _stop(BLACK, location)
+    stop[Key.Color] = color
+    return stop
+
+
+@pytest.mark.parametrize(
+    "method",
+    [GradientInterpolation.PERCEPTUAL.value, GradientInterpolation.LINEAR.value],
+)
+def test_a_cmyk_documents_own_inks_land_on_the_ramp_whatever_the_method(
+    method: bytes,
+) -> None:
+    """A fill of one CMYK colour is that colour, as the canvas stores it."""
+    ink = (60.0, 40.0, 40.0, 100.0)
+    stops = [_cmyk_stop(ink, 0), _cmyk_stop(ink, 4096)]
+    color, _ = paint.draw_gradient_fill(
+        (0, 0, 3, 1), ColorMode.CMYK, _gradient(stops=stops, method=method)
+    )
+    assert color is not None
+    canvas = [1.0 - v / 100.0 for v in ink]
+    assert np.allclose(color, np.array(canvas)[None, None, :], atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("color_mode", "stops"),
+    [
+        (
+            ColorMode.CMYK,
+            [
+                _cmyk_stop((100.0, 0.0, 0.0, 0.0), 0),
+                _cmyk_stop((0.0, 0.0, 0.0, 100.0), 4096),
+            ],
+        ),
+        (
+            ColorMode.LAB,
+            [
+                _lab_stop((50.0, 120.0, -120.0), 0),
+                _lab_stop((80.0, -100.0, 90.0), 4096),
+            ],
+        ),
+    ],
+    ids=["cmyk", "lab"],
+)
+def test_stops_native_to_a_non_rgb_canvas_keep_the_canvas_blend(
+    color_mode: ColorMode, stops: list[Descriptor]
+) -> None:
+    """Perceptual on such stops is the classic ramp, so the ends are the stops."""
+    classic, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1), color_mode, _gradient(stops=stops)
+    )
+    perceptual, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1),
+        color_mode,
+        _gradient(stops=stops, method=GradientInterpolation.PERCEPTUAL.value),
+    )
+    assert classic is not None and perceptual is not None
+    assert np.array_equal(perceptual, classic)
+    ends = [np.array(paint._get_color(color_mode, stop)) for stop in stops]
+    assert np.allclose(perceptual[0, 0], ends[0], atol=1e-6)
+    assert np.allclose(perceptual[0, 100], ends[1], atol=1e-6)
+    # The transparency stops carry no colour, so they are eased all the same.
+    fade = [_opacity_stop(100.0, 0), _opacity_stop(0.0, 4096)]
+    _, classic_shape = paint.draw_gradient_fill(
+        (0, 0, 101, 1), color_mode, _gradient(stops=stops, transparency=fade)
+    )
+    _, eased_shape = paint.draw_gradient_fill(
+        (0, 0, 101, 1),
+        color_mode,
+        _gradient(
+            stops=stops,
+            transparency=fade,
+            method=GradientInterpolation.PERCEPTUAL.value,
+        ),
+    )
+    assert classic_shape is not None and eased_shape is not None
+    assert np.allclose(eased_shape, _eased(classic_shape), atol=1e-5)
+
+
+def test_rgb_stops_in_a_cmyk_document_still_blend_perceptually() -> None:
+    """Their trip through sRGB is the classic path's too, so only the middle moves."""
+    classic, _ = paint.draw_gradient_fill((0, 0, 101, 1), ColorMode.CMYK, _gradient())
+    perceptual, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1),
+        ColorMode.CMYK,
+        _gradient(method=GradientInterpolation.PERCEPTUAL.value),
+    )
+    assert classic is not None and perceptual is not None
+    assert np.allclose(perceptual[0, 0], classic[0, 0], atol=1e-6)
+    assert np.allclose(perceptual[0, 100], classic[0, 100], atol=1e-6)
+    assert not np.allclose(perceptual[0, 50], classic[0, 50], atol=0.01)
+
+
+def _grey_stop(black: float, location: int) -> Descriptor:
+    """A ``Grsc`` stop; ``Gry `` is percent black."""
+    color = Descriptor(classID=Klass.Grayscale.value)
+    color[Key.Gray] = Double(black)
+    stop = _stop(BLACK, location)
+    stop[Key.Color] = color
+    return stop
+
+
+@pytest.mark.parametrize(
+    "method",
+    [GradientInterpolation.PERCEPTUAL.value, GradientInterpolation.LINEAR.value],
+)
+def test_grey_stops_on_a_grayscale_canvas_blend_as_their_rgb_spelling_does(
+    method: bytes,
+) -> None:
+    """A grey survives the trip through sRGB, so how it is stored changes nothing."""
+    as_grey = [_grey_stop(100.0, 0), _grey_stop(0.0, 4096)]
+    from_grey, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1), ColorMode.GRAYSCALE, _gradient(stops=as_grey, method=method)
+    )
+    from_rgb, _ = paint.draw_gradient_fill(
+        (0, 0, 101, 1), ColorMode.GRAYSCALE, _gradient(method=method)
+    )
+    assert from_grey is not None and from_rgb is not None
+    assert from_grey.shape == (1, 101, 1)
+    assert np.allclose(from_grey, from_rgb, atol=1e-6)
+    assert from_grey[0, 50, 0] == pytest.approx(HALFWAY_GREY[method], abs=0.002)
+
+
+def _eased(opacity: np.ndarray) -> np.ndarray:
+    """Photoshop's perceptual fade of a linearly blended opacity."""
+    return opacity ** (1.0 + 1.42 * (1.0 - opacity))
+
+
+def test_a_perceptual_fill_fades_along_the_fitted_ease() -> None:
+    """Perceptual bends the classic opacity blend to Photoshop's convex fade.
+
+    The fixture's own smoothness shapes the classic blend; the ease is a
+    function of that blend, whatever shape it has.
+    """
+    layer, desc = _fill_layer(None)
+    _, classic = paint.create_fill(layer, layer.bbox)
+    desc[FILL_METHOD_KEY] = Enumerated(
+        typeID=b"gradientInterpolationMethodType",
+        enum=GradientInterpolation.PERCEPTUAL.value,
+    )
+    _, perceptual = paint.create_fill(layer, layer.bbox)
+    assert classic is not None and perceptual is not None
+    blend = classic[:, 0, 0]
+    assert blend[-1] == pytest.approx(1.0) and blend[0] == pytest.approx(0.0)
+    assert (np.diff(blend) > 0).all()
+    assert np.allclose(perceptual[:, 0, 0], _eased(blend), atol=1e-5)
+    assert np.allclose(perceptual, perceptual[:, :1, :])
+
+
+@pytest.mark.parametrize(
+    "ascending", [False, True], ids=["opaque_first", "transparent_first"]
+)
+def test_a_perceptual_transparency_ramp_is_the_eased_classic_one(
+    ascending: bool,
+) -> None:
+    """The ease is a function of the blended opacity, so a mirrored ramp mirrors."""
+    locations = (4096, 0) if ascending else (0, 4096)
+    stops = [_opacity_stop(100.0, locations[0]), _opacity_stop(0.0, locations[1])]
+    _, classic = paint.draw_gradient_fill(
+        (0, 0, 101, 1), ColorMode.RGB, _gradient(transparency=stops)
+    )
+    _, perceptual = paint.draw_gradient_fill(
+        (0, 0, 101, 1),
+        ColorMode.RGB,
+        _gradient(transparency=stops, method=GradientInterpolation.PERCEPTUAL.value),
+    )
+    assert classic is not None and perceptual is not None
+    along = np.arange(101) / 100
+    assert np.allclose(classic[0, :, 0], along if ascending else 1.0 - along, atol=1e-5)
+    assert np.allclose(perceptual[0, :, 0], _eased(classic[0, :, 0]), atol=1e-5)
+    assert perceptual[0, 50, 0] == pytest.approx(0.5 ** (1 + 1.42 * 0.5), abs=1e-5)
+
+
+def test_a_perceptual_ramp_between_partial_opacities_still_lands_on_its_stops() -> None:
+    """What the ease's encode/decode pair guarantees between any two stops.
+
+    The ends stay put and the ramp stays monotone and convex between them.
+    Only the 100% to 0% fade is checked against Photoshop; this is the
+    construction's own contract.
+    """
+    stops = [_opacity_stop(80.0, 0), _opacity_stop(20.0, 4096)]
+    _, shape = paint.draw_gradient_fill(
+        (0, 0, 101, 1),
+        ColorMode.RGB,
+        _gradient(transparency=stops, method=GradientInterpolation.PERCEPTUAL.value),
+    )
+    assert shape is not None
+    ramp = shape[0, :, 0]
+    assert ramp[0] == pytest.approx(0.8, abs=1e-4)
+    assert ramp[100] == pytest.approx(0.2, abs=1e-4)
+    assert (np.diff(ramp) <= 1e-6).all()
+    # Convex: the fade sits below the straight line between its stops.
+    assert ramp[50] < 0.5
 
 
 # The width each mode's color arrays carry; multichannel's is per file.

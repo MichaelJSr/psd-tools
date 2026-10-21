@@ -845,3 +845,28 @@ def test_gradient_overlay_defaults_are_photoshops() -> None:
     perceptual = effects.GradientOverlay(descriptor, ImageResources())
     assert perceptual.interpolation is GradientInterpolation.PERCEPTUAL
     assert perceptual.interpolation == b"Perc"
+
+
+def test_a_stroke_names_its_interpolation_method_under_its_own_key() -> None:
+    """A gradient stroke writes ``gradientsInterpolationMethod``, not ``gs99``."""
+    descriptor = Descriptor(classID=b"FrFX")
+    bare = effects.Stroke(descriptor, ImageResources())
+    assert bare.interpolation is GradientInterpolation.CLASSIC
+    descriptor[b"gradientsInterpolationMethod"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=b"Lnr "
+    )
+    assert effects.Stroke(descriptor, ImageResources()).interpolation is (
+        GradientInterpolation.LINEAR
+    )
+    descriptor[b"gs99"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=b"Perc"
+    )
+    assert effects.Stroke(descriptor, ImageResources()).interpolation is (
+        GradientInterpolation.PERCEPTUAL
+    ), "gs99 is read first"
+    descriptor[b"gs99"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=b"Smoo"
+    )
+    assert effects.Stroke(descriptor, ImageResources()).interpolation is (
+        GradientInterpolation.LINEAR
+    ), "a value outside the enumeration yields to the next key"

@@ -31,8 +31,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# The gradient interpolation method's descriptor key; not in the terminology.
+# The gradient interpolation method's descriptor keys, neither in the
+# terminology: a gradient overlay's, and the one fill layers and stroke
+# effects use.
 _INTERPOLATION_KEY = b"gs99"
+_FILL_INTERPOLATION_KEY = b"gradientsInterpolationMethod"
 
 # How many times its own area a pattern panel may be scaled up to, past the
 # floor check_growth() allows.
@@ -490,13 +493,27 @@ def draw_gradient_fill(
         Z = 1.0 - Z
 
     G, Ga = _make_gradient_color(
-        color_mode,
-        desc.get(Key.Gradient),
-        getattr(desc.get(_INTERPOLATION_KEY), "enum", None),
+        color_mode, desc.get(Key.Gradient), _interpolation_method(desc)
     )
     color = G(Z) if G is not None else None
     shape = np.expand_dims(Ga(Z), 2) if Ga is not None else None
     return color, shape
+
+
+_METHODS = frozenset(method.value for method in GradientInterpolation)
+
+
+def _interpolation_method(desc: Descriptor) -> bytes | None:
+    """The ``gs99`` method, or the one under a fill layer's or stroke's own key.
+
+    A key holding a value outside :py:class:`GradientInterpolation` is skipped,
+    as ``Stroke.interpolation`` skips it.
+    """
+    for key in (_INTERPOLATION_KEY, _FILL_INTERPOLATION_KEY):
+        method = getattr(desc.get(key), "enum", None)
+        if method in _METHODS:
+            return method
+    return None
 
 
 def _gradient_length(angle: float, width: float, height: float) -> float:
@@ -679,17 +696,63 @@ def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
     return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ _OKLAB_LMS_INV.T)
 
 
+# The perceptual method fades opacity along a power of the blend whose
+# exponent runs from 1 at the opaque end to 1 + this at the transparent end.
+# Fitted to Photoshop's renders of foreground-to-transparent fills.
+_PERCEPTUAL_ALPHA_EASE = 1.42
+
+
+def _ease_alpha(alpha: np.ndarray) -> np.ndarray:
+    """Perceptual opacity from a linearly blended one."""
+    return alpha ** (1.0 + _PERCEPTUAL_ALPHA_EASE * (1.0 - alpha))
+
+
+_ALPHA_SAMPLES = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
+_EASED_ALPHA_SAMPLES = _ease_alpha(_ALPHA_SAMPLES)
+
+
+def _unease_alpha(alpha: np.ndarray) -> np.ndarray:
+    """Inverse of :py:func:`_ease_alpha`, read off its samples."""
+    return np.interp(alpha, _EASED_ALPHA_SAMPLES, _ALPHA_SAMPLES)
+
+
 _BlendSpace = tuple[
     Callable[[np.ndarray], np.ndarray], Callable[[np.ndarray], np.ndarray]
 ]
 
-# ``gs99`` methods that blend somewhere other than the document's own arrays:
-# perceptual in Oklab, linear in linear-light sRGB. Classic, and a missing or
-# unknown key, blend the canvas values directly.
+# Interpolation methods that blend somewhere other than the document's own
+# arrays: perceptual in Oklab, linear in linear-light sRGB. Classic, and a
+# missing or unknown key, blend the canvas values directly.
 _BLEND_SPACES: dict[bytes, _BlendSpace] = {
     GradientInterpolation.PERCEPTUAL.value: (_srgb_to_oklab, _oklab_to_srgb),
     GradientInterpolation.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),
 }
+
+# The same for the transparency stops; only the perceptual method eases them.
+_ALPHA_BLEND_SPACES: dict[bytes, _BlendSpace] = {
+    GradientInterpolation.PERCEPTUAL.value: (_unease_alpha, _ease_alpha),
+}
+
+# The colour classes ``_get_color()`` lands in a canvas without a trip through
+# sRGB, and whose inks or out-of-gamut Lab a round trip would not keep, even
+# at the stop itself. Such a stop keeps the canvas blend. A grey stop on a
+# single-channel canvas also lands directly, but it survives the trip, so it
+# blends as its RGB spelling does.
+_NATIVE_STOP_CLASSES: dict[ColorMode, frozenset[bytes]] = {
+    ColorMode.CMYK: frozenset({Klass.CMYKColor.value, Klass.Grayscale.value}),
+    ColorMode.LAB: frozenset({Klass.LabColor.value}),
+}
+
+
+def _blends_as_srgb(color_mode: ColorMode, stops: Any) -> bool:
+    """Whether every colour stop reaches ``color_mode``'s arrays through sRGB."""
+    native = _NATIVE_STOP_CLASSES.get(color_mode)
+    if not native:
+        return True
+    # A stop with no colour is left to ``_get_color()`` to reject.
+    return all(
+        getattr(stop.get(Key.Color), "classID", None) not in native for stop in stops
+    )
 
 
 def _make_linear_gradient_color(
@@ -700,6 +763,8 @@ def _make_linear_gradient_color(
     smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
     colors = grad.get(Key.Colors, [])
     space = _BLEND_SPACES.get(method) if method is not None else None
+    if space is not None and not _blends_as_srgb(color_mode, colors):
+        space = None
     if space is None:
         table = _blend_stops(
             *_collect_stops(
@@ -732,13 +797,20 @@ def _make_linear_gradient_color(
     if Key.Transparency not in grad:
         return G, None
 
-    alpha = _blend_stops(
-        *_collect_stops(
-            grad.get(Key.Transparency),
-            lambda stop: np.array(float(stop.get(Key.Opacity)) / 100.0),
-        ),
-        smoothness,
-    )
+    def opacity(stop: Any) -> np.ndarray:
+        return np.array(float(stop.get(Key.Opacity)) / 100.0)
+
+    stops = grad.get(Key.Transparency)
+    alpha_space = _ALPHA_BLEND_SPACES.get(method) if method is not None else None
+    if alpha_space is None:
+        alpha = _blend_stops(*_collect_stops(stops, opacity), smoothness)
+    else:
+        encode, decode = alpha_space
+        alpha = decode(
+            _blend_stops(
+                *_collect_stops(stops, lambda stop: encode(opacity(stop))), smoothness
+            )
+        )
     return G, lookup(alpha)
 
 
