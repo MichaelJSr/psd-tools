@@ -134,8 +134,9 @@ def test_a_soft_glow_is_a_drop_shadow_cast_nowhere() -> None:
 
 # The width of the gaussian that stands in for Photoshop's blur, per pixel of
 # size, and the floor the range is held above, both fitted on Photoshop's own
-# renders of soft glows: the fixture previews below and a corpus of documents
-# with glows at ranges from 1% to 100%.
+# renders of soft glows: the fixture previews below for the blur, and for the
+# floor a corpus of documents with glows at ranges from 1% to 100%, since no
+# fixture carries a range far from 100%.
 _FITTED_SIGMA_PER_SIZE = 0.45
 _FITTED_RANGE_FLOOR = 15.0
 
@@ -143,8 +144,9 @@ _FITTED_RANGE_FLOOR = 15.0
 def test_the_blur_width_and_the_range_floor_are_the_fitted_constants() -> None:
     """Both are fits, so a change to either is a measured change.
 
-    The fidelity cases below hold the fit to Photoshop's previews; this pins
-    the numbers themselves so they are not retuned on one fixture.
+    The fidelity cases below hold the blur to Photoshop's previews; this
+    pins the numbers themselves so they are not retuned on one fixture, and
+    is all that holds the range floor, which the fixtures cannot measure.
     """
     assert effects._GLOW_SIGMA_PER_SIZE == _FITTED_SIGMA_PER_SIZE
     assert effects._GLOW_RANGE_FLOOR == _FITTED_RANGE_FLOOR
@@ -281,16 +283,36 @@ def _outer_glow(layer: Layer) -> OuterGlow:
     return cast(OuterGlow, next(iter(layer.effects.find("outerglow"))))
 
 
-def test_a_solid_glow_is_painted_in_its_colour() -> None:
-    """The colour is the descriptor's and the coverage comes back untouched."""
+def _paint(
+    desc: Descriptor, falloff: np.ndarray, shape: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """``glow_paint`` on a canvas the size of ``falloff``, beside nothing by default."""
+    if shape is None:
+        shape = np.zeros(falloff.shape + (1,), dtype=np.float32)
+    viewport = (0, 0, falloff.shape[1], falloff.shape[0])
+    return effects.glow_paint(viewport, ColorMode.RGB, desc, shape, falloff)
+
+
+def test_a_solid_glow_is_painted_in_its_colour_over_its_falloff() -> None:
+    """The colour is the descriptor's, the coverage the falloff cut under the shape."""
     _, donor = _donor()
-    coverage = np.linspace(0.0, 1.0, 9, dtype=np.float32).reshape(3, 3, 1)
-    color, painted = effects.glow_paint(
-        (0, 0, 3, 3), ColorMode.RGB, _glow_descriptor(donor), coverage
-    )
+    falloff = np.linspace(0.0, 1.0, 9, dtype=np.float32).reshape(3, 3)
+    shape = np.zeros((3, 3, 1), dtype=np.float32)
+    shape[1, 1, 0] = 0.5
+    color, painted = _paint(_glow_descriptor(donor), falloff, shape=shape)
     assert color.shape == (3, 3, 3)
     assert np.all(color == 1.0)
-    assert painted is coverage
+    assert painted.shape == (3, 3, 1)
+    assert np.allclose(painted[:, :, 0], falloff * (1.0 - shape[:, :, 0]), atol=1e-6)
+
+
+def test_draw_outer_glow_is_the_falloff_beside_the_silhouette() -> None:
+    """The solid primitive is ``glow_falloff`` cut under the shape, and no more."""
+    disc = _disc(81, _RADIUS)
+    falloff = effects.glow_falloff(disc, size=6.0, spread=0.0, range_=100.0)
+    assert falloff.shape == (81, 81)
+    assert np.allclose(_glow(disc)[:, :, 0], falloff * (1.0 - disc[:, :, 0]))
+    assert float(falloff[disc[:, :, 0] > 0.0].min()) > 0.0, "cut before the paint"
 
 
 def _gradient_glow() -> tuple[Descriptor, list[tuple[float, ...]], list[float]]:
@@ -324,12 +346,12 @@ def test_a_gradient_glow_runs_from_its_first_stop_at_the_edge_to_its_last() -> N
     """The gradient is laid along the falloff, its start where the coverage is full.
 
     So the opaque end of Photoshop's default glow gradient sits against the
-    layer. Its transparency stops scale the coverage, and reversing the
+    layer. Its transparency stops hold the coverage under them, and reversing the
     gradient turns both around.
     """
     desc, colors, opacities = _gradient_glow()
-    coverage = np.array([[[1.0], [0.0]]], dtype=np.float32)
-    color, painted = effects.glow_paint((0, 0, 2, 1), ColorMode.RGB, desc, coverage)
+    falloff = np.array([[1.0, 0.0]], dtype=np.float32)
+    color, painted = _paint(desc, falloff)
     assert color.shape == (1, 2, 3)
     assert np.allclose(color[0, 0], colors[0], atol=1e-6)
     assert np.allclose(color[0, 1], colors[-1], atol=1e-6)
@@ -337,28 +359,51 @@ def test_a_gradient_glow_runs_from_its_first_stop_at_the_edge_to_its_last() -> N
     assert float(painted[0, 1, 0]) == 0.0
 
     desc[Key.Reverse] = True
-    color, _ = effects.glow_paint((0, 0, 2, 1), ColorMode.RGB, desc, coverage)
+    color, _ = _paint(desc, falloff)
     assert np.allclose(color[0, 0], colors[-1], atol=1e-6)
     assert np.allclose(color[0, 1], colors[0], atol=1e-6)
 
 
-def test_a_gradients_transparency_scales_the_coverage_between_its_stops() -> None:
-    """Halfway along the falloff the coverage carries the opacity read there.
+def test_a_gradients_transparency_holds_the_coverage_under_it() -> None:
+    """The coverage is the falloff where the transparency read there is above it.
 
-    The last two transparency stops bracket the midpoint, so the opacity is
-    the straight line between them, read at the midpoint's share of the gap.
+    With every transparency stop at 40%, the coverage follows the falloff
+    up to 0.4 and stays there; the gradient does not scale the falloff
+    down, which would leave a glow at 0.16 where Photoshop paints 0.4.
     """
-    desc, _, opacities = _gradient_glow()
-    stops = [
-        float(stop[Key.Location]) / 4096.0
-        for stop in desc[Key.Gradient][Key.Transparency]
-    ]
-    assert stops[1] < 0.5 < stops[2]
-    share = (0.5 - stops[1]) / (stops[2] - stops[1])
-    expected = 0.5 * (opacities[1] + (opacities[2] - opacities[1]) * share)
-    coverage = np.full((1, 1, 1), 0.5, dtype=np.float32)
-    _, painted = effects.glow_paint((0, 0, 1, 1), ColorMode.RGB, desc, coverage)
-    assert float(painted[0, 0, 0]) == pytest.approx(expected, abs=1e-6)
+    desc, _, _ = _gradient_glow()
+    for stop in desc[Key.Gradient][Key.Transparency]:
+        stop[Key.Opacity] = Double(40.0)
+    falloff = np.array([[0.2, 0.6, 1.0]], dtype=np.float32)
+    _, painted = _paint(desc, falloff)
+    assert np.allclose(painted[0, :, 0], [0.2, 0.4, 0.4], atol=1e-6)
+
+
+def test_a_gradient_opaque_at_both_ends_paints_what_a_solid_colour_would() -> None:
+    """With no transparency to hold it, the coverage is the falloff itself."""
+    desc, _, _ = _gradient_glow()
+    for stop in desc[Key.Gradient][Key.Transparency]:
+        stop[Key.Opacity] = Double(100.0)
+    disc = _disc(81, _RADIUS)
+    falloff = effects.glow_falloff(disc, size=6.0, spread=0.0, range_=100.0)
+    _, painted = _paint(desc, falloff, disc)
+    assert np.allclose(painted, _glow(disc), atol=1e-6)
+
+
+def test_a_gradient_is_placed_by_the_falloff_and_not_by_the_cut() -> None:
+    """A half-covered edge pixel takes the colour of its falloff, not half of it.
+
+    The cut under the silhouette scales the coverage after the gradient is
+    read, so an anti-aliased edge keeps the gradient's start against the
+    layer instead of sliding it along.
+    """
+    desc, colors, _ = _gradient_glow()
+    falloff = np.ones((1, 2), dtype=np.float32)
+    shape = np.array([[[0.5], [0.0]]], dtype=np.float32)
+    color, painted = _paint(desc, falloff, shape=shape)
+    assert np.allclose(color[0, 0], colors[0], atol=1e-6)
+    assert np.allclose(color[0, 1], colors[0], atol=1e-6)
+    assert float(painted[0, 0, 0]) == pytest.approx(0.5 * float(painted[0, 1, 0]))
 
 
 # -- Compositing ----------------------------------------------------------- #
@@ -445,12 +490,12 @@ def _blue(glow: Descriptor) -> None:
         glow[Key.Color][key] = Double(value)
 
 
-def test_the_blend_mode_is_the_descriptors_and_defaults_to_screen() -> None:
-    """A glow with no blend mode is blended Screen, as Photoshop gives a new one.
+def test_the_blend_mode_is_the_descriptors_and_defaults_as_the_api_does() -> None:
+    """A glow is blended as ``OuterGlow.blend_mode`` reads it: Normal when unsaid.
 
     A hard blue glow over grey: Screen leaves the grey in the red and green
     channels and Normal replaces them, so the pixel beside the card tells
-    the two apart. The descriptor's mode is read when it has one.
+    the two apart.
     """
     _, layer = _masks_card()
     glow = _hard_glow(layer)
@@ -459,14 +504,15 @@ def test_the_blend_mode_is_the_descriptors_and_defaults_to_screen() -> None:
     y, x = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1], 16 - 2
 
     assert glow[Key.Mode].enum == Enum.Screen
-    screened = _over_grey(layer, viewport)[y, x]
-    assert np.allclose(screened, (0.5, 0.5, 1.0), atol=1e-6)
+    assert np.allclose(_over_grey(layer, viewport)[y, x], (0.5, 0.5, 1.0), atol=1e-6)
 
     glow[Key.Mode].enum = Enum.Normal
-    assert np.allclose(_over_grey(layer, viewport)[y, x], (0.0, 0.0, 1.0), atol=1e-6)
+    normal = _over_grey(layer, viewport)[y, x]
+    assert np.allclose(normal, (0.0, 0.0, 1.0), atol=1e-6)
 
     del glow[Key.Mode]
-    assert np.allclose(_over_grey(layer, viewport)[y, x], screened, atol=1e-6)
+    assert _outer_glow(layer).blend_mode is BlendMode.NORMAL
+    assert np.allclose(_over_grey(layer, viewport)[y, x], normal, atol=1e-6)
 
 
 def test_a_glow_goes_over_the_drop_shadow_of_the_same_layer() -> None:
@@ -701,11 +747,12 @@ def test_an_unreadable_outer_glow_is_dropped_and_the_document_renders(
 # - layer_effects.psd: the rows beside and below the glowing text, clear of
 #   the emboss above it, whose outer shadow is not drawn.
 # - layer_params.psb: the glowing shape and its drop shadow; what is left is
-#   the blur that stands in for Photoshop's and the gradient's colour along
-#   it.
+#   the blur that stands in for Photoshop's. The bound is what pins the
+#   gradient's transparency as a cap on the falloff: scaling the falloff by
+#   it scores above it.
 _PREVIEWS = [
     ("layer_effects.psd", (56, 98, 541, 164), 1.7e-4, 4e-3),
-    ("layer_params.psb", (130, 230, 470, 560), 1.1e-3, 5e-3),
+    ("layer_params.psb", (130, 230, 470, 560), 3.2e-4, 5e-3),
 ]
 
 # How much closer to the preview the glow has to bring its region than

@@ -808,7 +808,7 @@ def test_an_unreadable_drop_shadow_is_dropped_and_the_document_renders(
 _PREVIEWS = [
     ("layer_effects.psd", (60, 215, 620, 296), 1e-5, 1e-3),
     ("masks.psb", None, 1e-6, 1.5e-4),
-    ("layer_params.psb", (130, 230, 470, 560), 1.1e-3, 2e-2),
+    ("layer_params.psb", (130, 230, 470, 560), 3.2e-4, 2e-2),
     ("layer_comps.psb", None, 4.8e-3, 6e-3),
 ]
 

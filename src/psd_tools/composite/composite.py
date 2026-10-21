@@ -10,7 +10,6 @@ import numpy as np
 from PIL import Image
 
 from psd_tools.api import numpy_io, pil_io
-from psd_tools.api._descriptor import get_blend_mode
 from psd_tools.api.effects import DropShadow, OuterGlow
 from psd_tools.api.layers import (
     AdjustmentLayer,
@@ -29,9 +28,9 @@ from psd_tools.composite.blend import get_blend_func, normal
 from psd_tools.composite.effects import (
     contour_table,
     draw_drop_shadow,
-    draw_outer_glow,
     draw_stroke_effect_split,
     drop_shadow_bbox,
+    glow_falloff,
     glow_geometry,
     glow_paint,
     outer_glow_bbox,
@@ -51,7 +50,6 @@ from psd_tools.constants import (
     Tag,
 )
 from psd_tools.psd.descriptor import Descriptor
-from psd_tools.terminology import Key
 
 logger = logging.getLogger(__name__)
 
@@ -1540,8 +1538,8 @@ class Compositor:
         resolved -- see :py:meth:`_apply_beneath_effects`.
 
         TODO: Inner shadow, inner glow, satin and bevel are not drawn at all,
-        so where they would land is not settled here either; each joins the
-        overlays.
+        so where they would land is not settled here either. The first three
+        join the overlays; a bevel has an outer part beside the layer too.
         """
         canvas = _EffectCanvas(self, source)
         for effect_name in _OVERLAY_DRAWS:
@@ -2494,10 +2492,11 @@ class Compositor:
 
         Read afresh on ``viewport`` rather than taken from the resolved
         source, which :py:meth:`_trace_shape` pastes from where it can. Both
-        go on before the layer is resolved, so there is no source yet; and a group resolved over this canvas can take alpha from it
-        through a knockout, which would make the shadow depend on the
-        viewport. The group's contents are composited over nothing, once per
-        box and pass, as :py:meth:`_get_group_shape` does for a stroke.
+        go on before the layer is resolved, so there is no source yet; and a
+        group resolved over this canvas can take alpha from it through a
+        knockout, which would make the shadow depend on the viewport. The
+        group's contents are composited over nothing, once per box and pass,
+        as :py:meth:`_get_group_shape` does for a stroke.
         """
         mask = self._get_mask(layer, viewport)
         own = (
@@ -2549,10 +2548,10 @@ class Compositor:
         return knockout
 
     def _apply_beneath_effects(self, layer: Layer) -> None:
-        """Composite what lies beneath the layer: its drop shadows, then its outer glows.
+        """Composite what lies beneath the layer: its drop shadows, then its glows.
 
-        Called before the layer is resolved: see :py:meth:`apply`. The glows
-        go over the shadows, as Photoshop stacks them.
+        Called before the layer is resolved: see :py:meth:`apply`. The outer
+        glows go over the shadows, as Photoshop stacks them.
         """
         self._apply_drop_shadows(layer)
         self._apply_outer_glows(layer)
@@ -2645,12 +2644,11 @@ class Compositor:
         As :py:meth:`_apply_drop_shadows`, from the same silhouette on a box
         grown the same way, faded by the layer opacity and not by its fill
         opacity, each effect guarded the same way. There is no knockout
-        switch: ``draw_outer_glow()`` always cuts the glow away under the
-        silhouette. The blend mode defaults to Screen, which is what
-        Photoshop gives a new glow, where the descriptor has none.
+        switch: ``glow_paint()`` always cuts the glow away under the
+        silhouette.
 
         The paint is drawn on the glow's own box, since a gradient glow's
-        colour follows its coverage, and pasted beside it; where the glow
+        colour follows its falloff, and pasted beside it; where the glow
         covers nothing the colour pasted there is never read.
         """
         glows = _readable(layer, "outerglow")
@@ -2667,7 +2665,7 @@ class Compositor:
                 effect_opacity = glow.opacity / 100.0
                 if not math.isfinite(effect_opacity):
                     raise ValueError("opacity %r is not finite" % effect_opacity)
-                blend_mode = get_blend_mode(glow.descriptor, Key.Mode, BlendMode.SCREEN)
+                blend_mode = glow.blend_mode
                 precise = glow.glow_type == GlowTechnique.PRECISE_MATTE
                 contour = contour_table(glow.contour)
                 anti_aliased = glow.anti_aliased
@@ -2685,8 +2683,7 @@ class Compositor:
                 logger.debug("The jitter of an outer glow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
             try:
-                coverage = draw_outer_glow(
-                    bbox,
+                falloff = glow_falloff(
                     silhouette,
                     size=size,
                     spread=spread,
@@ -2696,7 +2693,11 @@ class Compositor:
                     anti_aliased=anti_aliased,
                 )
                 color, coverage = glow_paint(
-                    bbox, layer._psd.color_mode, glow.descriptor, coverage
+                    bbox,
+                    layer._psd.color_mode,
+                    glow.descriptor,
+                    silhouette,
+                    falloff,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an outer glow of %s: %s", layer, error)

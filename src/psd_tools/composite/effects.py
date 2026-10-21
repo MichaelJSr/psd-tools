@@ -720,17 +720,18 @@ def stroke_band(
 # leaves the falloff too steep. The fit is asserted in the tests.
 _SHADOW_SIGMA_PER_SIZE = 0.45
 
-# The same for an outer glow, fitted on its own: a glow is not a shadow that
-# stays put, and Photoshop does not blur the two alike.
-_GLOW_SIGMA_PER_SIZE = 0.45
+# The same for an outer glow. Fitted on its own, since Photoshop need not blur
+# the two alike, and named apart so either can move without the other.
+_GLOW_SIGMA_PER_SIZE = _SHADOW_SIGMA_PER_SIZE
 
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
 
 # What a glow's range is held above, in the same percent, when its falloff is
 # squeezed: a range read as the inverse of the slider would draw a 1% range as
-# a hard band, and Photoshop draws a soft halo. Fitted on its renders; the
-# fit is asserted in the tests.
+# a hard band, and Photoshop draws a soft halo. Fitted against Photoshop's
+# renders of documents outside the fixture corpus, where no glow has a range
+# far from 100%; the tests pin the value and the closed form, not the fit.
 _GLOW_RANGE_FLOOR = 15.0
 
 # What one pixel of a shadow's or glow's canvas costs at the peak of
@@ -1051,8 +1052,7 @@ def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
 
 
-def draw_outer_glow(
-    viewport: tuple[int, int, int, int],
+def glow_falloff(
     shape: np.ndarray,
     *,
     size: float,
@@ -1062,15 +1062,13 @@ def draw_outer_glow(
     contour: np.ndarray | None = None,
     anti_aliased: bool = False,
 ) -> np.ndarray:
-    """The coverage an outer glow spreads from ``shape``, on ``viewport``.
+    """How an outer glow falls off from ``shape``.
 
-    ``shape`` is the layer's silhouette on the same canvas, which
-    :py:func:`outer_glow_bbox` sizes. The result is ``(height, width, 1)``,
-    one at the silhouette's edge and dying away over ``size`` pixels: a
-    shadow cast nowhere, except that it is cut away under the silhouette
-    whatever the layer's own opacity, since Photoshop never shows an outer
-    glow through its layer, and that the range squeezes the falloff
-    (:py:func:`_ranged`) before the contour maps it.
+    ``shape`` is the layer's silhouette on the canvas
+    :py:func:`outer_glow_bbox` sizes; the result is ``(height, width)`` on
+    it, one at the silhouette's edge and dying away over ``size`` pixels: a
+    shadow's matte cast nowhere, squeezed by the range (:py:func:`_ranged`)
+    and then mapped by the contour. It is not cut under the silhouette.
 
     ``precise`` ramps the matte by its distance from the silhouette instead
     of blurring it (:py:func:`_precise_matte`). A size of zero draws nothing
@@ -1087,44 +1085,88 @@ def draw_outer_glow(
         )
     alpha = shape[:, :, 0].astype(np.float32)
     if size <= 0.0 or not alpha.any():
-        return np.zeros(alpha.shape + (1,), dtype=np.float32)
+        return np.zeros(alpha.shape, dtype=np.float32)
     if precise:
         matte = _precise_matte(alpha, size, spread)
     else:
         matte = _soft_matte(alpha, size, spread, _GLOW_SIGMA_PER_SIZE)
-    matte = _ranged(np.clip(matte, 0.0, 1.0), min(max(range_, 1.0), 100.0))
+    falloff = _ranged(np.clip(matte, 0.0, 1.0), min(max(range_, 1.0), 100.0))
     if contour is not None:
-        matte = _contoured(matte, contour, anti_aliased)
-    matte = matte * (1.0 - alpha)
-    return np.clip(matte, 0.0, 1.0)[:, :, None]
+        falloff = _contoured(falloff, contour, anti_aliased)
+    return np.clip(falloff, 0.0, 1.0).astype(np.float32)
+
+
+def draw_outer_glow(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    size: float,
+    spread: float,
+    range_: float = _DEFAULT_GLOW_RANGE,
+    precise: bool = False,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+) -> np.ndarray:
+    """The coverage a solid outer glow spreads from ``shape``, on ``viewport``.
+
+    The falloff of :py:func:`glow_falloff`, as ``(height, width, 1)``, cut
+    away under the silhouette whatever the layer's own opacity, since
+    Photoshop never shows an outer glow through its layer. A gradient glow
+    is painted from the falloff by :py:func:`glow_paint` instead.
+    """
+    falloff = glow_falloff(
+        shape,
+        size=size,
+        spread=spread,
+        range_=range_,
+        precise=precise,
+        contour=contour,
+        anti_aliased=anti_aliased,
+    )
+    return _beside(falloff, shape)
+
+
+def _beside(coverage: np.ndarray, shape: np.ndarray) -> np.ndarray:
+    """``coverage`` cut away under the silhouette, as ``(height, width, 1)``."""
+    return np.clip(coverage * (1.0 - shape[:, :, 0]), 0.0, 1.0).astype(np.float32)[
+        :, :, None
+    ]
 
 
 def glow_paint(
     viewport: tuple[int, int, int, int],
     color_mode: ColorMode,
     desc: Descriptor,
-    coverage: np.ndarray,
+    shape: np.ndarray,
+    falloff: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """What an outer glow is painted with, on ``viewport``: its colour and coverage.
 
-    A solid colour is the descriptor's, with ``coverage`` as it came. A
-    gradient is laid along the falloff instead: its start at the silhouette's
-    edge, where the coverage is full, and its end where the coverage dies
-    away, so the opaque end of Photoshop's default glow gradient sits
-    against the layer. Its transparency stops scale the coverage; its colour
-    stops are read at the same place. The gradient's reverse flag turns it
-    around. A descriptor with neither raises as the solid colour reader does.
+    ``shape`` is the silhouette and ``falloff`` what :py:func:`glow_falloff`
+    drew from it. A solid colour is the descriptor's, covering the falloff.
+    A gradient is laid along the falloff instead: its start at the
+    silhouette's edge, where the falloff is full, and its end where the
+    falloff dies away, so the opaque end of Photoshop's default glow
+    gradient sits against the layer. Its transparency stops, read at the
+    same place as its colour stops, hold the coverage under them: the glow
+    is as opaque as the falloff or the transparency there, whichever is
+    less, so a gradient opaque at both ends paints what a solid colour would
+    and a translucent stop holds the glow at its opacity for as long as the
+    falloff is above it. The gradient's reverse flag turns it around. Either
+    way the coverage is cut away under the silhouette. A descriptor with
+    neither raises as the solid colour reader does.
     """
     if Key.Gradient not in desc:
         color, _ = paint.draw_solid_color_fill(viewport, color_mode, desc)
-        return color, coverage
-    along = 1.0 - coverage[:, :, 0]
+        return color, _beside(falloff, shape)
+    along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
     colors, opacities = paint._make_gradient_color(color_mode, desc[Key.Gradient])
     if colors is None:
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)
+    coverage = falloff
     if opacities is not None:
-        coverage = coverage * np.asarray(opacities(along), dtype=np.float32)[:, :, None]
-    return color, coverage.astype(np.float32, copy=False)
+        coverage = np.minimum(coverage, np.asarray(opacities(along), dtype=np.float32))
+    return color, _beside(coverage, shape)
