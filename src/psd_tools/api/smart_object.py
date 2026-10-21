@@ -427,8 +427,10 @@ class SmartObject:
     def filter_source(
         self,
     ) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
-        """``(bbox, color uint8 (h, w, 3), alpha uint8 (h, w) | None)`` of the
-        object as rendered before its smart filters, or ``None``.
+        """Return the object as rendered before its smart filters.
+
+        ``(bbox, color uint8 (h, w, 3), alpha uint8 (h, w) | None)``, or
+        ``None`` when the document stores no such raster.
         """
         item = self.filter_effect()
         if (
@@ -463,8 +465,9 @@ class SmartObject:
         return (left, top, right, bottom), color, alpha
 
     def filter_mask(self) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
-        """``(bbox, mask uint8 (h, w))`` of the smart filters' mask (255 =
-        filtered), or ``None`` when no mask pixels are stored.
+        """Return the smart filters' mask, or ``None`` when none is stored.
+
+        ``(bbox, mask uint8 (h, w))``; 255 = filtered, 0 = unfiltered.
         """
         item = self.filter_effect()
         extra = item.extra if item is not None else None
