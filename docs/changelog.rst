@@ -22,6 +22,10 @@ Changelog
   classic; perceptual also eases the transparency stops, fitted to Photoshop's
   foreground-to-transparent fills. Stops a CMYK or Lab document holds in its
   own colour keep the classic blend. Dither is still ignored
+- [api] Type layers can be edited and rendered: ``TypeLayer.text`` is
+  writable, ``set_text()`` and ``set_span_style()`` edit text and styles, and
+  ``rasterize()`` draws them into the layer's pixels with the new ``text``
+  extra. ``composite()`` still uses the stored pixels (#25, #317, #468)
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a

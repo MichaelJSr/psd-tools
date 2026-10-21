@@ -102,12 +102,13 @@ from typing import (
 
 if TYPE_CHECKING:
     from psd_tools.api.typesetting import TypeSetting
+    from psd_tools.composite.text import FontMap, Options, RenderReport
 
 import numpy as np
 from PIL import Image, ImageChops
 
 import psd_tools.psd.engine_data as engine_data
-from psd_tools.api import numpy_io, pil_io
+from psd_tools.api import numpy_io, pil_io, text_edit
 from psd_tools.api._resources import ResourceTransfer
 from psd_tools.api.effects import Effects
 from psd_tools.api.mask import Mask
@@ -132,6 +133,7 @@ from psd_tools.constants import (
     Tag,
     TextType,
 )
+from psd_tools.psd.base import NumericElement
 from psd_tools.psd.descriptor import Descriptor, DescriptorBlock, String
 from psd_tools.psd.header import FileHeader
 from psd_tools.psd.image_resources import ImageResource, Integer
@@ -3063,7 +3065,10 @@ class TypeLayer(Layer):
     Document styling information such as font list is is
     :py:attr:`~psd_tools.api.layers.TypeLayer.resource_dict`.
 
-    Currently, textual information is read-only.
+    The text and the character styles are editable through
+    :py:attr:`text`, :py:meth:`set_text`, :py:meth:`set_span_style` and
+    :py:meth:`set_run_style`; the stored pixels stay as Photoshop rendered
+    them until :py:meth:`rasterize` draws the edited text (``text`` extra).
 
     Example::
 
@@ -3098,13 +3103,178 @@ class TypeLayer(Layer):
     @property
     def text(self) -> str:
         r"""
-        Text in the layer. Read-only.
+        Text in the layer. Assigning calls :py:meth:`set_text`.
+
+        The ``'\r'`` that ends the last paragraph is not included.
 
         .. note:: New-line character in Photoshop is ``'\r'``.
         """
         item = self._data.text_data.get(b"Txt ")
         value = item.value if item is not None else None
         return value.rstrip("\x00") if isinstance(value, str) else ""
+
+    @text.setter
+    def text(self, value: str) -> None:
+        self.set_text(value)
+
+    def set_text(self, text: str, keep: Literal["runs", "single"] = "runs") -> None:
+        r"""
+        Replace the text, keeping the character styles.
+
+        ``keep="runs"`` keeps the runs of the unchanged prefix and suffix and
+        gives the replaced middle the style at the edit start; paragraphs are
+        rebuilt from ``'\r'``, a new one inheriting the paragraph the edit
+        started in. ``keep="single"`` collapses the styles to the first run.
+        The last paragraph's ``'\r'`` is added, so a ``text`` that ends in
+        one gains an empty paragraph. The pixels are untouched until
+        :py:meth:`rasterize`.
+        """
+        text_edit.set_text(self, text, keep=keep)
+
+    def set_span_style(
+        self,
+        start: int,
+        end: int,
+        *,
+        fill: tuple[float, float, float] | None = None,
+        **keys: Any,
+    ) -> None:
+        """
+        Set character style keys on ``text[start:end]``.
+
+        ``keys`` are ``StyleSheetData`` names with plain values, such as
+        ``FauxBold=True``, ``Tracking=50`` or ``FontSize=20.0``; ``Font``
+        takes a PostScript name already in the layer's ``FontSet``. ``fill``
+        is an RGB triple in 0..1. Runs are split at the span's ends and
+        equal neighbours merged.
+        """
+        text_edit.set_span_style(self, start, end, fill=fill, **keys)
+
+    def set_run_style(
+        self,
+        index: int,
+        *,
+        fill: tuple[float, float, float] | None = None,
+        **keys: Any,
+    ) -> None:
+        """:py:meth:`set_span_style` over style run ``index``."""
+        text_edit.set_run_style(self, index, fill=fill, **keys)
+
+    def rasterize(
+        self, fonts: "FontMap | None" = None, options: "Options | None" = None
+    ) -> "RenderReport":
+        """
+        Render the text into the layer's pixels.
+
+        Requires the ``text`` extra. The render replaces the stored channels
+        and the layer's rectangle, so :py:meth:`topil`, :py:meth:`numpy`,
+        :py:meth:`composite` and a saved file show it. A missing font
+        raises :py:class:`~psd_tools.composite.text.MissingFontError`
+        unless ``fonts`` or ``options`` say otherwise. An RGB document
+        stores the render at its own depth; a 32-bit one gets the fill
+        colours as written, not linearised. Other colour modes convert
+        through PIL at 8 bits.
+
+        :param fonts: :py:class:`~psd_tools.composite.text.FontMap`; the
+            default scans ``PSD_TOOLS_FONT_DIRS`` and the platform fonts.
+        :param options: :py:class:`~psd_tools.composite.text.Options`.
+        :return: :py:class:`~psd_tools.composite.text.RenderReport`.
+        """
+        try:
+            from psd_tools.composite.text import render  # noqa: PLC0415
+        except ImportError as e:
+            raise ImportError(
+                "Type layer rendering requires: uharfbuzz, freetype-py\n\n"
+                "Install with:\n"
+                "    pip install 'psd-tools[text]'"
+            ) from e
+        result = render(self, fonts=fonts, options=options)
+        self._store_raster(result.rgba, result.bbox)
+        self._rewrite_text_bounds(result.bbox, result.report)
+        self._invalidate_bbox()
+        self._psd.mark_updated()
+        return result.report
+
+    def _store_raster(self, rgba: np.ndarray, bbox: tuple[int, int, int, int]) -> None:
+        """Replace the channels with straight RGBA ``float32`` pixels at ``bbox``."""
+        header = self._psd._record.header
+        depth = cast(Literal[1, 8, 16, 32], header.depth)
+        x0, y0, x1, y1 = bbox
+        width, height = x1 - x0, y1 - y0
+        mode = self._psd.pil_mode.rstrip("A")
+        count = pil_io.get_pil_channels(mode)
+        colors: Iterable[bytes]
+        if not (width and height):
+            transparency, colors = b"", [b""] * count
+        elif mode == "RGB":
+            transparency = numpy_io._encode_array(rgba[..., 3], depth, width)
+            colors = (
+                numpy_io._encode_array(rgba[..., i], depth, width) for i in range(3)
+            )
+        else:
+            # PIL is the only converter to the other modes; it holds 8 bits.
+            u8 = (np.clip(rgba, 0, 1) * 255 + 0.5).astype(np.uint8)
+            alpha = Image.fromarray(np.ascontiguousarray(u8[..., 3]), "L")
+            color = Image.fromarray(np.ascontiguousarray(u8[..., :3]), "RGB")
+            color = color.convert(mode)
+            if color.mode == "CMYK":
+                color = ImageChops.invert(color)
+            transparency = pil_io.encode_channel(alpha, depth)
+            colors = (
+                pil_io.encode_channel(color.getchannel(i), depth) for i in range(count)
+            )
+        record, channels = PixelLayer._assemble(
+            transparency,
+            colors,
+            self.name,
+            x0,
+            y0,
+            width,
+            height,
+            Compression.RLE,
+            header.version,
+            depth,
+        )
+        # The mask channels keep their own rectangle (``mask_data``), so the
+        # render does not touch them.
+        for info, data in zip(self._record.channel_info, self._channels, strict=True):
+            if info.id in (ChannelID.USER_LAYER_MASK, ChannelID.REAL_USER_LAYER_MASK):
+                record.channel_info.append(info)
+                channels.append(data)
+        self._apply_reencoded((record, channels))
+        self._record.left, self._record.top = x0, y0
+        self._record.right, self._record.bottom = x1, y1
+        # The writer takes channels from the document's flat lists.
+        self._psd._update_record()
+
+    def _rewrite_text_bounds(
+        self, bbox: tuple[int, int, int, int], report: "RenderReport"
+    ) -> None:
+        """Refresh ``boundingBox`` (ink) and, for point text, ``bounds`` (pen)."""
+        xx, xy, yx, yy, tx, ty = self.transform
+        det = xx * yy - xy * yx
+        text_data = self._data.text_data
+        if det == 0 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            return
+
+        def to_text(px: float, py: float) -> tuple[float, float]:
+            px, py = px - tx, py - ty
+            return (px * yy - py * yx) / det, (py * xx - px * xy) / det
+
+        corners = [
+            to_text(x, y) for x in (bbox[0], bbox[2]) for y in (bbox[1], bbox[3])
+        ]
+        ink = (
+            min(c[0] for c in corners),
+            min(c[1] for c in corners),
+            max(c[0] for c in corners),
+            max(c[1] for c in corners),
+        )
+        _set_rect(text_data.get(b"boundingBox"), ink)
+        if self.text_type == TextType.POINT and report.lines:
+            left = min(line.x0 for line in report.lines)
+            right = max(line.x0 + line.width for line in report.lines)
+            _set_rect(text_data.get(b"bounds"), (left, ink[1], right, ink[3]))
 
     @property
     def text_type(self) -> TextType | None:
@@ -3219,6 +3389,16 @@ class TypeLayer(Layer):
             [font.postscript_name for font in layer.typesetting.fonts]
         """
         return [font.postscript_name for font in self.typesetting.fonts]
+
+
+def _set_rect(desc: Descriptor | None, rect: tuple[float, float, float, float]) -> None:
+    """Write ``(left, top, right, bottom)`` into a ``bounds``-style descriptor."""
+    if desc is None:
+        return
+    for key, value in zip((b"Left", b"Top ", b"Rght", b"Btom"), rect, strict=True):
+        item = desc.get(key)
+        if isinstance(item, NumericElement):
+            item.value = float(value)
 
 
 class ShapeLayer(Layer):
