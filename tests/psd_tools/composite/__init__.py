@@ -27,5 +27,6 @@ def opaque_effect_canvas(compositor: Compositor) -> _EffectCanvas:
         knockout=Knockout.NONE,
         adjustment_isolated=None,
         knockout_shape=ones,
+        region=ones,
     )
     return _EffectCanvas(compositor, source)

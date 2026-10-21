@@ -169,23 +169,43 @@ _Widen = Callable[[np.ndarray, int], np.ndarray]
 # channel count, and only the colour overlay always draws -- the pattern and
 # the gradient can both decline, returning None -- but a uniform signature is
 # what lets the three share one application path: the shape/alpha arithmetic
-# around them is identical.
+# around them is identical. Each draws on ``box`` and lays its paint out across
+# ``layout`` -- see ``_overlay_boxes()``.
+_Box = tuple[int, int, int, int]
 _OverlayDraw = Callable[
-    [Layer, tuple[int, int, int, int], Any, int],
-    tuple[np.ndarray | None, np.ndarray | None],
+    [Layer, Any, int, _Box, _Box], tuple[np.ndarray | None, np.ndarray | None]
 ]
 
 
+def _overlay_boxes(
+    layer: Layer, viewport: _Box, memo: "_ContentBBoxes"
+) -> tuple[_Box, _Box]:
+    """The box an overlay is drawn on and the box its paint is laid out across.
+
+    A layer's style box for both -- its own box, or an adjustment layer's
+    mask -- except for a group: its overlay covers its composited contents,
+    effects included, which can run past the group's box. A pass-through
+    group lays its overlay out across the document canvas, as Photoshop does.
+    """
+    if not layer.is_group():
+        box = _style_bbox(layer)
+        return box, box
+    box = utils.intersect(viewport, _content_bbox(layer, memo))
+    if layer.blend_mode == BlendMode.PASS_THROUGH:
+        return box, layer._psd.viewbox
+    return box, layer.bbox
+
+
 def _draw_color_overlay(
-    layer: Layer, bbox: tuple[int, int, int, int], descriptor: Any, channels: int
+    layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    return paint.draw_solid_color_fill(bbox, layer._psd.color_mode, descriptor)
+    return paint.draw_solid_color_fill(box, layer._psd.color_mode, descriptor)
 
 
 def _draw_pattern_overlay(
-    layer: Layer, bbox: tuple[int, int, int, int], descriptor: Any, channels: int
+    layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    fill, shape = paint.draw_pattern_fill(bbox, layer._psd, descriptor)
+    fill, shape = paint.draw_pattern_fill(box, layer._psd, descriptor, layout)
     if fill is None:
         return None, None
     # A pattern carries its own color mode, so a grayscale one reaches a CMYK
@@ -211,13 +231,13 @@ def _draw_pattern_overlay(
 
 
 def _draw_gradient_overlay(
-    layer: Layer, bbox: tuple[int, int, int, int], descriptor: Any, channels: int
+    layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     return paint.draw_gradient_fill(
-        bbox,
+        box,
         layer._psd.color_mode,
         descriptor,
-        paint.gradient_anchor(layer, descriptor),
+        paint.gradient_anchor(layer, descriptor) or layout,
     )
 
 
@@ -1214,6 +1234,11 @@ class _Source:
     # in: fill opacity fades the layer's own paint without narrowing the hole
     # it punches, which is what makes "fill 0 under a knockout" a hole at all.
     knockout_shape: np.ndarray
+    # What the layer's effects cover, under its mask and before its opacity:
+    # ``shape`` for an object, the composited alpha of a group, so a child
+    # faded to nothing carries none of the group's style. Only an effect
+    # canvas reads it, so a group with no style to draw carries ``shape``.
+    region: np.ndarray
 
 
 def _composites_as_passthrough(source: _Source, blend_mode: BlendMode) -> bool:
@@ -1287,7 +1312,7 @@ class _EffectCanvas:
     What the effect paints is the same either way; where it goes is not. An
     *inner* effect -- an overlay, or the part of a stroke within the layer's
     boundary -- covers a share of the layer's own region, which is
-    ``source.shape``: it paints over the layer, knocks out what it covers, and
+    ``source.region``: it paints over the layer, knocks out what it covers, and
     never widens the region. The coverage it is given is that share rather
     than a coverage of the pixel, so that the layer's opacity and whatever
     alpha it has of its own stay out of the arithmetic until
@@ -1328,9 +1353,8 @@ class _EffectCanvas:
         # here and scaling each effect by it as well is what made an overlay
         # at full strength lift a half-opaque layer to 0.75.
         #
-        # What is left is the layer's own alpha against its own coverage,
-        # which for an object is 1 and for a group is the group's, faded by
-        # fill opacity.
+        # What is left is the layer's own alpha against its region, which is 1
+        # inside it, faded by fill opacity.
         opacity = source.opacity
         self._alpha = utils.divide(source.alpha, self.region, fill=0.0) * (
             source.fill_opacity / opacity if opacity > 0.0 else 0.0
@@ -1345,8 +1369,8 @@ class _EffectCanvas:
 
     @property
     def region(self) -> np.ndarray:
-        """The layer's own coverage, which is what ``over()`` is a share of."""
-        return self._source.shape
+        """What the layer's effects cover, which ``over()`` is a share of."""
+        return self._source.region
 
     @property
     def opacity(self) -> float:
@@ -1409,11 +1433,11 @@ class _EffectCanvas:
             color=utils.clip(utils.divide(premultiplied, alpha, fill=self._color)),
             shape=utils.clip(self.region * self._shape),
             alpha=utils.clip(alpha),
-            # Not narrowed by fill opacity, which the shape above now carries:
-            # fill opacity fades the layer's own paint without narrowing the
-            # hole it punches, and that is what makes "fill 0 under a
-            # knockout" a hole at all.
-            knockout_shape=self.region,
+            # Unchanged: fill opacity, which the shape above now carries,
+            # fades the layer's own paint without narrowing the hole it
+            # punches -- that is what makes "fill 0 under a knockout" a hole
+            # at all -- and an effect that draws inside the layer does not
+            # move the hole either.
             fill_opacity=1.0,
         )
 
@@ -1743,7 +1767,8 @@ class Compositor:
         knockout = _read_knockout(layer)
         adjustment_isolated: bool | None = None
         stroke: tuple[np.ndarray, np.ndarray] | None = None
-        if isinstance(layer, GroupMixin):
+        is_group = isinstance(layer, GroupMixin)
+        if is_group:
             color, shape, alpha, adjustment_isolated = self._get_group(layer, knockout)
         else:
             color, shape, alpha, stroke = self._get_object(layer)
@@ -1757,12 +1782,19 @@ class Compositor:
         # In place: both canvases were built for this layer by the calls above
         # and are not shared with anything else.
         shape *= shape_mask
+        region = None
+        if is_group and _has_enabled_effects(layer):
+            region = alpha * shape_mask
         alpha *= mask
         if stroke is not None:
             stroke_mask = self._get_mask(layer, clip_to_path=False)
             # The fill's share and the stroke's are disjoint, so they add.
             shape = np.minimum(shape + stroke[0] * stroke_mask, 1.0)
             alpha = np.minimum(alpha + stroke[1] * stroke_mask * opacity, 1.0)
+        if region is None:
+            # An object's effects cover its shape, the redrawn stroke included.
+            # A group with no style to draw never has its region read.
+            region = shape
 
         # TODO: Tag.BLEND_INTERIOR_ELEMENTS controls how inner effects apply,
         # and is unread. There is a second thing riding on it now: the effect
@@ -1784,6 +1816,7 @@ class Compositor:
             knockout=knockout,
             adjustment_isolated=adjustment_isolated,
             knockout_shape=shape,
+            region=region,
         )
 
     def _composite_source(self, source: _Source, blend_mode: BlendMode) -> None:
@@ -2719,8 +2752,8 @@ class Compositor:
 
         An overlay covers the layer's whole region, so what it hands the
         canvas is its own mask and opacity alone -- the layer's coverage is
-        what the canvas already measures a share of. It is laid out on the
-        layer's style box: its own box, or an adjustment layer's mask.
+        what the canvas already measures a share of. It is drawn and laid out
+        on the boxes ``_overlay_boxes()`` picks.
 
         An effect is skipped twice over: when its draw declines, which the
         pattern and the gradient do for a fill they cannot make sense of, and
@@ -2728,8 +2761,13 @@ class Compositor:
         step earlier (#826).
         """
         draw = _OVERLAY_DRAWS[effect_name]
-        bbox = _style_bbox(layer)
-        for effect in _readable(layer, effect_name):
+        effects = _readable(layer, effect_name)
+        if not effects:
+            return
+        box, layout = _overlay_boxes(layer, self._viewport, self._cache.content_bboxes)
+        if box == (0, 0, 0, 0):
+            return
+        for effect in effects:
             # The draw is guarded and the coverage arithmetic below is not,
             # which keeps the shared half of this loop -- identical for all
             # three kinds -- out of the clause, so a fault there still
@@ -2737,7 +2775,9 @@ class Compositor:
             # fill decodes the pattern's own pixels, and a file whose pattern
             # data is corrupt loses the effect here rather than the document.
             try:
-                fill, shape_e = draw(layer, bbox, effect.descriptor, self.channels)
+                fill, shape_e = draw(
+                    layer, effect.descriptor, self.channels, box, layout
+                )
                 opacity = effect.opacity / 100.0
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:
@@ -2751,11 +2791,11 @@ class Compositor:
             if fill is None:
                 logger.debug("Skipping undrawable %s effect in %s", effect_name, layer)
                 continue
-            color = paste(self._viewport, bbox, fill, 1.0)
+            color = paste(self._viewport, box, fill, 1.0)
             if shape_e is None:
                 shape_e = np.ones((self.height, self.width, 1), dtype=np.float32)
             else:
-                shape_e = paste(self._viewport, bbox, shape_e)
+                shape_e = paste(self._viewport, box, shape_e)
             canvas.over(shape_e, color, blend_mode, opacity)
 
     def _trace_shape(

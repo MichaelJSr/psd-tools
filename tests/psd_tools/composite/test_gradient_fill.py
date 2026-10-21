@@ -339,10 +339,10 @@ def test_an_overlay_not_aligned_with_its_layer_is_laid_out_on_the_document() -> 
     assert layer.bbox == (99, 422, 699, 482) and psd.viewbox == (0, 0, 800, 640)
 
     assert paint.gradient_anchor(layer, desc) is None, "aligned by default"
-    aligned, _ = _draw_gradient_overlay(layer, layer.bbox, desc, 3)
+    aligned, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
     desc[Key.Alignment] = Bool(False)
     assert paint.gradient_anchor(layer, desc) == psd.viewbox
-    unaligned, _ = _draw_gradient_overlay(layer, layer.bbox, desc, 3)
+    unaligned, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
     on_document, _ = paint.draw_gradient_fill(
         layer.bbox, psd.color_mode, desc, psd.viewbox
     )

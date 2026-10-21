@@ -57,6 +57,11 @@ Changelog
 - [fix] An adjustment inside a styled pass-through group adjusts the group's
   own content at the content's own opacity, instead of the flattened canvas,
   so a half-transparent layer under it stays half-transparent over the backdrop
+- [fix] A group's overlays and inner effects cover the group's composited
+  alpha, its children's effects included, instead of its children's
+  coverage, and a pass-through group's gradient or pattern overlay is laid
+  out across the document canvas rather than the group's box, as in
+  Photoshop
 
 1.25.0 (2026-10-14)
 -------------------
