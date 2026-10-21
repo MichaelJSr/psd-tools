@@ -6,11 +6,13 @@ Changelog
 
 - [fix] A pattern overlay's tiling starts at the layer's reference point moved
   by its phase (the phase alone when not aligned with the layer) and turns by
-  a right-angle ``Angl``. Scaled patterns, in fills and strokes too, are
-  sampled as Photoshop does; a scale outside its 1-1000% range is drawn at the
-  limit instead of raising ``ValueError``
-- [api] ``paint.draw_pattern_fill`` takes an ``origin``; ``paint.pattern_origin``
-  computes an overlay's
+  a right-angle ``Angl``. A scaled pattern is sampled as Photoshop does, a
+  scale outside its 1-1000% range drawn at the limit instead of raising
+  ``ValueError``; pattern fill layers and strokes share the sampler and turn
+- [fix] Setting a layer's ``left``, ``top`` or ``offset`` carries its reference
+  point, so effects anchored to it move with the layer
+- [api] ``paint.draw_pattern_fill`` takes an ``origin`` for its tiling;
+  ``paint.pattern_origin`` computes an overlay's from its descriptor
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

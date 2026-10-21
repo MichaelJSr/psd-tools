@@ -43,6 +43,10 @@ _FILL_METHOD_KEY = b"gradientsInterpolationMethod"
 _MIN_SCALE = 1.0
 _MAX_SCALE = 1000.0
 
+# What a numpy call leaves on tracemalloc besides its arrays' data: the array
+# objects, the index arrays and the lists moveaxis builds.
+_CALL_OVERHEAD_BYTES = 32768
+
 # Per pixel, what a gradient fill peaks at: its coordinate grids and ramp
 # planes outweigh the float32 colour it returns.
 GRADIENT_FILL_BYTES = 128
@@ -363,7 +367,7 @@ def _reduction_box(scale: float) -> int:
     L is the deepest halving that does not reduce the panel past the scale.
     """
     width = 1
-    # A percentage over 100 can fall a hair short of the halving it names.
+    # A scale read as percent / 100 can fall a hair short of the halving it names.
     while width * 2 * scale <= 1.0 + 1e-9:
         width *= 2
     return width
@@ -386,8 +390,13 @@ def _box_peak_bytes(panel: np.ndarray, width: int) -> int:
     """What :py:func:`_box_average` holds at its peak, for the shorter axis."""
     size = min(panel.shape[0], panel.shape[1])
     # The wrapped copy, its float64 sums and cumsum's cast of it, at 5x the
-    # panel per wrapped row; the float64 totals, the result and the input.
-    return -(-panel.nbytes * (5 * (size + width + 1) + 5 * size) // size)
+    # panel per wrapped row; the float64 totals, the result and the input;
+    # the two int64 index arrays.
+    return (
+        -(-panel.nbytes * (5 * (size + width + 1) + 5 * size) // size)
+        + 16 * (size + width)
+        + _CALL_OVERHEAD_BYTES
+    )
 
 
 def _tile_axis(
@@ -413,6 +422,22 @@ def _sample_tiling(
 ) -> np.ndarray:
     """The panel tiled across ``viewport`` from ``origin``, bilinear and wrapping."""
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    if scale == 1.0:
+        # Every sample lands on a panel pixel: the panel rolled to the
+        # viewport's corner and repeated in one copy.
+        rolled = np.roll(
+            panel,
+            (origin[1] - viewport[1], origin[0] - viewport[0]),
+            axis=(0, 1),
+        )
+        rows, columns = -(-height // panel.shape[0]), -(-width // panel.shape[1])
+        tiled = np.broadcast_to(
+            rolled[None, :, None, :, :],
+            (rows,) + panel.shape[:1] + (columns,) + panel.shape[1:],
+        )
+        return tiled.reshape(
+            rows * panel.shape[0], columns * panel.shape[1], panel.shape[2]
+        )[:height, :width]
     top, bottom, down = _tile_axis(
         viewport[1], height, origin[1], panel.shape[0], scale
     )
@@ -426,10 +451,17 @@ def _sample_tiling(
     )
 
 
-def _sample_peak_bytes(panel: np.ndarray, viewport: tuple[int, int, int, int]) -> int:
+def _sample_peak_bytes(
+    panel: np.ndarray, viewport: tuple[int, int, int, int], scale: float
+) -> int:
     """What :py:func:`_sample_tiling` holds at its peak."""
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
     plane = panel.shape[2] * panel.dtype.itemsize
+    if scale == 1.0:
+        # The panel, its rolled copy and the tiling rounded up to whole panels.
+        rows = -(-height // panel.shape[0]) * panel.shape[0]
+        columns = -(-width // panel.shape[1]) * panel.shape[1]
+        return 2 * panel.nbytes + rows * columns * plane + _CALL_OVERHEAD_BYTES
     # The panel, three row-blend arrays, the output with its two terms, and
     # per row and column two int64 indices, their float64 position and weights.
     return (
@@ -437,6 +469,7 @@ def _sample_peak_bytes(panel: np.ndarray, viewport: tuple[int, int, int, int]) -
         + 3 * height * panel.shape[1] * plane
         + 3 * height * width * plane
         + 48 * (height + width)
+        + _CALL_OVERHEAD_BYTES
     )
 
 
@@ -523,7 +556,7 @@ def draw_pattern_fill(
             height,
             panel.shape[2],
             budget,
-            estimated_bytes=_sample_peak_bytes(panel, viewport),
+            estimated_bytes=_sample_peak_bytes(panel, viewport, scale),
             warn=False,
         )
     # Taken from the pattern's own slot layout rather than from its color mode.

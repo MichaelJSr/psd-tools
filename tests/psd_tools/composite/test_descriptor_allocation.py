@@ -63,16 +63,23 @@ def _peak(run: Callable[[], object]) -> int:
     return peak
 
 
-def test_the_sample_estimate_covers_its_peak() -> None:
-    panel = np.ones((37, 23, 4), dtype=np.float32)
+@pytest.mark.parametrize("shape", [(1, 1, 2), (5, 5, 4), (37, 23, 4)])
+@pytest.mark.parametrize("scale", [1.0, 1.7, 0.5])
+def test_the_sample_estimate_covers_its_peak(
+    shape: tuple[int, int, int], scale: float
+) -> None:
+    panel = np.ones(shape, dtype=np.float32)
     viewport = (5, 7, 305, 207)
-    peak = _peak(lambda: paint._sample_tiling(panel, viewport, (0, 0), 1.7))
-    assert paint._sample_peak_bytes(panel, viewport) >= peak
+    peak = _peak(lambda: paint._sample_tiling(panel, viewport, (-3, 11), scale))
+    assert paint._sample_peak_bytes(panel, viewport, scale) >= peak
 
 
+@pytest.mark.parametrize("shape", [(1, 1, 2), (5, 5, 4), (37, 23, 4)])
 @pytest.mark.parametrize("width", [2, 8, 64])
-def test_the_box_estimate_covers_its_peak(width: int) -> None:
-    panel = np.ones((37, 23, 4), dtype=np.float32)
+def test_the_box_estimate_covers_its_peak(
+    shape: tuple[int, int, int], width: int
+) -> None:
+    panel = np.ones(shape, dtype=np.float32)
     peak = _peak(lambda: paint._box_average(panel, width))
     assert paint._box_peak_bytes(panel, width) >= peak
 
@@ -86,7 +93,7 @@ def test_the_tiled_pattern_is_checked_at_its_estimate(scale: float) -> None:
     assert pattern is not None
     panel = numpy_io.get_pattern(pattern)
     needed = max(
-        paint._sample_peak_bytes(panel, viewport),
+        paint._sample_peak_bytes(panel, viewport, scale / 100),
         paint._box_peak_bytes(panel, paint._reduction_box(scale / 100)),
     )
 

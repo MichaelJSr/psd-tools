@@ -69,6 +69,25 @@ def test_the_tiling_starts_at_the_reference_point(
     assert np.array_equal(_drawn(layer, desc), _tiling_from(psd, desc, origin, box))
 
 
+def test_an_unscaled_tiling_matches_the_sampler() -> None:
+    psd, _, desc = _overlay()
+    panel = _panel(psd, desc)
+    viewport = (3, 5, 103, 75)
+    exact = paint._sample_tiling(panel, viewport, (-7, 11), 1.0)
+    assert np.array_equal(exact, _tiling_from(psd, desc, (-7, 11), viewport))
+    sampled = paint._sample_tiling(panel, viewport, (-7, 11), 1.0 + 1e-9)
+    assert np.allclose(exact, sampled, atol=1e-5)
+
+
+def test_moving_the_layer_moves_its_overlay() -> None:
+    psd, layer, desc = _overlay("layer_effects.psd", "Pattern Overlay")
+    before = _drawn(layer, desc)
+    layer.left += 7
+    layer.top += 5
+    after = _drawn(layer, desc)
+    assert np.array_equal(after, before)
+
+
 def test_the_phase_moves_the_tiling_from_the_reference_point() -> None:
     psd, layer, desc = _overlay()
     desc[b"phase"][b"Hrzn"] = Double(-37.0)
@@ -173,8 +192,7 @@ def test_a_tiling_scaled_by_a_fraction_keeps_its_period() -> None:
 
 @pytest.mark.parametrize(
     ("scale", "box"),
-    # Fitted on the card corpus: 0.89 on a zebra stat bar, 0.5 on a turned
-    # metal star, 0.07 on a type icon.
+    # Fitted against Photoshop's renders at 89%, 50% (turned) and 7%.
     [(1.0, 1), (0.89, 1), (0.5, 2), (0.3, 2), (0.25, 4), (0.07, 8), (0.01, 64)],
 )
 def test_a_reduction_averages_the_deepest_halving_it_reaches(

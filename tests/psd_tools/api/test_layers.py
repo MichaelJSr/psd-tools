@@ -652,6 +652,18 @@ def test_layer_fill_opacity(pixel_layer: PixelLayer) -> None:
     assert pixel_layer.fill_opacity == 0
 
 
+def test_moving_a_layer_carries_its_reference_point(pixel_layer: PixelLayer) -> None:
+    assert pixel_layer.reference_point == (15.0, 15.0)
+    pixel_layer.left += 7
+    pixel_layer.top -= 5
+    assert pixel_layer.reference_point == (22.0, 10.0)
+    pixel_layer.offset = (pixel_layer.left + 1, pixel_layer.top + 2)
+    assert pixel_layer.reference_point == (23.0, 12.0)
+    del pixel_layer.tagged_blocks[Tag.REFERENCE_POINT]
+    pixel_layer.left = 3
+    assert Tag.REFERENCE_POINT not in pixel_layer.tagged_blocks
+
+
 def test_layer_reference_point(pixel_layer: PixelLayer) -> None:
     assert pixel_layer.reference_point == (15.0, 15.0)
 
