@@ -52,7 +52,8 @@ Changelog
   through to the layers beneath
 - [fix] Layer effects on an adjustment layer are rendered, with the layer's
   mask as its shape: overlays fill the mask, inner effects and strokes are
-  drawn from its edge, shadows and glows are cast from it. They were dropped
+  drawn from its edge, shadows and glows are cast from it; without a mask the
+  document edge is the layer's. They were dropped
 - [fix] An adjustment inside a styled pass-through group adjusts the group's
   own content at the content's own opacity, instead of the flattened canvas,
   so a half-transparent layer under it stays half-transparent over the backdrop

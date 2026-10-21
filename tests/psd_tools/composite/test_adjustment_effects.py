@@ -127,16 +127,100 @@ def test_an_overlay_on_an_adjustment_layer_blends_with_the_adjusted_canvas() -> 
     assert np.allclose(_inside(color), _inside(before) * _RED, atol=1e-6)
 
 
-def test_the_layer_opacity_fades_the_effects_of_an_adjustment_layer() -> None:
-    """At half opacity the overlay goes on at half, over the half-strength adjustment."""
+def _without(psd: PSDImage, layer: Layer) -> np.ndarray:
+    layer.visible = False
+    color, _, _ = composite(psd)
+    layer.visible = True
+    return color
+
+
+def test_the_layer_opacity_fades_the_adjustment_and_its_effects_as_one() -> None:
+    """At half opacity, half the canvas without the layer and half the overlay.
+
+    As a layer's opacity fades it and its effects together: the solid
+    overlay covers the adjustment, so none of the adjustment is left in the
+    mix, where fading the two one after the other would leave a quarter.
+    """
     psd, layer = _exposure()
+    without = _without(psd, layer)
     layer.opacity = 128
-    before, _, _ = composite(psd)
     _red_overlay(layer)
     color, _, _ = composite(psd)
     share = 128 / 255
-    expected = (1.0 - share) * _inside(before) + share * np.asarray(_RED)
+    expected = (1.0 - share) * _inside(without) + share * np.asarray(_RED)
     assert np.allclose(_inside(color), expected, atol=1e-6)
+
+
+def test_a_blended_effect_is_faded_with_the_adjustment_it_sees() -> None:
+    """A Multiply overlay multiplies the whole adjustment, then the layer opacity fades both."""
+    psd, layer = _exposure()
+    without = _without(psd, layer)
+    adjusted, _, _ = composite(psd)
+    layer.opacity = 128
+    desc = _red_overlay(layer)
+    desc[Key.Mode] = Enumerated(typeID=Type.BlendMode, enum=Enum.Multiply)
+    color, _, _ = composite(psd)
+    share = 128 / 255
+    whole = _inside(adjusted) * _RED
+    expected = _inside(without) + share * (whole - _inside(without))
+    assert np.allclose(_inside(color), expected, atol=1e-6)
+
+
+# -- Without a mask ---------------------------------------------------------- #
+
+
+def _unmasked(size: float, style: bytes) -> tuple[PSDImage, Layer, np.ndarray]:
+    """``Exposure 1`` alone over the photograph, its mask off, with a red stroke."""
+    psd, layer = _exposure()
+    for sub in psd:
+        sub.visible = sub is psd[0] or sub is layer
+    assert layer.mask is not None
+    layer.mask.disabled = True
+    before, _, _ = composite(psd)
+    desc = _forge(layer, "Stroke", Klass.FrameFX)
+    desc[Key.Style] = Enumerated(typeID=Type.FrameStyle, enum=style)
+    desc[Key.SizeKey] = Double(size)
+    _paint(desc, _RED)
+    return psd, layer, before
+
+
+def test_a_stroke_on_an_unmasked_adjustment_layer_follows_the_document_edge() -> None:
+    """Without a mask the layer runs to the document's edge, and an inside stroke frames it."""
+    psd, layer, before = _unmasked(5.0, Enum.InsetFrame)
+    color, _, _ = composite(psd)
+    frame = np.ones(color.shape[:2], dtype=bool)
+    frame[5:-5, 5:-5] = False
+    assert np.allclose(color[frame], _RED, atol=1e-6)
+    assert np.allclose(color[~frame], before[~frame], atol=1e-6)
+
+
+def test_an_outside_stroke_on_an_unmasked_adjustment_layer_falls_off_the_document() -> (
+    None
+):
+    psd, layer, before = _unmasked(5.0, Enum.OutsetFrame)
+    color, _, _ = composite(psd)
+    assert np.allclose(color, before, atol=1e-6)
+
+
+def test_an_inner_shadow_on_an_unmasked_adjustment_layer_falls_from_the_document_edge() -> (
+    None
+):
+    psd, layer = _exposure()
+    for sub in psd:
+        sub.visible = sub is psd[0] or sub is layer
+    assert layer.mask is not None
+    layer.mask.disabled = True
+    before, _, _ = composite(psd)
+    desc = _forge(layer, "Inner Shadow", Klass.InnerShadow)
+    _paint(desc, (0.0, 0.0, 0.0))
+    desc[Key.UseGlobalAngle] = False
+    desc[Key.LocalLightingAngle] = Double(180.0)
+    desc[Key.Distance] = Double(4.0)
+    desc[Key.Blur] = Double(0.0)
+    desc[Key.ChokeMatte] = Double(0.0)
+    color, _, _ = composite(psd)
+    assert np.allclose(color[:, :4], 0.0, atol=1e-6)
+    assert np.allclose(color[:, 4:], before[:, 4:], atol=1e-6)
 
 
 def test_a_gradient_overlay_on_an_adjustment_layer_is_laid_out_on_its_mask() -> None:

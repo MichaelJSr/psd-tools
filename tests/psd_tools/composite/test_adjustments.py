@@ -396,8 +396,8 @@ def test_an_adjustment_in_a_styled_group_reads_the_content_not_the_canvas(
 
     ``Layer 14`` is switched on at half opacity as the styled ``Group 6``'s
     only content, and ``Curves 9`` is moved into a pass-through group of its
-    own above it, as the cards nest them. Photoshop adjusts the layer's own colour
-    and composites it over the backdrop at the layer's alpha,
+    own above it. Photoshop adjusts the layer's own colour and composites it
+    over the backdrop at the layer's alpha,
     ``a * f(C) + (1 - a) * B``, on every pixel the layer covers at all;
     adjusting the canvas the layer stands on gives ``f(a * C + (1 - a) * B)``,
     which a curve that is not a straight line tells apart. ``f`` is the curve

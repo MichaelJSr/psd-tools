@@ -277,9 +277,10 @@ def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
     """The box a layer's style is laid out on and its silhouette read from.
 
     ``layer.bbox``, except for an adjustment layer, which has no pixels of its
-    own: its mask is its shape, so the mask's box stands in, and the whole
-    canvas where there is no mask or the mask reveals what lies outside its
-    box. A vector mask narrows it as it narrows the shape.
+    own: its mask is its shape, so the mask's box stands in -- empty when the
+    mask hides everything -- and the whole canvas where there is no mask or
+    the mask reveals what lies outside its box. A vector mask narrows it as
+    it narrows the shape.
     """
     if not isinstance(layer, AdjustmentLayer):
         return layer.bbox
@@ -287,9 +288,7 @@ def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
     bbox = (0, 0, psd.width, psd.height)
     mask = layer.mask
     if mask is not None and not mask.disabled and mask.background_color == 0:
-        box = mask.bbox
-        if box[0] < box[2] and box[1] < box[3]:
-            bbox = box
+        bbox = mask.bbox
     vector = layer.vector_mask if layer.has_vector_mask() else None
     if (
         vector is not None
@@ -1426,18 +1425,17 @@ class _AdjustmentCanvas:
     to composite an effect into; its mask is its shape, and the adjustment has
     already rewritten the canvas under that shape by the time its effects are
     drawn. So each effect goes onto the compositor's canvas by itself, with its
-    own blend mode against what is there and faded by the layer opacity, which
-    is how Photoshop composites a layer's interior effects when they are not
-    blended as a group -- and with nothing of the layer's to blend them into,
-    the one way they can go on at all.
+    own blend mode against what is there, which is how Photoshop composites a
+    layer's interior effects when they are not blended as a group -- and with
+    nothing of the layer's to blend them into, the one way they can go on at
+    all. The layer opacity is not applied here: it fades the adjustment and
+    every effect as one, once they are all on
+    (:py:meth:`Compositor._apply_styled_adjustment`).
     """
 
-    def __init__(
-        self, compositor: "Compositor", region: np.ndarray, opacity: float
-    ) -> None:
+    def __init__(self, compositor: "Compositor", region: np.ndarray) -> None:
         self._compositor = compositor
         self._region = region
-        self._opacity = opacity
 
     @property
     def region(self) -> np.ndarray:
@@ -1446,8 +1444,8 @@ class _AdjustmentCanvas:
 
     @property
     def opacity(self) -> float:
-        """The layer opacity, which fades its effects."""
-        return self._opacity
+        """Whole: the layer opacity is applied to the finished style instead."""
+        return 1.0
 
     def within(self, coverage: np.ndarray) -> np.ndarray:
         """A coverage of the pixel, as the share of the region it is."""
@@ -1464,9 +1462,7 @@ class _AdjustmentCanvas:
         if not coverage.any():
             return
         shape = self._region * coverage
-        self._compositor._apply_source(
-            color, shape, shape * (opacity * self._opacity), blend_mode
-        )
+        self._compositor._apply_source(color, shape, shape * opacity, blend_mode)
 
 
 @dataclass
@@ -1658,14 +1654,18 @@ class Compositor:
             # An adjustment contributes no source of its own; it rewrites the
             # canvas that is already there. Its style is drawn from its mask,
             # the shape it has, and goes on around that rewrite the way a
-            # layer's goes on around its paint: shadows and glows beneath,
-            # the rest over -- see _apply_adjustment_effects().
-            styled = _has_enabled_effects(layer)
-            if styled:
-                self._apply_beneath_effects(layer)
-            self._apply_adjustment(layer)
-            if styled:
-                self._apply_adjustment_effects(layer)
+            # layer's goes on around its paint -- see
+            # _apply_styled_adjustment(). A mask that hides everything leaves
+            # no shape to draw from.
+            style = _style_bbox(layer)
+            if (
+                _has_enabled_effects(layer)
+                and style[0] < style[2]
+                and style[1] < style[3]
+            ):
+                self._apply_styled_adjustment(layer)
+            else:
+                self._apply_adjustment(layer)
             return
 
         # Beneath everything else the layer paints, and before the layer is
@@ -2038,7 +2038,14 @@ class Compositor:
             )
         )
 
-    def _apply_adjustment(self, layer: AdjustmentLayer) -> None:
+    def _apply_adjustment(
+        self, layer: AdjustmentLayer, opacity: float | None = None
+    ) -> None:
+        """Rewrite the canvas under the layer's mask.
+
+        ``opacity`` stands in for the layer's own where the caller fades the
+        layer later, with its style (:py:meth:`_apply_styled_adjustment`).
+        """
         adjustment_fn = ADJUSTMENT_FUNC.get(layer.kind)
         colormode = layer._psd.color_mode
 
@@ -2080,9 +2087,10 @@ class Compositor:
 
         shape_mask = self._get_mask(layer)
         shape_const, opacity_const = self._get_const(layer)
+        if opacity is None:
+            opacity = opacity_const
 
-        shape = shape_mask * shape_const
-        opacity = shape * opacity_const
+        strength = shape_mask * shape_const * opacity
 
         # Passed for uniformity with _apply_source() rather than for effect.
         # The guard above returns for every mode whose blending the colour mode
@@ -2093,7 +2101,7 @@ class Compositor:
         # that describes it.
         blend_fn = get_blend_func(layer.blend_mode, self._color_mode)
         blended = blend_fn(content, transformed_color)
-        content = utils.clip(content + opacity * (blended - content))
+        content = utils.clip(content + strength * (blended - content))
 
         if self._adjustment_isolated:
             self._color = _remix(
@@ -2102,25 +2110,80 @@ class Compositor:
         else:
             self._color = content
 
-    def _apply_adjustment_effects(self, layer: AdjustmentLayer) -> None:
-        """Composite the effects of an adjustment layer, over the adjustment.
+    def _apply_styled_adjustment(self, layer: AdjustmentLayer) -> None:
+        """Composite an adjustment layer that carries a style.
 
-        The mask is the layer's shape, so it is the region the effects are a
-        share of and the silhouette the inner effects and strokes are drawn
-        from; without a mask the layer covers the viewport. Each goes onto
-        the canvas on its own (:py:class:`_AdjustmentCanvas`); what paints
-        beside the region follows, at what it was drawn at, since there is no
-        layer source about to go over it.
+        Its shadows and glows go beneath, then the adjustment, then the rest
+        of its effects over that: the mask is the layer's shape, so it is the
+        region the effects are a share of and the silhouette the inner
+        effects and strokes are drawn from. Each goes onto the canvas on its
+        own (:py:class:`_AdjustmentCanvas`); what paints beside the region
+        follows, at what it was drawn at, since there is no layer source
+        about to go over it.
+
+        The layer opacity fades the adjustment and its effects as one, as it
+        fades a layer and its effects: they go on whole, and the canvas is
+        then drawn back towards what it was. The shadows and glows are faded
+        on their own, before that mark is taken.
         """
+        self._apply_beneath_effects(layer)
         _, opacity = self._get_const(layer)
         if opacity <= 0.0:
             return
-        region = self._get_mask(layer)
-        if not isinstance(region, np.ndarray):
-            region = np.full((self.height, self.width, 1), region, dtype=np.float32)
-        canvas = _AdjustmentCanvas(self, region, opacity)
+        color, alpha = self._color, self._alpha
+        shape_g, alpha_g = self._shape_g, self._alpha_g
+        self._apply_adjustment(layer, opacity=1.0)
+        region = self._adjustment_shape(layer, self._viewport)
+        canvas = _AdjustmentCanvas(self, region)
         outer = self._paint_effects(layer, canvas, region, region)
         self._apply_outer_effects(outer, None)
+        if opacity < 1.0:
+            self._fade(opacity, color, alpha, shape_g, alpha_g)
+
+    def _fade(
+        self,
+        share: float,
+        color: np.ndarray,
+        alpha: np.ndarray,
+        shape_g: np.ndarray,
+        alpha_g: np.ndarray,
+    ) -> None:
+        """Keep ``share`` of what went onto the canvas since the state given.
+
+        What a layer's opacity does to the layer and its effects together.
+        Interpolated premultiplied, which is exact for what went on Normal
+        and is what fading each piece by ``share`` as it went on would have
+        summed to for the alphas; the group's shape and alpha interpolate
+        the same way, as ``union`` is affine in what joins it.
+        """
+        premultiplied = alpha * color + share * (
+            self._alpha * self._color - alpha * color
+        )
+        self._alpha = alpha + share * (self._alpha - alpha)
+        self._color = utils.clip(
+            utils.divide(premultiplied, self._alpha, fill=self._color)
+        )
+        self._shape_g = shape_g + share * (self._shape_g - shape_g)
+        self._alpha_g = alpha_g + share * (self._alpha_g - alpha_g)
+
+    def _adjustment_shape(
+        self, layer: AdjustmentLayer, viewport: tuple[int, int, int, int]
+    ) -> np.ndarray:
+        """An adjustment layer's silhouette on ``viewport``: its mask, in the document.
+
+        The layer has no pixels, so its mask is its shape; where the mask
+        leaves it uncovered -- no mask, or one that reveals its outside --
+        the layer runs to the document's edge, which is then the edge its
+        strokes and inner effects are drawn from.
+        """
+        height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+        shape = np.zeros((height, width, 1), dtype=np.float32)
+        x0, y0, x1, y1 = utils.intersect(viewport, layer._psd.viewbox)
+        if x0 < x1 and y0 < y1:
+            shape[
+                y0 - viewport[1] : y1 - viewport[1], x0 - viewport[0] : x1 - viewport[0]
+            ] = 1.0
+        return utils.clip(shape * self._get_mask(layer, viewport))
 
     def _isolation_alpha(self) -> np.ndarray:
         """How opaque what the isolated group has painted so far is."""
@@ -2161,15 +2224,9 @@ class Compositor:
     def result_isolated(self) -> np.ndarray:
         """The composited color with the initial backdrop's contribution removed.
 
-        Correct when the result is handed back as a *source* in its own right
-        -- a group about to be composited by its parent, or the return value of
-        ``composite()`` -- because the caller will composite it over that same
-        backdrop again, and the backdrop must not be counted twice. Paired with
-        ``alpha``, this is straight (un-premultiplied) color: where the group
-        covers nothing, the backdrop it was seeded with is undone.
-
-        The correction is a no-op for the transparent backdrop an isolated
-        group starts from, and grows with ``_alpha_0``.
+        For a result handed back as a *source* -- a group its parent composites,
+        or the return value of ``composite()`` -- which the caller composites
+        over that same backdrop again.
         """
         return _unmix(self._color, self._color_0, self._alpha_0, self._alpha_g)
 
@@ -2732,6 +2789,8 @@ class Compositor:
         # in the corpus (the two groups it applies to carry no stroke effect),
         # and the same inside the viewport as outside, so this change leaves it
         # be; ``_get_group_shape()`` is what a fix would multiply in.
+        if isinstance(layer, AdjustmentLayer):
+            return self._adjustment_shape(layer, viewport)
         traced = mask = self._get_mask(layer, viewport)
         if not traces_mask:
             # Reading a group as an object finds no pixel data and no fill, so
@@ -2861,12 +2920,9 @@ class Compositor:
 
         An adjustment layer has no pixels: its mask is the whole silhouette.
         """
-        mask = self._get_mask(layer, viewport)
         if isinstance(layer, AdjustmentLayer):
-            if isinstance(mask, np.ndarray):
-                return utils.clip(mask)
-            height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-            return np.full((height, width, 1), mask, dtype=np.float32)
+            return self._adjustment_shape(layer, viewport)
+        mask = self._get_mask(layer, viewport)
         own = (
             self._get_group_shape(layer, viewport, alpha=True)
             if isinstance(layer, GroupMixin)
