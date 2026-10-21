@@ -3388,7 +3388,8 @@ class Compositor:
         opacity, each effect guarded the same way. There is no knockout
         switch: ``glow_paint()`` always cuts the glow away under the
         silhouette, leaving what the layer's paint will not cover once it is
-        composited over the glow.
+        composited over the glow; an adjustment layer paints nothing over it,
+        so its glow is left the plain complement of its mask.
 
         The paint is drawn on the glow's own box, since a gradient glow's
         colour follows its falloff, and pasted beside it; where the glow
@@ -3400,6 +3401,7 @@ class Compositor:
         fill_opacity, opacity = self._get_const(layer)
         if opacity <= 0.0:
             return
+        over = 0.0 if isinstance(layer, AdjustmentLayer) else fill_opacity * opacity
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         for effect in glows:
             glow = cast(OuterGlow, effect)
@@ -3443,7 +3445,7 @@ class Compositor:
                     glow.descriptor,
                     silhouette,
                     falloff,
-                    over=fill_opacity * opacity,
+                    over=over,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an outer glow of %s: %s", layer, error)

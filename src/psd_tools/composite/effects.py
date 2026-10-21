@@ -776,6 +776,11 @@ _GLOW_COVERAGE_GAIN = 20.0
 # a step short of solid, or a 32-bit one a rounding short, still has edges.
 _OPAQUE_STEP = 1.0 / 255.0
 
+# How far, in pixels along the axes, a partial pixel may lie from an opaque
+# one and from a clear one and still read as the shape's antialiased edge:
+# two, the width of the band a resampled edge is antialiased over.
+_GLOW_EDGE_REACH = 2
+
 # What a glow's range is held above, in the same percent, when its falloff is
 # squeezed: a range read as the inverse of the slider would draw a 1% range as
 # a hard band, and Photoshop draws a soft halo. Fitted against Photoshop's
@@ -1220,18 +1225,21 @@ def _glow_coverage(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
     coverage: the opacity scaled by :data:`_GLOW_COVERAGE_GAIN` and held to
     one, so a soft-edged or faint layer glows as the shape it fades out to
     and only its faintest pixels cast less than a solid one. A partial pixel
-    that borders both a clear pixel and an opaque one is an antialiased edge
-    and keeps its opacity, which leaves a hard shape casting from exactly
-    where its edge lies; the neighbours are read along the axes, as
-    :py:func:`_signed_distance` reads a hard step. Photoshop's renders of
-    such layers split the same way.
+    within :data:`_GLOW_EDGE_REACH` of both a clear pixel and an opaque one
+    is a hard shape's antialiased edge and keeps its opacity, so text and a
+    resampled shape cast from exactly where their edges lie; the neighbours
+    are read along the axes, as :py:func:`_signed_distance` reads a hard
+    step. Photoshop's renders of such layers split the same way.
     """
     alpha = alpha.astype(np.float32)
     grow = max(float(size), 0.0) * min(max(float(spread), 0.0), 100.0) / 100.0
     if grow < _GLOW_SPREAD_PIXELS:
         return alpha
     covered = alpha > 0.0
-    edge = covered & _grow(~covered) & _grow(alpha >= 1.0 - _OPAQUE_STEP)
+    near_clear, near_opaque = ~covered, alpha >= 1.0 - _OPAQUE_STEP
+    for _ in range(_GLOW_EDGE_REACH):
+        near_clear, near_opaque = _grow(near_clear), _grow(near_opaque)
+    edge = covered & near_clear & near_opaque
     coverage = np.clip(alpha * _GLOW_COVERAGE_GAIN, 0.0, 1.0)
     return np.where(edge, alpha, coverage).astype(np.float32)
 

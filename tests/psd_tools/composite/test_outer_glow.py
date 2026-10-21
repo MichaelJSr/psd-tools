@@ -149,19 +149,21 @@ def _soft_disc(size: int, radius: float, hard_radius: float) -> np.ndarray:
 
 
 # What a glow is cast from, fitted on Photoshop's renders of a corpus of
-# soft-edged layers: lens flares and feathered smart objects carrying glows of
-# sizes from ten to two hundred pixels, some spread by a percent or two and
-# some not at all. With no spread the glow is the blur of the opacity to
-# within a few percent, however large; spread by a pixel or more, it is the
-# blur of the opacity scaled twentyfold and held to one, which reads the
-# layer's coverage and a little less of its faintest fringe, with a hard
-# shape's antialiased edge kept as it is, since the glow of small text spread
-# by a pixel or two starts where the text's edge does. The half pixel
-# is where the spread rounds to a whole one, between a corpus card spread by
-# 0.46 px that glows by its opacity and one spread by 0.76 px that glows by
-# its coverage.
+# layers carrying glows of sizes from ten to two hundred pixels: lens flares
+# and feathered smart objects, and text and resampled shapes, some spread by
+# a percent or two and some not at all. With no spread the glow is the blur
+# of the opacity to within a few percent, however large; spread by a pixel or
+# more, it is the blur of the opacity scaled twentyfold and held to one,
+# which reads the layer's coverage and a little less of its faintest fringe,
+# with a hard shape's antialiased edge kept as it is, since the glow of text
+# or of a resampled shape spread by a pixel or more starts where the shape's
+# edge does, and that edge is up to two pixels wide. The half pixel is where
+# the spread rounds to a whole one, between a corpus card spread by 0.46 px
+# that glows by its opacity and one spread by 0.76 px that glows by its
+# coverage.
 _FITTED_COVERAGE_GAIN = 20.0
 _FITTED_SPREAD_PIXELS = 0.5
+_FITTED_EDGE_REACH = 2
 _COVERAGE_SIZE = 32.0
 _COVERAGE_SPREAD = 10.0
 
@@ -170,16 +172,16 @@ def test_the_coverage_switch_and_gain_are_the_fitted_constants() -> None:
     """A fit, so a change to either is a measured change.
 
     Just under the half pixel the opacity is cast as it is; at it, scaled by
-    the gain and held to one.
+    the gain and held to one. The probed pixels lie beyond the edge reach of
+    the one opaque pixel, so none of them reads as an edge.
     """
-    alpha = np.array(
-        [[0.0, 0.5 / _FITTED_COVERAGE_GAIN, 1.0 / _FITTED_COVERAGE_GAIN, 0.3, 1.0]]
-    )
-    alpha = alpha.astype(np.float32)
+    alpha = np.zeros((1, 8), dtype=np.float32)
+    alpha[0, 1:4] = [0.5 / _FITTED_COVERAGE_GAIN, 1.0 / _FITTED_COVERAGE_GAIN, 0.3]
+    alpha[0, 7] = 1.0
     under = 100.0 * (_FITTED_SPREAD_PIXELS - 1e-3) / 100.0
     assert np.array_equal(effects._glow_coverage(alpha, 100.0, under), alpha)
     at = effects._glow_coverage(alpha, 100.0, _FITTED_SPREAD_PIXELS)
-    assert np.allclose(at, [[0.0, 0.5, 1.0, 1.0, 1.0]])
+    assert np.allclose(at, [[0.0, 0.5, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]])
     assert np.array_equal(
         effects._glow_coverage(alpha, 1.0, 100.0 * _FITTED_SPREAD_PIXELS), at
     )
@@ -243,9 +245,10 @@ def test_the_coverage_keeps_an_antialiased_edge_and_gains_the_rest() -> None:
     """A partial pixel between clear and opaque keeps its value; any other is gained.
 
     A hard shape's antialiased edge is left where it lies, so its glow
-    starts where the edge does, and so is the edge of a shape painted a
-    step short of solid. A feather's pixels border other partial pixels and
-    a faint patch borders nothing opaque: those cast whole above the gain's
+    starts where the edge does, whether the edge is a pixel wide or the two
+    a resampled shape's is, and so is the edge of a shape painted a step
+    short of solid. A feather's pixels border other partial pixels and a
+    faint patch borders nothing opaque: those cast whole above the gain's
     reach and in proportion below it.
     """
     alpha = np.zeros((9, 9), dtype=np.float32)
@@ -272,6 +275,30 @@ def test_the_coverage_keeps_an_antialiased_edge_and_gains_the_rest() -> None:
         effects._glow_coverage(feather, _COVERAGE_SIZE, _COVERAGE_SPREAD)[:, :6] == 1.0
     )
     assert np.array_equal(effects._glow_coverage(feather, _COVERAGE_SIZE, 0.0), feather)
+
+
+def test_an_antialiased_edge_is_kept_as_far_as_the_fitted_reach() -> None:
+    """A band of partial pixels two wide is an edge; one three wide is not.
+
+    A resampled shape's edge is antialiased over two pixels, and both keep
+    their value. Of a band one wider, only the middle pixel lies within the
+    reach of both the clear side and the opaque one; the outer two are
+    gained like any other.
+    """
+    reach = _FITTED_EDGE_REACH
+    band = np.zeros((3, 12), dtype=np.float32)
+    band[:, :4] = 1.0
+    band[:, 4 : 4 + reach] = np.linspace(0.8, 0.2, reach)[None, :]
+    coverage = effects._glow_coverage(band, _COVERAGE_SIZE, _COVERAGE_SPREAD)
+    assert np.allclose(coverage[:, 4 : 4 + reach], band[:, 4 : 4 + reach])
+
+    wide = np.zeros((3, 12), dtype=np.float32)
+    wide[:, :4] = 1.0
+    wide[:, 4 : 5 + reach] = np.linspace(0.8, 0.2, reach + 1)[None, :]
+    coverage = effects._glow_coverage(wide, _COVERAGE_SIZE, _COVERAGE_SPREAD)
+    assert np.all(coverage[:, 4] == 1.0)
+    assert np.allclose(coverage[:, 5], wide[:, 5])
+    assert np.all(coverage[:, 6] == 1.0)
 
 
 # The width of the gaussian that stands in for Photoshop's blur, per pixel of
@@ -641,8 +668,9 @@ def test_a_layer_over_its_glow_leaves_it_what_its_coverage_leaves() -> None:
     ``feathered-stroke.psd``'s square fades across a 6 px mask ramp. Its hard
     glow, spread and so cast from the square's coverage, reaches past the
     viewport on every side, and over the ramp the glow and the square
-    together cover every pixel whole: the glow has ``1 - alpha`` of each. Cut by ``1 - alpha`` and then composited under the layer as well,
-    it would have ``(1 - alpha)`` squared and leave the ramp translucent. At
+    together cover every pixel whole: the glow has ``1 - alpha`` of each.
+    Cut by ``1 - alpha`` and then composited under the layer as well, it
+    would have ``(1 - alpha)`` squared and leave the ramp translucent. At
     fill opacity zero the square paints nothing, and the glow has the plain
     ``1 - alpha``.
     """
@@ -664,6 +692,46 @@ def test_a_layer_over_its_glow_leaves_it_what_its_coverage_leaves() -> None:
     unpainted = _alone(layer, viewport)[y, :, 0]
     assert np.allclose(unpainted[x0 : x0 + 6], 1.0 - ramp[:6], atol=1e-6)
     assert np.allclose(unpainted[x0 - 4 : x0], 1.0, atol=1e-6)
+
+
+def test_an_adjustment_layers_glow_is_cut_by_its_mask_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An adjustment layer paints nothing over its glow, so the cut is ``1 - mask``.
+
+    ``exposure_rgb.psd``'s first exposure is masked to the right of the
+    document. Given a hard glow and a mask ramping up over 20 px, the glow
+    alone over nothing has exactly what the ramp leaves of each pixel, and
+    nothing under the solid mask, rather than the full glow a layer that
+    painted over it would be given to cover.
+    """
+    psd = PSDImage.open(full_name("adjustments/exposure_rgb.psd"))
+    layer = next(each for each in psd.descendants() if each.name == "Exposure 1")
+    _hard_glow(layer, size=_COVERAGE_SIZE)
+    viewport = (100, 0, 200, 200)
+    read_mask = Compositor._get_mask
+
+    def ramped(
+        self: Compositor,
+        target: Layer,
+        box: tuple[int, int, int, int] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        if target is not layer:
+            return read_mask(self, target, box, *args, **kwargs)
+        left, top, right, bottom = self.viewport if box is None else box
+        columns = np.arange(left, right, dtype=np.float32)
+        ramp = np.clip((columns - 150.0) / 20.0, 0.0, 1.0)
+        return np.broadcast_to(ramp[None, :, None], (bottom - top, right - left, 1))
+
+    monkeypatch.setattr(Compositor, "_get_mask", ramped)
+    alpha = _alone(layer, viewport)[100, :, 0]
+    ramp = np.clip((np.arange(100) - 50) / 20.0, 0.0, 1.0)
+    assert np.all(alpha[:10] == 0.0)  # beyond the glow's size
+    assert np.allclose(alpha[30:50], 1.0, atol=1e-6)
+    assert np.allclose(alpha[50:70], 1.0 - ramp[50:70], atol=1e-6), alpha[50:70]
+    assert np.all(alpha[70:] == 0.0)
 
 
 def _over_grey(layer: Layer, viewport: tuple[int, int, int, int]) -> np.ndarray:
