@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A gradient fill layer's interpolation method is read from the key it
+  stores it under, so a perceptual fill no longer renders as classic, and the
+  perceptual method now eases the transparency stops as Photoshop does, fitted
+  to its foreground-to-transparent fades. Dither is still ignored
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a
