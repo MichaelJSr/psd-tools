@@ -103,6 +103,11 @@ What it bounds
 - The canvas that ``composite()`` builds, and each canvas that a stroke size,
   vector stroke width or pattern scale grows. A layer effect over the budget is
   skipped; a vector stroke or fill layer over it raises.
+- Each glyph, underline and canvas that
+  :py:meth:`~psd_tools.api.layers.TypeLayer.rasterize` and the
+  :py:mod:`~psd_tools.composite.text` functions draw, and the comparison
+  :py:func:`~psd_tools.composite.text.verify` makes. A text layer over the
+  budget raises.
 
 What it does not bound
 ----------------------

@@ -12,20 +12,23 @@ from __future__ import annotations
 
 import ctypes
 import math
+import threading
 from collections import OrderedDict
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass
-from typing import Literal, TypeVar
+from typing import Literal
 
 import freetype
 import numpy as np
 
+from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite.scanline import fill_coverage
 from psd_tools.composite.text.constants import (
     CRISP_SUBPIXEL_X,
     FAUX_BOLD_EM,
     FAUX_ITALIC_SHEAR,
     GENERAL_TRANSFORM_EPS,
+    GLYPH_CACHE_BYTES,
     GLYPH_CACHE_SIZE,
     MAX_CANVAS_PIXELS,
     NONE_THRESHOLD,
@@ -37,7 +40,22 @@ from psd_tools.composite.text.model import RGB, Transform
 
 #: ``(x0, y0, x1, y1)`` in document pixels.
 Bbox = tuple[int, int, int, int]
-T = TypeVar("T")
+#: ``(bitmap_left, bitmap_top, coverage uint8)`` of one rendered glyph.
+Glyph = tuple[int, int, np.ndarray]
+
+# Bytes per pixel each stage holds at its peak, counted from the arrays
+# alive at once, for the allocation budget.
+#: A glyph: FreeType's bitmap and its copy, both uint8.
+_GLYPH_BYTES = 1 + 1
+#: A rule: the float32 coverage, its scaling and the uint8 result.
+_RULE_BYTES = 4 + 4 + 1
+#: The canvas: uint32 coverage sum, float32 RGB, uint8 winning coverage,
+#: float32 alpha and the float32 RGBA.
+_COMPOSE_BYTES = 4 + 12 + 1 + 4 + 16
+#: A resampled canvas: the warped premultiplied float32 RGBA, its alpha,
+#: the ink mask, the float32 RGB and the float32 RGBA; the axis-aligned
+#: render and its premultiplied copy come on top.
+_RESAMPLE_BYTES = 16 + 4 + 1 + 12 + 16
 
 #: Unhinted outline, bitmap strikes ignored: the outline is box-filtered as is.
 _UNHINTED = (
@@ -61,6 +79,8 @@ class Options:
     #: Draw the outlines of a colour (``SVG ``) font as a silhouette; when
     #: false its glyphs are skipped.
     monochrome_emoji: bool = True
+    #: Pixels a glyph bitmap or the canvas may not exceed. The document's
+    #: allocation budget and the PSD per-axis limit apply as well.
     max_canvas_pixels: int = MAX_CANVAS_PIXELS
 
 
@@ -94,25 +114,68 @@ _MODES: dict[int, _Mode] = {
 
 
 class GlyphCache:
-    """LRU of rendered glyph bitmaps, keyed by everything that shapes one."""
+    """LRU of rendered glyph bitmaps, keyed by everything that shapes one.
 
-    def __init__(self, maxsize: int = GLYPH_CACHE_SIZE):
+    Bounded by entry count and by the bitmaps' total bytes, and safe to
+    share between threads.
+    """
+
+    def __init__(
+        self, maxsize: int = GLYPH_CACHE_SIZE, maxbytes: int = GLYPH_CACHE_BYTES
+    ):
         self.maxsize = maxsize
-        self._items: OrderedDict[Hashable, object] = OrderedDict()
+        self.maxbytes = maxbytes
+        #: Bytes of the cached bitmaps.
+        self.nbytes = 0
+        self._items: OrderedDict[Hashable, Glyph] = OrderedDict()
+        self._lock = threading.Lock()
 
     def __len__(self) -> int:
         return len(self._items)
 
-    def get(self, key: Hashable, make: Callable[[], T]) -> T:
-        """The cached value for ``key``, rendering it with ``make`` once."""
-        if key in self._items:
-            self._items.move_to_end(key)
-            return self._items[key]  # type: ignore[return-value]
+    def get(self, key: Hashable, make: Callable[[], Glyph]) -> Glyph:
+        """The cached glyph for ``key``, rendering it with ``make`` on a miss."""
+        with self._lock:
+            value = self._items.get(key)
+            if value is not None:
+                self._items.move_to_end(key)
+                return value
+        # Rendered outside the lock; two threads may render the same glyph.
         value = make()
-        self._items[key] = value
-        while len(self._items) > self.maxsize:
-            self._items.popitem(last=False)
+        with self._lock:
+            old = self._items.pop(key, None)
+            if old is not None:
+                self.nbytes -= old[2].nbytes
+            self._items[key] = value
+            self.nbytes += value[2].nbytes
+            while self._items and (
+                len(self._items) > self.maxsize or self.nbytes > self.maxbytes
+            ):
+                _, old = self._items.popitem(last=False)
+                self.nbytes -= old[2].nbytes
         return value
+
+
+def _guard(
+    what: str,
+    w: int,
+    h: int,
+    estimated_bytes: int,
+    options: Options,
+    budget: AllocBudget | None,
+) -> None:
+    """Refuse a ``w`` x ``h`` allocation before it is made.
+
+    :class:`TextRenderError` over ``options.max_canvas_pixels``;
+    ``ValueError`` over the PSD per-axis limit or the allocation budget.
+    """
+    if w * h > options.max_canvas_pixels:
+        raise TextRenderError(
+            f"{what} of {w}x{h} px exceeds {options.max_canvas_pixels} pixels"
+        )
+    check_pixel_size(
+        w, h, max_alloc_bytes=budget, estimated_bytes=estimated_bytes, warn=False
+    )
 
 
 def is_general(transform: Transform) -> bool:
@@ -187,26 +250,28 @@ def _render_glyph(
     delta: tuple[int, int],
     flags: int,
     embolden: tuple[int, int],
-) -> tuple[int, int, np.ndarray]:
+) -> Glyph:
     """``(bitmap_left, bitmap_top, coverage uint8)`` of one glyph."""
     ft = face.ft
-    try:
-        ft.set_char_size(size66[0], size66[1], 72, 72)
-        ft.set_transform(freetype.FT_Matrix(*matrix), freetype.FT_Vector(*delta))
-        ft.load_glyph(gid, flags)
-        slot = ft.glyph
-        if embolden != (0, 0) and slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE:
-            # FreeType grows the outline towards +x and +y by the whole
-            # strength; translating back by half of it centres the dilation.
-            outline = ctypes.byref(slot.outline._FT_Outline)
-            freetype.FT_Outline_EmboldenXY(outline, embolden[0], embolden[1])
-            freetype.FT_Outline_Translate(
-                outline, -(embolden[0] // 2), -(embolden[1] // 2)
-            )
-        slot.render(freetype.FT_RENDER_MODE_NORMAL)
-    except freetype.FT_Exception as ex:
-        raise TextRenderError(f"glyph {gid} of {face.key[0]}: {ex}") from ex
-    return slot.bitmap_left, slot.bitmap_top, _bitmap(slot)
+    # The size, transform and glyph slot are state of the shared face.
+    with face.lock:
+        try:
+            ft.set_char_size(size66[0], size66[1], 72, 72)
+            ft.set_transform(freetype.FT_Matrix(*matrix), freetype.FT_Vector(*delta))
+            ft.load_glyph(gid, flags)
+            slot = ft.glyph
+            if embolden != (0, 0) and slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE:
+                # FreeType grows the outline towards +x and +y by the whole
+                # strength; translating back by half of it centres the dilation.
+                outline = ctypes.byref(slot.outline._FT_Outline)
+                freetype.FT_Outline_EmboldenXY(outline, embolden[0], embolden[1])
+                freetype.FT_Outline_Translate(
+                    outline, -(embolden[0] // 2), -(embolden[1] // 2)
+                )
+            slot.render(freetype.FT_RENDER_MODE_NORMAL)
+        except freetype.FT_Exception as ex:
+            raise TextRenderError(f"glyph {gid} of {face.key[0]}: {ex}") from ex
+        return slot.bitmap_left, slot.bitmap_top, _bitmap(slot)
 
 
 def _fixed(v: float) -> int:
@@ -228,6 +293,7 @@ def _glyph_items(
     mode: _Mode,
     options: Options,
     cache: GlyphCache,
+    budget: AllocBudget | None,
 ) -> list[_Item]:
     xx, xy, yx, yy, tx, ty = transform
     cx, cy = math.hypot(xx, xy), math.hypot(yx, yy)
@@ -239,14 +305,12 @@ def _glyph_items(
         if g.face.metrics.has_svg and not options.monochrome_emoji:
             continue
         px_w, px_h = g.em_w * cx, g.em_h * cy
-        if px_w * px_h > options.max_canvas_pixels:
-            raise TextRenderError(
-                f"glyph of {px_w:.0f}x{px_h:.0f} px exceeds the canvas limit"
-            )
         k = strike_scale(px_h, g.face.metrics.strikes)
         size66 = (round(64 * px_w * k), round(64 * px_h * k))
         if not size66[0] or not size66[1]:
             continue
+        w, h = math.ceil(px_w), math.ceil(px_h)
+        _guard("glyph", w, h, w * h * _GLYPH_BYTES, options, budget)
         m = base
         if g.faux_italic:
             s = FAUX_ITALIC_SHEAR
@@ -284,7 +348,12 @@ def _glyph_items(
     return items
 
 
-def _rule_items(rules: Sequence[Rule], transform: Transform) -> list[_Item]:
+def _rule_items(
+    rules: Sequence[Rule],
+    transform: Transform,
+    options: Options,
+    budget: AllocBudget | None,
+) -> list[_Item]:
     xx, xy, yx, yy, tx, ty = transform
     items: list[_Item] = []
     for r in rules:
@@ -300,14 +369,22 @@ def _rule_items(rules: Sequence[Rule], transform: Transform) -> list[_Item]:
         )
         x0, y0 = int(math.floor(pts[:, 0].min())), int(math.floor(pts[:, 1].min()))
         x1, y1 = int(math.ceil(pts[:, 0].max())), int(math.ceil(pts[:, 1].max()))
-        cov = fill_coverage([pts - (x0, y0)], x1 - x0, y1 - y0)
-        if cov.size and cov.any():
+        w, h = x1 - x0, y1 - y0
+        if w <= 0 or h <= 0:
+            continue
+        _guard("rule", w, h, w * h * _RULE_BYTES, options, budget)
+        cov = fill_coverage([pts - (x0, y0)], w, h)
+        if cov.any():
             items.append((x0, y0, (cov * 255 + 0.5).astype(np.uint8), r.fill))
     return items
 
 
 def _compose(
-    items: list[_Item], transform: Transform, mode: _Mode, limit: int
+    items: list[_Item],
+    transform: Transform,
+    mode: _Mode,
+    options: Options,
+    budget: AllocBudget | None,
 ) -> tuple[np.ndarray, Bbox]:
     if not items:
         return _empty(transform)
@@ -316,8 +393,7 @@ def _compose(
     x1 = max(x + c.shape[1] for x, _, c, _ in items)
     y1 = max(y + c.shape[0] for _, y, c, _ in items)
     w, h = x1 - x0, y1 - y0
-    if w * h > limit:
-        raise TextRenderError(f"canvas {w}x{h} exceeds {limit} pixels")
+    _guard("canvas", w, h, w * h * _COMPOSE_BYTES, options, budget)
     # Coverage is summed in 8-bit units and clipped once at the end.
     acc = np.zeros((h, w), np.uint32)
     rgb = np.zeros((h, w, 3), np.float32)
@@ -352,10 +428,11 @@ def _rasterize_matrix(
     mode: _Mode,
     options: Options,
     cache: GlyphCache,
+    budget: AllocBudget | None,
 ) -> tuple[np.ndarray, Bbox]:
-    items = _glyph_items(layout.glyphs, transform, mode, options, cache)
-    items += _rule_items(layout.rules, transform)
-    return _compose(items, transform, mode, options.max_canvas_pixels)
+    items = _glyph_items(layout.glyphs, transform, mode, options, cache, budget)
+    items += _rule_items(layout.rules, transform, options, budget)
+    return _compose(items, transform, mode, options, budget)
 
 
 def _resample(
@@ -364,14 +441,23 @@ def _resample(
     mode: _Mode,
     options: Options,
     cache: GlyphCache,
+    budget: AllocBudget | None,
 ) -> tuple[np.ndarray, Bbox]:
     """Render axis-aligned at the column lengths, then warp to ``transform``."""
-    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+    try:
+        from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+    except ImportError as e:
+        raise ImportError(
+            "Options(general_transform='resample') requires scipy, which the "
+            "'text' extra does not install:\n    pip install scipy"
+        ) from e
 
     xx, xy, yx, yy, tx, ty = transform
     cx, cy = math.hypot(xx, xy), math.hypot(yx, yy)
     axis: Transform = (cx, 0.0, 0.0, cy, 0.0, 0.0)
-    rgba, (ax0, ay0, ax1, ay1) = _rasterize_matrix(layout, axis, mode, options, cache)
+    rgba, (ax0, ay0, ax1, ay1) = _rasterize_matrix(
+        layout, axis, mode, options, cache, budget
+    )
     if not rgba.size:
         return _empty(transform)
     # Axis-aligned (u, v) -> document (X, Y).
@@ -384,10 +470,7 @@ def _resample(
     )
     bx1, by1 = int(math.ceil(corners[:, 0].max())), int(math.ceil(corners[:, 1].max()))
     w, h = bx1 - bx0, by1 - by0
-    if w * h > options.max_canvas_pixels:
-        raise TextRenderError(
-            f"canvas {w}x{h} exceeds {options.max_canvas_pixels} pixels"
-        )
+    _guard("canvas", w, h, w * h * _RESAMPLE_BYTES + 2 * rgba.nbytes, options, budget)
     # Output index (row, col) -> input index, sampling at pixel centres.
     inv = np.linalg.inv(m)[::-1, ::-1]
     offset = inv @ (by0 + 0.5 - ty, bx0 + 0.5 - tx) - (ay0 + 0.5, ax0 + 0.5)
@@ -421,12 +504,17 @@ def rasterize(
     antialias: int,
     options: Options,
     cache: GlyphCache | None = None,
+    *,
+    max_alloc_bytes: AllocBudget | None = None,
 ) -> tuple[np.ndarray, Bbox]:
     """Render ``layout`` to ``float32`` HxWx4 straight RGBA and its bbox.
 
     ``antialias`` is the layer's ``AntA`` value. The bbox is the integer
     union of the pasted glyph bitmaps and rule quads; an empty render is
-    ``(0, 0, 4)`` at the rounded translation.
+    ``(0, 0, 4)`` at the rounded translation. Each glyph, rule and canvas
+    allocation is checked against ``options.max_canvas_pixels``, the PSD
+    per-axis limit and the ``max_alloc_bytes`` budget (the document's
+    setting, or the global default when ``None``) before it is made.
     """
     mode = _MODES.get(antialias)
     if mode is None:
@@ -438,5 +526,5 @@ def rasterize(
         return _empty(transform)
     cache = cache if cache is not None else GlyphCache()
     if options.general_transform == "resample" and is_general(transform):
-        return _resample(layout, transform, mode, options, cache)
-    return _rasterize_matrix(layout, transform, mode, options, cache)
+        return _resample(layout, transform, mode, options, cache, max_alloc_bytes)
+    return _rasterize_matrix(layout, transform, mode, options, cache, max_alloc_bytes)

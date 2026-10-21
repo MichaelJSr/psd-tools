@@ -62,8 +62,12 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
     suffix = n_old - old_u[len(old) - s]
     shift = n_new - n_old
 
+    # Both sections are read and checked before either is written, so a
+    # layer the edit cannot handle is left as it was.
     style = _section(layer, "StyleRun")
     spans = _spans(style, n_old)
+    paragraphs = _section(layer, "ParagraphRun")
+    pspans = _spans(paragraphs, n_old)
     if keep == "single":
         runs = [(0, n_new, spans[0][2])]
     else:
@@ -79,9 +83,6 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
             if u1 > n_old - suffix
         ]
     _write_spans(style, runs, merge=True)
-
-    paragraphs = _section(layer, "ParagraphRun")
-    pspans = _spans(paragraphs, n_old)
 
     def old_unit(u: int) -> int:
         if u < prefix:

@@ -105,7 +105,14 @@ def render(
     lay = _layout.layout(model, fonts, breaks)
     # FontSize and the transform are in document pixels at any ppi.
     transform = model.transform
-    rgba, bbox = rasterize(lay, transform, model.antialias, options, _GLYPH_CACHE)
+    rgba, bbox = rasterize(
+        lay,
+        transform,
+        model.antialias,
+        options,
+        _GLYPH_CACHE,
+        max_alloc_bytes=layer._psd._max_alloc_bytes,
+    )
     return RenderResult(rgba, bbox, _report(lay, transform, t0))
 
 
@@ -139,10 +146,11 @@ def verify(
     replaces that raster.
     """
     stored = stored_raster(layer)
+    budget = layer._psd._max_alloc_bytes
     try:
         result = render(layer, fonts=fonts, options=options)
     except MissingFontError:
-        return fidelity(*stored, None, None, status="missing")
+        return fidelity(*stored, None, None, "missing", max_alloc_bytes=budget)
     if any(how == "missing" for how, _ in result.report.fonts.values()):
-        return fidelity(*stored, None, None, status="missing")
-    return fidelity(*stored, result.rgba, result.bbox)
+        return fidelity(*stored, None, None, "missing", max_alloc_bytes=budget)
+    return fidelity(*stored, result.rgba, result.bbox, max_alloc_bytes=budget)

@@ -12,6 +12,7 @@ from psd_tools.composite.text.fonts import (  # noqa: E402
     FontMap,
     MissingFontError,
     Resolved,
+    font_files,
     load_face,
     norm,
     platform_font_dirs,
@@ -31,17 +32,13 @@ from .conftest import (  # noqa: E402
 def _platform_face() -> tuple[str, int, str] | None:
     """``(path, index, postscript_name)`` of some installed face, or ``None``."""
     for d in platform_font_dirs():
-        if not os.path.isdir(d):
-            continue
-        for fn in sorted(os.listdir(d)):
-            path = os.path.join(d, fn)
-            if fn.lower().endswith((".ttf", ".otf", ".ttc")):
-                try:
-                    face = freetype.Face(path)
-                except freetype.FT_Exception:
-                    continue
-                if face.postscript_name:
-                    return path, 0, face.postscript_name.decode("latin-1")
+        for path in font_files(d):
+            try:
+                face = freetype.Face(path)
+            except freetype.FT_Exception:
+                continue
+            if face.postscript_name:
+                return path, 0, face.postscript_name.decode("latin-1")
     return None
 
 
@@ -126,12 +123,10 @@ def test_system() -> None:
 
 def test_ttc_indexing() -> None:
     ttcs = [
-        os.path.join(d, fn)
+        path
         for d in platform_font_dirs()
-        if os.path.isdir(d)
-        for fn in os.listdir(d)
-        if fn.lower().endswith(".ttc")
-        and freetype.Face(os.path.join(d, fn)).num_faces > 1
+        for path in font_files(d)
+        if path.lower().endswith(".ttc") and freetype.Face(path).num_faces > 1
     ]
     if not ttcs:
         pytest.skip("no font collection installed")
@@ -142,6 +137,72 @@ def test_ttc_indexing() -> None:
     assert found[0].lower().endswith(".ttc")
     face = load_face(found[0], found[1])
     assert face.ft.postscript_name.decode("latin-1") == name
+
+
+def test_nested_directories(ttf_font_path: str, tmp_path: object) -> None:
+    root = os.path.join(str(tmp_path), "fonts")
+    nested = os.path.join(root, "truetype", "fixture")
+    os.makedirs(nested)
+    top = shutil.copy(ttf_font_path, os.path.join(root, "top.ttf"))
+    deep = shutil.copy(ttf_font_path, os.path.join(nested, "deep.ttf"))
+    os.mkdir(os.path.join(root, "not-a-font.ttf"))
+    assert font_files(root) == [top, deep]
+    assert FontMap(dirs=[root]).resolve(PS_TT).path == top
+    shutil.rmtree(os.path.dirname(nested))
+    os.remove(top)
+    os.makedirs(nested)
+    shutil.copy(ttf_font_path, deep)
+    assert FontMap(dirs=[root]).resolve(PS_TT).path == deep
+    assert font_files(os.path.join(root, "missing")) == []
+
+
+def test_platform_dirs_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(os, "uname", lambda: os.uname_result(("Linux",) * 5))
+    monkeypatch.setenv("HOME", "/home/u")
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    assert platform_font_dirs() == [
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        "/home/u/.local/share/fonts",
+        "/home/u/.fonts",
+    ]
+    monkeypatch.setenv("XDG_DATA_HOME", "/data")
+    assert platform_font_dirs()[2] == "/data/fonts"
+
+
+def test_alias_to_a_missing_file(
+    monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str, tmp_path: object
+) -> None:
+    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
+    gone = os.path.join(str(tmp_path), "gone.ttf")
+    fm = FontMap(dirs=[fixture_fonts_dir], aliases={"ArialMT": gone})
+    assert fm.find("ArialMT") is None
+    with pytest.raises(MissingFontError) as info:
+        fm.resolve("ArialMT")
+    assert info.value.names == ("ArialMT",)
+    skip = FontMap(aliases={"ArialMT": gone}, policy="skip")
+    assert skip.resolve("ArialMT").how == "missing"
+    sub = FontMap(
+        dirs=[fixture_fonts_dir],
+        aliases={"ArialMT": gone},
+        policy="substitute",
+        fallback=PS_TT,
+    )
+    assert sub.resolve("ArialMT").how == "substitute"
+
+
+def test_indexed_file_removed(
+    monkeypatch: pytest.MonkeyPatch, ttf_font_path: str, tmp_path: object
+) -> None:
+    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
+    copy = shutil.copy(ttf_font_path, os.path.join(str(tmp_path), "copy.ttf"))
+    fm = FontMap(dirs=[str(tmp_path)], policy="skip")
+    assert fm.find(PS_TT) == (copy, 0, "exact")
+    os.remove(copy)
+    assert fm.resolve(PS_TT).how == "missing"
+    with pytest.raises(MissingFontError):
+        FontMap(dirs=[str(tmp_path)], aliases={PS_TT: copy}).resolve(PS_TT)
 
 
 def test_aliases(

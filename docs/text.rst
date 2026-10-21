@@ -13,7 +13,8 @@ rasterization)::
 
     pip install 'psd-tools[text]'
 
-Editing needs nothing beyond psd-tools.
+Editing needs nothing beyond psd-tools. The ``resample`` setting of
+:py:class:`~psd_tools.composite.text.Options` also needs ``scipy``.
 
 Reading
 -------
@@ -73,8 +74,9 @@ the document's depth for RGB documents and converted through PIL, at 8
 bits, for the other colour modes.
 
 Fonts are looked up by PostScript name in the ``FontMap``'s directories,
-then ``PSD_TOOLS_FONT_DIRS`` and the platform font directories; ``aliases``
-map a name to a file. A name no file matches raises
+then ``PSD_TOOLS_FONT_DIRS`` and the platform font directories, each with
+its subdirectories; ``aliases`` map a name to a file. A name no file
+matches, or whose file cannot be opened, raises
 :py:class:`~psd_tools.composite.text.MissingFontError`;
 ``FontMap(policy="substitute")`` draws it with a fallback face and
 ``policy="skip"`` leaves its runs blank, both reported in ``report.fonts``.

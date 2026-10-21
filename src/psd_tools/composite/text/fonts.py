@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from ctypes import byref, c_ulong
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import freetype
@@ -62,12 +63,17 @@ class FontMetrics:
 
 @dataclass(frozen=True, eq=False)
 class Face:
-    """An open face: HarfBuzz font, FreeType face, metrics and file identity."""
+    """An open face: HarfBuzz font, FreeType face, metrics and file identity.
+
+    ``lock`` serialises use of ``ft``, whose size, transform and glyph slot
+    are mutable state; shaping with ``hb`` needs no lock.
+    """
 
     hb: hb.Font
     ft: freetype.Face
     metrics: FontMetrics
     key: tuple[str, int]
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 @dataclass(frozen=True, eq=False)
@@ -99,18 +105,26 @@ def _loose_keys(name: str) -> tuple[str, ...]:
 
 
 def platform_font_dirs() -> list[str]:
-    """The operating system's font directories, in search order."""
+    """The operating system's font directories, in search order.
+
+    Each is indexed with its subdirectories.
+    """
     if os.name == "nt":
         return [os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")]
     home = os.path.expanduser("~")
     if os.uname().sysname == "Darwin":
         return [
             "/System/Library/Fonts",
-            "/System/Library/Fonts/Supplemental",
             "/Library/Fonts",
             os.path.join(home, "Library", "Fonts"),
         ]
-    return ["/usr/share/fonts", os.path.join(home, ".fonts")]
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return [
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        os.path.join(data_home, "fonts"),
+        os.path.join(home, ".fonts"),
+    ]
 
 
 def _env_dirs() -> list[str]:
@@ -159,6 +173,23 @@ def load_face(path: str, index: int = 0) -> Face:
     return Face(hb=font, ft=ft, metrics=metrics, key=(path, index))
 
 
+def font_files(directory: str) -> list[str]:
+    """Font files under ``directory`` and its subdirectories, in walk order.
+
+    Files sort before subdirectories at each level; symbolic links to
+    directories are not followed.
+    """
+    out: list[str] = []
+    for root, subdirs, files in os.walk(directory):
+        subdirs.sort()
+        out += [
+            os.path.join(root, fn)
+            for fn in sorted(files)
+            if fn.lower().endswith(FONT_EXTENSIONS)
+        ]
+    return out
+
+
 class _Index:
     """Faces under a list of directories, by exact and by loose name."""
 
@@ -166,12 +197,7 @@ class _Index:
         self.exact: dict[str, tuple[str, int]] = {}
         self.loose: dict[str, tuple[str, int]] = {}
         for d in dirs:
-            if not os.path.isdir(d):
-                continue
-            for fn in sorted(os.listdir(d)):
-                path = os.path.join(d, fn)
-                if not fn.lower().endswith(FONT_EXTENSIONS) or not os.path.isfile(path):
-                    continue
+            for path in font_files(d):
                 try:
                     self._add(path)
                 except freetype.FT_Exception:
@@ -221,29 +247,33 @@ class FontMap:
         self._user: _Index | None = None
         self._platform: _Index | None = None
         self._faces: OrderedDict[tuple[str, int], Face] = OrderedDict()
+        self._lock = threading.Lock()
 
     def _indexes(self) -> tuple[_Index, _Index]:
-        if self._user is None or self._platform is None:
-            self._user = _Index(self.dirs)
-            self._platform = _Index(self.platform_dirs)
-        return self._user, self._platform
+        with self._lock:
+            if self._user is None or self._platform is None:
+                self._user = _Index(self.dirs)
+                self._platform = _Index(self.platform_dirs)
+            return self._user, self._platform
 
     def _face(self, key: tuple[str, int]) -> Face:
-        face = self._faces.get(key)
-        if face is None:
-            face = load_face(*key)
-            self._faces[key] = face
-            while len(self._faces) > FACE_CACHE_SIZE:
-                self._faces.popitem(last=False)
-        else:
-            self._faces.move_to_end(key)
-        return face
+        with self._lock:
+            face = self._faces.get(key)
+            if face is None:
+                face = load_face(*key)
+                self._faces[key] = face
+                while len(self._faces) > FACE_CACHE_SIZE:
+                    self._faces.popitem(last=False)
+            else:
+                self._faces.move_to_end(key)
+            return face
 
     def _lookup(self, name: str) -> tuple[tuple[str, int], How] | None:
         alias = self.aliases.get(name)
         if alias is not None:
+            # An alias with a font extension names a file, present or not.
             if alias.lower().endswith(FONT_EXTENSIONS) or os.path.isfile(alias):
-                return (alias, 0), "exact"
+                return ((alias, 0), "exact") if os.path.isfile(alias) else None
             name = alias
         user, platform = self._indexes()
         if name in user.exact:
@@ -259,21 +289,39 @@ class FontMap:
         return None
 
     def find(self, name: str) -> tuple[str, int, How] | None:
-        """Where ``name`` would resolve: ``(path, index, how)`` or ``None``."""
+        """Where ``name`` would resolve: ``(path, index, how)`` or ``None``.
+
+        The file is not opened; one that has gone or cannot be read still
+        counts as missing when resolved.
+        """
         hit = self._lookup(name)
         return None if hit is None else (hit[0][0], hit[0][1], hit[1])
 
-    def resolve(self, name: str) -> Resolved:
-        """Resolve one PostScript name under this map's policy."""
+    def _open(self, name: str) -> tuple[Face, How] | None:
+        """The open face ``name`` resolves to, or ``None`` when none does."""
         hit = self._lookup(name)
+        if hit is None:
+            return None
+        try:
+            return self._face(hit[0]), hit[1]
+        except (freetype.FT_Exception, hb.HarfBuzzError, OSError):
+            # Indexed or aliased, but removed or unreadable since.
+            return None
+
+    def resolve(self, name: str) -> Resolved:
+        """Resolve one PostScript name under this map's policy.
+
+        A name whose file is missing or cannot be opened is a missing font.
+        """
+        hit = self._open(name)
         if hit is not None:
-            return Resolved(self._face(hit[0]), hit[1])
+            return Resolved(*hit)
         if self.policy == "skip":
             return Resolved(None, "missing")
         if self.policy == "substitute":
-            sub = self._lookup(self.fallback)
+            sub = self._open(self.fallback)
             if sub is not None:
-                return Resolved(self._face(sub[0]), "substitute")
+                return Resolved(sub[0], "substitute")
             raise MissingFontError((name, self.fallback))
         raise MissingFontError((name,))
 

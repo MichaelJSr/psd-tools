@@ -10,36 +10,49 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
+from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite.text.constants import ANY_ALPHA, BAD_DIFF, IOU_COVER
 from psd_tools.composite.text.raster import Bbox
 from psd_tools.composite.text.report import Fidelity
+from psd_tools.constants import ColorMode
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import TypeLayer
 
 #: A pixel with less alpha than this holds no ink for the ink box.
 _INK = 0.5 / 255
+#: Colour modes whose stored channels are the RGB or gray values themselves.
+_DIRECT_MODES = (ColorMode.RGB, ColorMode.GRAYSCALE, ColorMode.DUOTONE)
+#: Bytes per union pixel :func:`fidelity` holds at its peak: the two placed
+#: premultiplied float32 rasters, their float32 difference and its maximum.
+_FIDELITY_BYTES = 16 + 16 + 16 + 4
 
 
 def stored_raster(layer: TypeLayer) -> tuple[np.ndarray | None, Bbox | None]:
     """The layer's stored pixels as straight RGBA ``float32`` and its bbox.
 
-    ``(None, None)`` when the layer has no pixels. Grayscale documents repeat
-    their single channel; other non-RGB modes go through PIL.
+    ``(None, None)`` when the layer has no pixels. A grayscale document
+    repeats its single channel; CMYK, Lab and the other modes take their
+    colour through PIL's RGB conversion, at 8 bits. The alpha is the stored
+    transparency channel in every mode, opaque when there is none.
     """
     if not layer.has_pixels():
         return None, None
-    color = layer.numpy("color")
-    shape = layer.numpy("shape")
-    if color is None or shape is None or color.shape[2] not in (1, 3):
+    if layer._psd.color_mode in _DIRECT_MODES:
+        color = layer.numpy("color")
+        if color is None:
+            return None, None
+        if color.shape[2] == 1:
+            color = np.repeat(color, 3, axis=2)
+    else:
         image = layer.topil(apply_icc=False)
         if image is None:
             return None, None
-        rgba = np.asarray(image.convert("RGBA"), dtype=np.float32) / 255
-    else:
-        if color.shape[2] == 1:
-            color = np.repeat(color, 3, axis=2)
-        rgba = np.concatenate([color, shape], axis=2).astype(np.float32)
+        color = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
+    shape = layer.numpy("shape")
+    if shape is None:
+        shape = np.ones(color.shape[:2] + (1,), np.float32)
+    rgba = np.concatenate([color, shape], axis=2).astype(np.float32)
     x0, y0, x1, y1 = layer.bbox
     return rgba, (x0, y0, x1, y1)
 
@@ -95,11 +108,15 @@ def fidelity(
     rgba: np.ndarray | None,
     bbox: Bbox | None,
     status: Literal["ok", "empty", "missing"] | None = None,
+    *,
+    max_alloc_bytes: AllocBudget | None = None,
 ) -> Fidelity:
     """Compare two straight-alpha RGBA rasters on the union of their bboxes.
 
     A ``None`` raster is empty. ``status`` overrides the one derived from the
-    render (``"empty"`` when it has no ink).
+    render (``"empty"`` when it has no ink). The union is checked against
+    the PSD per-axis limit and the ``max_alloc_bytes`` budget (the global
+    default when ``None``) before it is allocated.
     """
     if status is None:
         status = (
@@ -108,6 +125,15 @@ def fidelity(
     if stored_bbox is None and bbox is None:
         return Fidelity(1.0, 0.0, 0.0, None, None, None, None, None, None, status)
     union = _union(stored_bbox, bbox)
+    w, h = union[2] - union[0], union[3] - union[1]
+    if w > 0 and h > 0:
+        check_pixel_size(
+            w,
+            h,
+            max_alloc_bytes=max_alloc_bytes,
+            estimated_bytes=w * h * _FIDELITY_BYTES,
+            warn=False,
+        )
     stored = _place(stored_rgba, stored_bbox, union)
     rendered = _place(rgba, bbox, union)
     a_s, a_r = stored[..., 3], rendered[..., 3]

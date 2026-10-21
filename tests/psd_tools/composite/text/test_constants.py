@@ -21,6 +21,7 @@ def test_values() -> None:
     assert c.GENERAL_TRANSFORM_EPS == 0.01
     assert c.MAX_CANVAS_PIXELS == 64_000_000
     assert c.GLYPH_CACHE_SIZE == 8192
+    assert c.GLYPH_CACHE_BYTES == 64 * 1024 * 1024
     assert c.FACE_CACHE_SIZE == 64
     assert c.IOU_COVER == 0.5
     assert c.BAD_DIFF == 24 / 255

@@ -54,6 +54,17 @@ def test_text_setter() -> None:
     assert layer.typesetting.text == "Hello"
 
 
+def test_set_text_without_paragraph_runs_changes_nothing() -> None:
+    layer = open_layer()
+    del layer.engine_dict["ParagraphRun"]
+    before = lengths(layer)
+    with pytest.raises(ValueError, match="ParagraphRun"):
+        layer.text = "Hello"
+    assert layer.text == TEXT
+    assert lengths(layer) == before
+    assert not layer._psd.is_updated()
+
+
 def test_set_text_keeps_prefix_and_suffix_runs() -> None:
     layer = open_layer()
     layer.set_span_style(0, 6, fill=(1, 0, 0))

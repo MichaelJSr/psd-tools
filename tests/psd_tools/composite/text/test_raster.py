@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import sys
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pytest
@@ -12,7 +14,9 @@ import pytest
 freetype = pytest.importorskip("freetype")
 pytest.importorskip("uharfbuzz")
 
+from psd_tools.api.utils import AllocBudget  # noqa: E402
 from psd_tools.composite.scanline import fill_coverage  # noqa: E402
+from psd_tools.composite.text import raster as raster_module  # noqa: E402
 from psd_tools.composite.text.constants import (  # noqa: E402
     FAUX_BOLD_EM,
     FAUX_ITALIC_SHEAR,
@@ -84,9 +88,15 @@ def render(
     rules: Sequence[Rule] = (),
     options: Options | None = None,
     cache: GlyphCache | None = None,
+    max_alloc_bytes: AllocBudget | None = None,
 ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
     return rasterize(
-        layout(glyphs, rules), transform, antialias, options or Options(), cache
+        layout(glyphs, rules),
+        transform,
+        antialias,
+        options or Options(),
+        cache,
+        max_alloc_bytes=max_alloc_bytes,
     )
 
 
@@ -353,6 +363,46 @@ def test_canvas_guard(face: Face) -> None:
         )
 
 
+def test_allocation_budget(face: Face, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each allocation is refused under the budget before it is made."""
+    far = [glyph(face, "I", 0.0, 0.0), glyph(face, "I", 1000.0, 1000.0)]
+    assert render(far, max_alloc_bytes="unlimited")[1] == (-1, -29, 1005, 1001)
+    with pytest.raises(ValueError, match="1006x1030"):
+        render(far, max_alloc_bytes=1_000_000)
+    with pytest.raises(ValueError, match="2000x2000"):
+        render([glyph(face, "I", 0.0, 0.0, em=2000.0)], max_alloc_bytes=1_000_000)
+    # A rule under a rotation spans a bbox far larger than its ink, and is
+    # refused before its coverage is allocated.
+    monkeypatch.setattr(
+        raster_module, "fill_coverage", lambda *a: pytest.fail("allocated")
+    )
+    diagonal: Transform = (0.7, 0.7, -0.7, 0.7, 0.0, 0.0)
+    with pytest.raises(ValueError, match="budget"):
+        render(
+            rules=[Rule(0.0, 2000.0, 0.0, 1.0, GREEN)],
+            transform=diagonal,
+            max_alloc_bytes=1_000_000,
+        )
+    long = Rule(0.0, 100_000.0, 0.0, 1.0, GREEN)
+    with pytest.raises(TextRenderError, match="rule"):
+        render(rules=[long], transform=diagonal, max_alloc_bytes="unlimited")
+    # The PSD per-axis limit holds whatever the budget.
+    with pytest.raises(ValueError, match="per axis"):
+        render(rules=[long], max_alloc_bytes="unlimited")
+
+
+def test_resample_without_scipy(
+    luckiest_guy_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "scipy", None)
+    real = load_face(luckiest_guy_path)
+    skew: Transform = (3.0, 0.4, 0.6, 3.0, 20.0, 50.0)
+    g = [glyph(real, "A", 0.0, 0.0, em=12)]
+    with pytest.raises(ImportError, match="scipy"):
+        render(g, STRONG, skew, options=Options(general_transform="resample"))
+    render(g, STRONG, skew)
+
+
 def test_glyph_cache(face: Face) -> None:
     cache = GlyphCache()
     g = [
@@ -368,7 +418,41 @@ def test_glyph_cache(face: Face) -> None:
     small = GlyphCache(maxsize=1)
     render(g, cache=small)
     assert len(small) == 1
-    assert small.get("k", lambda: 7) == 7 and small.get("k", lambda: 8) == 7
+    seven = (0, 0, np.full((1, 1), 7, np.uint8))
+    eight = (0, 0, np.full((1, 1), 8, np.uint8))
+    assert small.get("k", lambda: seven) is seven
+    assert small.get("k", lambda: eight) is seven
+
+
+def test_glyph_cache_is_bounded_by_bytes(face: Face) -> None:
+    g = [glyph(face, "I", 0.0, 0.0, em=em) for em in (20.0, 40.0, 80.0)]
+    unbounded = GlyphCache()
+    render(g, cache=unbounded)
+    assert len(unbounded) == 3
+    assert unbounded.nbytes == sum(v[2].nbytes for v in unbounded._items.values())
+    largest = max(v[2].nbytes for v in unbounded._items.values())
+    cache = GlyphCache(maxbytes=largest)
+    render(g, cache=cache)
+    # Only the last glyph rendered, the largest, fits.
+    assert len(cache) == 1 and cache.nbytes == largest
+    tiny = GlyphCache(maxbytes=1)
+    rgba, _ = render(g, cache=tiny)
+    assert len(tiny) == 0 and tiny.nbytes == 0 and rgba[..., 3].any()
+
+
+def test_shared_face_renders_from_threads(face: Face) -> None:
+    """A face and a cache shared between threads render each size right."""
+    sizes = (20.0, 41.0, 83.0)
+    expected = [render([glyph(face, "I", 0.0, 0.0, em=em)]) for em in sizes]
+    cache = GlyphCache()
+
+    def work(i: int) -> bool:
+        em = sizes[i % len(sizes)]
+        out = render([glyph(face, "I", 0.0, 0.0, em=em)], cache=cache)
+        return same(out, expected[i % len(sizes)])
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert all(pool.map(work, range(120)))
 
 
 def test_resample_matches_matrix(luckiest_guy_path: str) -> None:

@@ -108,6 +108,33 @@ def test_any_alpha_mask_excludes_faint_pixels() -> None:
     assert f.dx0 == -1 and f.dy0 == -1
 
 
+@pytest.mark.parametrize("mode", ["CMYK", "LAB", "L"])
+def test_stored_raster_in_other_colour_modes(mode: str) -> None:
+    psd = PSDImage.open(full_name("text.psd"))
+    layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
+    rgb, bbox = stored_raster(layer)
+    copied = layer.copy_to(PSDImage.new(mode, psd.size))
+    rgba, copied_bbox = stored_raster(copied)
+    assert rgb is not None and rgba is not None
+    assert copied_bbox == bbox and rgba.shape == rgb.shape
+    # The alpha is the stored channel, not the layer rectangle.
+    np.testing.assert_array_equal(rgba[..., 3], rgb[..., 3])
+    ink = rgb[..., 3] > 0.5
+    assert np.abs(rgba[..., :3][ink] - rgb[..., :3][ink]).max() < 0.1
+    assert fidelity(rgb, bbox, rgba, copied_bbox).bad_pct < 1.0
+
+
+def test_fidelity_allocation_budget() -> None:
+    a = square()
+    far = (100_000, 0, 100_006, 6)
+    with pytest.raises(ValueError, match="per axis"):
+        fidelity(a, (0, 0, 6, 6), a, far, max_alloc_bytes="unlimited")
+    with pytest.raises(ValueError):
+        fidelity(a, (0, 0, 6, 6), a, (10_000, 0, 10_006, 6), max_alloc_bytes=1_000)
+    f = fidelity(a, (0, 0, 6, 6), a, (10_000, 0, 10_006, 6), max_alloc_bytes=10**7)
+    assert f.iou == 0.0
+
+
 def test_stored_raster_of_a_type_layer() -> None:
     psd = PSDImage.open(full_name("text.psd"))
     layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))

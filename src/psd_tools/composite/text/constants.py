@@ -44,11 +44,14 @@ CRISP_SUBPIXEL_X = ((24.0, 4), (32.0, 2))
 # "general": a shear or rotation rather than a scale or flip.
 GENERAL_TRANSFORM_EPS = 0.01
 
-# A canvas larger than this raises before allocation.
+# A canvas larger than this raises before allocation; the document's
+# allocation budget applies as well.
 MAX_CANVAS_PIXELS = 64_000_000
 
-# Bounded caches: rendered glyph bitmaps and open font faces.
+# Bounded caches: rendered glyph bitmaps, by count and by their total bytes,
+# and open font faces.
 GLYPH_CACHE_SIZE = 8192
+GLYPH_CACHE_BYTES = 64 * 1024 * 1024
 FACE_CACHE_SIZE = 64
 
 # Fidelity metrics, shared with the scoring harness: alpha above IOU_COVER
