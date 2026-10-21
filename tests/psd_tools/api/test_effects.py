@@ -609,6 +609,13 @@ def test_an_unreadable_effect_value_degrades_to_the_default() -> None:
     assert effect.use_shape is False
 
 
+def test_the_global_light_falls_back_to_photoshops_default_angle() -> None:
+    """A document that states no global angle is lit from 120 degrees."""
+    descriptor = Descriptor(items={Key.UseGlobalAngle: Bool(True)})  # type: ignore[arg-type]
+    assert effects.DropShadow(descriptor, ImageResources()).angle == 120.0
+    assert effects.InnerShadow(descriptor, ImageResources()).angle == 120.0
+
+
 def test_effect_enums_are_members_that_still_equal_the_raw_code() -> None:
     psd = PSDImage.open(full_name("layer_effects.psd"))
     stroke = psd[10].effects[0]

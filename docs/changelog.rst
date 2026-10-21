@@ -33,8 +33,11 @@ Changelog
 - [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
   ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
 - [fix] A drop shadow layer effect is now rendered when a document is
-  composited from its layers, instead of being dropped. Noise is not applied.
-  Needs ``scipy``; without it the shadow is left out with a warning (#679)
+  composited from its layers, instead of being dropped. Distance, size,
+  spread, contour, global light, opacity, blend mode and the layer knockout
+  are honoured; noise is read but not applied, and a soft shadow's falloff
+  can differ from Photoshop's. Without ``scipy`` it is skipped with a warning
+  (#679)
 - [fix] A stroke effect on a group is drawn around everything the group
   paints, a child's stroke or shadow included, where it stopped at the
   group's own box (#679)
@@ -44,14 +47,19 @@ Changelog
   composited from its layers, instead of being dropped. Size, spread,
   technique, range, contour, a solid or gradient colour, opacity and blend
   mode are honoured; noise and jitter are read but not applied, and the
-  blur and range approximate Photoshop's. Needs ``scipy`` (#680)
+  blur and range approximate Photoshop's. Without ``scipy`` it is skipped
+  with a warning (#680)
 - [fix] A gradient stop whose location or opacity is out of range or not a
   number is held to 0-100%, as a stop's colour is, and so is a noise
   gradient's transparency. A gradient fill, overlay or stroke with one could
   leave NaN in the composited image (#757)
 - [fix] Inner shadow and inner glow layer effects are now rendered when a
   document is composited from its layers. Solid colours only: a gradient
-  glow is still dropped, and noise is read but not applied. Needs ``scipy``
+  glow is still dropped, and noise is read but not applied. Without ``scipy``
+  they are skipped with a warning
+- [fix] The ``angle`` of a shadow or bevel lit by the global light is
+  Photoshop's default, 120, in a document that states no global angle; it
+  was 30
 - [fix] Satin and bevel/emboss layer effects are now rendered when a document
   is composited from its layers; a stroke emboss, a bevel's shape contour and
   its texture are not. Needs ``scipy``; without it they are left out with a

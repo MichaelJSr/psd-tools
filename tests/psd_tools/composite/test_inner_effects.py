@@ -8,6 +8,8 @@ from ``layer_effects.psd`` and editing it, so what is drawn has a closed form.
 """
 
 import copy
+import logging
+import sys
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +26,8 @@ from psd_tools.terminology import Enum, Key, Klass, Type
 from ..utils import full_name
 from .test_composite import _mse
 from .test_drop_shadow import _contour
+
+pytest.importorskip("scipy")
 
 
 def _disc(size: int, radius: float) -> np.ndarray:
@@ -535,6 +539,48 @@ def test_an_inner_effect_over_the_documents_budget_is_dropped_not_drawn(
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1
     assert np.array_equal(_render(psd)[0], disabled)
+
+
+@pytest.mark.parametrize("klass", [Klass.InnerShadow, Klass.InnerGlow])
+def test_without_scipy_an_inner_effect_is_skipped_and_the_document_renders(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, klass: Klass
+) -> None:
+    """A missing scipy costs the effect, with a warning, not the render."""
+    psd, layer = _square()
+    desc = _forge(layer, klass, Distance=4.0, Blur=4.0)
+    desc[Key.Enabled] = False
+    disabled, _ = _render(psd)
+    desc[Key.Enabled] = True
+    monkeypatch.setattr(
+        sys.modules["psd_tools.composite.composite"], "HAS_SCIPY", False
+    )
+    monkeypatch.setattr(effects, "HAS_SCIPY", False)
+    with caplog.at_level(logging.WARNING, logger="psd_tools.composite.composite"):
+        rendered, _ = _render(psd)
+    assert np.array_equal(rendered, disabled)
+    assert "install scipy" in caplog.text
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_an_inner_glow_lights_the_stroke_of_a_stroke_only_shape(force: bool) -> None:
+    """The glow follows the edge of what the shape paints, not of its path.
+
+    ``stroke-outer-no-fill.psd`` paints only a 10 px ring outside its path.
+    A hard glow 2 px deep lights both rims of the ring and leaves its middle,
+    redrawn under ``force`` as read from the stored pixels.
+    """
+    psd = PSDImage.open(full_name("stroke-outer-no-fill.psd"))
+    layer = next(layer for layer in psd if layer.name == "Rectangle 1")
+    desc = _forge(layer, Klass.InnerGlow, Blur=2.0, ChokeMatte=100.0)
+    desc[Key.Enabled] = False
+    plain, _, _ = composite(psd, force=force)
+    desc[Key.Enabled] = True
+    glowing, _, _ = composite(psd, force=force)
+    lit = ~np.isclose(glowing, plain, atol=1e-3).all(axis=2)
+    # Along the middle row, the ring's left side runs from 20 to 30.
+    assert lit[50, 20] and lit[50, 29]
+    assert not lit[50, 25]
+    assert not lit[50, 50]
 
 
 # -- Fidelity against Photoshop's own render ------------------------------- #

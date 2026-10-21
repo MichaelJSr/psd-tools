@@ -493,8 +493,19 @@ def test_a_satin_is_budgeted_on_the_box_it_is_drawn_on() -> None:
 def test_without_scipy_the_effects_are_left_out_with_a_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A document with a drop shadow, a satin and a bevel still composites."""
-    kinds = ("dropshadow", "satin", "bevelemboss")
+    """A document with the effects that need scipy still composites.
+
+    Each kind warns on its own: the shadows, satins and bevels this module
+    draws, and the glows and inner effects beside them.
+    """
+    kinds = (
+        "dropshadow",
+        "satin",
+        "bevelemboss",
+        "outerglow",
+        "innershadow",
+        "innerglow",
+    )
 
     def rendered(enabled: bool) -> np.ndarray:
         psd = PSDImage.open(full_name("layer_effects.psd"))
@@ -514,6 +525,8 @@ def test_without_scipy_the_effects_are_left_out_with_a_warning(
         "Drop shadows",
         "Satins",
         "Bevels",
+        "Outer glows",
+        "Inner shadows and glows",
     }
 
 

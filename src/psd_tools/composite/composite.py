@@ -3180,11 +3180,11 @@ class Compositor:
         """What casts the layer's drop shadow or outer glow, on ``viewport``.
 
         How opaque the layer is, before its opacity and fill opacity, and
-        under its mask: what an object paints (:py:meth:`_get_object_coverage`),
-        and a group's composited alpha, so a child faded to nothing casts
-        nothing. Not the outline of a vector mask, which a stroke follows
-        under ``force``: on a pixel layer that would cast a shadow from the
-        mask's empty margin.
+        under its mask: an object's own alpha as it is painted
+        (:py:meth:`_get_object_coverage`), and a group's composited alpha, so
+        a child faded to nothing casts nothing. Not the outline of a vector
+        mask, which a stroke follows under ``force``: on a pixel layer that
+        would cast a shadow from the mask's empty margin.
 
         Read afresh on ``viewport`` rather than taken from the resolved
         source, which :py:meth:`_trace_shape` pastes from where it can. Both
@@ -3222,8 +3222,7 @@ class Compositor:
         under the whole pixel. The part inside the boundary paints over the
         layer, not beside it, and on such a pixel comes out equal to the
         layer's own coverage; added it would count that coverage twice, so
-        it is left out. A stroke whose band cannot be drawn cuts nothing, as
-        it draws nothing.
+        it is left out.
 
         Each band is drawn as :py:meth:`_add_stroke_effects` draws it, on its
         own :py:func:`_stroke_box` and traced from :py:meth:`_read_traced`,
@@ -3232,7 +3231,9 @@ class Compositor:
         wherever the contents are translucent, so a band traced from the
         silhouette would cut the shadow where no stroke is painted. The
         stroke's box is the one ``stroke_bbox()`` checked against the
-        budget, so the band costs what a stroke does and no more.
+        budget, so the band costs what a stroke does and no more, and a
+        stroke too large to draw cuts nothing. Its paint is not drawn here,
+        so a stroke dropped only because its paint will not draw still cuts.
         """
         knockout = silhouette
         strokes = _readable(layer, "stroke")
@@ -3329,7 +3330,9 @@ class Compositor:
                 effect_opacity = shadow.opacity / 100.0
                 if not math.isfinite(effect_opacity):
                     raise ValueError("opacity %r is not finite" % effect_opacity)
-                blend_mode = shadow.blend_mode
+                blend_mode = get_blend_mode(
+                    shadow.descriptor, Key.Mode, BlendMode.MULTIPLY
+                )
                 knocks_out = shadow.layer_knocks_out
                 contour = contour_table(shadow.contour)
                 anti_aliased = shadow.anti_aliased
@@ -3391,7 +3394,7 @@ class Compositor:
         covers nothing the colour pasted there is never read.
         """
         glows = _readable(layer, "outerglow")
-        if not glows:
+        if not glows or not self._has_scipy("Outer glows"):
             return
         _, opacity = self._get_const(layer)
         if opacity <= 0.0:
@@ -3457,11 +3460,11 @@ class Compositor:
 
         Each is drawn on the cast box grown by its size, from the silhouette
         :py:meth:`_cast_shape` reads there, so an edge past the viewport is
-        not taken for the layer's own (#804).
+        not taken for the layer's own.
         """
         glows = _readable(layer, "innerglow")
         shadows = _readable(layer, "innershadow")
-        if not (glows or shadows):
+        if not (glows or shadows) or not self._has_scipy("Inner shadows and glows"):
             return
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         silhouettes: dict[tuple[int, int, int, int], np.ndarray] = {}
