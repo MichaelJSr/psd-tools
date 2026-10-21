@@ -766,7 +766,7 @@ def _to_indices(color: np.ndarray, psdimage: "PSDProtocol") -> np.ndarray | None
 
 
 def encode_image_data(
-    psdimage: "PSDProtocol", color: np.ndarray, alpha: np.ndarray
+    psdimage: "PSDProtocol", color: np.ndarray, alpha: np.ndarray | None
 ) -> list[bytes]:
     """Turn a composited document into the merged image data section's planes.
 
@@ -787,8 +787,12 @@ def encode_image_data(
     :py:meth:`~psd_tools.psd.image_data.ImageData.set_data`.
 
     :param psdimage: the document the planes are being written for.
-    :param color: ``(height, width, color_channels)`` in [0, 1].
-    :param alpha: ``(height, width, 1)`` in [0, 1].
+    :param color: ``(height, width, color_channels)`` in [0, 1]. For an 8-bit
+        indexed document a single plane is taken as the index plane itself,
+        already on the document's table, scaled by 255.
+    :param alpha: ``(height, width, 1)`` in [0, 1]. ``None`` carries the stored
+        transparency plane over, for a preview whose source holds no alpha,
+        and writes an opaque one where nothing is stored.
     :return: one ``bytes`` per channel the header declares.
     """
     header = psdimage._record.header
@@ -796,25 +800,28 @@ def encode_image_data(
     height, width, channels = header.height, header.width, header.channels
 
     color = _fit(color, height, width, 1.0)
-    alpha = _fit(alpha, height, width, 0.0)
+    if alpha is not None:
+        alpha = _fit(alpha, height, width, 0.0)
     color_planes = get_color_channels(psdimage)
-    if color.shape[2] != color_planes:
-        logger.debug(
-            "Composited %d color planes where the document carries %d; fitting.",
-            color.shape[2],
-            color_planes,
-        )
-        widened = np.ones((height, width, color_planes), dtype=np.float32)
-        kept = min(color_planes, color.shape[2])
-        widened[:, :, :kept] = color[:, :, :kept]
-        color = widened
     # Indexed at depth 16 or 32 is left alone, mirroring the reader: only its
     # depth-8 branch applies the palette, so only that one has an inverse.
-    if psdimage.color_mode == ColorMode.INDEXED and depth == 8:
-        collapsed = _to_indices(color, psdimage)
-        if collapsed is None:
-            return _stored_or_empty(psdimage, range(channels))
-        color = collapsed
+    indexed = psdimage.color_mode == ColorMode.INDEXED and depth == 8
+    if not (indexed and color.shape[2] == 1):
+        if color.shape[2] != color_planes:
+            logger.debug(
+                "Composited %d color planes where the document carries %d; fitting.",
+                color.shape[2],
+                color_planes,
+            )
+            widened = np.ones((height, width, color_planes), dtype=np.float32)
+            kept = min(color_planes, color.shape[2])
+            widened[:, :, :kept] = color[:, :, :kept]
+            color = widened
+        if indexed:
+            collapsed = _to_indices(color, psdimage)
+            if collapsed is None:
+                return _stored_or_empty(psdimage, range(channels))
+            color = collapsed
 
     # Channel order is the header's: the color planes first, then the
     # transparency channel wherever the document keeps it.
@@ -822,7 +829,7 @@ def encode_image_data(
         index: color[:, :, index] for index in range(min(color.shape[2], channels))
     }
     transparency = _transparency_slot(psdimage, color_planes)
-    if transparency >= 0:
+    if transparency >= 0 and alpha is not None:
         arrays[transparency] = alpha[:, :, 0]
 
     carried = _stored_planes(psdimage, [i for i in range(channels) if i not in arrays])
@@ -835,6 +842,10 @@ def encode_image_data(
             planes.append(_encode_array(arrays[index], depth, width))
         elif index in carried:
             planes.append(carried[index])
+        elif index == transparency:
+            planes.append(
+                _encode_array(np.ones((height, width), np.float32), depth, width)
+            )
         else:
             # Built once, and only if a channel actually needs it: on a large
             # document this is a whole plane of zeros nobody may want.

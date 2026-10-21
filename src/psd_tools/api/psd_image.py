@@ -317,9 +317,13 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             values, as :py:meth:`composite` returns them with
             ``apply_icc=False``: the document's size, and the PIL mode of its
             color mode with or without alpha (``"P"`` or ``"RGB"`` for an
-            indexed one). Without alpha the preview is opaque.
+            indexed one). An ``"L"`` or ``"RGB"`` image stores an opaque
+            preview; a mode with no alpha band (``"CMYK"``, ``"LAB"``,
+            ``"P"``, ``"1"``) keeps the stored transparency plane. The saved
+            document reports :py:meth:`has_preview` ``True``.
         :param update_preview: ``False`` writes the stored preview unchanged,
             even after an edit.
+        :raises TypeError: if ``preview`` is not a PIL image.
         :raises ValueError: if ``preview`` does not fit the document, or is
             given with ``update_preview=False``.
         """
@@ -330,8 +334,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
                 pil_io.convert_pil_to_image_data(self, preview),
                 self._record.header,
             )
+            self._mark_composite()
         elif update_preview and self.is_updated():
-            # TODO: Set a `has_composite` flag in VersionInfo resource.
             try:
                 self._update_preview()
             except ImportError as e:
@@ -372,6 +376,13 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             numpy_io.encode_image_data(self, color, alpha),
             self._record.header,
         )
+        self._mark_composite()
+
+    def _mark_composite(self) -> None:
+        """Record in VersionInfo that the merged image data is a real composite."""
+        version_info = self.image_resources.get_data(Resource.VERSION_INFO)
+        if version_info is not None:
+            version_info.has_composite = True
 
     def topil(
         self, channel: int | ChannelID | None = None, apply_icc: bool = True

@@ -304,9 +304,12 @@ and one that wants the stored preview kept can say so::
 
 ``preview`` holds the document's own color values, as
 ``composite(apply_icc=False)`` returns them, at the document's size and in the
-PIL mode of its color mode, with or without alpha. In an opaque 8-bit
-document, storing the image a regenerated preview reads back as with
-``topil(apply_icc=False)`` writes the same bytes as regenerating it.
+PIL mode of its color mode, with or without alpha. CMYK and Lab have no PIL
+alpha band, so such a document keeps its stored transparency plane. In an
+opaque 8-bit document, storing the image a regenerated preview reads back as
+with ``topil(apply_icc=False)`` writes the same bytes as regenerating it; one
+with transparency reads back within the rounding of the white matte the
+preview is stored over.
 
 
 Exporting data to PIL

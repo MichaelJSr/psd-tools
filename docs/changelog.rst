@@ -7,6 +7,9 @@ Changelog
 - [api] ``PSDImage.save()`` takes ``preview``, a flattened PIL image to store
   instead of compositing the document, and ``update_preview=False`` to keep
   the stored preview after an edit. The default is unchanged.
+- [fix] ``PSDImage.save()`` marks the preview it regenerates or stores as
+  present in ``VersionInfo``, so a document saved without Maximize
+  Compatibility reports ``has_preview()`` ``True`` once saved.
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round
