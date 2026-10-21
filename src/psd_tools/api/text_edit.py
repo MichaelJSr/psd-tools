@@ -42,8 +42,9 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
     inserted text continues the run before it. Paragraphs are rebuilt from
     ``\r``, a new one inheriting the paragraph the edit started in.
     ``keep="single"`` collapses the styles to the first run and the
-    paragraphs to the first paragraph. Setting the text the layer already
-    has with ``keep="runs"`` changes nothing.
+    paragraphs to the first paragraph. The last paragraph's ``\r`` is
+    appended, so a ``text`` ending in one gains an empty paragraph. Setting
+    the text the layer already has with ``keep="runs"`` changes nothing.
     """
     old = _editor_text(layer)
     new = text + "\r"
@@ -294,6 +295,5 @@ def _set_stored_text(layer: TypeLayer, text: str) -> None:
 
 
 def _touch(layer: TypeLayer) -> None:
-    layer._text_dirty = True
     layer.__dict__.pop("_typesetting", None)
     layer._psd.mark_updated()

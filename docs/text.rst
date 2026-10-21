@@ -67,6 +67,11 @@ and ``save()`` show it::
     print(report.warnings)   # ("font_loose", "overflow", ...)
     psd.save("card-edited.psd")
 
+``report.lines`` lists every composed line with its position; a line an
+overflowing box did not draw has ``drawn`` false. The render is stored at
+the document's depth for RGB documents and converted through PIL, at 8
+bits, for the other colour modes.
+
 Fonts are looked up by PostScript name in the ``FontMap``'s directories,
 then ``PSD_TOOLS_FONT_DIRS`` and the platform font directories; ``aliases``
 map a name to a file. A name no file matches raises
@@ -93,6 +98,8 @@ Point and paragraph (box) text; FontSize, Leading and AutoLeading, Tracking,
 metrics kerning and ligatures, super- and subscript, BaselineShift,
 Horizontal and Vertical scale, all caps, faux bold and italic, underline
 and strikethrough, fill colour, the five anti-aliasing modes, and any
-affine transform. Paragraph text is broken with Photoshop's single-line
-composer, with justification. Warp is rendered unwarped and colour emoji
-fonts as monochrome silhouettes, each with a warning in the report.
+affine transform, at any document resolution. Paragraph text is broken
+with Photoshop's single-line composer, with justification. Warp is
+rendered unwarped, colour emoji fonts as monochrome silhouettes and the
+platform anti-aliasing modes (Mac LCD, Mac and Windows Gray) as Strong,
+each with a warning in the report.

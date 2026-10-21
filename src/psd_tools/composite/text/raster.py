@@ -1,7 +1,7 @@
 """Rasterization: a :class:`Layout` under a transform to straight RGBA.
 
-``transform`` maps text-space pt to document px (a caller folds a non-72 ppi
-resolution into it). Every glyph is loaded at its final pixel size and
+``transform`` maps text-space pt to document px. Every glyph is loaded at
+its final pixel size and
 FreeType's own transform carries only the column-normalised rotation, flip
 or shear: loading at the text-space em and scaling afterwards quantises the
 outline at the small size, and FreeType adopts an embedded bitmap strike's

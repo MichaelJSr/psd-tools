@@ -57,6 +57,7 @@ class LineInfo:
     n_spaces: int
     stretch: float
     decision: Decision
+    drawn: bool = True  #: ``False`` for a line below the box (``overflow``)
 
 
 @dataclass(frozen=True, eq=False)
@@ -263,6 +264,7 @@ def layout(
                     count,
                     line.stretch,
                     line.decision,
+                    drawn,
                 )
             )
             if not drawn:

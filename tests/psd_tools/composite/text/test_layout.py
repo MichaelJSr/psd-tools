@@ -330,6 +330,7 @@ def test_overflow_cut(fonts: FontMap) -> None:
     lay = layout(model("I\rI\rI\rI\r", box=(0.0, 0.0, 100.0, 20.0)), fonts)
     assert [line.y for line in lay.lines] == pytest.approx([7.5, 19.5, 31.5, 43.5])
     assert ys(lay) == pytest.approx([7.5, 19.5, 31.5])
+    assert [line.drawn for line in lay.lines] == [True, True, True, False]
     assert "overflow" in lay.warnings
     lay = layout(model("I\rI\r", box=(0.0, 0.0, 100.0, 20.0)), fonts)
     assert "overflow" not in lay.warnings

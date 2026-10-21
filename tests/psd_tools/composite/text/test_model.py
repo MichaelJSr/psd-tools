@@ -94,8 +94,7 @@ def test_point_text_model(text_layer: TypeLayer) -> None:
     assert (m.shape, m.box, m.antialias) == (0, None, 3)
     assert m.transform == pytest.approx((1.0, 0.0, 0.0, 1.0, 83.8125, 119.72265625))
     assert m.warnings == ()
-    assert (m.resolution, m.sub_size, m.sub_position, m.auto_leading) == (
-        72.0,
+    assert (m.sub_size, m.sub_position, m.auto_leading) == (
         0.583,
         0.333,
         1.2,
@@ -233,6 +232,21 @@ def test_antialias(text_layer: TypeLayer) -> None:
     )
 
 
+def test_platform_antialias_falls_back(text_layer: TypeLayer) -> None:
+    # Photoshop writes the platform mode to both the enum and the EngineDict.
+    engine = copy.deepcopy(text_layer.engine_dict)
+    engine["AntiAlias"] = engine_data.Integer(6)
+    resources = text_layer.resource_dict
+    for enum in (b"antiAliasPlatformLCD", b"antiAliasPlatformGray"):
+        m = TextModel.from_layer(cast(TypeLayer, _Layer(engine, resources, anta=enum)))
+        assert m.antialias == 2 and "antialias_fallback" in m.warnings
+    m = TextModel.from_layer(cast(TypeLayer, _Layer(engine, resources)))
+    assert m.antialias == 2 and "antialias_fallback" in m.warnings
+    engine["AntiAlias"] = engine_data.Integer(3)
+    m = TextModel.from_layer(cast(TypeLayer, _Layer(engine, resources)))
+    assert m.antialias == 3 and "antialias_fallback" not in m.warnings
+
+
 def test_warp_warning(text_layer: TypeLayer) -> None:
     warp = {b"warpStyle": SimpleNamespace(enum=b"warpArc")}
     layer = cast(
@@ -256,4 +270,3 @@ def test_resource_constants(text_layer: TypeLayer) -> None:
     m = TextModel.from_layer(cast(TypeLayer, _Layer(text_layer.engine_dict, resources)))
     assert (m.sub_size, m.sub_position, m.auto_leading) == (0.6, 0.3, 1.5)
     assert m.transform == (2.0, 0.0, 0.0, 2.0, 10.0, 20.0)
-    assert m.resolution == 72.0

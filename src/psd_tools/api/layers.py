@@ -3072,8 +3072,6 @@ class TypeLayer(Layer):
     def __init__(self, *args: Any):
         super().__init__(*args)
         self._type_data = self.tagged_blocks.get_data(Tag.TYPE_TOOL_OBJECT_SETTING)
-        #: The text or styles changed since the pixels were last rendered.
-        self._text_dirty = False
 
     @property
     def _data(self) -> TypeToolObjectSetting:
@@ -3085,6 +3083,8 @@ class TypeLayer(Layer):
     def text(self) -> str:
         r"""
         Text in the layer. Assigning calls :py:meth:`set_text`.
+
+        The ``'\r'`` that ends the last paragraph is not included.
 
         .. note:: New-line character in Photoshop is ``'\r'``.
         """
@@ -3104,7 +3104,9 @@ class TypeLayer(Layer):
         gives the replaced middle the style at the edit start; paragraphs are
         rebuilt from ``'\r'``, a new one inheriting the paragraph the edit
         started in. ``keep="single"`` collapses the styles to the first run.
-        The pixels are untouched until :py:meth:`rasterize`.
+        The last paragraph's ``'\r'`` is added, so a ``text`` that ends in
+        one gains an empty paragraph. The pixels are untouched until
+        :py:meth:`rasterize`.
         """
         text_edit.set_text(self, text, keep=keep)
 
@@ -3147,7 +3149,10 @@ class TypeLayer(Layer):
         and the layer's rectangle, so :py:meth:`topil`, :py:meth:`numpy`,
         :py:meth:`composite` and a saved file show it. A missing font
         raises :py:class:`~psd_tools.composite.text.MissingFontError`
-        unless ``fonts`` or ``options`` say otherwise.
+        unless ``fonts`` or ``options`` say otherwise. An RGB document
+        stores the render at its own depth; a 32-bit one gets the fill
+        colours as written, not linearised. Other colour modes convert
+        through PIL at 8 bits.
 
         :param fonts: :py:class:`~psd_tools.composite.text.FontMap`; the
             default scans ``PSD_TOOLS_FONT_DIRS`` and the platform fonts.
@@ -3165,7 +3170,6 @@ class TypeLayer(Layer):
         result = render(self, fonts=fonts, options=options)
         self._store_raster(result.rgba, result.bbox)
         self._rewrite_text_bounds(result.bbox, result.report)
-        self._text_dirty = False
         self._invalidate_bbox()
         self._psd.mark_updated()
         return result.report
@@ -3178,7 +3182,16 @@ class TypeLayer(Layer):
         width, height = x1 - x0, y1 - y0
         mode = self._psd.pil_mode.rstrip("A")
         count = pil_io.get_pil_channels(mode)
-        if width and height:
+        colors: Iterable[bytes]
+        if not (width and height):
+            transparency, colors = b"", [b""] * count
+        elif mode == "RGB":
+            transparency = numpy_io._encode_array(rgba[..., 3], depth, width)
+            colors = (
+                numpy_io._encode_array(rgba[..., i], depth, width) for i in range(3)
+            )
+        else:
+            # PIL is the only converter to the other modes; it holds 8 bits.
             u8 = (np.clip(rgba, 0, 1) * 255 + 0.5).astype(np.uint8)
             alpha = Image.fromarray(np.ascontiguousarray(u8[..., 3]), "L")
             color = Image.fromarray(np.ascontiguousarray(u8[..., :3]), "RGB")
@@ -3186,11 +3199,9 @@ class TypeLayer(Layer):
             if color.mode == "CMYK":
                 color = ImageChops.invert(color)
             transparency = pil_io.encode_channel(alpha, depth)
-            colors: Iterable[bytes] = (
+            colors = (
                 pil_io.encode_channel(color.getchannel(i), depth) for i in range(count)
             )
-        else:
-            transparency, colors = b"", [b""] * count
         record, channels = PixelLayer._assemble(
             transparency,
             colors,

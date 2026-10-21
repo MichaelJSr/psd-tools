@@ -15,7 +15,11 @@ from psd_tools.composite.text.raster import Bbox
 
 @dataclass(frozen=True)
 class RenderReport:
-    """Fonts, lines, warnings and timing of one render."""
+    """Fonts, lines, warnings and timing of one render.
+
+    ``lines`` lists every composed line; one an overflowing box did not draw
+    has ``drawn`` false.
+    """
 
     fonts: Mapping[str, tuple[How, str | None]]  #: name -> (how, path)
     lines: tuple[LineInfo, ...]

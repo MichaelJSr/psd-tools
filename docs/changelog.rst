@@ -4,13 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
-- [api] Type layers can be edited and rendered. ``TypeLayer.text`` is
-  writable; ``set_text()``, ``set_span_style()`` and ``set_run_style()`` edit
-  the text and character styles in place, and ``rasterize()`` renders the
-  text into the layer's pixels with the new ``text`` extra (``uharfbuzz``,
-  ``freetype-py``). ``psd_tools.composite.text`` exposes ``render()``,
-  ``verify()`` and ``FontMap``; ``composite()`` still uses the stored pixels
-  (#25, #317, #468)
+- [api] Type layers can be edited and rendered: ``TypeLayer.text`` is
+  writable, ``set_text()`` and ``set_span_style()`` edit text and styles, and
+  ``rasterize()`` draws them into the layer's pixels with the new ``text``
+  extra. ``composite()`` still uses the stored pixels (#25, #317, #468)
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a

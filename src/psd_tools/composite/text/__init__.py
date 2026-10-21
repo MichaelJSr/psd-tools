@@ -71,16 +71,6 @@ def font_names(layer: TypeLayer) -> list[str]:
     )
 
 
-def document_transform(model: TextModel) -> Transform:
-    """The layer transform with the document resolution folded in.
-
-    Text space is in points; the stored matrix maps it to pixels at 72 ppi.
-    """
-    s = model.resolution / 72.0
-    xx, xy, yx, yy, tx, ty = model.transform
-    return (xx * s, xy * s, yx * s, yy * s, tx, ty)
-
-
 def _report(lay: Layout, transform: Transform, t0: float) -> RenderReport:
     warnings = list(lay.warnings)
     for w in raster_warnings(lay, transform):
@@ -113,7 +103,8 @@ def render(
     fonts = fonts or default_font_map(options.missing_font)
     model = TextModel.from_layer(layer)
     lay = _layout.layout(model, fonts, breaks)
-    transform = document_transform(model)
+    # FontSize and the transform are in document pixels at any ppi.
+    transform = model.transform
     rgba, bbox = rasterize(lay, transform, model.antialias, options, _GLYPH_CACHE)
     return RenderResult(rgba, bbox, _report(lay, transform, t0))
 

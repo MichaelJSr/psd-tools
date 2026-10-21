@@ -40,7 +40,6 @@ def test_fixture_state() -> None:
     assert layer.text == TEXT
     assert lengths(layer) == [30]
     assert lengths(layer, "ParagraphRun") == [7, 7, 16]
-    assert not layer._text_dirty
 
 
 def test_text_setter() -> None:
@@ -51,7 +50,6 @@ def test_text_setter() -> None:
     assert layer._data.text_data[b"Txt "].value == "Hello\x00"
     assert lengths(layer) == [6]
     assert lengths(layer, "ParagraphRun") == [6]
-    assert layer._text_dirty
     assert layer._psd.is_updated()
     assert layer.typesetting.text == "Hello"
 
@@ -117,9 +115,7 @@ def test_set_text_same_text_changes_nothing() -> None:
     before = io.BytesIO()
     psd.save(before)
     psd._updated = False
-    layer._text_dirty = False
     layer.set_text(layer.text)
-    assert not layer._text_dirty
     assert not psd.is_updated()
     after = io.BytesIO()
     psd.save(after)

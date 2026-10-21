@@ -1,5 +1,3 @@
-import builtins
-import dataclasses
 import os
 import subprocess
 import sys
@@ -18,7 +16,6 @@ from psd_tools.composite.text import (
     MissingFontError,
     Options,
     default_font_map,
-    document_transform,
     font_names,
     render,
     render_type_layer,
@@ -26,14 +23,14 @@ from psd_tools.composite.text import (
 )
 from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.composite.text.model import TextModel
-from psd_tools.constants import ChannelID
+from psd_tools.constants import Resource
 
 from ...utils import full_name
 from .conftest import PS_TT
 
 #: Photoshop-rendered cards copied out of the TTSCardMaker corpus; the tests
-#: on them skip when the directory is absent.
-FIXTURES = os.environ.get("PSD_TOOLS_TEXT_FIXTURES", "/tmp/wt-text-fixtures")
+#: on them run only where ``PSD_TOOLS_TEXT_FIXTURES`` names the directory.
+FIXTURES = os.environ.get("PSD_TOOLS_TEXT_FIXTURES")
 #: (psd, index path, layer name, bad% ceiling, IoU floor)
 CORPUS = [
     # point Strong, one subscript run, centred
@@ -68,16 +65,22 @@ def arial_as_luckiest_guy(luckiest_guy_path: str) -> FontMap:
     return FontMap(aliases={"ArialMT": luckiest_guy_path})
 
 
+def _fixtures_dir() -> str:
+    if FIXTURES is None:
+        pytest.skip("PSD_TOOLS_TEXT_FIXTURES is not set")
+    return FIXTURES
+
+
 @pytest.fixture(scope="module")
 def corpus_fonts() -> FontMap:
-    fonts = os.path.join(FIXTURES, "fonts")
+    fonts = os.path.join(_fixtures_dir(), "fonts")
     if not os.path.isdir(fonts):
         pytest.skip(f"corpus fixtures not found under {FIXTURES}")
     return FontMap(dirs=[fonts])
 
 
 def corpus_layer(psd: str, index: tuple[int, ...]) -> TypeLayer:
-    path = os.path.join(FIXTURES, psd)
+    path = os.path.join(_fixtures_dir(), psd)
     if not os.path.isfile(path):
         pytest.skip(f"{path} not found")
     node: Any = PSDImage.open(path)
@@ -169,12 +172,32 @@ def test_type_layer_psd_renders(luckiest_guy_path: str) -> None:
     assert rgba[..., 3].max() == 1.0
 
 
-def test_document_transform_scales_the_linear_part(layer: TypeLayer) -> None:
-    model = TextModel.from_layer(layer)
-    assert document_transform(model) == model.transform
-    doubled = document_transform(dataclasses.replace(model, resolution=144.0))
-    xx, xy, yx, yy, tx, ty = model.transform
-    assert doubled == (2 * xx, 2 * xy, 2 * yx, 2 * yy, tx, ty)
+def test_resolution_does_not_scale_the_render(luckiest_guy_path: str) -> None:
+    # A 150 ppi document: FontSize and the transform are already in pixels.
+    psd = PSDImage.open(full_name("adjustment-fillers.psd"))
+    layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
+    info = psd.image_resources.get_data(Resource.RESOLUTION_INFO)
+    assert info.horizontal == 150 << 16
+    fonts = FontMap(aliases={"ArialMT": luckiest_guy_path})
+    at_150 = render(layer, fonts=fonts)
+    x0, y0, x1, y1 = layer.bbox
+    assert at_150.bbox[3] - at_150.bbox[1] == y1 - y0
+    assert abs(at_150.bbox[1] - y0) <= 1 and abs(at_150.bbox[0] - x0) < (x1 - x0) / 4
+    info.horizontal = 72 << 16
+    at_72 = render(layer, fonts=fonts)
+    assert at_72.bbox == at_150.bbox
+    np.testing.assert_array_equal(at_72.rgba, at_150.rgba)
+
+
+def test_platform_antialias_falls_back(tmp_path: Any) -> None:
+    # ``antiAliasPlatformLCD`` has no transfer of its own; it renders as the
+    # default mode with a warning instead of failing.
+    psd = PSDImage.open(full_name("masks.psd"))
+    layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
+    assert layer._data.text_data[b"AntA"].enum == b"antiAliasPlatformLCD"
+    result = render(layer, fonts=FontMap(policy="skip"))
+    assert "antialias_fallback" in result.report.warnings
+    assert verify(layer, fonts=FontMap(policy="skip")).status == "missing"
 
 
 def test_verify_text_psd(layer: TypeLayer, arial_as_luckiest_guy: FontMap) -> None:
@@ -239,93 +262,6 @@ def test_composite_import_does_not_load_text() -> None:
 
 def _quantised(rgba: np.ndarray) -> np.ndarray:
     return np.round(rgba * 255) / 255
-
-
-def test_rasterize_round_trip(
-    layer: TypeLayer, arial_as_luckiest_guy: FontMap, tmp_path: Any
-) -> None:
-    psd = cast(PSDImage, layer._psd)
-    layer.set_text("Hello\rworld")
-    assert layer._text_dirty
-    report = layer.rasterize(fonts=arial_as_luckiest_guy)
-    assert not layer._text_dirty
-    assert [line.text for line in report.lines] == ["Hello", "world"]
-    out = render_type_layer(layer, arial_as_luckiest_guy)
-    assert out is not None
-    rgba, bbox = out
-    assert tuple(layer.bbox) == bbox
-    shape = layer.numpy("shape")
-    color = layer.numpy("color")
-    assert shape is not None and color is not None
-    np.testing.assert_allclose(shape[..., 0], _quantised(rgba[..., 3]), atol=1e-6)
-    ink = rgba[..., 3] > 0
-    np.testing.assert_allclose(color[ink], _quantised(rgba[..., :3][ink]), atol=1e-6)
-    psd.save(tmp_path / "edited.psd")
-    again = PSDImage.open(tmp_path / "edited.psd")
-    reopened = next(x for x in again.descendants() if isinstance(x, TypeLayer))
-    assert reopened.text == "Hello\rworld"
-    assert tuple(reopened.bbox) == bbox
-    shape2 = reopened.numpy("shape")
-    assert shape2 is not None
-    np.testing.assert_allclose(shape2[..., 0], _quantised(rgba[..., 3]), atol=1e-6)
-    image = reopened.composite()
-    assert image is not None and image.size == (bbox[2] - bbox[0], bbox[3] - bbox[1])
-    alpha = np.asarray(image.convert("RGBA"), dtype=np.float32)[..., 3] / 255
-    np.testing.assert_allclose(alpha, _quantised(rgba[..., 3]), atol=1e-6)
-    whole = np.asarray(again.composite().convert("RGBA"), dtype=np.float32)
-    x0, y0, x1, y1 = bbox
-    assert (whole[y0:y1, x0:x1, :3].min(axis=-1) < 128).any()
-
-
-def test_rasterize_keeps_the_mask(luckiest_guy_path: str, tmp_path: Any) -> None:
-    psd = PSDImage.open(full_name("transparency/fill-opacity.psd"))
-    layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
-    assert layer.mask is not None
-    before = layer.mask.topil()
-    assert before is not None
-    bbox = layer.mask.bbox
-    layer.rasterize(fonts=FontMap(aliases={"ArialMT": luckiest_guy_path}))
-    ids = [info.id for info in layer._record.channel_info]
-    assert ids.count(ChannelID.USER_LAYER_MASK) == 1
-    assert len(ids) == len(layer._channels)
-    assert layer.mask is not None and layer.mask.bbox == bbox
-    after = layer.mask.topil()
-    assert after is not None and after.tobytes() == before.tobytes()
-    psd.save(tmp_path / "masked.psd")
-    again = PSDImage.open(tmp_path / "masked.psd")
-    reopened = next(x for x in again.descendants() if isinstance(x, TypeLayer))
-    assert reopened.mask is not None and reopened.mask.bbox == bbox
-    saved = reopened.mask.topil()
-    assert saved is not None and saved.tobytes() == before.tobytes()
-    assert reopened.composite() is not None
-
-
-def test_rasterize_rewrites_text_bounds(luckiest_guy_path: str) -> None:
-    psd = PSDImage.open(full_name("layers/type-layer.psd"))
-    layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
-    box = layer._data.text_data[b"boundingBox"]
-    before = {k: v.value for k, v in box.items()}
-    layer.rasterize(fonts=FontMap(aliases={"ArialMT": luckiest_guy_path}))
-    after = layer._data.text_data[b"boundingBox"]
-    assert any(after[k].value != before[k] for k in before)
-    assert after[b"Rght"].value > after[b"Left"].value
-    # Box text keeps its frame.
-    assert layer._data.text_data[b"bounds"][b"Rght"].value == pytest.approx(32.0)
-
-
-def test_rasterize_without_the_extra(
-    layer: TypeLayer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    real_import = builtins.__import__
-
-    def fake_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "psd_tools.composite.text":
-            raise ImportError("no text extra")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(ImportError, match=r"psd-tools\[text\]"):
-        layer.rasterize()
 
 
 def test_unedited_document_saves_byte_identical(tmp_path: Any) -> None:

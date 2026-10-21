@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from psd_tools.composite.text.constants import AUTO_LEADING, SUB_POSITION, SUB_SIZE
-from psd_tools.constants import Resource
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import TypeLayer
@@ -22,8 +21,11 @@ RGB = tuple[float, float, float]
 
 #: The type tool's ``AntA`` enum -> ``EngineDict.AntiAlias`` code.
 _ANTIALIAS = {b"Anno": 0, b"AnCr": 1, b"AnSt": 2, b"AnSm": 3, b"antiAliasSharp": 4}
-#: The mode the engine is calibrated for, when a layer states none.
+#: The mode the engine is calibrated for, when a layer states none or one
+#: it has no transfer for (the platform modes ``antiAliasPlatformLCD`` and
+#: ``antiAliasPlatformGray``, codes 5 and 6).
 _DEFAULT_ANTIALIAS = 2
+_KNOWN_ANTIALIAS = frozenset(_ANTIALIAS.values())
 _BLACK: RGB = (0.0, 0.0, 0.0)
 
 
@@ -80,9 +82,8 @@ class TextModel:
         tuple[float, float, float, float] | None
     )  #: ``BoxBounds`` (L, T, R, B) as stored, box text only
     antialias: int  #: ``AntA``: 0 none, 1 crisp, 2 strong, 3 smooth, 4 sharp
-    transform: Transform
+    transform: Transform  #: text-space pt -> document px, whatever the document's ppi
     warnings: tuple[str, ...]
-    resolution: float = 72.0  #: document ppi
     sub_size: float = SUB_SIZE  #: ``ResourceDict`` SubscriptSize/SuperscriptSize
     sub_position: float = SUB_POSITION
     auto_leading: float = AUTO_LEADING  #: ``ResourceDict`` auto-leading ratio
@@ -114,6 +115,10 @@ class TextModel:
         shape, box = _shape(engine)
         if _warp_style(layer) not in (None, b"warpNone"):
             warnings.append("warp")
+        antialias = _antialias(layer, engine)
+        if antialias not in _KNOWN_ANTIALIAS:
+            warnings.append("antialias_fallback")
+            antialias = _DEFAULT_ANTIALIAS
         xx, xy, yx, yy, tx, ty = layer.transform
 
         return cls(
@@ -122,7 +127,7 @@ class TextModel:
             paragraphs=tuple(paragraphs),
             shape=shape,
             box=box,
-            antialias=_antialias(layer, engine),
+            antialias=antialias,
             transform=(
                 float(xx),
                 float(xy),
@@ -132,7 +137,6 @@ class TextModel:
                 float(ty),
             ),
             warnings=tuple(warnings),
-            resolution=_resolution(layer),
             sub_size=float(_value(_get(resources, "SubscriptSize", SUB_SIZE))),
             sub_position=float(
                 _value(_get(resources, "SubscriptPosition", SUB_POSITION))
@@ -309,14 +313,3 @@ def _warp_style(layer: TypeLayer) -> bytes | None:
     if warp is None:
         return None
     return getattr(warp.get(b"warpStyle"), "enum", None)
-
-
-def _resolution(layer: TypeLayer) -> float:
-    try:
-        info = layer._psd.image_resources.get_data(Resource.RESOLUTION_INFO)
-    except AttributeError:
-        return 72.0
-    if info is None or info.horizontal <= 0:
-        return 72.0
-    ppi = info.horizontal / 65536  # 16.16 fixed point
-    return ppi * 2.54 if info.horizontal_unit == 2 else ppi
