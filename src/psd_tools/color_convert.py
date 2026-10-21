@@ -250,12 +250,25 @@ _SRGB_TO_XYZ_D50 = (
 )
 
 
+#: The sRGB transfer function's pieces: linear with this slope up to this
+#: linear-light cutoff, a power with this offset and exponent above it. The
+#: encoded cutoff is the slope times the linear one.
+SRGB_SLOPE = 12.92
+SRGB_CUTOFF = 0.0031308
+SRGB_OFFSET = 0.055
+SRGB_GAMMA = 2.4
+
+
 def _srgb_gamma(c: float) -> float:
-    return 12.92 * c if c <= 0.0031308 else 1.055 * (c ** (1.0 / 2.4)) - 0.055
+    if c <= SRGB_CUTOFF:
+        return SRGB_SLOPE * c
+    return (1.0 + SRGB_OFFSET) * (c ** (1.0 / SRGB_GAMMA)) - SRGB_OFFSET
 
 
 def _srgb_ungamma(c: float) -> float:
-    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+    if c <= SRGB_SLOPE * SRGB_CUTOFF:
+        return c / SRGB_SLOPE
+    return ((c + SRGB_OFFSET) / (1.0 + SRGB_OFFSET)) ** SRGB_GAMMA
 
 
 def _clamp(value: float, low: float, high: float) -> float:

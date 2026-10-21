@@ -101,10 +101,15 @@ GlowTechnique
     :members:
     :undoc-members:
 
-GradientInterpolation
----------------------
+GRADIENT_METHOD_KEY
+-------------------
 
-.. autoclass:: psd_tools.constants.GradientInterpolation
+.. autodata:: psd_tools.constants.GRADIENT_METHOD_KEY
+
+GradientMethod
+--------------
+
+.. autoclass:: psd_tools.constants.GradientMethod
     :members:
     :undoc-members:
 

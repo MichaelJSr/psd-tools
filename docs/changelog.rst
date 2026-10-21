@@ -16,12 +16,12 @@ Changelog
 - [api] ``composite()``, ``composite_pil()`` and the ``composite()`` methods of
   ``PSDImage``, ``Layer``, ``Group`` and ``Artboard`` take ``text_gamma``;
   ``None`` restores the straight mix of earlier releases.
-- [fix] A gradient fill layer's or stroke effect's interpolation method is
-  read from the key it stores it under, by the compositor and by
-  ``Stroke.interpolation``, so a perceptual or linear one no longer renders as
-  classic; perceptual also eases the transparency stops, fitted to Photoshop's
-  foreground-to-transparent fills. Stops a CMYK or Lab document holds in its
-  own colour keep the classic blend. Dither is still ignored
+- [fix] A gradient fill layer's or stroke effect's method is read from the
+  key it stores it under, by the compositor and by ``Stroke.method``, so a
+  perceptual or linear one no longer renders as classic; perceptual also
+  eases the transparency stops, fitted to Photoshop's foreground-to-transparent
+  fills. Stops a CMYK or Lab document holds in its own colour keep their
+  stored values on the ramp. Dither is still ignored
 - [api] Type layers can be edited and rendered: ``TypeLayer.text`` is
   writable, ``set_text()`` and ``set_span_style()`` edit text and styles, and
   ``rasterize()`` draws them into the layer's pixels with the new ``text``
@@ -58,14 +58,15 @@ Changelog
 - [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
   the effect uses global light
 - [fix] A gradient's ramp spans the line through its box at the gradient's
-  angle, so a vertical gradient on a wide layer is no longer a flat band; the
-  offset, stop midpoints, smoothness, "align with layer" and the perceptual
-  and linear interpolation methods (``gs99``) are honoured. Every gradient
-  overlay, fill layer and gradient stroke renders differently
-- [api] ``GradientOverlay`` and ``PatternOverlay`` default ``scale`` to 100 and
-  ``aligned`` to True where the descriptor omits them, as Photoshop does.
-  ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
-  ``interpolation``, the ``gs99`` method as a new ``GradientInterpolation`` enum
+  angle, so a vertical gradient on a wide layer is no longer a flat band, and
+  its offset, stop midpoints, smoothness, hard edges, "align with layer" and
+  method (classic, perceptual or linear) are honoured. Every gradient overlay,
+  fill layer and gradient stroke renders differently
+- [api] ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
+  ``method``, the gradient's method as a new ``GradientMethod`` enum.
+  Backwards-incompatible: ``GradientOverlay`` and ``PatternOverlay`` now
+  default ``scale`` to 100.0 and ``aligned`` to True where the descriptor
+  omits them, as Photoshop does; they were 1.0 and False
 - [fix] The compositor renders channel mixer, black & white, colour balance
   and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
   grayscale and CMYK documents, instead of skipping them. Channel mixer is

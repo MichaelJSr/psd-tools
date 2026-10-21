@@ -26,13 +26,14 @@ from typing import Any, Protocol
 from psd_tools.api._descriptor import get_blend_mode, get_enum, get_scalar
 from psd_tools.api.protocols import LayerProtocol
 from psd_tools.constants import (
+    GRADIENT_METHOD_KEY,
     BevelDirection,
     BevelStyle,
     BevelTechnique,
     BlendMode,
     GlowSource,
     GlowTechnique,
-    GradientInterpolation,
+    GradientMethod,
     GradientType,
     Resource,
     StrokeFillType,
@@ -373,15 +374,26 @@ class _GradientMixin(_EffectProtocol):
         return self.descriptor.get(Key.Offset)
 
     @property
-    def interpolation(self) -> GradientInterpolation:
-        """Interpolation method, classic where the descriptor does not say."""
-        # Neither key is in the terminology: an overlay writes ``gs99``, a
-        # stroke ``gradientsInterpolationMethod``.
-        for key in (b"gs99", b"gradientsInterpolationMethod"):
-            method = get_enum(self.descriptor, key, GradientInterpolation)
+    def method(self) -> GradientMethod | None:
+        """Gradient method, classic where the descriptor does not say.
+
+        ``None`` for a method this version does not know.
+        """
+        # A gradient overlay writes ``gs99``, a fill layer or stroke effect
+        # ``gradientsInterpolationMethod``; neither is in the terminology. A
+        # value outside the enumeration yields to the next key.
+        keys = [
+            key
+            for key in (GRADIENT_METHOD_KEY, b"gradientsInterpolationMethod")
+            if key in self.descriptor
+        ]
+        if not keys:
+            return GradientMethod.CLASSIC
+        for key in keys:
+            method = get_enum(self.descriptor, key, GradientMethod)
             if method is not None:
                 return method
-        return GradientInterpolation.CLASSIC
+        return None
 
 
 class _PatternMixin(_EffectProtocol):
