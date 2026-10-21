@@ -8,7 +8,11 @@ import pytest
 from psd_tools import PSDImage
 from psd_tools.constants import Compression, Tag
 from psd_tools.psd.descriptor import Bool, Descriptor, List
-from psd_tools.psd.filter_effects import FilterEffect, FilterEffectChannel, FilterEffectExtra
+from psd_tools.psd.filter_effects import (
+    FilterEffect,
+    FilterEffectChannel,
+    FilterEffectExtra,
+)
 
 from ..utils import full_name
 
@@ -22,10 +26,14 @@ def _plane(array: np.ndarray) -> FilterEffectChannel:
     from psd_tools.compression import compress
 
     data = compress(array.tobytes(), Compression.RLE, w, h, 8, 2)
-    return FilterEffectChannel(is_written=1, compression=int(Compression.RLE), data=data)
+    return FilterEffectChannel(
+        is_written=1, compression=int(Compression.RLE), data=data
+    )
 
 
-def _with_filter_mask(psd: PSDImage, layer, source: np.ndarray, alpha: np.ndarray, mask: np.ndarray):
+def _with_filter_mask(
+    psd: PSDImage, layer, source: np.ndarray, alpha: np.ndarray, mask: np.ndarray
+):
     """Attach smart filters to *layer* whose FEid source is *source* under *mask*."""
     from psd_tools.compression import compress
 
@@ -64,14 +72,16 @@ def _with_filter_mask(psd: PSDImage, layer, source: np.ndarray, alpha: np.ndarra
 @pytest.fixture
 def filtered():
     psd = PSDImage.open(full_name("layers/smartobject-layer.psd"))
-    layer = next(l for l in psd.descendants() if l.kind == "smartobject")
+    layer = next(layer for layer in psd.descendants() if layer.kind == "smartobject")
     stored = (layer.numpy("color") * 255).round().astype(np.uint8)
     shape = layer.numpy("shape")[..., 0]
     source = 255 - stored
     h, w = stored.shape[:2]
     mask = np.zeros((h, w), np.uint8)
     mask[:, : w // 2] = 255
-    fx = _with_filter_mask(psd, layer, source, (shape * 255).round().astype(np.uint8), mask)
+    fx = _with_filter_mask(
+        psd, layer, source, (shape * 255).round().astype(np.uint8), mask
+    )
     return psd, layer, stored, source, shape > 0.999, w // 2, fx
 
 
@@ -79,7 +89,9 @@ def _rgb(layer) -> np.ndarray:
     return np.asarray(layer.composite(force=True).convert("RGBA")).astype(int)[..., :3]
 
 
-def test_the_mask_picks_the_filtered_raster_where_white_and_the_source_where_black(filtered):
+def test_the_mask_picks_the_filtered_raster_where_white_and_the_source_where_black(
+    filtered,
+):
     psd, layer, stored, source, opaque, half, fx = filtered
     out = _rgb(layer)
     left = opaque.copy()
@@ -107,10 +119,15 @@ def test_the_filter_effect_survives_a_save(filtered):
     psd.save(buf)
     buf.seek(0)
     reopened = PSDImage.open(buf)
-    layer2 = next(l for l in reopened.descendants() if l.kind == "smartobject")
+    layer2 = next(
+        layer for layer in reopened.descendants() if layer.kind == "smartobject"
+    )
     assert layer2.smart_object.filter_effect() is not None
     out = _rgb(layer2)
-    assert np.abs(out - source)[opaque & (np.arange(out.shape[1]) >= half)[None, :]].max() <= 1
+    assert (
+        np.abs(out - source)[opaque & (np.arange(out.shape[1]) >= half)[None, :]].max()
+        <= 1
+    )
 
 
 def test_the_accessors_read_the_block(filtered):
