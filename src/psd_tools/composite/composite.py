@@ -773,7 +773,7 @@ def composite_pil(
     # so the failure mode of the next producer is a clipped colour rather than
     # a wrapped one. Note it does not make the cast total -- np.clip passes NaN
     # through -- so it is a narrowing of the damage, not a guarantee.
-    pixels = np.clip(255 * color, 0, 255).astype(np.uint8)
+    pixels = np.rint(np.clip(255 * color, 0, 255)).astype(np.uint8)
     if mode == "1":
         # `fromarray(uint8, "1")` does not mean "these bytes, as bilevel". PIL
         # takes the raw mode literally at one bit per pixel, so it consumes one
@@ -813,7 +813,7 @@ def composite_pil(
     # above had just diverted here.
     if skip_alpha and delay_alpha_application:
         alpha_as_image = Image.fromarray(
-            (255 * np.squeeze(alpha, axis=2)).astype(np.uint8), "L"
+            np.rint(255 * np.squeeze(alpha, axis=2)).astype(np.uint8), "L"
         )
     icc = None
     if apply_icc and Resource.ICC_PROFILE in psd_image.image_resources:
