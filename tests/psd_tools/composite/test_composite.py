@@ -1871,6 +1871,32 @@ def test_fill_opacity_fades_the_layer_and_not_the_effect_over_it() -> None:
     assert np.allclose(composed.knockout_shape, 0.5)
 
 
+def test_an_effect_inside_a_group_does_not_move_the_hole_its_knockout_punches() -> None:
+    """A group's effects cover its alpha; its knockout still punches with its shape.
+
+    The two differ for a group with a half-faded child: the region its
+    overlay covers is the child's alpha, the hole its knockout punches is
+    the child's coverage. Drawing the overlay must leave the hole where a
+    group with no style punches it.
+    """
+    psd = PSDImage.open(full_name("clipping-mask.psd"))
+    compositor = _canvas(psd)
+    source = _partial_source(compositor, coverage=1.0, fill=1.0)
+    source = dataclasses.replace(
+        source, alpha=source.alpha * 0.5, region=source.alpha * 0.5
+    )
+    canvas = composite_module._EffectCanvas(compositor, source)
+    assert canvas.source().knockout_shape is source.knockout_shape
+
+    red = np.zeros((psd.height, psd.width, 3), dtype=np.float32)
+    red[..., 0] = 1.0
+    canvas.over(np.ones_like(source.shape), red, BlendMode.NORMAL, 1.0)
+    composed = canvas.source()
+    assert np.allclose(composed.alpha, 0.5)
+    assert composed.knockout_shape is source.knockout_shape
+    assert np.allclose(composed.knockout_shape, 1.0)
+
+
 def test_layer_opacity_fades_the_layer_and_its_effect_once_between_them() -> None:
     """An overlay cannot make a half-opaque layer more opaque than it is.
 

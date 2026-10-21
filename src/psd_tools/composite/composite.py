@@ -1196,7 +1196,8 @@ class _Source:
     knockout_shape: np.ndarray
     # What the layer's effects cover, under its mask and before its opacity:
     # ``shape`` for an object, the composited alpha of a group, so a child
-    # faded to nothing carries none of the group's style.
+    # faded to nothing carries none of the group's style. Only an effect
+    # canvas reads it, so a group with no style to draw carries ``shape``.
     region: np.ndarray
 
 
@@ -1365,11 +1366,11 @@ class _EffectCanvas:
             color=utils.clip(utils.divide(premultiplied, alpha, fill=self._color)),
             shape=utils.clip(self.region * self._shape),
             alpha=utils.clip(alpha),
-            # Not narrowed by fill opacity, which the shape above now carries:
-            # fill opacity fades the layer's own paint without narrowing the
-            # hole it punches, and that is what makes "fill 0 under a
-            # knockout" a hole at all.
-            knockout_shape=self.region,
+            # Unchanged: fill opacity, which the shape above now carries,
+            # fades the layer's own paint without narrowing the hole it
+            # punches -- that is what makes "fill 0 under a knockout" a hole
+            # at all -- and an effect that draws inside the layer does not
+            # move the hole either.
             fill_opacity=1.0,
         )
 
@@ -1592,7 +1593,9 @@ class Compositor:
         # In place: both canvases were built for this layer by the calls above
         # and are not shared with anything else.
         shape *= shape_mask
-        region = alpha * shape_mask if is_group else None
+        region = None
+        if is_group and _has_enabled_effects(layer):
+            region = alpha * shape_mask
         alpha *= mask
         if stroke is not None:
             stroke_mask = self._get_mask(layer, clip_to_path=False)
@@ -1601,6 +1604,7 @@ class Compositor:
             alpha = np.minimum(alpha + stroke[1] * stroke_mask * opacity, 1.0)
         if region is None:
             # An object's effects cover its shape, the redrawn stroke included.
+            # A group with no style to draw never has its region read.
             region = shape
 
         # TODO: Tag.BLEND_INTERIOR_ELEMENTS controls how inner effects apply,

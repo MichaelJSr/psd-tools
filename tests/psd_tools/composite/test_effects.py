@@ -1597,12 +1597,13 @@ def test_a_pass_through_groups_gradient_overlay_is_laid_out_on_the_canvas(
 ) -> None:
     """A pass-through group's gradient spans the document, an isolated one's its box.
 
-    Photoshop lays a pass-through group's aligned gradient overlay out
-    across the document canvas rather than the group's contents.
-    ``layer_effects.psd``'s opaque violet-orange overlay, turned horizontal,
-    on ``group-clips-child-stroke.psd``'s groups: across the 96 px canvas
-    for ``Pass Through``, across the 16 px group box for the Normal
-    ``Outset``.
+    Pins which box an aligned gradient overlay is laid out across, drawn by
+    the same routine the compositor uses: the document canvas for a
+    pass-through group, as the card corpus calibrates it, and the group's
+    box for an isolated one. ``layer_effects.psd``'s opaque violet-orange
+    overlay, turned horizontal, on ``group-clips-child-stroke.psd``'s groups:
+    across the 96 px canvas for ``Pass Through``, across the 16 px group box
+    for the Normal ``Outset``.
     """
     psd = PSDImage.open(full_name("effects/group-clips-child-stroke.psd"))
     group = _forge_overlay(psd, group_name, "layer_effects.psd", "Gradient Overlay")

@@ -53,8 +53,8 @@ Changelog
 - [fix] A group's overlays and inner effects cover the group's composited
   alpha, its children's effects included, instead of its children's
   coverage, and a pass-through group's gradient or pattern overlay is laid
-  out across the document canvas, as in Photoshop. Every gradient overlay on
-  a pass-through group renders differently
+  out across the document canvas rather than the group's box, as in
+  Photoshop
 
 1.25.0 (2026-10-14)
 -------------------
