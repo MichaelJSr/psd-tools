@@ -389,6 +389,61 @@ def test_an_adjustment_nested_in_a_styled_group_still_reaches_its_content() -> N
     assert difference[190:].max() <= 1
 
 
+def test_an_adjustment_in_a_styled_group_reads_the_content_not_the_canvas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adjustment applies to the group's own content, at its own alpha.
+
+    ``Layer 14`` is switched on at half opacity as the styled ``Group 6``'s
+    only content, and ``Curves 9`` is moved into a pass-through group of its
+    own above it, as the cards nest them. Photoshop adjusts the layer's own colour
+    and composites it over the backdrop at the layer's alpha,
+    ``a * f(C) + (1 - a) * B``, on every pixel the layer covers at all;
+    adjusting the canvas the layer stands on gives ``f(a * C + (1 - a) * B)``,
+    which a curve that is not a straight line tells apart. ``f`` is the curve
+    under the adjustment's own mask. The style is faked through
+    ``_has_enabled_effects`` so that no stroke lands on the pixels measured.
+    """
+    psd = PSDImage.open(full_name("adjustments/adjustment_nested_composition_3.psd"))
+    group = psd[4]
+    assert isinstance(group, Group) and group.blend_mode == BlendMode.PASS_THROUGH
+    curves, content, other = group[0], group[1], group[3]
+    assert isinstance(curves, adjustments.Curves) and content.name == "Layer 14"
+    content.visible, content.opacity = True, 128
+    other.visible = False
+    group.create_group([curves], name="Nested")
+    assert [sub.name for sub in group if sub.is_visible()] == ["Layer 14", "Nested"]
+    monkeypatch.setattr(
+        composite_module, "_has_enabled_effects", lambda layer: layer is group
+    )
+
+    group.visible = False
+    backdrop, _, _ = composite_module.composite(psd)
+    group.visible = True
+    color, _, _ = composite_module.composite(psd)
+
+    left, top, right, bottom = content.bbox
+    own_color, own_shape = content.numpy("color"), content.numpy("shape")
+    assert own_color is not None and own_shape is not None
+    assert curves.mask is not None and curves.mask.bbox == psd.viewbox
+    mask = curves.numpy("mask")
+    assert mask is not None
+    mask = mask[top:bottom, left:right]
+    alpha = own_shape * (128 / 255)
+    under = backdrop[top:bottom, left:right]
+
+    def adjust(image: np.ndarray) -> np.ndarray:
+        return image + mask * (apply_curves(image, ColorMode.RGB, curves) - image)
+
+    expected = alpha * adjust(own_color) + (1.0 - alpha) * under
+    flattened = adjust(alpha * own_color + (1.0 - alpha) * under)
+
+    covered = own_shape[..., 0] > 0.0
+    rendered = color[top:bottom, left:right]
+    assert np.abs(rendered - expected)[covered].max() <= 1 / 255
+    assert np.abs(flattened - expected)[own_shape[..., 0] > 0.99].max() > 4 / 255
+
+
 def test_a_style_on_a_normal_group_changes_nothing_about_its_adjustments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

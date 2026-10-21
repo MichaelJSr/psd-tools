@@ -170,19 +170,22 @@ _Widen = Callable[[np.ndarray, int], np.ndarray]
 # the gradient can both decline, returning None -- but a uniform signature is
 # what lets the three share one application path: the shape/alpha arithmetic
 # around them is identical.
-_OverlayDraw = Callable[[Layer, Any, int], tuple[np.ndarray | None, np.ndarray | None]]
+_OverlayDraw = Callable[
+    [Layer, tuple[int, int, int, int], Any, int],
+    tuple[np.ndarray | None, np.ndarray | None],
+]
 
 
 def _draw_color_overlay(
-    layer: Layer, descriptor: Any, channels: int
+    layer: Layer, bbox: tuple[int, int, int, int], descriptor: Any, channels: int
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    return paint.draw_solid_color_fill(layer.bbox, layer._psd.color_mode, descriptor)
+    return paint.draw_solid_color_fill(bbox, layer._psd.color_mode, descriptor)
 
 
 def _draw_pattern_overlay(
-    layer: Layer, descriptor: Any, channels: int
+    layer: Layer, bbox: tuple[int, int, int, int], descriptor: Any, channels: int
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    fill, shape = paint.draw_pattern_fill(layer.bbox, layer._psd, descriptor)
+    fill, shape = paint.draw_pattern_fill(bbox, layer._psd, descriptor)
     if fill is None:
         return None, None
     # A pattern carries its own color mode, so a grayscale one reaches a CMYK
@@ -208,10 +211,10 @@ def _draw_pattern_overlay(
 
 
 def _draw_gradient_overlay(
-    layer: Layer, descriptor: Any, channels: int
+    layer: Layer, bbox: tuple[int, int, int, int], descriptor: Any, channels: int
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     return paint.draw_gradient_fill(
-        layer.bbox,
+        bbox,
         layer._psd.color_mode,
         descriptor,
         paint.gradient_anchor(layer, descriptor),
@@ -270,6 +273,45 @@ def _vector_stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     return (bbox[0] - width, bbox[1] - width, bbox[2] + width, bbox[3] + width)
 
 
+def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
+    """The box a layer's style is laid out on and its silhouette read from.
+
+    ``layer.bbox``, except for an adjustment layer, which has no pixels of its
+    own: its mask is its shape, so the mask's box stands in, and the whole
+    canvas where there is no mask or the mask reveals what lies outside its
+    box. A vector mask narrows it as it narrows the shape.
+    """
+    if not isinstance(layer, AdjustmentLayer):
+        return layer.bbox
+    psd = layer._psd
+    bbox = (0, 0, psd.width, psd.height)
+    mask = layer.mask
+    if mask is not None and not mask.disabled and mask.background_color == 0:
+        box = mask.bbox
+        if box[0] < box[2] and box[1] < box[3]:
+            bbox = box
+    vector = layer.vector_mask if layer.has_vector_mask() else None
+    if (
+        vector is not None
+        and not vector.disabled
+        and any(len(path) for path in vector.paths)
+    ):
+        bbox = utils.intersect(bbox, _path_bbox(layer))
+    return bbox
+
+
+def _reach_base(layer: Layer) -> tuple[int, int, int, int]:
+    """The box a layer's effects reach out from.
+
+    ``layer.bbox``, which is empty for an adjustment layer: one with a style
+    reaches out from its style box instead, so the canvas of a group holding
+    it is measured to fit the style. One without is not measured at all.
+    """
+    if isinstance(layer, AdjustmentLayer) and _has_enabled_effects(layer):
+        return _style_bbox(layer)
+    return layer.bbox
+
+
 def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     """``layer.bbox`` grown to every box its strokes are drawn on.
 
@@ -299,15 +341,15 @@ def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     direction for both callers: it costs a group canvas nobody draws on, where
     narrower clips a stroke or culls a layer that has one (#826).
     """
-    bbox = layer.bbox
-    if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
-        return bbox
-    bbox = _vector_stroke_reach(layer)
+    base = _reach_base(layer)
+    if base[0] >= base[2] or base[1] >= base[3]:
+        return base
+    bbox = utils.union_bbox(base, _vector_stroke_reach(layer))
     for effect in _readable(layer, "stroke"):
         try:
             bbox = utils.union_bbox(
                 bbox,
-                stroke_bbox(layer.bbox, effect.descriptor, layer._psd._max_alloc_bytes),
+                stroke_bbox(base, effect.descriptor, layer._psd._max_alloc_bytes),
             )
         except _UNREADABLE as error:
             logger.debug("Cannot measure a stroke effect of %s: %s", layer, error)
@@ -322,11 +364,12 @@ def _cast_bbox(
     A layer's own box, except for a group: its silhouette is its composited
     contents, effects included, and a child's stroke or shadow runs past the
     group's box, which is the union of its children's own. The group's
-    content box is every box those contents paint on (#808).
+    content box is every box those contents paint on (#808). An adjustment
+    layer casts from its style box, as it has no pixels.
     """
     if layer.is_group():
         return _content_bbox(layer, memo)
-    return layer.bbox
+    return _style_bbox(layer)
 
 
 def _beneath_reach(
@@ -347,7 +390,7 @@ def _beneath_reach(
     group's own effect lists are read first, so a group with neither never
     measures its contents here.
     """
-    bbox = layer.bbox
+    bbox = _reach_base(layer)
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     shadows = _readable(layer, "dropshadow")
@@ -382,7 +425,7 @@ def _bevel_reach(
     An inner bevel stays inside the layer and adds nothing. Degrades as
     :py:func:`_beneath_reach` does.
     """
-    bbox = layer.bbox
+    bbox = _reach_base(layer)
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     bevels = _readable(layer, "bevelemboss")
@@ -1205,6 +1248,33 @@ class _OuterEffect(NamedTuple):
     blend_mode: BlendMode
 
 
+class _EffectSink(Protocol):
+    """Where the effects drawn inside a layer's region are put.
+
+    :py:class:`_EffectCanvas` composites them into the layer, which is then
+    composited as one source; :py:class:`_AdjustmentCanvas` puts them straight
+    on the compositor, which has no layer paint to composite them into. The
+    drawing code hands either one a share of ``region`` and the effect's own
+    colour, blend mode and opacity, and does not know which it has.
+    """
+
+    @property
+    def region(self) -> np.ndarray: ...
+
+    @property
+    def opacity(self) -> float: ...
+
+    def within(self, coverage: np.ndarray) -> np.ndarray: ...
+
+    def over(
+        self,
+        coverage: np.ndarray,
+        color: np.ndarray,
+        blend_mode: BlendMode,
+        opacity: float,
+    ) -> None: ...
+
+
 class _EffectCanvas:
     """The layer's own canvas, where the effects inside it composite into it.
 
@@ -1349,6 +1419,118 @@ class _EffectCanvas:
         )
 
 
+class _AdjustmentCanvas:
+    """Where an adjustment layer's effects paint: straight onto the compositor.
+
+    An adjustment layer has no paint of its own for an :py:class:`_EffectCanvas`
+    to composite an effect into; its mask is its shape, and the adjustment has
+    already rewritten the canvas under that shape by the time its effects are
+    drawn. So each effect goes onto the compositor's canvas by itself, with its
+    own blend mode against what is there and faded by the layer opacity, which
+    is how Photoshop composites a layer's interior effects when they are not
+    blended as a group -- and with nothing of the layer's to blend them into,
+    the one way they can go on at all.
+    """
+
+    def __init__(
+        self, compositor: "Compositor", region: np.ndarray, opacity: float
+    ) -> None:
+        self._compositor = compositor
+        self._region = region
+        self._opacity = opacity
+
+    @property
+    def region(self) -> np.ndarray:
+        """The mask coverage, which is what ``over()`` is a share of."""
+        return self._region
+
+    @property
+    def opacity(self) -> float:
+        """The layer opacity, which fades its effects."""
+        return self._opacity
+
+    def within(self, coverage: np.ndarray) -> np.ndarray:
+        """A coverage of the pixel, as the share of the region it is."""
+        return utils.clip(utils.divide(coverage, self._region, fill=0.0))
+
+    def over(
+        self,
+        coverage: np.ndarray,
+        color: np.ndarray,
+        blend_mode: BlendMode,
+        opacity: float,
+    ) -> None:
+        """Composite an effect onto the canvas, inside the region."""
+        if not coverage.any():
+            return
+        shape = self._region * coverage
+        self._compositor._apply_source(
+            color, shape, shape * (opacity * self._opacity), blend_mode
+        )
+
+
+@dataclass
+class _Isolation:
+    """How opaque an enclosing isolated group's content is, and what it stands on.
+
+    Handed to a pass-through group nested inside an isolated one, on the
+    nested group's viewport: its adjustments read the enclosing group's
+    content rather than the canvas it was composited over, which takes the
+    backdrop the enclosing group was seeded with -- see
+    :py:meth:`Compositor._apply_adjustment`. A nested group that is not
+    pass-through stands on its own transparent backdrop, and gets that
+    instead.
+    """
+
+    alpha: np.ndarray
+    backdrop_color: np.ndarray
+    backdrop_alpha: np.ndarray
+
+
+def _unmix(
+    color: np.ndarray,
+    backdrop_color: np.ndarray,
+    backdrop_alpha: np.ndarray,
+    alpha: np.ndarray,
+) -> np.ndarray:
+    """The content of ``alpha`` that, over the backdrop, composited to ``color``.
+
+    Exact where the content went on Normal; where it blended, the backdrop's
+    share is taken out as if it had. Where ``alpha`` is zero there is no
+    content to divide out, and the canvas is handed back as it is.
+    """
+    return utils.clip(
+        color
+        + (color - backdrop_color)
+        * (
+            # A ratio of two alphas rather than a color, so the fill means
+            # "fully opaque" here and not "white".
+            utils.divide(backdrop_alpha, alpha, fill=1.0) - backdrop_alpha
+        )
+    )
+
+
+def _remix(
+    content: np.ndarray,
+    backdrop_color: np.ndarray,
+    backdrop_alpha: np.ndarray,
+    alpha: np.ndarray,
+    canvas_alpha: np.ndarray,
+) -> np.ndarray:
+    """``content`` at ``alpha`` composited Normal over the backdrop: _unmix() undone.
+
+    ``canvas_alpha`` is the union of the two alphas, which the caller already
+    holds.
+    """
+    return utils.clip(
+        utils.divide(
+            alpha * content + (1.0 - alpha) * backdrop_alpha * backdrop_color,
+            canvas_alpha,
+            fill=content,
+        )
+    )
+
+
 class Compositor:
     """Composite context.
 
@@ -1399,7 +1581,7 @@ class Compositor:
         alpha: np.ndarray,
         layer_filter: Callable[[Layer], bool] | None = None,
         force: bool = False,
-        adjustment_isolated: bool | np.ndarray = False,
+        adjustment_isolated: bool | _Isolation = False,
         document_backdrop: Callable[[], tuple[np.ndarray, np.ndarray] | None]
         | None = None,
         widen: _Widen = _widen,
@@ -1426,12 +1608,13 @@ class Compositor:
         # own, which is what the public entry points and the tests do.
         self._cache: _PassCache = _PassCache() if cache is None else cache
         # Whether adjustments stop at what the enclosing isolated group has
-        # painted. An array is that painted shape so far, handed down to a
-        # nested group that does not isolate on its own; True starts a fresh
-        # isolated group, whose adjustments stop at its own content.
+        # painted. An _Isolation is how opaque that group's content is so far
+        # and the backdrop it stands on, handed down to a nested group that
+        # does not isolate on its own; True starts a fresh isolated group,
+        # whose adjustments stop at its own content.
         self._adjustment_isolated = adjustment_isolated is not False
-        self._enclosing_shape: np.ndarray | None = (
-            adjustment_isolated if isinstance(adjustment_isolated, np.ndarray) else None
+        self._enclosing: _Isolation | None = (
+            adjustment_isolated if isinstance(adjustment_isolated, _Isolation) else None
         )
         # What Knockout.DEEP knocks out to. Inherited by pass-through
         # sub-compositors and reset at every isolation boundary, so deep
@@ -1473,8 +1656,16 @@ class Compositor:
             return
         if isinstance(layer, AdjustmentLayer):
             # An adjustment contributes no source of its own; it rewrites the
-            # canvas that is already there.
+            # canvas that is already there. Its style is drawn from its mask,
+            # the shape it has, and goes on around that rewrite the way a
+            # layer's goes on around its paint: shadows and glows beneath,
+            # the rest over -- see _apply_adjustment_effects().
+            styled = _has_enabled_effects(layer)
+            if styled:
+                self._apply_beneath_effects(layer)
             self._apply_adjustment(layer)
+            if styled:
+                self._apply_adjustment_effects(layer)
             return
 
         # Beneath everything else the layer paints, and before the layer is
@@ -1635,19 +1826,32 @@ class Compositor:
         beside the layer is an outer effect, after the stroke's.
         """
         canvas = _EffectCanvas(self, source)
+        outer = self._paint_effects(layer, canvas, source.shape, source.shape_mask)
+        return canvas.source(), outer
+
+    def _paint_effects(
+        self,
+        layer: Layer,
+        canvas: _EffectSink,
+        shape: np.ndarray,
+        shape_mask: float | np.ndarray,
+    ) -> list[_OuterEffect]:
+        """Draw the layer's effects into ``canvas``, returning the outer ones.
+
+        ``shape`` is the layer's coverage on this viewport and ``shape_mask``
+        its mask alone; a stroke traces one or the other.
+        """
         for effect_name in _OVERLAY_DRAWS:
             self._add_overlay(layer, effect_name, canvas)
         self._add_satins(layer, canvas)
         self._add_inner_effects(layer, canvas)
 
         traces_mask = self._traces_mask(layer)
-        traced: float | np.ndarray = source.shape
+        traced: float | np.ndarray = shape
         if traces_mask:
-            traced = source.shape_mask
+            traced = shape_mask
         elif _is_shape_layer(layer) and _readable(layer, "stroke"):
-            traced = self._path_interior(
-                layer, self._viewport, source.shape_mask, source.shape
-            )
+            traced = self._path_interior(layer, self._viewport, shape_mask, shape)
         outer: list[_OuterEffect] = []
         self._add_stroke_effects(
             layer,
@@ -1657,16 +1861,19 @@ class Compositor:
             traces_mask,
         )
         self._add_bevels(layer, canvas, outer)
-        return canvas.source(), outer
+        return outer
 
     def _traces_mask(self, layer: Layer) -> bool:
         """Whether the layer's strokes follow its mask rather than its coverage.
 
         A layer drawn from a fill, or force-redrawn from its vector mask, has
-        no source shape worth tracing.
+        no source shape worth tracing; an adjustment layer has no shape but
+        its mask.
         """
-        return (self._force and layer.has_vector_mask()) or (
-            not layer.has_pixels() and utils.has_fill(layer)
+        return (
+            isinstance(layer, AdjustmentLayer)
+            or (self._force and layer.has_vector_mask())
+            or (not layer.has_pixels() and utils.has_fill(layer))
         )
 
     def _apply_outer_effects(
@@ -1849,12 +2056,26 @@ class Compositor:
             logger.debug("Adjustment layer without data: %s", layer.kind)
             return
 
-        backdrop_color = self._color
-        transformed_color = adjustment_fn(backdrop_color, colormode, layer)
+        # An adjustment inside an isolated group reads the group's own
+        # content, not the canvas that content was composited over: a
+        # half-transparent layer under it is adjusted at its own colour and
+        # stays half-transparent over the backdrop. The content is divided
+        # back out of the canvas, adjusted, and composited over the backdrop
+        # again, which confines the adjustment to where the group has
+        # painted; adjusting the canvas and dividing afterwards cannot undo
+        # an adjustment that is not linear.
+        if self._adjustment_isolated:
+            backdrop_color, backdrop_alpha = self._isolation_backdrop()
+            content_alpha = self._isolation_alpha()
+            content = _unmix(self._color, backdrop_color, backdrop_alpha, content_alpha)
+        else:
+            content_alpha = self._alpha
+            content = self._color
+        transformed_color = adjustment_fn(content, colormode, layer)
 
         if layer.has_clip_layers():
             transformed_color = self._apply_clip_layers(
-                layer, transformed_color, self._alpha
+                layer, transformed_color, content_alpha
             )
 
         shape_mask = self._get_mask(layer)
@@ -1871,23 +2092,47 @@ class Compositor:
         # compositor built by hand, the canvas is this one's and so is the mode
         # that describes it.
         blend_fn = get_blend_func(layer.blend_mode, self._color_mode)
-        blended = blend_fn(backdrop_color, transformed_color)
+        blended = blend_fn(content, transformed_color)
+        content = utils.clip(content + opacity * (blended - content))
 
         if self._adjustment_isolated:
-            self._color = utils.clip(
-                backdrop_color
-                + self._isolation_shape() * opacity * (blended - backdrop_color)
+            self._color = _remix(
+                content, backdrop_color, backdrop_alpha, content_alpha, self._alpha
             )
         else:
-            self._color = utils.clip(
-                backdrop_color + opacity * (blended - backdrop_color)
-            )
+            self._color = content
 
-    def _isolation_shape(self) -> np.ndarray:
-        """What the isolated group has painted so far, enclosing groups included."""
-        if self._enclosing_shape is None:
-            return self._shape_g
-        return cast(np.ndarray, utils.union(self._enclosing_shape, self._shape_g))
+    def _apply_adjustment_effects(self, layer: AdjustmentLayer) -> None:
+        """Composite the effects of an adjustment layer, over the adjustment.
+
+        The mask is the layer's shape, so it is the region the effects are a
+        share of and the silhouette the inner effects and strokes are drawn
+        from; without a mask the layer covers the viewport. Each goes onto
+        the canvas on its own (:py:class:`_AdjustmentCanvas`); what paints
+        beside the region follows, at what it was drawn at, since there is no
+        layer source about to go over it.
+        """
+        _, opacity = self._get_const(layer)
+        if opacity <= 0.0:
+            return
+        region = self._get_mask(layer)
+        if not isinstance(region, np.ndarray):
+            region = np.full((self.height, self.width, 1), region, dtype=np.float32)
+        canvas = _AdjustmentCanvas(self, region, opacity)
+        outer = self._paint_effects(layer, canvas, region, region)
+        self._apply_outer_effects(outer, None)
+
+    def _isolation_alpha(self) -> np.ndarray:
+        """How opaque what the isolated group has painted so far is."""
+        if self._enclosing is None:
+            return self._alpha_g
+        return cast(np.ndarray, utils.union(self._enclosing.alpha, self._alpha_g))
+
+    def _isolation_backdrop(self) -> tuple[np.ndarray, np.ndarray]:
+        """The backdrop the isolated group's content stands on."""
+        if self._enclosing is None:
+            return self._color_0, self._alpha_0
+        return self._enclosing.backdrop_color, self._enclosing.backdrop_alpha
 
     def finish(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return the isolated result, the shape and the alpha."""
@@ -1926,16 +2171,7 @@ class Compositor:
         The correction is a no-op for the transparent backdrop an isolated
         group starts from, and grows with ``_alpha_0``.
         """
-        return utils.clip(
-            self._color
-            + (self._color - self._color_0)
-            * (
-                # A ratio of two alphas rather than a color, so the fill
-                # means "fully opaque" here and not "white": where the group
-                # covers nothing there is no coverage to divide out of.
-                utils.divide(self._alpha_0, self._alpha_g, fill=1.0) - self._alpha_0
-            )
-        )
+        return _unmix(self._color, self._color_0, self._alpha_0, self._alpha_g)
 
     def result_over_backdrop(self) -> np.ndarray:
         """The composited color *as it stands over* the initial backdrop.
@@ -2012,10 +2248,20 @@ class Compositor:
                 dtype=np.float32,
             )
         )
-        adjustment_isolated: bool | np.ndarray = isolate_adjustments
+        adjustment_isolated: bool | _Isolation = isolate_adjustments
         if not isolate_adjustments and self._adjustment_isolated:
-            adjustment_isolated = paste(
-                viewport, self._viewport, self._isolation_shape()
+            if is_passthrough:
+                backdrop_color, backdrop_alpha = self._isolation_backdrop()
+                content_alpha = self._isolation_alpha()
+            else:
+                # Stands on its own transparent backdrop, with nothing of the
+                # enclosing group's content on it.
+                backdrop_color, backdrop_alpha = color_b, group_alpha
+                content_alpha = group_alpha
+            adjustment_isolated = _Isolation(
+                alpha=paste(viewport, self._viewport, content_alpha),
+                backdrop_color=paste(viewport, self._viewport, backdrop_color, 1.0),
+                backdrop_alpha=paste(viewport, self._viewport, backdrop_alpha),
             )
         group_compositor = Compositor(
             viewport,
@@ -2408,9 +2654,7 @@ class Compositor:
         alpha = shape * opacity
         return color, shape, alpha
 
-    def _add_overlay(
-        self, layer: Layer, effect_name: str, canvas: _EffectCanvas
-    ) -> None:
+    def _add_overlay(self, layer: Layer, effect_name: str, canvas: _EffectSink) -> None:
         """Composite every overlay effect of one kind into the layer.
 
         The three overlay kinds differ only in what they draw, which is what
@@ -2418,7 +2662,8 @@ class Compositor:
 
         An overlay covers the layer's whole region, so what it hands the
         canvas is its own mask and opacity alone -- the layer's coverage is
-        what the canvas already measures a share of.
+        what the canvas already measures a share of. It is laid out on the
+        layer's style box: its own box, or an adjustment layer's mask.
 
         An effect is skipped twice over: when its draw declines, which the
         pattern and the gradient do for a fill they cannot make sense of, and
@@ -2426,6 +2671,7 @@ class Compositor:
         step earlier (#826).
         """
         draw = _OVERLAY_DRAWS[effect_name]
+        bbox = _style_bbox(layer)
         for effect in _readable(layer, effect_name):
             # The draw is guarded and the coverage arithmetic below is not,
             # which keeps the shared half of this loop -- identical for all
@@ -2434,7 +2680,7 @@ class Compositor:
             # fill decodes the pattern's own pixels, and a file whose pattern
             # data is corrupt loses the effect here rather than the document.
             try:
-                fill, shape_e = draw(layer, effect.descriptor, self.channels)
+                fill, shape_e = draw(layer, bbox, effect.descriptor, self.channels)
                 opacity = effect.opacity / 100.0
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:
@@ -2448,11 +2694,11 @@ class Compositor:
             if fill is None:
                 logger.debug("Skipping undrawable %s effect in %s", effect_name, layer)
                 continue
-            color = paste(self._viewport, layer.bbox, fill, 1.0)
+            color = paste(self._viewport, bbox, fill, 1.0)
             if shape_e is None:
                 shape_e = np.ones((self.height, self.width, 1), dtype=np.float32)
             else:
-                shape_e = paste(self._viewport, layer.bbox, shape_e)
+                shape_e = paste(self._viewport, bbox, shape_e)
             canvas.over(shape_e, color, blend_mode, opacity)
 
     def _trace_shape(
@@ -2612,8 +2858,15 @@ class Compositor:
         knockout, which would make the shadow depend on the viewport. The
         group's contents are composited over nothing, once per box and pass,
         as :py:meth:`_get_group_shape` does for a stroke.
+
+        An adjustment layer has no pixels: its mask is the whole silhouette.
         """
         mask = self._get_mask(layer, viewport)
+        if isinstance(layer, AdjustmentLayer):
+            if isinstance(mask, np.ndarray):
+                return utils.clip(mask)
+            height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+            return np.full((height, width, 1), mask, dtype=np.float32)
         own = (
             self._get_group_shape(layer, viewport, alpha=True)
             if isinstance(layer, GroupMixin)
@@ -2826,7 +3079,7 @@ class Compositor:
                     blend_mode,
                 )
 
-    def _add_inner_effects(self, layer: Layer, canvas: _EffectCanvas) -> None:
+    def _add_inner_effects(self, layer: Layer, canvas: _EffectSink) -> None:
         """Composite every inner glow, then every inner shadow, into the layer.
 
         Each is drawn on the cast box grown by its size, from the silhouette
@@ -2884,7 +3137,7 @@ class Compositor:
             inner_bbox(self._viewport, reach, max_alloc),
         )
 
-    def _add_satins(self, layer: Layer, canvas: _EffectCanvas) -> None:
+    def _add_satins(self, layer: Layer, canvas: _EffectSink) -> None:
         """Composite every satin of the layer into it, over its overlays.
 
         Drawn from :py:meth:`_cast_shape` read on a box grown by the satin's
@@ -2989,7 +3242,7 @@ class Compositor:
         return bbox, draw_glow
 
     def _add_bevels(
-        self, layer: Layer, canvas: _EffectCanvas, outer: list[_OuterEffect]
+        self, layer: Layer, canvas: _EffectSink, outer: list[_OuterEffect]
     ) -> None:
         """Composite every bevel of the layer: inside it, and beside it.
 
@@ -3080,7 +3333,7 @@ class Compositor:
         self,
         layer: Layer,
         shape: float | np.ndarray,
-        canvas: _EffectCanvas,
+        canvas: _EffectSink,
         outer: list[_OuterEffect],
         traces_mask: bool,
     ) -> None:
@@ -3109,7 +3362,7 @@ class Compositor:
                 # or centered stroke has room for the part of itself that
                 # falls outside the layer (#792).
                 bbox = stroke_bbox(
-                    layer.bbox, effect.descriptor, layer._psd._max_alloc_bytes
+                    _style_bbox(layer), effect.descriptor, layer._psd._max_alloc_bytes
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a stroke effect of %s: %s", layer, error)
