@@ -1577,7 +1577,8 @@ class Compositor:
         knockout = _read_knockout(layer)
         adjustment_isolated: bool | None = None
         stroke: tuple[np.ndarray, np.ndarray] | None = None
-        if isinstance(layer, GroupMixin):
+        is_group = isinstance(layer, GroupMixin)
+        if is_group:
             color, shape, alpha, adjustment_isolated = self._get_group(layer, knockout)
         else:
             color, shape, alpha, stroke = self._get_object(layer)
@@ -1591,13 +1592,16 @@ class Compositor:
         # In place: both canvases were built for this layer by the calls above
         # and are not shared with anything else.
         shape *= shape_mask
-        region = alpha * shape_mask if adjustment_isolated is not None else shape
+        region = alpha * shape_mask if is_group else None
         alpha *= mask
         if stroke is not None:
             stroke_mask = self._get_mask(layer, clip_to_path=False)
             # The fill's share and the stroke's are disjoint, so they add.
             shape = np.minimum(shape + stroke[0] * stroke_mask, 1.0)
             alpha = np.minimum(alpha + stroke[1] * stroke_mask * opacity, 1.0)
+        if region is None:
+            # An object's effects cover its shape, the redrawn stroke included.
+            region = shape
 
         # TODO: Tag.BLEND_INTERIOR_ELEMENTS controls how inner effects apply,
         # and is unread. There is a second thing riding on it now: the effect

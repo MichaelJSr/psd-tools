@@ -1522,21 +1522,49 @@ def test_an_overlay_on_a_pass_through_group_covers_the_groups_alpha() -> None:
     assert np.allclose(middle, 0.5, atol=3 / 255.0 + 1e-6), middle
 
 
-def _forge_group_overlay(
-    psd: PSDImage, group_name: str, filename: str, layer_name: str
-) -> Any:
-    """``group_name`` given the overlays of ``filename``'s ``layer_name`` alone."""
-    group = next(layer for layer in psd.descendants() if layer.name == group_name)
+def _forge_overlay(psd: PSDImage, name: str, filename: str, donor_name: str) -> Any:
+    """``psd``'s ``name`` given the overlays of ``filename``'s ``donor_name`` alone."""
+    target = next(layer for layer in psd.descendants() if layer.name == name)
     source = PSDImage.open(full_name(filename))
-    donor = next(layer for layer in source.descendants() if layer.name == layer_name)
-    group.tagged_blocks.set_data(
+    donor = next(layer for layer in source.descendants() if layer.name == donor_name)
+    target.tagged_blocks.set_data(
         Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
         donor.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO),
     )
-    for effect in group.effects:
+    for effect in target.effects:
         if not type(effect).__name__.endswith("Overlay"):
             effect.descriptor[Key.Enabled] = False
-    return group
+    return target
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize(
+    ("filename", "centre"),
+    [
+        ("stroke-center.psd", (0, 0, 153)),
+        ("stroke-center-no-fill.psd", (255, 255, 255)),
+    ],
+)
+def test_an_overlay_covers_a_shape_layers_vector_stroke(
+    filename: str, centre: tuple[int, int, int], force: bool
+) -> None:
+    """An inner effect on a shape layer covers its vector stroke, both halves.
+
+    A 10 px centred stroke on a 40x40 rectangle, fill on and off, given a
+    colour overlay: the band is the overlay's colour whether the stroke is
+    read from the stored pixels or redrawn from the path, and the fill's
+    absence shows only inside the path.
+    """
+    overlay = (0, 0, 153)  # Clip+Effects' colour overlay
+    psd = PSDImage.open(full_name(filename))
+    _forge_overlay(psd, "Rectangle 1", "effects/stroke-composite.psd", "Clip+Effects")
+    image = psd.composite(force=force, ignore_preview=True)
+    assert image is not None
+    pixels = np.asarray(image.convert("RGB"))
+    row = pixels[50]
+    assert [tuple(pixel) for pixel in row[25:35]] == [overlay] * 10
+    assert tuple(row[24]) == (255, 255, 255)
+    assert tuple(row[50]) == centre
 
 
 @pytest.mark.parametrize(("group_name", "left"), [("Outset", 0), ("Pass Through", 64)])
@@ -1552,7 +1580,7 @@ def test_a_group_overlay_covers_its_childrens_effects(
     """
     overlay = (0, 0, 153)  # Clip+Effects' colour overlay
     psd = PSDImage.open(full_name("effects/group-clips-child-stroke.psd"))
-    group = _forge_group_overlay(
+    group = _forge_overlay(
         psd, group_name, "effects/stroke-composite.psd", "Clip+Effects"
     )
     assert group.bbox == (8 + left, 8, 24 + left, 24)
@@ -1577,9 +1605,7 @@ def test_a_pass_through_groups_gradient_overlay_is_laid_out_on_the_canvas(
     ``Outset``.
     """
     psd = PSDImage.open(full_name("effects/group-clips-child-stroke.psd"))
-    group = _forge_group_overlay(
-        psd, group_name, "layer_effects.psd", "Gradient Overlay"
-    )
+    group = _forge_overlay(psd, group_name, "layer_effects.psd", "Gradient Overlay")
     passthrough = group.blend_mode is BlendMode.PASS_THROUGH
     assert passthrough == (group_name == "Pass Through")
     desc = next(group.effects.find("gradientoverlay")).descriptor
