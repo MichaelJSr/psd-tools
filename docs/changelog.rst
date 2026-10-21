@@ -80,6 +80,10 @@ Changelog
   coverage, and a pass-through group's gradient or pattern overlay is laid
   out across the document canvas rather than the group's box, as in
   Photoshop
+- [fix] A shape layer with Align Edges that is redrawn from its path is
+  snapped onto the pixel grid as Photoshop does: the box of its visible edge
+  moves to whole pixels and the path with it, so a centred stroke of odd
+  width lands on pixel centres instead of half-covering the pixels either side
 
 1.25.0 (2026-10-14)
 -------------------

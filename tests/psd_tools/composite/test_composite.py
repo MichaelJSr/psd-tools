@@ -168,16 +168,14 @@ def test_composite_quality_xfail(filename: str) -> None:
 # that needs a bound of its own: its 1 px inner stroke is drawn by an aggdraw
 # pen, which is not bit-stable between versions, so the bound sits above the
 # measurement rather than at it. It stays well under what this render scores
-# with the stroke switched off, so it still has an opinion. Most of what it
-# does score is colour on pixels the render leaves transparent, which no
-# viewer sees and this metric counts anyway.
+# with the stroke switched off, so it still has an opinion.
 @pytest.mark.parametrize(
     ("filename", "threshold"),
     [
         ("smartobject-layer.psd", 0.017),
         ("type-layer.psd", 0.017),
         ("gradient-fill.psd", 0.017),
-        ("shape-layer.psd", 0.015),
+        ("shape-layer.psd", 0.001),
         ("pixel-layer.psd", 0.017),
         ("solid-color-fill.psd", 0.017),
         ("pattern-fill.psd", 0.017),
@@ -189,7 +187,12 @@ def test_composite_minimal(filename: str, threshold: float) -> None:
     color, _, alpha = composite(source, force=True)
     result = color
     if reference.shape[2] > color.shape[2]:
-        result = np.concatenate((color, alpha), axis=2)
+        # Colour on a pixel the render leaves transparent is not a result,
+        # so both sides are compared premultiplied.
+        result = np.concatenate((color * alpha, alpha), axis=2)
+        reference = np.concatenate(
+            (reference[:, :, :3] * reference[:, :, 3:], reference[:, :, 3:]), axis=2
+        )
     assert _mse(reference, result) <= threshold
 
 
@@ -1465,11 +1468,18 @@ def test_a_partly_opaque_stroke_fades_into_the_fill() -> None:
     and green reads what is left of it.
 
     No fixture ships a stroke below 100%, so the descriptor is forged here.
+    Align Edges is switched off so the pen stays on the path, where it covers
+    ``row, column`` whole.
     """
+
+    def layer_of(psd: PSDImage) -> Layer:
+        layer = [x for x in psd.descendants() if x.name == "Polygon 1"][0]
+        del layer._record.tagged_blocks[Tag.USING_ALIGNED_RENDERING]
+        return layer
 
     def render(opacity: float | None) -> np.ndarray:
         psd = PSDImage.open(full_name("layers/shape-layer.psd"))
-        layer = [x for x in psd.descendants() if x.name == "Polygon 1"][0]
+        layer = layer_of(psd)
         assert layer.stroke is not None
         stored = cast(UnitFloat, layer.stroke._data["strokeStyleOpacity"])
         assert float(stored) == 100.0, "the fixture's own value, forged below"
@@ -1481,8 +1491,7 @@ def test_a_partly_opaque_stroke_fades_into_the_fill() -> None:
         return color
 
     row, column = 27, 19
-    psd = PSDImage.open(full_name("layers/shape-layer.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Polygon 1"][0]
+    layer = layer_of(PSDImage.open(full_name("layers/shape-layer.psd")))
     assert vector.draw_stroke(layer)[row, column, 0] == 1.0, "covered whole"
 
     assert render(None)[row, column] == pytest.approx([1.0, 0.0, 1.0], abs=1e-6)

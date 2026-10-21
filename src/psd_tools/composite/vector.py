@@ -11,7 +11,7 @@ from PIL import Image
 from psd_tools.api.utils import check_pixel_size
 from psd_tools.composite import scanline
 from psd_tools.composite._compat import require_aggdraw
-from psd_tools.constants import StrokeAlignment
+from psd_tools.constants import StrokeAlignment, Tag
 from psd_tools.psd.vector import Knot
 
 if TYPE_CHECKING:
@@ -33,9 +33,13 @@ def draw_vector_mask(
     something to be clipped away (#804).
 
     The coverage is the area of the path inside each pixel, computed by
-    :py:mod:`psd_tools.composite.scanline`. Filling needs no aggdraw.
+    :py:mod:`psd_tools.composite.scanline`. Filling needs no aggdraw. A layer
+    that aligns its edges is snapped onto the pixel grid first; see
+    :py:func:`_alignment`.
     """
-    return _draw_path(layer, brush={"color": 255}, viewport=viewport)
+    return _draw_path(
+        layer, brush={"color": 255}, viewport=viewport, align=_alignment(layer)
+    )
 
 
 # The two positions that put the stroke to one side of the path. A stroke that
@@ -63,6 +67,9 @@ _STROKE_LIVE_BYTES = 13
 # Slack on a distance to the silhouette, measured from a pixel-resolution edge.
 _BOUNDARY_MARGIN = 1.0
 _RIDGE_DROP = 0.5
+# Align Edges rounds half up, and a coordinate this far short of the half
+# still rounds up.
+_ALIGN_SLACK = 0.025
 
 
 @require_aggdraw
@@ -97,6 +104,9 @@ def draw_stroke(
 
     The pen follows each input path, so it is kept to the neighbourhood of the
     combined shape's boundary, which is where Photoshop strokes (#889).
+
+    Under Align Edges the pen follows the snapped path, so its outer edge
+    lies on the pixel grid; see :py:func:`_alignment`.
 
     Requires aggdraw, which draws the pen. Only a stroke does; a fill is
     rasterized by :py:mod:`psd_tools.composite.scanline`.
@@ -133,7 +143,8 @@ def draw_stroke(
     inner = alignment is StrokeAlignment.INNER
     radius = float(pen["width"]) / 2.0 * _MITER_REACH
     near = _near_silhouette(layer, radius, viewport)
-    outline = _draw_path(layer, pen=pen, viewport=viewport, near=near)
+    align = _alignment(layer)
+    outline = _draw_path(layer, pen=pen, viewport=viewport, near=near, align=align)
     if not sided:
         return outline
 
@@ -154,6 +165,65 @@ def draw_stroke(
     if inner:
         outline = _solid_inner_band(layer, outline, width, viewport, near)
     return outline * inside
+
+
+def _alignment(layer: "Layer") -> tuple[np.ndarray, np.ndarray] | None:
+    """
+    The scale and offset Align Edges applies to the layer's path, x first.
+
+    Photoshop snaps the box of the shape's visible edge -- the outer edge of
+    an enabled stroke, otherwise the path -- onto the pixel grid: its origin
+    to the nearest pixel and its size to a whole number of pixels, half up.
+    The path is scaled and shifted with that box, so a centred stroke of odd
+    width lands on pixel centres and one of even width on pixel boundaries.
+
+    ``None`` when the layer does not align its edges or has no path.
+    """
+    blocks = layer._record.tagged_blocks
+    if blocks is None or not blocks.get_data(Tag.USING_ALIGNED_RENDERING, 0):
+        return None
+    box = _path_box(layer)
+    if box is None:
+        return None
+    margin = 0.0
+    stroke = layer.stroke
+    if stroke is not None and stroke.enabled:
+        alignment = stroke.line_alignment
+        if alignment is StrokeAlignment.OUTER:
+            margin = float(stroke.line_width)
+        elif alignment is not StrokeAlignment.INNER:
+            margin = float(stroke.line_width) / 2.0
+    size = box[1] - box[0]
+    origin = _snap(box[0] - margin)
+    inner_size = _snap(size + 2.0 * margin) - 2.0 * margin
+    # A box with no extent in an axis, or one the rounding would empty,
+    # keeps its size there.
+    scalable = (size > 0.0) & (inner_size > 0.0)
+    scale = np.where(scalable, inner_size / np.where(scalable, size, 1.0), 1.0)
+    offset = origin + margin - box[0] * scale
+    return scale, offset
+
+
+def _snap(values: np.ndarray) -> np.ndarray:
+    """``values`` rounded to whole pixels the way Align Edges does."""
+    return np.floor(values + 0.5 + _ALIGN_SLACK)
+
+
+def _path_box(layer: "Layer") -> np.ndarray | None:
+    """Bounding box of the layer's path in document pixels: ``[[x0, y0], [x1, y1]]``."""
+    assert layer.vector_mask is not None
+    doc_size = (layer._psd.width, layer._psd.height)
+    polylines: list[np.ndarray] = []
+    for subpath in layer.vector_mask.paths:
+        knots = [x for x in subpath if isinstance(x, Knot)]
+        if len(knots) > 1:
+            polylines.append(_flatten_subpath(subpath, *doc_size))
+        elif knots:
+            polylines.append(_knot_points(knots, *doc_size, None)[:, 0])
+    if not polylines:
+        return None
+    points = np.concatenate(polylines)
+    return np.stack([points.min(axis=0), points.max(axis=0)])
 
 
 def can_bury_arcs(layer: "Layer") -> bool:
@@ -305,7 +375,13 @@ def _silhouette_distance(
         warn=False,
     )
     mask = (
-        _draw_path(layer, brush={"color": 255}, viewport=padded, closed_only=True)
+        _draw_path(
+            layer,
+            brush={"color": 255},
+            viewport=padded,
+            closed_only=True,
+            align=_alignment(layer),
+        )
         if closed_only
         else draw_vector_mask(layer, padded)
     )
@@ -333,12 +409,14 @@ def _draw_path(
     viewport: tuple[int, int, int, int] | None = None,
     near: np.ndarray | None = None,
     closed_only: bool = False,
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """
     Rasterize a layer's vector mask, filled by ``brush`` and outlined by ``pen``.
 
     ``near`` limits the outline of a closed subpath to where it is nonzero; see
     :py:func:`_near_silhouette`. ``closed_only`` fills the closed subpaths alone.
+    ``align`` snaps the path onto the pixel grid; see :py:func:`_alignment`.
 
     A mask with an initial fill rule and no path of its own reveals all, so
     the plane starts out covered -- but only for a brush. The seed describes a
@@ -381,7 +459,7 @@ def _draw_path(
         if closed_only and not any(x.is_closed() for x in subpath_list):
             continue
         plane = _draw_subpath(
-            subpath_list, viewport, doc_size, brush, pen, near, closed_only
+            subpath_list, viewport, doc_size, brush, pen, near, closed_only, align
         )
         assert mask.shape == (height, width, 1)
         assert plane.shape == mask.shape
@@ -412,6 +490,7 @@ def _draw_subpath(
     pen: dict[str, int | float] | None,
     near: np.ndarray | None = None,
     closed_only: bool = False,
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """
     Rasterize one merged path component, filled by ``brush``, outlined by ``pen``.
@@ -435,19 +514,19 @@ def _draw_subpath(
     if brush:
         filled = [x for x in drawable if x.is_closed()] if closed_only else drawable
         if filled:
-            plane = _fill_subpath(filled, viewport, doc_size)
+            plane = _fill_subpath(filled, viewport, doc_size, align)
     if pen:
         closed = [subpath for subpath in drawable if subpath.is_closed()]
         outline = plane * 0
         if closed:
-            outline = _stroke_subpath(closed, viewport, doc_size, pen)
+            outline = _stroke_subpath(closed, viewport, doc_size, pen, align)
             if near is not None:
                 outline = outline * near
         # An open subpath bounds no area, so it has no silhouette to follow.
         opened = [subpath for subpath in drawable if not subpath.is_closed()]
         if opened:
             outline = np.maximum(
-                outline, _stroke_subpath(opened, viewport, doc_size, pen)
+                outline, _stroke_subpath(opened, viewport, doc_size, pen, align)
             )
         plane = plane + outline - plane * outline
     return plane
@@ -457,6 +536,7 @@ def _fill_subpath(
     subpath_list: list,
     viewport: tuple[int, int, int, int],
     doc_size: tuple[int, int],
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """
     Area of the path inside each pixel of ``viewport``.
@@ -469,7 +549,7 @@ def _fill_subpath(
     """
     origin = np.array([viewport[0], viewport[1]], dtype=np.float64)
     polylines = [
-        _flatten_subpath(subpath, *doc_size) - origin for subpath in subpath_list
+        _flatten_subpath(subpath, *doc_size, align) - origin for subpath in subpath_list
     ]
     coverage = scanline.fill_coverage(
         polylines, viewport[2] - viewport[0], viewport[3] - viewport[1]
@@ -477,7 +557,29 @@ def _fill_subpath(
     return np.expand_dims(coverage, 2)
 
 
-def _flatten_subpath(subpath, width: int, height: int) -> np.ndarray:
+def _knot_points(
+    knots: list[Knot],
+    width: int,
+    height: int,
+    align: tuple[np.ndarray, np.ndarray] | None,
+) -> np.ndarray:
+    """
+    Anchor, preceding and leaving point of each knot in document pixels, x first.
+
+    ``align`` is the scale and offset of :py:func:`_alignment`, applied to
+    every point.
+    """
+    points = np.array(
+        [(k.anchor, k.preceding, k.leaving) for k in knots], dtype=np.float64
+    )[:, :, ::-1] * (width, height)
+    if align is not None:
+        points = points * align[0] + align[1]
+    return points
+
+
+def _flatten_subpath(
+    subpath, width: int, height: int, align: tuple[np.ndarray, np.ndarray] | None = None
+) -> np.ndarray:
     """
     Polyline through one subpath, in document coordinates, x first.
 
@@ -490,24 +592,13 @@ def _flatten_subpath(subpath, width: int, height: int) -> np.ndarray:
     """
     knots = [x for x in subpath if isinstance(x, Knot)]
     closed = subpath.is_closed()
-    pairs = list(
-        zip(knots, knots[1:] + knots[:1], strict=True) if closed else pairwise(knots)
-    )
-
-    def scaled(points) -> np.ndarray:
-        return np.array(
-            [(p[1] * width, p[0] * height) for p in points], dtype=np.float64
-        )
-
-    polyline = scanline.flatten_cubics(
-        scaled([a.anchor for a, _ in pairs]),
-        scaled([a.leaving for a, _ in pairs]),
-        scaled([b.preceding for _, b in pairs]),
-        scaled([b.anchor for _, b in pairs]),
-    )
+    points = _knot_points(knots, width, height, align)
+    start = points if closed else points[:-1]
+    end = np.roll(points, -1, axis=0) if closed else points[1:]
+    polyline = scanline.flatten_cubics(start[:, 0], start[:, 2], end[:, 1], end[:, 0])
     if closed:
         return polyline
-    return np.concatenate([polyline, scaled([knots[-1].anchor])])
+    return np.concatenate([polyline, points[-1:, 0]])
 
 
 @require_aggdraw
@@ -516,6 +607,7 @@ def _stroke_subpath(
     viewport: tuple[int, int, int, int],
     doc_size: tuple[int, int],
     pen: dict[str, int | float],
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """
     Rasterize the outline of a path with aggdraw.
@@ -537,7 +629,7 @@ def _stroke_subpath(
     draw = aggdraw.Draw(mask)
     stroke = aggdraw.Pen(**pen)
     for subpath in subpath_list:
-        path = " ".join(map(str, _generate_symbol(subpath, *doc_size)))
+        path = " ".join(map(str, _generate_symbol(subpath, *doc_size, align=align)))
         symbol = aggdraw.Symbol(path)
         draw.symbol((-viewport[0], -viewport[1]), symbol, stroke, None)
     draw.flush()
@@ -550,33 +642,31 @@ def _generate_symbol(
     width: int,
     height: int,
     command: str = "C",
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> Generator[str | float, None, None]:
     """Sequence generator for SVG path."""
     knots = [x for x in path if isinstance(x, Knot)]
     if len(knots) == 0:
         return
+    points = _knot_points(knots, width, height, align).tolist()
 
     # Initial point.
     yield "M"
-    yield knots[0].anchor[1] * width
-    yield knots[0].anchor[0] * height
+    yield from points[0][0]
     yield command
 
     # Closed path or open path
-    points = (
-        zip(knots, knots[1:] + knots[:1], strict=True)
+    pairs = (
+        zip(points, points[1:] + points[:1], strict=True)
         if path.is_closed()
-        else pairwise(knots)
+        else pairwise(points)
     )
 
     # Rest of the points.
-    for p1, p2 in points:
-        yield p1.leaving[1] * width
-        yield p1.leaving[0] * height
-        yield p2.preceding[1] * width
-        yield p2.preceding[0] * height
-        yield p2.anchor[1] * width
-        yield p2.anchor[0] * height
+    for p1, p2 in pairs:
+        yield from p1[2]
+        yield from p2[1]
+        yield from p2[0]
 
     if path.is_closed():
         yield "Z"
