@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from psd_tools.api import numpy_io
+from psd_tools.api._descriptor import get_descriptor, get_scalar
 from psd_tools.api.utils import check_growth, check_pixel_size
 from psd_tools.color_convert import (
     SRGB_CUTOFF,
@@ -63,6 +64,16 @@ _SINGLE_CHANNEL_MODES = (
     ColorMode.DUOTONE,
     ColorMode.MULTICHANNEL,
 )
+
+
+def _finite(desc: Descriptor, key: bytes, default: float) -> float:
+    """``desc[key]`` as a float, or ``default`` where it is missing, mistyped or not finite.
+
+    A fill layer's draw has no guard around it, unlike an effect's, so a
+    forged number has to read as the dialog's default rather than raise.
+    """
+    value = get_scalar(desc, key, float, default)
+    return value if math.isfinite(value) else default
 
 
 def _clamp01(value: float) -> float:
@@ -473,11 +484,11 @@ def draw_gradient_fill(
     # A path with no extent along an axis ramps as a single pixel there.
     box_height, box_width = max(box[3] - box[1], 1), max(box[2] - box[0], 1)
 
-    angle = float(desc.get(Key.Angle, 0))
+    angle = _finite(desc, Key.Angle, 0.0)
     scale = float(desc.get(Key.Scale, 100.0)) / 100.0
     scale *= _gradient_length(angle, box_width, box_height)
     # ``Ofst`` moves the ramp's centre by a share of the box.
-    offset = desc.get(Key.Offset)
+    offset = get_descriptor(desc, Key.Offset)
     shift_x = box_width * _offset_share(offset, Key.Horizontal)
     shift_y = box_height * _offset_share(offset, Key.Vertical)
     X, Y = np.meshgrid(
@@ -550,12 +561,10 @@ _OFFSET_LIMIT = 10_000.0
 
 
 def _offset_share(point: Descriptor | None, key: bytes) -> float:
-    """One axis of ``Ofst`` as a share of the box; NaN and infinity read as none."""
+    """One axis of ``Ofst`` as a share of the box; a malformed one reads as none."""
     if point is None:
         return 0.0
-    value = float(point.get(key, 0.0))
-    if not math.isfinite(value):
-        return 0.0
+    value = _finite(point, key, 0.0)
     return min(_OFFSET_LIMIT, max(-_OFFSET_LIMIT, value)) / 100.0
 
 
@@ -634,7 +643,7 @@ def _collect_stops(
             (
                 _clamp01(float(stop.get(Key.Location)) / 4096.0),
                 value_fn(stop),
-                float(stop.get(Key.Midpoint, 50.0)) / 100.0,
+                _finite(stop, Key.Midpoint, 50.0) / 100.0,
             )
             for stop in stops
         ),
@@ -655,28 +664,39 @@ def _collect_stops(
 _RAMP_SAMPLES = 4097
 
 
+def _segment_blend(
+    u: np.ndarray, m: np.ndarray | float, smoothness: float
+) -> np.ndarray:
+    """How far a segment's blend has gone at ``u``, its share of the segment.
+
+    The blend runs linearly to halfway at the end stop's midpoint ``m`` and
+    linearly on to the end; a midpoint on either end of its segment is
+    ignored, as Photoshop's dialog cannot author one. Smoothness then eases
+    the blend towards a smoothstep, with 100% landing halfway between the two.
+    Shared with a gradient map's ramp, so a map and a fill with the same stops
+    blend alike.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
+    f = np.where((m > 0.0) & (m < 1.0), bent, u)
+    return f + smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+
+
 def _blend_stops(
     X: list[float], Y: list[np.ndarray], M: list[float], smoothness: float
 ) -> np.ndarray:
     """Sample the ramp through the stops at every ``Lctn`` unit.
 
-    Within a segment the blend runs linearly to halfway at the end stop's
-    midpoint and linearly on to the end; a midpoint on either end of its
-    segment is ignored, as Photoshop's dialog cannot author one. Smoothness
-    then eases the blend towards a smoothstep, with 100% landing halfway
-    between the two.
+    Each segment blends as :py:func:`_segment_blend` says.
     """
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
     k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(X) - 2)
     span = locations[k + 1] - locations[k]
-    m = np.asarray(M)[k + 1]
     with np.errstate(divide="ignore", invalid="ignore"):
         # A sample falls in a segment of no width only on its end stop.
         u = np.where(span > 0.0, np.clip((t - locations[k]) / span, 0.0, 1.0), 1.0)
-        bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
-    f = np.where((m > 0.0) & (m < 1.0), bent, u)
-    f += smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+    f = _segment_blend(u, np.asarray(M)[k + 1], smoothness)
     values = np.asarray(Y, dtype=np.float64)
     f = f.reshape((-1,) + (1,) * (values.ndim - 1))
     return values[k] * (1.0 - f) + values[k + 1] * f
@@ -777,7 +797,7 @@ def _make_linear_gradient_color(
 ) -> tuple[Any | None, Any | None]:
     from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    smoothness = _clamp01(float(grad.get(Key.Interpolation, 4096.0)) / 4096.0)
+    smoothness = _clamp01(_finite(grad, Key.Interpolation, 4096.0) / 4096.0)
     colors = grad.get(Key.Colors, [])
     table = _blend_stops(
         *_collect_stops(colors, lambda stop: np.array(_get_color(color_mode, stop))),

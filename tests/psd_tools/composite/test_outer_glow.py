@@ -28,7 +28,14 @@ from psd_tools.composite.composite import (
     _content_bbox,
     _effect_reach,
 )
-from psd_tools.constants import BlendMode, ColorMode, GlowTechnique, Tag
+from psd_tools.constants import (
+    GRADIENT_METHOD_KEY,
+    BlendMode,
+    ColorMode,
+    GlowTechnique,
+    GradientMethod,
+    Tag,
+)
 from psd_tools.psd.base import ByteElement
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass, Type
@@ -424,6 +431,24 @@ def test_a_gradient_is_placed_by_the_falloff_and_not_by_the_cut() -> None:
     assert np.allclose(color[0, 0], colors[0], atol=1e-6)
     assert np.allclose(color[0, 1], colors[0], atol=1e-6)
     assert float(painted[0, 0, 0]) == pytest.approx(0.5 * float(painted[0, 1, 0]))
+
+
+@pytest.mark.parametrize("method", [GradientMethod.PERCEPTUAL, GradientMethod.LINEAR])
+def test_a_gradient_glow_blends_in_its_method(method: GradientMethod) -> None:
+    """``gs99`` picks the space the stops blend in, as it does for an overlay."""
+    desc, _, _ = _gradient_glow()
+    falloff = np.linspace(1.0, 0.0, 33, dtype=np.float32)[None, :]
+    classic, _ = _paint(desc, falloff)
+    desc[GRADIENT_METHOD_KEY] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=method.value
+    )
+    blended, _ = _paint(desc, falloff)
+    colors, _ = paint._make_gradient_color(
+        ColorMode.RGB, desc[Key.Gradient], method.value
+    )
+    assert colors is not None
+    assert np.allclose(blended, colors(1.0 - falloff), atol=1e-6)
+    assert not np.allclose(blended, classic, atol=1e-3)
 
 
 # -- Compositing ----------------------------------------------------------- #

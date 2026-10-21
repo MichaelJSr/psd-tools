@@ -1273,9 +1273,10 @@ def glow_paint(
     is as opaque as the falloff or the transparency there, whichever is
     less, so a gradient opaque at both ends paints what a solid colour would
     and a translucent stop holds the glow at its opacity for as long as the
-    falloff is above it. The gradient's reverse flag turns it around. Either
-    way the coverage is cut away under the silhouette. A descriptor with
-    neither raises as the solid colour reader does.
+    falloff is above it. The gradient's reverse flag turns it around, and its
+    stops blend in the method ``gs99`` names, as an overlay's do. Either way
+    the coverage is cut away under the silhouette. A descriptor with neither
+    raises as the solid colour reader does.
     """
     if Key.Gradient not in desc:
         color, _ = paint.draw_solid_color_fill(viewport, color_mode, desc)
@@ -1283,7 +1284,9 @@ def glow_paint(
     along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
-    colors, opacities = paint._make_gradient_color(color_mode, desc[Key.Gradient])
+    colors, opacities = paint._make_gradient_color(
+        color_mode, desc[Key.Gradient], paint._gradient_method(desc)
+    )
     if colors is None:
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)

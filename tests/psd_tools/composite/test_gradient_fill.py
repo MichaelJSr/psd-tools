@@ -9,6 +9,7 @@ width from the height.
 """
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -294,6 +295,49 @@ def test_full_smoothness_eases_the_blend_halfway_to_a_smoothstep(
     assert grey[25] == pytest.approx(0.203125) and grey[50] == 0.5
     half = _grey(_gradient(smoothness=0.5), 101, 1)[0]
     assert np.allclose(half, (along + _smoothed(along)) / 2, atol=1e-5)
+
+
+def _infinite_angle(desc: Descriptor) -> None:
+    desc[Key.Angle] = UnitFloat(math.inf, Unit.Angle)
+
+
+def _offset_not_a_point(desc: Descriptor) -> None:
+    desc[Key.Offset] = Integer(3)
+
+
+def _offset_not_a_number(desc: Descriptor) -> None:
+    point = Descriptor(classID=Klass.Point.value)
+    point[Key.Horizontal] = List()
+    point[Key.Vertical] = UnitFloat(math.nan, Unit.Percent)
+    desc[Key.Offset] = point
+
+
+def _smoothness_not_a_number(desc: Descriptor) -> None:
+    desc[Key.Gradient][Key.Interpolation] = List()
+
+
+def _midpoint_not_a_number(desc: Descriptor) -> None:
+    desc[Key.Gradient][Key.Colors][1][Key.Midpoint] = List()
+
+
+@pytest.mark.parametrize(
+    "forge",
+    [
+        _infinite_angle,
+        _offset_not_a_point,
+        _offset_not_a_number,
+        _smoothness_not_a_number,
+        _midpoint_not_a_number,
+    ],
+)
+def test_a_malformed_number_reads_as_if_it_were_absent(
+    forge: Callable[[Descriptor], None],
+) -> None:
+    """A fill layer has no guard around its draw, so the ramp must not raise."""
+    expected = _grey(_gradient(smoothness=None), 16, 4)
+    desc = _gradient(smoothness=None)
+    forge(desc)
+    assert np.allclose(_grey(desc, 16, 4), expected, atol=1e-6)
 
 
 def test_a_smooth_ramp_matches_photoshops_own_pixels() -> None:

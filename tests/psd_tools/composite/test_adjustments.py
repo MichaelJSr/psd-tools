@@ -11,6 +11,7 @@ import pytest
 from psd_tools.api import adjustments
 from psd_tools.api.layers import Group
 from psd_tools.api.psd_image import PSDImage
+from psd_tools.composite import paint
 from psd_tools.composite.adjustments import (
     _rows_from_rgb,
     apply_blackandwhite,
@@ -615,8 +616,13 @@ def _gradient_map_data(
     method: bytes = b"Gcls",
     reversed: int = 0,
     mode: int = 0,
+    smoothness: int = 0,
 ) -> GradientMapData:
-    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops."""
+    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops.
+
+    ``smoothness`` is in 4096ths, as the block stores it; at 0 every segment
+    blends linearly, so the ramp reads off the output directly.
+    """
     color_stops = [
         ColorStop(
             location=location,
@@ -627,7 +633,11 @@ def _gradient_map_data(
         for location, midpoint, rgb in stops
     ]
     block = GradientMapData(
-        version=3, method=method, is_reversed=reversed, interpolation=4096, mode=mode
+        version=3,
+        method=method,
+        is_reversed=reversed,
+        interpolation=smoothness,
+        mode=mode,
     )
     block.color_stops = color_stops
     block.transparency_stops = [
@@ -722,6 +732,44 @@ def test_gradient_map_perceptual_blends_in_oklab() -> None:
     mid_gray = 1.055 * (1 / 8) ** (1 / 2.4) - 0.055
     out = apply_gradientmap(image, ColorMode.RGB, layer)
     assert np.allclose(out, mid_gray, atol=1 / 255)
+
+
+def test_gradient_map_smoothness_eases_the_blend_towards_a_smoothstep() -> None:
+    """At 100% the blend lands halfway between linear and a smoothstep, as a fill's."""
+    gray = np.array([0.25, 0.5, 0.75], dtype=np.float32)
+    image = np.repeat(gray[None, :, None], 3, axis=2)
+    stops = [(0, 50, _BLACK), (4096, 50, _WHITE)]
+    smooth = _gradient_map_layer(_gradient_map_data(stops, smoothness=4096))
+    half = _gradient_map_layer(_gradient_map_data(stops, smoothness=2048))
+    eased = gray + ((3 - 2 * gray) * gray * gray - gray) / 2
+    out = apply_gradientmap(image, ColorMode.RGB, smooth)
+    assert np.allclose(out[0, :, 0], eased, atol=1 / 255)
+    assert float(out[0, 0, 0]) == pytest.approx(0.203125, abs=1 / 255)
+    out = apply_gradientmap(image, ColorMode.RGB, half)
+    assert np.allclose(out[0, :, 0], (gray + eased) / 2, atol=1 / 255)
+
+
+def test_gradient_map_blends_its_stops_as_a_gradient_fill_does() -> None:
+    """Smoothness and midpoints shape a map's ramp as they shape a fill's."""
+    red = (1.0, 0.0, 0.0)
+    stops = [(0, 50, _BLACK), (1024, 30, red), (4096, 70, _WHITE)]
+    layer = _gradient_map_layer(_gradient_map_data(stops, smoothness=4096))
+    fill = paint._blend_stops(
+        [0.0, 0.25, 1.0], [np.array(rgb) for _, _, rgb in stops], [0.5, 0.3, 0.7], 1.0
+    )
+    greys = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+    image = np.repeat(greys[None, :, None], 3, axis=2)
+    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    samples = np.linspace(0.0, 1.0, len(fill))
+    expected = np.stack(
+        [np.interp(greys, samples, fill[:, channel]) for channel in range(3)], axis=1
+    )
+    assert np.allclose(out[0], expected, atol=1 / 255)
+    # 100% smoothness bends the ramp away from the straight segments.
+    linear = _gradient_map_layer(_gradient_map_data(stops))
+    assert not np.allclose(
+        apply_gradientmap(image, ColorMode.RGB, linear), out, atol=2 / 255
+    )
 
 
 def test_gradient_map_writes_one_channel_on_a_grayscale_document() -> None:
