@@ -15,6 +15,7 @@ from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite
 from psd_tools.composite.composite import _readable, _stroke_reach
+from psd_tools.constants import Tag
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass
 
@@ -47,9 +48,12 @@ def _color(rgb: tuple[float, float, float]) -> Descriptor:
 
 
 def _instances(layer: Layer, key: bytes, count: int) -> list[Descriptor]:
-    """The first ``count`` instances of ``key``'s list, enabled and present."""
-    data = layer.effects._data
-    assert data is not None
+    """The first ``count`` instances of ``key``'s list, enabled and present.
+
+    Edits the effects block itself, which ``layer.effects`` re-reads.
+    """
+    data = layer.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V0)
+    assert isinstance(data, Descriptor)
     items = data[key]
     assert isinstance(items, List)
     while len(items) < count:
