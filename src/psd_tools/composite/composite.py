@@ -329,8 +329,8 @@ def _beneath_reach(
             logger.debug("Cannot measure a drop shadow of %s: %s", layer, error)
     for effect in glows:
         try:
-            size, _, _ = glow_geometry(effect.descriptor)
-            bbox = utils.union_bbox(bbox, outer_glow_bbox(cast_from, size, budget))
+            glow_box = outer_glow_bbox(cast_from, effect.descriptor, budget)
+            bbox = utils.union_bbox(bbox, glow_box)
         except _UNREADABLE as error:
             logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
     return bbox
@@ -2671,7 +2671,9 @@ class Compositor:
                 anti_aliased = glow.anti_aliased
                 noise = glow.noise
                 jitter = glow.quality_jitter
-                bbox = outer_glow_bbox(cast_from, size, layer._psd._max_alloc_bytes)
+                bbox = outer_glow_bbox(
+                    cast_from, glow.descriptor, layer._psd._max_alloc_bytes
+                )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
                 continue
