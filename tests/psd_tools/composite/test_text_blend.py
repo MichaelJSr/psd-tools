@@ -326,7 +326,9 @@ def _rings(layer: Layer, *rings: tuple[float, float, float]) -> None:
     strokes = data[b"frameFXMulti"]
     while len(strokes) < len(rings):
         strokes.append(copy.deepcopy(strokes[0]))
-    for desc, (size, grey, opacity) in zip(strokes, rings, strict=True):
+    for desc in strokes[len(rings) :]:
+        desc[b"enab"] = False
+    for desc, (size, grey, opacity) in zip(strokes[: len(rings)], rings, strict=True):
         desc[b"enab"] = True
         desc[b"present"] = True
         desc[Key.Style] = Enumerated(typeID=b"FStl", enum=Enum.OutsetFrame)
@@ -341,7 +343,7 @@ def test_a_faint_stroke_over_a_wide_one_leaves_the_text_on_the_backdrop() -> Non
     """A 1 px ring at 0 % listed over a 6 px ring cuts the wide ring back.
 
     The glyph edge then meets the backdrop, in the gamma, as it does with no
-    style at all; with the narrow ring opaque it meets the ring instead.
+    style at all, where the wide ring alone would put its grey there.
     """
     psd = PSDImage.open(full_name("text.psb"))
     layer = next(_type_layers(psd))
@@ -349,7 +351,12 @@ def test_a_faint_stroke_over_a_wide_one_leaves_the_text_on_the_backdrop() -> Non
     rows, columns, edges = _edges(psd, layer)
     plain = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
 
-    _rings(layer, (1.0, 0.0, 0.0), (6.0, 1.0, 100.0))
+    wide = (6.0, 0.5, 100.0)
+    _rings(layer, wide)
+    ringed = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
+    assert np.abs(ringed - plain).max() > 0.1
+
+    _rings(layer, (1.0, 0.0, 0.0), wide)
     cut = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
     assert cut == pytest.approx(plain, abs=1 / 255)
 

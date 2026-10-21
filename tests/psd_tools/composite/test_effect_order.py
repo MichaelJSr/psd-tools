@@ -25,6 +25,7 @@ pytest.importorskip("scipy")
 
 _RED = (1.0, 0.0, 0.0)
 _BLUE = (0.0, 0.0, 1.0)
+_GREY = (0.5, 0.5, 0.5)
 
 # The rectangle's path spans rows 3-27 and columns 4-27 of a 32x32 canvas.
 _INSIDE = (slice(3, 28), slice(4, 28))
@@ -128,7 +129,8 @@ def test_a_faded_first_listed_stroke_shows_the_backdrop_not_the_second(
     """The second ring is cut from under the first, whatever the first's opacity.
 
     So ``t * first + (1 - t) * backdrop`` on the first row, and the second
-    ring only past it.
+    ring only past it. Photoshop shows this at 0 %; the other opacities are
+    the same rule extrapolated, with no Photoshop sample behind them.
     """
     psd, layer = _rectangle()
     backdrop = _backdrop(psd)
@@ -150,7 +152,8 @@ def test_rings_that_meet_within_a_pixel_fill_it_between_them(opacity: float) -> 
 
     The two bands add rather than composite one over the other, so no
     backdrop shows between them; a faded first ring shows it only through
-    its own half.
+    its own half. The 50 % case extrapolates the cut rule to a faded ring,
+    which no Photoshop sample checks.
     """
     psd, layer = _rectangle()
     backdrop = _backdrop(psd)
@@ -158,6 +161,24 @@ def test_rings_that_meet_within_a_pixel_fill_it_between_them(opacity: float) -> 
     first = _over(opacity / 100.0, _RED, tuple(backdrop[1]))
     half = _over(0.5, first, _BLUE)
     np.testing.assert_allclose(_below(psd)[1], half, atol=1e-6)
+
+
+def test_bands_keep_their_stacking_order_across_blend_modes() -> None:
+    """Normal 1.5 px over Multiply 3 px over Normal 5 px: the second row.
+
+    Only adjacent bands in one blend mode are added into one source, so the
+    two Normal bands stay either side of the Multiply one and the first
+    ring's outer half-pixel goes over the Multiply band, not under it.
+    """
+    psd, layer = _rectangle()
+    backdrop = _backdrop(psd)
+    _strokes(layer, (1.5, _RED, 100.0), (3.0, _GREY, 100.0), (5.0, _BLUE, 100.0))
+    _instances(layer, b"frameFXMulti", 3)[1][Key.Mode] = Enumerated(
+        typeID=b"BlnM", enum=Enum.Multiply
+    )
+    under = tuple(backdrop[1])
+    multiplied = _over(0.5, tuple(backdrop[1] * _GREY), under)
+    np.testing.assert_allclose(_below(psd)[1], _over(0.5, _RED, multiplied), atol=1e-6)
 
 
 @pytest.mark.parametrize(

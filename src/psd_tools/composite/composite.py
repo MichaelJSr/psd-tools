@@ -1,10 +1,9 @@
 """Composite implementation for layer rendering and blending."""
 
-import functools
 import logging
 import math
 import warnings
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple, Protocol, cast
 
@@ -1357,10 +1356,10 @@ class _OuterEffect(NamedTuple):
 class _StrokeBand(NamedTuple):
     """A stroke effect's paint and coverage, measured before any is painted.
 
-    Or several bands as one: those of one blend mode are disjoint once each
-    is cut from under the ones above it, so they add, and one source carries
-    their summed coverage, the opacity each pixel is painted at and the
-    colour weighted by it -- see :py:func:`_merge_bands`.
+    Or several bands as one: adjacent bands of one blend mode are disjoint
+    once each is cut from under the ones above it, so they add, and one
+    source carries their summed coverage, the opacity each pixel is painted
+    at and the colour weighted by it -- see :py:class:`_BandSum`.
     """
 
     color: np.ndarray
@@ -1371,47 +1370,53 @@ class _StrokeBand(NamedTuple):
     blend_mode: BlendMode
 
 
-def _total(arrays: Iterable[np.ndarray]) -> np.ndarray:
-    """The arrays summed, without stacking them."""
-    return functools.reduce(np.add, arrays)
-
-
-def _merge_bands(bands: Sequence[_StrokeBand]) -> list[_StrokeBand]:
-    """The bands as one per blend mode, bottom first.
+class _BandSum:
+    """Adjacent stroke bands of one blend mode, added as they are measured.
 
     Composited one over the other, two bands that share a pixel would each
     see the other's paint in the share it leaves: an opaque ring's outer edge
     over the ring beneath it would let the backdrop through. Added into one
-    source they fill the pixel between them exactly. A lone band is handed
-    back as it is.
+    source they fill the pixel between them exactly. The sums are kept in
+    place of the bands, so the memory held is per run of one blend mode and
+    not per stroke, and a lone band is handed back as it is.
     """
-    groups: dict[BlendMode, list[_StrokeBand]] = {}
-    for band in reversed(bands):
-        groups.setdefault(band.blend_mode, []).append(band)
-    merged: list[_StrokeBand] = []
-    for blend_mode, members in groups.items():
-        if len(members) == 1:
-            merged.append(members[0])
-            continue
-        coverage = np.minimum(_total(band.coverage for band in members), 1.0)
-        inside = np.minimum(_total(band.inside for band in members), 1.0)
-        weights = [band.coverage * band.opacity for band in members]
-        weight = _total(weights)
-        color = utils.divide(
-            _total(w * band.color for w, band in zip(weights, members, strict=True)),
-            weight,
-            fill=members[0].color,
+
+    def __init__(self, band: _StrokeBand) -> None:
+        self.blend_mode = band.blend_mode
+        self._lone: _StrokeBand | None = band
+        self._coverage = band.coverage
+        self._inside = band.inside
+        self._weight: np.ndarray | None = None
+        self._color: np.ndarray | None = None
+
+    def add(self, band: _StrokeBand) -> None:
+        assert band.blend_mode == self.blend_mode
+        if self._lone is not None:
+            self._weight = self._lone.coverage * self._lone.opacity
+            self._color = self._weight * self._lone.color
+            self._lone = None
+        assert self._weight is not None and self._color is not None
+        weight = band.coverage * band.opacity
+        self._coverage = self._coverage + band.coverage
+        self._inside = self._inside + band.inside
+        self._weight = self._weight + weight
+        self._color = self._color + weight * band.color
+
+    def band(self) -> _StrokeBand:
+        if self._lone is not None:
+            return self._lone
+        assert self._weight is not None and self._color is not None
+        # Bands that overrun a pixel between them are clamped to it, and the
+        # weight with them so the opacity painted stays at most 1.
+        coverage = np.minimum(self._coverage, 1.0)
+        weight = np.minimum(self._weight, coverage)
+        return _StrokeBand(
+            utils.divide(self._color, self._weight, fill=0.0),
+            coverage,
+            np.minimum(self._inside, 1.0),
+            utils.divide(weight, coverage, fill=0.0),
+            self.blend_mode,
         )
-        merged.append(
-            _StrokeBand(
-                color,
-                coverage,
-                inside,
-                utils.divide(weight, coverage, fill=0.0),
-                blend_mode,
-            )
-        )
-    return merged
 
 
 class _EffectSink(Protocol):
@@ -3824,7 +3829,7 @@ class Compositor:
         # the same boundary, so on either side of it the bands are nested
         # intervals: what the ones above claim of a pixel is the widest of
         # them, on each side separately, and a band keeps what exceeds that.
-        bands: list[_StrokeBand] = []
+        runs: list[_BandSum] = []
         claimed: tuple[np.ndarray, np.ndarray] | None = None
         for effect in reversed(_readable(layer, "stroke")):
             try:
@@ -3861,10 +3866,14 @@ class Compositor:
                 )
                 inside = np.maximum(inside - claimed_inside, 0.0)
                 mask = inside + np.maximum(outside - claimed_outside, 0.0)
-            bands.append(_StrokeBand(color, mask, inside, opacity, blend_mode))
+            band = _StrokeBand(color, mask, inside, opacity, blend_mode)
+            if runs and runs[-1].blend_mode == blend_mode:
+                runs[-1].add(band)
+            else:
+                runs.append(_BandSum(band))
 
-        for band in _merge_bands(bands):
-            color, mask, inside, band_opacity, blend_mode = band
+        for run in reversed(runs):
+            color, mask, inside, band_opacity, blend_mode = run.band()
             # The two halves of the band go to different places, and an inset
             # or outset stroke is all of one of them -- only a centered stroke
             # is split. The rest of the band, not ``mask - inside``, so that
