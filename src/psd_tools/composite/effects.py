@@ -755,9 +755,9 @@ def stroke_band(
 # leaves the falloff too steep. The fit is asserted in the tests.
 _SHADOW_SIGMA_PER_SIZE = 0.45
 
-# The same for an outer glow. Fitted on its own, since Photoshop need not blur
-# the two alike, and named apart so either can move without the other.
-_GLOW_SIGMA_PER_SIZE = _SHADOW_SIGMA_PER_SIZE
+# The same for an outer glow, fitted on its own against the glow previews,
+# since Photoshop need not blur the two alike.
+_GLOW_SIGMA_PER_SIZE = 0.45
 
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
@@ -770,13 +770,12 @@ _DEFAULT_GLOW_RANGE = 50.0
 _GLOW_RANGE_FLOOR = 15.0
 
 # What one pixel of a shadow's or glow's canvas costs at the peak of
-# ``draw_drop_shadow()`` or ``draw_outer_glow()``: the silhouette it is cast
+# ``draw_drop_shadow()`` or ``glow_falloff()``: the silhouette it is cast
 # from, the matte spread grows and the distance transform and masks that grow
-# it, the blurred or ramped matte and the shifted one, or the gradient paint
-# laid along it, with the object read or group composite the silhouette is
-# taken from. The knockout that follows a shadow holds less: the cut
-# silhouette and the stroke bands pasted onto it, each drawn on its own
-# stroke's box, which ``stroke_bbox()`` checks on its own.
+# it, the blurred or ramped matte and the shifted one, with the object read or
+# group composite the silhouette is taken from. The knockout that follows a
+# shadow holds less: the cut silhouette and the stroke bands pasted onto it,
+# each drawn on its own stroke's box, which ``stroke_bbox()`` checks on its own.
 _SHADOW_BYTES = 64
 
 # Entries in a contour's transfer table. Photoshop states a contour's points
@@ -832,9 +831,41 @@ def drop_shadow_bbox(
     :class:`ValueError` when the grown box is over the per-axis limit or
     ``max_alloc_bytes``, which the callers read as an unreadable shadow.
     """
+    dx, dy = _shadow_offset(distance, angle)
+    return _cast_canvas(bbox, dx, dy, size, max_alloc_bytes, _SHADOW_BYTES)
+
+
+def outer_glow_bbox(
+    bbox: tuple[int, int, int, int],
+    desc: Descriptor,
+    max_alloc_bytes: AllocBudget | None = None,
+) -> tuple[int, int, int, int]:
+    """The canvas an outer glow is drawn on.
+
+    A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the
+    glow's size on every side, with the same fringe, and raising the same
+    way. A gradient glow is checked against what its paint costs, which is
+    more than the falloff it is laid along. Raises as
+    :py:func:`glow_geometry` does for a size it cannot read.
+    """
+    size, _, _ = glow_geometry(desc)
+    per_pixel = _SHADOW_BYTES
+    if Key.Gradient in desc:
+        per_pixel = max(per_pixel, paint.GRADIENT_FILL_BYTES)
+    return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, per_pixel)
+
+
+def _cast_canvas(
+    bbox: tuple[int, int, int, int],
+    dx: float,
+    dy: float,
+    size: float,
+    max_alloc_bytes: AllocBudget | None,
+    per_pixel: int,
+) -> tuple[int, int, int, int]:
+    """``bbox`` grown as :py:func:`drop_shadow_bbox` says, at ``per_pixel`` bytes."""
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
-    dx, dy = _shadow_offset(distance, angle)
     margin = math.ceil(max(size, 0.0)) + 2
     grown = (
         math.floor(bbox[0] + min(dx, 0.0)) - margin,
@@ -847,24 +878,10 @@ def drop_shadow_bbox(
         width,
         height,
         max_alloc_bytes=max_alloc_bytes,
-        estimated_bytes=width * height * _SHADOW_BYTES,
+        estimated_bytes=width * height * per_pixel,
         warn=False,
     )
     return grown
-
-
-def outer_glow_bbox(
-    bbox: tuple[int, int, int, int],
-    size: float,
-    max_alloc_bytes: AllocBudget | None = None,
-) -> tuple[int, int, int, int]:
-    """The canvas :py:func:`draw_outer_glow` needs to draw a glow on.
-
-    A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the size
-    on every side, with the same fringe, checked against the same budget and
-    raising the same way.
-    """
-    return drop_shadow_bbox(bbox, 0.0, 0.0, size, max_alloc_bytes)
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
@@ -1200,38 +1217,12 @@ def glow_falloff(
     return np.clip(falloff, 0.0, 1.0).astype(np.float32)
 
 
-def draw_outer_glow(
-    viewport: tuple[int, int, int, int],
-    shape: np.ndarray,
-    *,
-    size: float,
-    spread: float,
-    range_: float = _DEFAULT_GLOW_RANGE,
-    precise: bool = False,
-    contour: np.ndarray | None = None,
-    anti_aliased: bool = False,
-) -> np.ndarray:
-    """The coverage a solid outer glow spreads from ``shape``, on ``viewport``.
-
-    The falloff of :py:func:`glow_falloff`, as ``(height, width, 1)``, cut
-    away under the silhouette whatever the layer's own opacity, since
-    Photoshop never shows an outer glow through its layer. A gradient glow
-    is painted from the falloff by :py:func:`glow_paint` instead.
-    """
-    falloff = glow_falloff(
-        shape,
-        size=size,
-        spread=spread,
-        range_=range_,
-        precise=precise,
-        contour=contour,
-        anti_aliased=anti_aliased,
-    )
-    return _beside(falloff, shape)
-
-
 def _beside(coverage: np.ndarray, shape: np.ndarray) -> np.ndarray:
-    """``coverage`` cut away under the silhouette, as ``(height, width, 1)``."""
+    """``coverage`` cut away under the silhouette, as ``(height, width, 1)``.
+
+    Cut whatever the layer's own opacity, since Photoshop never shows an
+    outer glow through its layer.
+    """
     return np.clip(coverage * (1.0 - shape[:, :, 0]), 0.0, 1.0).astype(np.float32)[
         :, :, None
     ]

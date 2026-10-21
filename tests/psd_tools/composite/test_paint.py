@@ -1051,6 +1051,124 @@ def test_out_of_range_hue_still_wraps_rather_than_clamping() -> None:
         assert result == pytest.approx((1.0, 0.5, 0.0), abs=1e-6), degrees
 
 
+# A stop's location and opacity are file values, as a colour component is, so
+# they are held to [0, 1] where they are read. Every gradient fill, overlay,
+# stroke and outer glow reads its colour through ``_make_gradient_color()``.
+
+_ALONG = np.linspace(0.0, 1.0, 101, dtype=np.float32)
+
+
+def _stops_gradient(
+    colors: list[tuple[float, float]], opacities: list[tuple[float, float]]
+) -> Descriptor:
+    """A custom-stops gradient from ``(location, value)`` pairs.
+
+    A location is in the file's 0 to 4096, a colour stop's value a grey level
+    from 0 to 255, and a transparency stop's an opacity in percent.
+    """
+
+    def stop(location: float) -> Descriptor:
+        desc = Descriptor(classID=b"Clrt")
+        desc[Key.Location] = Double(location)
+        return desc
+
+    grad = Descriptor(classID=Klass.Gradient.value)
+    grad[Type.GradientForm] = Enumerated(
+        typeID=Type.GradientForm.value, enum=Enum.CustomStops.value
+    )
+    grad[Key.Colors] = List()
+    for location, grey in colors:
+        color_stop = stop(location)
+        color_stop[Key.Color] = _color_desc(
+            Klass.RGBColor.value, {Key.Red: grey, Key.Green: grey, Key.Blue: grey}
+        )[Key.Color]
+        grad[Key.Colors].append(color_stop)
+    grad[Key.Transparency] = List()
+    for location, opacity in opacities:
+        transparency_stop = stop(location)
+        transparency_stop[Key.Opacity] = Double(opacity)
+        grad[Key.Transparency].append(transparency_stop)
+    return grad
+
+
+def _read_gradient(grad: Descriptor) -> tuple[np.ndarray, np.ndarray]:
+    colors, opacities = paint._make_gradient_color(ColorMode.RGB, grad)
+    assert colors is not None and opacities is not None
+    return np.asarray(colors(_ALONG)), np.asarray(opacities(_ALONG))
+
+
+_THREE_STOPS = [(0.0, 0.0), (2048.0, 128.0), (4096.0, 255.0)]
+_UNTRUSTED = [float("nan"), float("inf"), float("-inf"), 9000.0, -500.0]
+
+
+@pytest.mark.parametrize("value", _UNTRUSTED, ids=str)
+@pytest.mark.parametrize("index", [0, -1], ids=["first", "last"])
+@pytest.mark.parametrize(
+    "field", ["colour-location", "transparency-location", "opacity"]
+)
+def test_an_untrusted_gradient_stop_reads_finite_and_in_range(
+    field: str, index: int, value: float
+) -> None:
+    """Any stop field the file can carry gives a gradient finite and in [0, 1]."""
+    colors = list(_THREE_STOPS)
+    opacities = [(0.0, 100.0), (2048.0, 50.0), (4096.0, 10.0)]
+    if field == "colour-location":
+        colors[index] = (value, colors[index][1])
+    elif field == "transparency-location":
+        opacities[index] = (value, opacities[index][1])
+    else:
+        opacities[index] = (opacities[index][0], value)
+    color, alpha = _read_gradient(_stops_gradient(colors, opacities))
+    for plane in (color, alpha):
+        assert np.isfinite(plane).all()
+        assert plane.min() >= 0.0 and plane.max() <= 1.0
+
+
+@pytest.mark.parametrize(
+    ("opacity", "expected"),
+    [
+        (float("nan"), 0.0),
+        (float("inf"), 1.0),
+        (float("-inf"), 0.0),
+        (250.0, 1.0),
+        (-500.0, 0.0),
+    ],
+    ids=str,
+)
+def test_a_stop_opacity_is_held_to_the_axis_as_a_colour_is(
+    opacity: float, expected: float
+) -> None:
+    """NaN is transparent, as a NaN component is no colour, and the rest saturate."""
+    _, alpha = _read_gradient(_stops_gradient(_THREE_STOPS, [(0.0, opacity)]))
+    assert np.all(alpha == expected)
+
+
+def test_co_located_stops_keep_the_last_the_file_lists_wherever_they_are() -> None:
+    """A NaN location lands at the start, and the start's two stops become one.
+
+    The two are not neighbours in the file, so it takes the sort to find
+    them; left apart, the interpolation divides by the zero gap between them
+    and the gradient's first pixel is NaN.
+    """
+    colors = [*_THREE_STOPS, (float("nan"), 64.0)]
+    color, _ = _read_gradient(_stops_gradient(colors, [(0.0, 100.0)]))
+    assert np.isfinite(color).all()
+    assert color[0] == pytest.approx((64.0 / 255.0,) * 3)
+    assert color[-1] == pytest.approx((1.0,) * 3)
+
+
+def test_a_noise_gradients_nan_transparency_band_is_transparent() -> None:
+    """``np.clip`` keeps a NaN, so the transparency band clamps it first."""
+    grad = _noise_desc(
+        Enum.RGBColor.value, (50.0, 50.0, 50.0, 50.0), show_transparency=True
+    )[Key.Gradient]
+    grad[Key.Maximum][3] = Double(float("nan"))
+    colors, opacities = paint._make_gradient_color(ColorMode.RGB, grad)
+    assert colors is not None and opacities is not None
+    assert np.isfinite(np.asarray(colors(_ALONG))).all()
+    assert np.all(np.asarray(opacities(_ALONG)) == 0.0)
+
+
 # ---------------------------------------------------------------------------
 # CMYK is read as ink, not as canvas (#763)
 #

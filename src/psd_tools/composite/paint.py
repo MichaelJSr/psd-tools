@@ -622,14 +622,17 @@ def _collect_stops(
 ) -> tuple[list[float], list[np.ndarray], list[float]]:
     """Collect gradient stop (location, value, midpoint) triples in ramp order.
 
-    Co-located stops make a step: at their location the ramp takes the later
-    listed. A stop's ``Mdpn`` is where, as a fraction of the segment that ends
-    at it, the blend from the previous stop is halfway.
+    A location is the file's, so it is held to the gradient's length as a
+    colour component is (#757). Co-located stops make a step: at their
+    location the ramp takes the later listed, and the sort is stable so two
+    that are not neighbours in the file still come out in the file's order. A
+    stop's ``Mdpn`` is where, as a fraction of the segment that ends at it,
+    the blend from the previous stop is halfway.
     """
     triples = sorted(
         (
             (
-                float(stop.get(Key.Location)) / 4096.0,
+                _clamp01(float(stop.get(Key.Location)) / 4096.0),
                 value_fn(stop),
                 float(stop.get(Key.Midpoint, 50.0)) / 100.0,
             )
@@ -808,7 +811,7 @@ def _make_linear_gradient_color(
         return G, None
 
     def opacity(stop: Any) -> np.ndarray:
-        return np.array(float(stop.get(Key.Opacity)) / 100.0)
+        return np.array(_clamp01(float(stop.get(Key.Opacity)) / 100.0))
 
     stops = grad.get(Key.Transparency)
     alpha_space = _ALPHA_BLEND_SPACES.get(method) if method is not None else None
@@ -949,8 +952,9 @@ def _make_noise_gradient_color(
     if not grad.get(Key.ShowTransparency):
         return G, None
     # Clamped like the color components, and from the same raw ``Mnm ``/``Mxm ``
-    # values (#757).
-    Ya = np.clip(Y[:, -1], 0.0, 1.0)
+    # values (#757). ``np.clip`` keeps a NaN, so it goes to 0.0 first, as
+    # ``_clamp01`` sends it.
+    Ya = np.clip(np.nan_to_num(Y[:, -1], nan=0.0), 0.0, 1.0)
     Ga = interpolate.interp1d(
         X, Ya, axis=0, bounds_error=False, fill_value=(Ya[0], Ya[-1])
     )

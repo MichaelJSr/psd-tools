@@ -47,6 +47,10 @@ Changelog
   technique, range, contour, a solid or gradient colour, opacity and blend
   mode are honoured; noise and jitter are read but not applied, and the
   blur and range approximate Photoshop's. Needs ``scipy`` (#680)
+- [fix] A gradient stop whose location or opacity is out of range or not a
+  number is held to 0-100%, as a stop's colour is, and so is a noise
+  gradient's transparency. A gradient fill, overlay or stroke with one could
+  leave NaN in the composited image (#757)
 - [fix] Inner shadow and inner glow layer effects are now rendered when a
   document is composited from its layers. Solid colours only: a gradient
   glow is still dropped, and noise is read but not applied. Needs ``scipy``

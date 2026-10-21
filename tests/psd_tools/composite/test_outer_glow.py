@@ -21,7 +21,7 @@ import pytest
 from psd_tools.api.effects import OuterGlow
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import composite, effects, utils
+from psd_tools.composite import composite, effects, paint, utils
 from psd_tools.composite.composite import (
     Compositor,
     _beneath_reach,
@@ -44,10 +44,10 @@ _RADIUS = 12.0
 
 
 def _glow(shape: np.ndarray, **params: Any) -> np.ndarray:
-    """A glow drawn on the disc canvas, with the keyword defaults of a plain one."""
+    """A solid glow's coverage, with the keyword defaults of a plain one."""
     settings: dict[str, Any] = {"size": 6.0, "spread": 0.0, "range_": 100.0}
     settings.update(params)
-    return effects.draw_outer_glow(_CANVAS, shape, **settings)
+    return effects._beside(effects.glow_falloff(shape, **settings), shape)
 
 
 def _ring(glow: np.ndarray) -> np.ndarray:
@@ -245,21 +245,42 @@ def test_an_outer_glow_asks_for_scipy_by_name_when_it_is_missing(
         _glow(_disc(81, _RADIUS))
 
 
+def _sized(size: float) -> Descriptor:
+    desc = Descriptor(classID=Klass.OuterGlow.value)
+    desc[Key.Blur] = Double(size)
+    return desc
+
+
 def test_outer_glow_bbox_grows_the_box_by_the_size_on_every_side() -> None:
     """A shadow's canvas for a shadow cast nowhere, under the same budget."""
     bbox = (10, 20, 30, 40)
-    assert effects.outer_glow_bbox(bbox, 3.0) == effects.drop_shadow_bbox(
+    assert effects.outer_glow_bbox(bbox, _sized(3.0)) == effects.drop_shadow_bbox(
         bbox, 0.0, 0.0, 3.0
     )
-    assert effects.outer_glow_bbox(bbox, 3.0) == (5, 15, 35, 45)
-    assert effects.outer_glow_bbox((0, 0, 0, 0), 3.0) == (0, 0, 0, 0)
+    assert effects.outer_glow_bbox(bbox, _sized(3.0)) == (5, 15, 35, 45)
+    assert effects.outer_glow_bbox((0, 0, 0, 0), _sized(3.0)) == (0, 0, 0, 0)
 
-    grown = effects.outer_glow_bbox(bbox, 250.0, max_alloc_bytes="unlimited")
+    desc = _sized(250.0)
+    grown = effects.outer_glow_bbox(bbox, desc, max_alloc_bytes="unlimited")
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     budget = width * height * effects._SHADOW_BYTES
-    assert effects.outer_glow_bbox(bbox, 250.0, max_alloc_bytes=budget) == grown
+    assert effects.outer_glow_bbox(bbox, desc, max_alloc_bytes=budget) == grown
     with pytest.raises(ValueError):
-        effects.outer_glow_bbox(bbox, 250.0, max_alloc_bytes=budget - 1)
+        effects.outer_glow_bbox(bbox, desc, max_alloc_bytes=budget - 1)
+
+
+def test_a_gradient_glows_canvas_is_budgeted_for_its_paint() -> None:
+    """A gradient paint costs what a gradient fill does, past the falloff's cost."""
+    bbox = (10, 20, 30, 40)
+    desc = _sized(250.0)
+    desc[Key.Gradient] = Descriptor(classID=Klass.Gradient.value)
+    grown = effects.outer_glow_bbox(bbox, desc, max_alloc_bytes="unlimited")
+    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    assert paint.GRADIENT_FILL_BYTES > effects._SHADOW_BYTES
+    budget = width * height * paint.GRADIENT_FILL_BYTES
+    assert effects.outer_glow_bbox(bbox, desc, max_alloc_bytes=budget) == grown
+    with pytest.raises(ValueError):
+        effects.outer_glow_bbox(bbox, desc, max_alloc_bytes=budget - 1)
 
 
 # -- Paint ----------------------------------------------------------------- #
@@ -306,13 +327,12 @@ def test_a_solid_glow_is_painted_in_its_colour_over_its_falloff() -> None:
     assert np.allclose(painted[:, :, 0], falloff * (1.0 - shape[:, :, 0]), atol=1e-6)
 
 
-def test_draw_outer_glow_is_the_falloff_beside_the_silhouette() -> None:
-    """The solid primitive is ``glow_falloff`` cut under the shape, and no more."""
+def test_the_falloff_is_not_cut_under_the_silhouette() -> None:
+    """``glow_falloff`` leaves the cut to the paint, which places a gradient by it."""
     disc = _disc(81, _RADIUS)
     falloff = effects.glow_falloff(disc, size=6.0, spread=0.0, range_=100.0)
     assert falloff.shape == (81, 81)
-    assert np.allclose(_glow(disc)[:, :, 0], falloff * (1.0 - disc[:, :, 0]))
-    assert float(falloff[disc[:, :, 0] > 0.0].min()) > 0.0, "cut before the paint"
+    assert float(falloff[disc[:, :, 0] > 0.0].min()) > 0.0
 
 
 def _gradient_glow() -> tuple[Descriptor, list[tuple[float, ...]], list[float]]:
@@ -670,7 +690,11 @@ def test_noise_and_jitter_are_read_but_not_applied(
 
 
 def test_a_glow_over_the_documents_budget_is_dropped_not_drawn() -> None:
-    """A glow whose canvas the document's budget refuses costs the glow only."""
+    """A glow whose canvas the document's budget refuses costs the glow only.
+
+    A budget that holds a solid glow's canvas refuses the same canvas once
+    the glow is a gradient, whose paint costs more.
+    """
     psd, layer = _masks_card()
     glow = _forge_glow(layer)
     viewport = _around(layer)
@@ -679,10 +703,14 @@ def test_a_glow_over_the_documents_budget_is_dropped_not_drawn() -> None:
     glow[Key.Enabled] = True
     assert not np.array_equal(_alone(layer, viewport), disabled)
 
-    size, _, _ = effects.glow_geometry(glow)
-    grown = effects.outer_glow_bbox(layer.bbox, size)
+    grown = effects.outer_glow_bbox(layer.bbox, glow)
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1
+    assert np.array_equal(_alone(layer, viewport), disabled)
+
+    psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES
+    assert not np.array_equal(_alone(layer, viewport), disabled)
+    glow[Key.Gradient] = copy.deepcopy(_gradient_glow()[0][Key.Gradient])
     assert np.array_equal(_alone(layer, viewport), disabled)
 
 
@@ -735,6 +763,30 @@ def test_an_unreadable_outer_glow_is_dropped_and_the_document_renders(
     rendered = _rendered(_UNDRAWABLE[defect])
     assert np.isfinite(rendered).all()
     assert np.array_equal(rendered, disabled)
+
+
+@pytest.mark.parametrize(
+    ("stops", "key"),
+    [
+        (Key.Transparency, Key.Opacity),
+        (Key.Transparency, Key.Location),
+        (Key.Colors, Key.Location),
+    ],
+    ids=["opacity", "transparency-location", "colour-location"],
+)
+def test_a_glow_whose_gradient_stop_is_nan_still_renders_finite(
+    stops: bytes, key: bytes
+) -> None:
+    """The stop is held in range where it is read, so the glow is still drawn."""
+
+    def nan_stop(desc: Descriptor) -> None:
+        gradient = copy.deepcopy(_gradient_glow()[0][Key.Gradient])
+        gradient[stops][-1][key] = Double(float("nan"))
+        desc[Key.Gradient] = gradient
+
+    rendered = _rendered(nan_stop)
+    assert np.isfinite(rendered).all()
+    assert not np.array_equal(rendered, _rendered(_setting(Key.Enabled, False)))
 
 
 # -- Fidelity against Photoshop's own render ------------------------------- #
