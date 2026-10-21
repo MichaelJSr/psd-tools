@@ -4,6 +4,9 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] The inner half of a Normal stroke effect replaces the layer under it,
+  as Photoshop paints it: below full opacity the band shows what is beneath
+  the layer rather than the layer's own pixels
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round
