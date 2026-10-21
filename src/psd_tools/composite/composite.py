@@ -368,7 +368,9 @@ def _beneath_reach(
     for effect in glows:
         try:
             size, _, _ = glow_geometry(effect.descriptor)
-            bbox = utils.union_bbox(bbox, outer_glow_bbox(cast_from, size, budget))
+            bbox = utils.union_bbox(
+                bbox, outer_glow_bbox(cast_from, size, budget, effect.descriptor)
+            )
         except _UNREADABLE as error:
             logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
     return bbox
@@ -2612,7 +2614,13 @@ class Compositor:
         knockout, which would make the shadow depend on the viewport. The
         group's contents are composited over nothing, once per box and pass,
         as :py:meth:`_get_group_shape` does for a stroke.
+
+        A vector stroke redrawn from the path casts with the fill, as
+        :py:meth:`_resolve_source` combines them: it reaches past the path,
+        and with the fill off it is all the layer paints.
         """
+        if self._has_redrawn_stroke(layer):
+            return self._stroked_cast_shape(layer, viewport)
         mask = self._get_mask(layer, viewport)
         own = (
             self._get_group_shape(layer, viewport, alpha=True)
@@ -2620,6 +2628,28 @@ class Compositor:
             else self._get_object_shape(layer, viewport)
         )
         return utils.clip(own * mask)
+
+    def _stroked_cast_shape(
+        self, layer: Layer, viewport: tuple[int, int, int, int]
+    ) -> np.ndarray:
+        """:py:meth:`_cast_shape` for a layer whose vector stroke is redrawn."""
+        # Read through a compositor on ``viewport``, since the object and
+        # stroke reads draw on their compositor's own.
+        height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+        reader = Compositor(
+            viewport,
+            np.ones((height, width, self._channels), dtype=np.float32),
+            np.zeros((height, width, 1), dtype=np.float32),
+            force=self._force,
+            widen=self._widen,
+            color_mode=self._color_mode,
+            cache=self._cache,
+        )
+        _, _, alpha, stroke = reader._get_object(layer)
+        alpha = alpha * reader._get_mask(layer)
+        if stroke is not None:
+            alpha = alpha + stroke[1] * reader._get_mask(layer, clip_to_path=False)
+        return utils.clip(alpha)
 
     def _knockout_shape(
         self, layer: Layer, viewport: tuple[int, int, int, int], silhouette: np.ndarray
@@ -2786,7 +2816,9 @@ class Compositor:
                 anti_aliased = glow.anti_aliased
                 noise = glow.noise
                 jitter = glow.quality_jitter
-                bbox = outer_glow_bbox(cast_from, size, layer._psd._max_alloc_bytes)
+                bbox = outer_glow_bbox(
+                    cast_from, size, layer._psd._max_alloc_bytes, glow.descriptor
+                )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
                 continue

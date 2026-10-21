@@ -284,12 +284,14 @@ def test_a_transparency_midpoint_shapes_the_alpha_ramp_alone() -> None:
 
 
 # What a black-to-white ramp is halfway along in each ``gs99`` method: the
-# classic blend is the sRGB mean, perceptual is Oklab lightness 0.5 (linear
-# light 0.125) and linear is linear-light 0.5, both re-encoded as sRGB.
+# classic blend is the sRGB mean, as is smooth, which blends as classic here;
+# perceptual is Oklab lightness 0.5 (linear light 0.125) and linear is
+# linear-light 0.5, both re-encoded as sRGB.
 HALFWAY_GREY = {
     None: 0.5,
     b"XXXX": 0.5,
     GradientInterpolation.CLASSIC.value: 0.5,
+    GradientInterpolation.SMOOTH.value: 0.5,
     GradientInterpolation.PERCEPTUAL.value: 1.055 * 0.125 ** (1 / 2.4) - 0.055,
     GradientInterpolation.LINEAR.value: 1.055 * 0.5 ** (1 / 2.4) - 0.055,
 }
@@ -312,7 +314,7 @@ FILL_METHOD_KEY = b"gradientsInterpolationMethod"
 
 def test_an_unknown_method_under_gs99_yields_to_the_fill_layers_key() -> None:
     """Both keys are read in order, skipping a value outside the enumeration."""
-    desc = _gradient(method=b"Smoo")
+    desc = _gradient(method=b"Nsch")
     assert paint._interpolation_method(desc) is None
     desc[FILL_METHOD_KEY] = Enumerated(
         typeID=b"gradientInterpolationMethodType",

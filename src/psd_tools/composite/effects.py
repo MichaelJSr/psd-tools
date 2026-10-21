@@ -754,9 +754,9 @@ _GLOW_RANGE_FLOOR = 15.0
 # What one pixel of a shadow's or glow's canvas costs at the peak of
 # ``draw_drop_shadow()`` or ``draw_outer_glow()``: the silhouette it is cast
 # from, the matte spread grows and the distance transform and masks that grow
-# it, the blurred or ramped matte and the shifted one, or the gradient paint
-# laid along it, with the group composite the silhouette of a group is read
-# from.
+# it, the blurred or ramped matte and the shifted one, with the group
+# composite the silhouette of a group is read from. A gradient glow's ramp is
+# charged on top, by :py:func:`outer_glow_bbox`.
 _SHADOW_BYTES = 64
 
 # Entries in a contour's transfer table. Photoshop states a contour's points
@@ -812,6 +812,18 @@ def drop_shadow_bbox(
     :class:`ValueError` when the grown box is over the per-axis limit or
     ``max_alloc_bytes``, which the callers read as an unreadable shadow.
     """
+    return _cast_canvas(bbox, distance, angle, size, max_alloc_bytes, _SHADOW_BYTES)
+
+
+def _cast_canvas(
+    bbox: tuple[int, int, int, int],
+    distance: float,
+    angle: float,
+    size: float,
+    max_alloc_bytes: AllocBudget | None,
+    per_pixel: int,
+) -> tuple[int, int, int, int]:
+    """:py:func:`drop_shadow_bbox`, charging ``per_pixel`` bytes a pixel."""
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     dx, dy = _shadow_offset(distance, angle)
@@ -827,7 +839,7 @@ def drop_shadow_bbox(
         width,
         height,
         max_alloc_bytes=max_alloc_bytes,
-        estimated_bytes=width * height * _SHADOW_BYTES,
+        estimated_bytes=width * height * per_pixel,
         warn=False,
     )
     return grown
@@ -837,14 +849,19 @@ def outer_glow_bbox(
     bbox: tuple[int, int, int, int],
     size: float,
     max_alloc_bytes: AllocBudget | None = None,
+    desc: Descriptor | None = None,
 ) -> tuple[int, int, int, int]:
     """The canvas :py:func:`draw_outer_glow` needs to draw a glow on.
 
     A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the size
     on every side, with the same fringe, checked against the same budget and
-    raising the same way.
+    raising the same way. A glow ``desc`` paints with a gradient is also
+    charged the ramp :py:func:`glow_paint` evaluates over the whole box.
     """
-    return drop_shadow_bbox(bbox, 0.0, 0.0, size, max_alloc_bytes)
+    per_pixel = _SHADOW_BYTES
+    if desc is not None and Key.Gradient in desc:
+        per_pixel += paint.GRADIENT_FILL_BYTES
+    return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, per_pixel)
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
@@ -1247,7 +1264,9 @@ def glow_paint(
     along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
-    colors, opacities = paint._make_gradient_color(color_mode, desc[Key.Gradient])
+    colors, opacities = paint._make_gradient_color(
+        color_mode, desc[Key.Gradient], paint._interpolation_method(desc)
+    )
     if colors is None:
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)

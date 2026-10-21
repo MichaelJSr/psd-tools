@@ -868,5 +868,11 @@ def test_a_stroke_names_its_interpolation_method_under_its_own_key() -> None:
         typeID=b"gradientInterpolationMethodType", enum=b"Smoo"
     )
     assert effects.Stroke(descriptor, ImageResources()).interpolation is (
+        GradientInterpolation.SMOOTH
+    )
+    descriptor[b"gs99"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=b"Nsch"
+    )
+    assert effects.Stroke(descriptor, ImageResources()).interpolation is (
         GradientInterpolation.LINEAR
     ), "a value outside the enumeration yields to the next key"

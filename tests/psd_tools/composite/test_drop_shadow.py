@@ -32,7 +32,15 @@ from psd_tools.composite.composite import (
 )
 from psd_tools.constants import BlendMode, Resource, Tag
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List, String
+from psd_tools.psd.descriptor import (
+    Bool,
+    Descriptor,
+    Double,
+    Enumerated,
+    List,
+    String,
+    UnitFloat,
+)
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
@@ -738,6 +746,78 @@ def test_a_masked_pixel_layer_casts_its_shadow_from_its_pixels(force: bool) -> N
     # Left of the ellipse, where only its shadow can be: opaque, faded by the
     # layer's own opacity.
     assert float(alpha[40, 4, 0]) == pytest.approx(layer.opacity / 255.0)
+
+
+def _stroke_card(
+    fill_enabled: bool | None = None,
+    alignment: bytes | None = None,
+    width: float | None = None,
+) -> Layer:
+    """``stroke.psd``'s ``Rectangle 1``: an unfilled path with a thin inside stroke."""
+    psd = PSDImage.open(full_name("stroke.psd"))
+    layer = next(layer for layer in psd.descendants() if layer.name == "Rectangle 1")
+    stroke = layer.tagged_blocks.get_data(Tag.VECTOR_STROKE_DATA)
+    if fill_enabled is not None:
+        stroke[b"fillEnabled"] = Bool(fill_enabled)
+    if alignment is not None:
+        stroke[b"strokeStyleLineAlignment"] = Enumerated(
+            b"strokeStyleLineAlignment", alignment
+        )
+    if width is not None:
+        stroke[b"strokeStyleLineWidth"] = UnitFloat(unit=b"#Pxl", value=width)
+    layer.tagged_blocks.set_data(Tag.VECTOR_STROKE_DATA, stroke)
+    return layer
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_an_unfilled_shape_layer_casts_its_shadow_from_its_stroke(force: bool) -> None:
+    """With its fill off a shape layer is its stroke, and casts from that alone.
+
+    Under ``force`` the stroke is redrawn from the path; the stored pixels
+    hold the same outline, so both force modes cast the same shadow.
+    """
+    layer = _stroke_card()
+    # Lit from the right, so the shadow falls 6 px to the left.
+    _forge_shadow(layer, angle=0.0, Blur=0.0, Distance=6.0, Opacity=100.0)
+    viewport = _around(layer)
+    alpha = _alone(layer, viewport, force=force)
+    left, top, _, bottom = layer.bbox
+    row = (top + bottom) // 2 - viewport[1]
+    # Past the outline's own shadow, where a filled path's would still fall.
+    assert float(alpha[row, left - 3 - viewport[0], 0]) == 0.0
+
+
+@pytest.mark.parametrize(
+    "fill_enabled, alignment",
+    [
+        (False, b"strokeStyleAlignInside"),
+        (False, b"strokeStyleAlignOutside"),
+        (True, b"strokeStyleAlignOutside"),
+        (True, b"strokeStyleAlignCenter"),
+    ],
+)
+def test_a_redrawn_vector_stroke_casts_what_the_layer_paints(
+    fill_enabled: bool, alignment: bytes
+) -> None:
+    """The silhouette is the fill and the stroke as the layer composites them."""
+    layer = _stroke_card(fill_enabled, alignment, width=6.0)
+    viewport = _around(layer)
+    height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
+    compositor = Compositor(
+        viewport,
+        np.ones((height, width, 3), dtype=np.float32),
+        np.zeros((height, width, 1), dtype=np.float32),
+        force=True,
+    )
+    silhouette = compositor._cast_shape(layer, viewport)
+    source = compositor._resolve_source(layer)
+    assert np.allclose(silhouette, source.alpha / source.opacity, atol=1e-6)
+    row, centre = height // 2, width // 2
+    assert float(silhouette[row, centre, 0]) == float(fill_enabled)
+    # An outside stroke covers the 6 px past the path, which is the layer's
+    # box less the stroke's own pixel there.
+    outside = float(silhouette[row, layer.bbox[0] - 3 - viewport[0], 0])
+    assert outside == (1.0 if alignment == b"strokeStyleAlignOutside" else 0.0)
 
 
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:

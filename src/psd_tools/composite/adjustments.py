@@ -25,6 +25,7 @@ from psd_tools.api.adjustments import (
     Vibrance,
 )
 from psd_tools.api.layers import Layer
+from psd_tools.composite import paint
 from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.blend import (
     _lum,
@@ -848,10 +849,13 @@ def _gradientmap_luminance(
     return _get_luminance(img, colormode)
 
 
-# A gradient map stop's colour space id and the scale of its components.
+# A gradient map stop's colour space id and the scale of its components. A
+# grey component is percent black, in hundredths, as a descriptor's ``Gry ``
+# is percent black.
 _STOP_SPACE_RGB = 0
 _STOP_SPACE_GRAYSCALE = 8
 _STOP_COMPONENT_MAX = np.float32(65535.0)
+_STOP_GRAY_MAX = np.float32(10000.0)
 _STOP_LOCATION_MAX = 4096.0
 
 
@@ -873,7 +877,7 @@ def _gradientmap_lut(
         if stop.mode == _STOP_SPACE_RGB:
             rgb = np.array(stop.color[:3], dtype=np.float32) / _STOP_COMPONENT_MAX
         elif stop.mode == _STOP_SPACE_GRAYSCALE:
-            rgb = np.full(3, stop.color[0] / _STOP_COMPONENT_MAX, dtype=np.float32)
+            rgb = np.full(3, _1 - stop.color[0] / _STOP_GRAY_MAX, dtype=np.float32)
         else:
             logger.info(
                 "Gradient map stop colour space %d is not supported.", stop.mode
@@ -884,8 +888,14 @@ def _gradientmap_lut(
         colors.append(np.clip(rgb, _0, _1))
 
     size = _get_lut_size(layer)
+    smoothness = paint._clamp01(layer.interpolation or 0.0)
     ramp = _gradient_ramp(
-        _lut_domain(size), locations, midpoints, np.array(colors), block.method
+        _lut_domain(size),
+        locations,
+        midpoints,
+        np.array(colors),
+        block.method,
+        smoothness,
     )
     return _rows_from_rgb(colormode, ramp)
 
@@ -914,11 +924,13 @@ def _gradient_ramp(
     midpoints: list[float],
     colors: NDArray[np.float32],
     method: bytes,
+    smoothness: float = 0.0,
 ) -> NDArray[np.float32]:
     """Sample a stop gradient at ``t``; ends are clamped to the end stops.
 
     Two stops at one location make a hard edge: the segment into it ends in
     the first stop's colour and the segment out of it starts in the second's.
+    Smoothness eases each segment as it does a gradient fill's.
     """
     if len(locations) == 1:
         return np.repeat(colors[:1], len(t), axis=0)
@@ -937,6 +949,7 @@ def _gradient_ramp(
         # reaches one half.
         m = min(max(midpoints[k + 1], 0.01), 0.99)
         u = np.where(u <= m, _HALF * u / m, _HALF + _HALF * (u - m) / (1 - m))
+        u = paint._ease_blend(u, smoothness)
         out[inside] = values[k] + u[:, None] * (values[k + 1] - values[k])
     return from_space(out).astype(np.float32, copy=False)
 

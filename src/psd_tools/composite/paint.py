@@ -642,8 +642,7 @@ def _blend_stops(
     Within a segment the blend runs linearly to halfway at the end stop's
     midpoint and linearly on to the end; a midpoint on either end of its
     segment is ignored, as Photoshop's dialog cannot author one. Smoothness
-    then eases the blend towards a smoothstep, with 100% landing halfway
-    between the two.
+    then eases the blend, as :py:func:`_ease_blend` says.
     """
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
@@ -652,11 +651,19 @@ def _blend_stops(
     m = np.asarray(M)[k + 1]
     with np.errstate(divide="ignore", invalid="ignore"):
         bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
-    f = np.where((m > 0.0) & (m < 1.0), bent, u)
-    f += smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+    f = _ease_blend(np.where((m > 0.0) & (m < 1.0), bent, u), smoothness)
     values = np.asarray(Y, dtype=np.float64)
     f = f.reshape((-1,) + (1,) * (values.ndim - 1))
     return values[k] * (1.0 - f) + values[k + 1] * f
+
+
+def _ease_blend(f: np.ndarray, smoothness: float) -> np.ndarray:
+    """A segment's blend ``f`` eased by a gradient's smoothness.
+
+    Smoothness eases the blend towards a smoothstep, with 100% landing halfway
+    between the two.
+    """
+    return f + smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
 
 
 def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
@@ -721,8 +728,8 @@ _BlendSpace = tuple[
 ]
 
 # Interpolation methods that blend somewhere other than the document's own
-# arrays: perceptual in Oklab, linear in linear-light sRGB. Classic, and a
-# missing or unknown key, blend the canvas values directly.
+# arrays: perceptual in Oklab, linear in linear-light sRGB. Classic, smooth,
+# and a missing or unknown key, blend the canvas values directly.
 _BLEND_SPACES: dict[bytes, _BlendSpace] = {
     GradientInterpolation.PERCEPTUAL.value: (_srgb_to_oklab, _oklab_to_srgb),
     GradientInterpolation.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),

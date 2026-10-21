@@ -335,7 +335,9 @@ option::
     pixel-based operations. If a feature requires missing dependencies, an
     ``ImportError`` with installation instructions will be raised.
 
-    Note that most layer effects are not supported. Adjustment layers have
+    Layer effects are approximated, and some of their settings are not
+    drawn: noise and jitter, a gradient inner glow, and a bevel's stroke
+    emboss style, shape contour and texture. Adjustment layers have
     limited support (BrightnessContrast, Levels, Curves, Exposure,
     HueSaturation, Invert, Posterize, Threshold, ChannelMixer, BlackAndWhite,
     GradientMap, ColorBalance, Vibrance). The compositing result may look
