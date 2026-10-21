@@ -845,3 +845,9 @@ def test_gradient_overlay_defaults_are_photoshops() -> None:
     perceptual = effects.GradientOverlay(descriptor, ImageResources())
     assert perceptual.interpolation is GradientInterpolation.PERCEPTUAL
     assert perceptual.interpolation == b"Perc"
+
+    descriptor[b"gs99"] = Enumerated(
+        typeID=b"gradientInterpolationMethodType", enum=b"Smoo"
+    )
+    smooth = effects.GradientOverlay(descriptor, ImageResources())
+    assert smooth.interpolation is GradientInterpolation.SMOOTH

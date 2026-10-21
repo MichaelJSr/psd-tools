@@ -394,6 +394,39 @@ def test_a_cut_through_a_wide_chisel_renders_what_the_whole_does(
         assert np.array_equal(rendered(viewport), whole[top:bottom, left:right])
 
 
+@pytest.mark.parametrize("distance", [3000.0, -3000.0])
+def test_a_satins_distance_is_held_to_what_photoshop_writes(distance: float) -> None:
+    desc = Descriptor()
+    desc[Key.Distance] = Double(distance)
+    desc[Key.Blur] = Double(10.0)
+    assert effects.satin_geometry(desc) == (math.copysign(250.0, distance), 10.0)
+
+
+def test_inner_bbox_refuses_a_box_far_out_of_proportion() -> None:
+    """Over the growth floor, though well inside the default budget."""
+    assert effects.inner_bbox((0, 0, 20, 20), 500.0) == (-502, -502, 522, 522)
+    with pytest.raises(ValueError, match="allowed"):
+        effects.inner_bbox((0, 0, 20, 20), 2100.0)
+
+
+def test_a_satin_is_drawn_when_only_the_grown_viewport_is_over_the_budget() -> None:
+    """The budget is checked on the satin's canvas, not on the viewport grown by its reach.
+
+    The budget refuses the document's box grown by the reach and nothing
+    smaller, so the satin, whose canvas is a small part of that, is drawn.
+    """
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    satin = next(iter(_layer(psd, "Satin").effects.find("satin")))
+    distance, size = effects.satin_geometry(satin.descriptor)
+    grown = effects.inner_bbox(psd.viewbox, abs(distance) + size)
+    psd.max_alloc_bytes = (grown[2] - grown[0]) * (
+        grown[3] - grown[1]
+    ) * effects._INNER_BYTES - 1
+    drawn = _rendered(psd)
+    satin.descriptor[Key.Enabled] = False
+    assert not np.array_equal(drawn, _rendered(psd))
+
+
 def _setting(key: bytes, value: Any) -> Callable[[Descriptor], Any]:
     return lambda desc: desc.__setitem__(key, value)
 

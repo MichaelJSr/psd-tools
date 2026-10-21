@@ -38,6 +38,7 @@ from psd_tools.composite.effects import (
     bevel_geometry,
     bevel_inside,
     bevel_reach,
+    check_inner_canvas,
     contour_table,
     draw_bevel,
     draw_drop_shadow,
@@ -371,7 +372,10 @@ def _beneath_reach(
     for effect in glows:
         try:
             size, _, _ = glow_geometry(effect.descriptor)
-            bbox = utils.union_bbox(bbox, outer_glow_bbox(cast_from, size, budget))
+            gradient = Key.Gradient in effect.descriptor
+            bbox = utils.union_bbox(
+                bbox, outer_glow_bbox(cast_from, size, budget, gradient)
+            )
         except _UNREADABLE as error:
             logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
     return bbox
@@ -383,7 +387,9 @@ def _bevel_reach(
     """``layer.bbox`` grown to every box its bevels paint beside the layer on.
 
     An inner bevel stays inside the layer and adds nothing. Degrades as
-    :py:func:`_beneath_reach` does.
+    :py:func:`_beneath_reach` does, except that no budget is checked: the
+    canvas a bevel is drawn on is cut to the viewport first, and only that is
+    checked, so checking the whole box here would drop a bevel that is drawn.
     """
     bbox = layer.bbox
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
@@ -403,7 +409,6 @@ def _bevel_reach(
                 inner_bbox(
                     _cast_bbox(layer, memo),
                     bevel_reach(size, soften, _bevel_technique(bevel)),
-                    layer._psd._max_alloc_bytes,
                 ),
             )
         except _UNREADABLE as error:
@@ -1854,6 +1859,11 @@ class Compositor:
 
         backdrop_color = self._color
         transformed_color = adjustment_fn(backdrop_color, colormode, layer)
+        # An adjustment that is not rendered is not blended either: the
+        # backdrop would blend with itself.
+        if transformed_color is None:
+            logger.debug("Adjustment layer not rendered: %s", layer.kind)
+            return
 
         if layer.has_clip_layers():
             transformed_color = self._apply_clip_layers(
@@ -2789,7 +2799,12 @@ class Compositor:
                 anti_aliased = glow.anti_aliased
                 noise = glow.noise
                 jitter = glow.quality_jitter
-                bbox = outer_glow_bbox(cast_from, size, layer._psd._max_alloc_bytes)
+                bbox = outer_glow_bbox(
+                    cast_from,
+                    size,
+                    layer._psd._max_alloc_bytes,
+                    Key.Gradient in glow.descriptor,
+                )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
                 continue
@@ -2878,14 +2893,17 @@ class Compositor:
 
         The silhouette is read on it: the layer's box grown by the reach, but
         no further than the reach past the viewport, since nothing beyond that
-        reaches back into view. Raises as :py:func:`inner_bbox` does.
+        reaches back into view. Only that box is allocated, so only it is
+        checked against the budget. Raises as :py:func:`inner_bbox` and
+        :py:func:`check_inner_canvas` do.
         """
-        max_alloc = layer._psd._max_alloc_bytes
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        return utils.intersect(
-            inner_bbox(cast_from, reach, max_alloc),
-            inner_bbox(self._viewport, reach, max_alloc),
+        bbox = utils.intersect(
+            inner_bbox(cast_from, reach), inner_bbox(self._viewport, reach)
         )
+        if bbox != (0, 0, 0, 0):
+            check_inner_canvas(bbox, layer._psd._max_alloc_bytes)
+        return bbox
 
     def _add_satins(self, layer: Layer, canvas: _EffectCanvas) -> None:
         """Composite every satin of the layer into it, over its overlays.

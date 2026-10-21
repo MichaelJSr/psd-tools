@@ -1128,6 +1128,17 @@ def test_drop_shadow_bbox_refuses_a_canvas_over_the_allocation_budget() -> None:
     assert effects.drop_shadow_bbox(empty, 0.0, 90.0, 250.0, max_alloc_bytes=1) == empty
 
 
+def test_drop_shadow_bbox_refuses_a_box_far_out_of_proportion_to_the_layer() -> None:
+    """A forged distance cannot cast a small layer across a huge canvas.
+
+    This holds whatever the budget, as for a stroke's width.
+    """
+    bbox = (0, 0, 20, 20)
+    assert effects.drop_shadow_bbox(bbox, 2000.0, 45.0, 250.0, "unlimited")
+    with pytest.raises(ValueError, match="out of proportion|allowed"):
+        effects.drop_shadow_bbox(bbox, 9000.0, 45.0, 250.0, "unlimited")
+
+
 def test_a_drop_shadow_over_the_documents_budget_is_dropped_not_drawn() -> None:
     """A shadow whose canvas the document's budget refuses costs the shadow only.
 

@@ -262,6 +262,20 @@ def test_outer_glow_bbox_grows_the_box_by_the_size_on_every_side() -> None:
         effects.outer_glow_bbox(bbox, 250.0, max_alloc_bytes=budget - 1)
 
 
+def test_a_gradient_glow_is_checked_at_what_its_lookup_costs_too() -> None:
+    """``glow_paint`` reads the gradient across the whole canvas, on top of the glow."""
+    bbox = (10, 20, 30, 40)
+    grown = effects.outer_glow_bbox(bbox, 250.0, max_alloc_bytes="unlimited")
+    pixels = (grown[2] - grown[0]) * (grown[3] - grown[1])
+    budget = pixels * (effects._SHADOW_BYTES + effects.paint.GRADIENT_FILL_BYTES)
+    assert effects.outer_glow_bbox(bbox, 250.0, budget, gradient=True) == grown
+    with pytest.raises(ValueError):
+        effects.outer_glow_bbox(bbox, 250.0, budget - 1, gradient=True)
+    solid = pixels * effects._SHADOW_BYTES
+    with pytest.raises(ValueError):
+        effects.outer_glow_bbox(bbox, 250.0, solid, gradient=True)
+
+
 # -- Paint ----------------------------------------------------------------- #
 
 
@@ -362,6 +376,22 @@ def test_a_gradient_glow_runs_from_its_first_stop_at_the_edge_to_its_last() -> N
     color, _ = _paint(desc, falloff)
     assert np.allclose(color[0, 0], colors[-1], atol=1e-6)
     assert np.allclose(color[0, 1], colors[0], atol=1e-6)
+
+
+@pytest.mark.parametrize("method", [b"Perc", b"Lnr "])
+def test_a_gradient_glow_blends_by_its_interpolation_method(method: bytes) -> None:
+    """``gs99`` picks the space the stops blend in, as for a gradient overlay."""
+    desc, _, _ = _gradient_glow()
+    falloff = np.linspace(0.0, 1.0, 11, dtype=np.float32)[None, :]
+    classic, _ = _paint(desc, falloff)
+    desc[b"gs99"] = Enumerated(typeID=b"gradientInterpolationMethodType", enum=method)
+    color, _ = _paint(desc, falloff)
+    colors, _ = effects.paint._make_gradient_color(
+        ColorMode.RGB, desc[Key.Gradient], method
+    )
+    assert colors is not None
+    assert np.allclose(color, colors(1.0 - falloff), atol=1e-6)
+    assert not np.allclose(color, classic, atol=1 / 255)
 
 
 def test_a_gradients_transparency_holds_the_coverage_under_it() -> None:

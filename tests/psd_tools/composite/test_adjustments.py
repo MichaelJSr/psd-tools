@@ -40,6 +40,13 @@ composite_module = importlib.import_module("psd_tools.composite.composite")
 
 logger = logging.getLogger(__name__)
 
+
+def _applied(out: np.ndarray | None) -> np.ndarray:
+    """``out``, which an adjustment returns None for when it does not render."""
+    assert out is not None
+    return out
+
+
 # Tolerances used for MSE computation over test images (shape (200, 200, C), values in [0,1])
 
 LOOSE = 5e-4  # tolerance for approximate adjustment algorithms which can be improved (e.g. brightness/contrast)
@@ -136,12 +143,8 @@ def test_curves_without_extra_records_leaves_the_image_alone(
         (7, apply_exposure),
         (8, apply_vibrance),
         (9, apply_huesaturation),
-        (10, apply_colorbalance),
-        (11, apply_blackandwhite),
-        (13, apply_channelmixer),
         (16, apply_posterize),
         (17, apply_threshold),
-        (19, apply_gradientmap),
     ],
 )
 def test_an_absent_adjustment_block_leaves_the_image_alone(
@@ -151,6 +154,55 @@ def test_an_absent_adjustment_block_leaves_the_image_alone(
     monkeypatch.setattr(layer, "_data", None)
     image = np.zeros((2, 2, 3), dtype=np.float32)
     assert apply(image, ColorMode.RGB, layer) is image
+
+
+@pytest.mark.parametrize(
+    "index, apply",
+    [
+        (10, apply_colorbalance),
+        (11, apply_blackandwhite),
+        (13, apply_channelmixer),
+        (19, apply_gradientmap),
+    ],
+)
+def test_an_absent_adjustment_block_is_not_rendered(
+    monkeypatch: pytest.MonkeyPatch,
+    index: int,
+    apply: Callable[..., np.ndarray | None],
+) -> None:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[index]
+    monkeypatch.setattr(layer, "_data", None)
+    image = np.zeros((2, 2, 3), dtype=np.float32)
+    assert apply(image, ColorMode.RGB, layer) is None
+
+
+@pytest.mark.parametrize(
+    "index, apply",
+    [
+        (8, apply_vibrance),
+        (10, apply_colorbalance),
+        (11, apply_blackandwhite),
+        (13, apply_channelmixer),
+    ],
+)
+def test_an_rgb_only_adjustment_is_not_rendered_on_grayscale(
+    index: int, apply: Callable[..., np.ndarray | None]
+) -> None:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[index]
+    image = np.full((2, 2, 1), 0.3, dtype=np.float32)
+    assert apply(image, ColorMode.GRAYSCALE, layer) is None
+
+
+def test_an_unrendered_adjustment_leaves_the_composite_alone_under_multiply() -> None:
+    """A noise gradient map is not rendered, so it does not multiply the canvas by itself."""
+    psd = PSDImage.open(full_name("fill_adjustments.psd"))
+    layer = psd[19]
+    assert isinstance(layer, adjustments.GradientMap) and not layer.visible
+    expected = psd.composite(force=True)
+    layer.visible = True
+    layer.blend_mode = BlendMode.MULTIPLY
+    layer._data = _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], mode=1)
+    assert psd.composite(force=True).tobytes() == expected.tobytes()
 
 
 def test_an_absent_adjustment_block_leaves_the_composite_alone_under_multiply(
@@ -451,7 +503,7 @@ def test_channel_mixer_mixes_the_sources_and_adds_the_constant(
     monkeypatch.setattr(layer, "_data", _mixer_data(records))
     image = np.array([[[0.8, 0.5, 0.4], [0.1, 0.2, 0.9]]], dtype=np.float32)
     expected = [[[0.6, 0.5, 0.6], [0.0, 0.2, 1.0]]]
-    out = apply_channelmixer(image, ColorMode.RGB, layer)
+    out = _applied(apply_channelmixer(image, ColorMode.RGB, layer))
     assert out.dtype == np.float32
     assert np.allclose(out, expected, atol=1e-6)
 
@@ -464,12 +516,12 @@ def test_channel_mixer_monochrome_writes_one_mix_to_every_channel(
     records = [[30, 59, 11, 0, 0], [0, 0, 0, 0, 100], [0, 0, 0, 0, 100]]
     monkeypatch.setattr(layer, "_data", _mixer_data(records, monochrome=1))
     image = np.array([[[1.0, 0.0, 0.0], [0.2, 0.4, 0.6]]], dtype=np.float32)
-    out = apply_channelmixer(image, ColorMode.RGB, layer)
+    out = _applied(apply_channelmixer(image, ColorMode.RGB, layer))
     gray = image @ np.array([0.3, 0.59, 0.11], dtype=np.float32)
     assert np.allclose(out, gray[..., None], atol=1e-6)
 
 
-def test_channel_mixer_with_a_short_block_leaves_the_image_alone(
+def test_channel_mixer_with_a_short_block_is_not_rendered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layer = _channel_mixer_layer()
@@ -477,7 +529,7 @@ def test_channel_mixer_with_a_short_block_leaves_the_image_alone(
     block.data = [100, 0, 0, 0, 0]
     monkeypatch.setattr(layer, "_data", block)
     image = np.zeros((2, 2, 3), dtype=np.float32)
-    assert apply_channelmixer(image, ColorMode.RGB, layer) is image
+    assert apply_channelmixer(image, ColorMode.RGB, layer) is None
 
 
 # Black & white
@@ -503,7 +555,7 @@ def test_black_and_white_weights_a_pixel_by_its_primary_and_secondary_hue() -> N
         dtype=np.float32,
     )
     expected = [0.4, 0.6, 0.5, 0.2, 0.6, 0.5]
-    out = apply_blackandwhite(image, ColorMode.RGB, layer)
+    out = _applied(apply_blackandwhite(image, ColorMode.RGB, layer))
     assert np.allclose(out, np.array(expected)[None, :, None], atol=1e-6)
 
 
@@ -512,7 +564,7 @@ def test_black_and_white_reads_the_sliders_from_the_descriptor() -> None:
     image = np.array([[[1, 0, 0], [0, 0, 1], [1, 0, 0.5]]], dtype=np.float32)
     # magenta 50 on the min..mid span, red 100 on the mid..max span
     expected = [1.0, 0.0, 0.5 * 0.5 + 0.5 * 1.0]
-    out = apply_blackandwhite(image, ColorMode.RGB, layer)
+    out = _applied(apply_blackandwhite(image, ColorMode.RGB, layer))
     assert np.allclose(out, np.array(expected)[None, :, None], atol=1e-6)
 
 
@@ -525,8 +577,13 @@ def _gradient_map_data(
     method: bytes = b"Gcls",
     reversed: int = 0,
     mode: int = 0,
+    smoothness: float = 0.0,
 ) -> GradientMapData:
-    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops."""
+    """A gradient map block from ``(location, midpoint %, sRGB colour)`` stops.
+
+    Its blend is linear unless ``smoothness`` says, so the ramp reads off
+    the output directly.
+    """
     color_stops = [
         ColorStop(
             location=location,
@@ -537,7 +594,11 @@ def _gradient_map_data(
         for location, midpoint, rgb in stops
     ]
     block = GradientMapData(
-        version=3, method=method, is_reversed=reversed, interpolation=4096, mode=mode
+        version=3,
+        method=method,
+        is_reversed=reversed,
+        interpolation=round(smoothness * 4096),
+        mode=mode,
     )
     block.color_stops = color_stops
     block.transparency_stops = [
@@ -565,7 +626,7 @@ def test_gradient_map_maps_luminance_through_the_gradient() -> None:
         _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)])
     )
     luminance = _PRIMARIES @ _LUM
-    out = apply_gradientmap(_PRIMARIES, ColorMode.RGB, layer)
+    out = _applied(apply_gradientmap(_PRIMARIES, ColorMode.RGB, layer))
     assert out.shape == _PRIMARIES.shape
     assert np.allclose(out, luminance[..., None], atol=1 / 255)
 
@@ -575,7 +636,7 @@ def test_gradient_map_reversed_runs_the_gradient_the_other_way() -> None:
         _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], reversed=1)
     )
     luminance = _PRIMARIES @ _LUM
-    out = apply_gradientmap(_PRIMARIES, ColorMode.RGB, layer)
+    out = _applied(apply_gradientmap(_PRIMARIES, ColorMode.RGB, layer))
     assert np.allclose(out, 1 - luminance[..., None], atol=1 / 255)
 
 
@@ -584,7 +645,7 @@ def test_gradient_map_holds_the_end_colours_outside_the_end_stops() -> None:
     red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
     layer = _gradient_map_layer(_gradient_map_data([(1024, 50, red), (3072, 50, blue)]))
     image = np.array([[[0, 0, 0], [1, 1, 1], [0.5, 0.5, 0.5]]], dtype=np.float32)
-    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out[0, 0], red, atol=1 / 255)
     assert np.allclose(out[0, 1], blue, atol=1 / 255)
     assert np.allclose(out[0, 2], (0.5, 0.0, 0.5), atol=1 / 255)
@@ -605,7 +666,7 @@ def test_gradient_map_keeps_a_hard_edge_between_co_located_stops() -> None:
     )
     below, at = 0.5 - 2 / 255, 0.5
     image = np.array([[[below] * 3, [at] * 3, [0.75] * 3]], dtype=np.float32)
-    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out[0, 0], red, atol=3 / 255)
     assert np.allclose(out[0, 1], blue, atol=3 / 255)
     assert np.allclose(out[0, 2], (0.5, 0.5, 1.0), atol=1 / 255)
@@ -617,7 +678,7 @@ def test_gradient_map_midpoint_is_where_the_blend_reaches_one_half() -> None:
         _gradient_map_data([(0, 50, _BLACK), (4096, 25, _WHITE)])
     )
     image = np.array([[[0.25, 0.25, 0.25], [0.625, 0.625, 0.625]]], dtype=np.float32)
-    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out[0, 0], 0.5, atol=1 / 255)
     assert np.allclose(out[0, 1], 0.75, atol=1 / 255)
 
@@ -629,7 +690,7 @@ def test_gradient_map_perceptual_blends_in_oklab() -> None:
     )
     image = np.full((1, 1, 3), 0.5, dtype=np.float32)
     mid_gray = 1.055 * (1 / 8) ** (1 / 2.4) - 0.055
-    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out, mid_gray, atol=1 / 255)
 
 
@@ -637,7 +698,7 @@ def test_gradient_map_writes_one_channel_on_a_grayscale_document() -> None:
     red = (1.0, 0.0, 0.0)
     layer = _gradient_map_layer(_gradient_map_data([(0, 50, red), (4096, 50, red)]))
     image = np.array([[[0.2], [0.9]]], dtype=np.float32)
-    out = apply_gradientmap(image, ColorMode.GRAYSCALE, layer)
+    out = _applied(apply_gradientmap(image, ColorMode.GRAYSCALE, layer))
     assert out.shape == (1, 2, 1)
     assert np.allclose(out, 0.3, atol=1 / 255)
 
@@ -647,17 +708,45 @@ def test_gradient_map_clamps_luminance_outside_the_unit_range() -> None:
     red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
     layer = _gradient_map_layer(_gradient_map_data([(0, 50, red), (4096, 50, blue)]))
     image = np.array([[[-0.5, -0.5, -0.5], [1.5, 1.5, 1.5]]], dtype=np.float32)
-    out = apply_gradientmap(image, ColorMode.RGB, layer)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out[0, 0], red, atol=1 / 255)
     assert np.allclose(out[0, 1], blue, atol=1 / 255)
 
 
-def test_gradient_map_with_a_noise_gradient_leaves_the_image_alone() -> None:
+def test_gradient_map_with_a_noise_gradient_is_not_rendered() -> None:
     layer = _gradient_map_layer(
         _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)], mode=1)
     )
     image = np.zeros((2, 2, 3), dtype=np.float32)
-    assert apply_gradientmap(image, ColorMode.RGB, layer) is image
+    assert apply_gradientmap(image, ColorMode.RGB, layer) is None
+
+
+def test_gradient_map_smoothness_eases_the_blend_towards_a_smoothstep() -> None:
+    """At 100% the blend lands halfway between linear and a smoothstep."""
+    gray = np.array([0.25, 0.5, 0.75], dtype=np.float32)
+    image = np.repeat(gray[None, :, None], 3, axis=2)
+    stops = [(0, 50, _BLACK), (4096, 50, _WHITE)]
+    smooth = _gradient_map_layer(_gradient_map_data(stops, smoothness=1.0))
+    half = _gradient_map_layer(_gradient_map_data(stops, smoothness=0.5))
+    eased = gray + ((3 - 2 * gray) * gray * gray - gray) / 2
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, smooth))
+    assert np.allclose(out[0, :, 0], eased, atol=1 / 255)
+    assert float(out[0, 0, 0]) == pytest.approx(0.203125, abs=1 / 255)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, half))
+    assert np.allclose(out[0, :, 0], (gray + eased) / 2, atol=1 / 255)
+
+
+def test_gradient_map_reads_a_grayscale_stop_as_ink() -> None:
+    """A grayscale stop runs from 0 for white to 10000 for black."""
+    block = _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)])
+    block.color_stops[0].mode = 8
+    block.color_stops[0].color = (10000, 0, 0, 0)
+    block.color_stops[1].mode = 8
+    block.color_stops[1].color = (0, 0, 0, 0)
+    layer = _gradient_map_layer(block)
+    luminance = _PRIMARIES @ _LUM
+    out = _applied(apply_gradientmap(_PRIMARIES, ColorMode.RGB, layer))
+    assert np.allclose(out, luminance[..., None], atol=1 / 255)
 
 
 # Colour balance
@@ -676,7 +765,7 @@ _RAMP = np.linspace(0.0, 1.0, 11, dtype=np.float32)[None, :, None].repeat(3, axi
 def test_color_balance_midtones_are_a_gamma_per_channel() -> None:
     """+100 toward red is the square root of red; the other channels stay."""
     layer = _color_balance_layer((100, 0, 0), luminosity=False)
-    out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+    out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, layer))
     assert np.allclose(out[..., 0], np.sqrt(_RAMP[..., 0]), atol=1 / 255)
     assert np.allclose(out[..., 1:], _RAMP[..., 1:], atol=1 / 255)
 
@@ -687,11 +776,11 @@ def test_color_balance_preserving_luminosity_centres_the_amounts() -> None:
     So +100 red also darkens green and blue, and opposite shifts cancel out.
     """
     layer = _color_balance_layer((100, 0, 0), luminosity=True)
-    out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+    out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, layer))
     assert np.allclose(out[..., 0], _RAMP[..., 0] ** (2 ** (-2 / 3)), atol=1 / 255)
     assert np.allclose(out[..., 1], _RAMP[..., 1] ** (2 ** (1 / 3)), atol=1 / 255)
     balanced = _color_balance_layer((100, -100, 0), luminosity=True)
-    out = apply_colorbalance(_RAMP, ColorMode.RGB, balanced)
+    out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, balanced))
     assert np.allclose(out[..., 0], np.sqrt(_RAMP[..., 0]), atol=1 / 255)
     assert np.allclose(out[..., 1], _RAMP[..., 1] ** 2, atol=1 / 255)
 
@@ -705,7 +794,7 @@ _SILITHID_TOLERANCE = 6 / 255
 
 def test_color_balance_matches_the_exponents_measured_on_photoshop() -> None:
     layer = _color_balance_layer(_SILITHID_MIDTONES, luminosity=True)
-    out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+    out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, layer))
     for channel, exponent in enumerate(_SILITHID_EXPONENTS):
         expected = _RAMP[..., channel] ** exponent
         assert np.allclose(out[..., channel], expected, atol=_SILITHID_TOLERANCE)
@@ -713,7 +802,7 @@ def test_color_balance_matches_the_exponents_measured_on_photoshop() -> None:
 
 def test_color_balance_keeps_black_white_and_channel_order() -> None:
     layer = _color_balance_layer((-60, 30, 80), luminosity=True)
-    out = apply_colorbalance(_RAMP, ColorMode.RGB, layer)
+    out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, layer))
     assert np.allclose(out[0, 0], 0.0, atol=1 / 255)
     assert np.allclose(out[0, -1], 1.0, atol=1 / 255)
     assert np.all(np.diff(out, axis=1) >= -1e-6)
@@ -751,7 +840,7 @@ def test_negative_vibrance_takes_more_chroma_from_a_pale_pixel() -> None:
     The pale one keeps a smaller share of what it had.
     """
     image = np.array([[_PALE_BLUE, _DEEP_BLUE]], dtype=np.float32)
-    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0))
+    out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0)))
     kept = _linear_chroma(out) / _linear_chroma(image)
     assert np.all(kept < 1)
     assert kept[0, 0] < kept[0, 1]
@@ -760,8 +849,8 @@ def test_negative_vibrance_takes_more_chroma_from_a_pale_pixel() -> None:
 
 def test_a_weaker_negative_vibrance_removes_less() -> None:
     image = np.array([[_PALE_BLUE, _DEEP_BLUE]], dtype=np.float32)
-    strong = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0))
-    weak = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-40, 0))
+    strong = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0)))
+    weak = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-40, 0)))
     assert np.all(_linear_chroma(weak) > _linear_chroma(strong))
     assert np.all(_linear_chroma(weak) < _linear_chroma(image))
 
@@ -772,7 +861,7 @@ def test_positive_vibrance_boosts_pale_pixels_and_spares_skin_tones() -> None:
     A red of the same saturation gains less than a cyan.
     """
     image = np.array([[_PALE_BLUE, _DEEP_BLUE, _PALE_RED, _PALE_CYAN]], np.float32)
-    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(100, 0))
+    out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(100, 0)))
     gained = _linear_chroma(out) / _linear_chroma(image)
     assert np.all(gained > 1)
     assert gained[0, 0] > gained[0, 1]
@@ -786,9 +875,9 @@ def test_saturation_scales_chroma_about_the_linear_luminance() -> None:
     """
     image = np.array([[_DEEP_BLUE, _PALE_RED]], dtype=np.float32)
     luminance = _linear(image) @ np.array([0.2126, 0.7152, 0.0722])
-    gray = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, -100))
+    gray = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, -100)))
     assert np.allclose(_linear(gray), luminance[..., None], atol=1 / 255)
-    boosted = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 50))
+    boosted = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 50)))
     expected = luminance[..., None] + (_linear(image) - luminance[..., None]) * 1.5
     assert np.allclose(_linear(boosted), np.clip(expected, 0, 1), atol=1 / 255)
 
@@ -841,7 +930,9 @@ def test_vibrance_is_the_fitted_model(
     pixel: list[float], vibrance: int, saturation: int, skin: bool
 ) -> None:
     image = np.array([[pixel]], dtype=np.float32)
-    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(vibrance, saturation))
+    out = _applied(
+        apply_vibrance(image, ColorMode.RGB, _vibrance_layer(vibrance, saturation))
+    )
     expected = _fitted_vibrance(pixel, vibrance / 100, saturation / 100, skin)
     assert np.allclose(out[0, 0], expected, atol=0.5 / 255)
 
@@ -849,7 +940,7 @@ def test_vibrance_is_the_fitted_model(
 def test_negative_vibrance_keeps_a_bright_pale_pixel_bright() -> None:
     """A pale pixel near white keeps its luminance; a dark pale one loses some."""
     image = np.array([[[0.9, 0.85, 0.8], [0.25, 0.2, 0.15]]], dtype=np.float32)
-    out = apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0))
+    out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0)))
     luminance_in = _linear(image) @ _LINEAR_LUMINANCE
     luminance_out = _linear(out) @ _LINEAR_LUMINANCE
     assert luminance_out[0, 0] > luminance_in[0, 0] * 0.98
@@ -859,5 +950,3 @@ def test_negative_vibrance_keeps_a_bright_pale_pixel_bright() -> None:
 def test_vibrance_at_rest_leaves_the_image_alone() -> None:
     image = np.array([[_DEEP_BLUE]], dtype=np.float32)
     assert apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 0)) is image
-    gray = np.full((1, 1, 1), 0.3, dtype=np.float32)
-    assert apply_vibrance(gray, ColorMode.GRAYSCALE, _vibrance_layer(50, 0)) is gray

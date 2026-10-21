@@ -33,6 +33,10 @@ Changelog
   the chisel soft technique, the shape contour and the texture are
   approximated or left out, and the blurs approximate Photoshop's. Needs
   ``scipy``
+- [fix] Backwards incompatible without ``scipy``: compositing from layers
+  raises ``ImportError`` for a visible drop shadow, outer glow, inner shadow,
+  inner glow, satin or bevel, where it skipped the effect. Install
+  ``psd-tools[composite]`` to render them
 - [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
   the effect uses global light
 - [fix] A gradient's ramp spans the line through its box at the gradient's
@@ -48,8 +52,8 @@ Changelog
   and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
   grayscale and CMYK documents, instead of skipping them. Channel mixer is
   exact, black & white is exact without its tint; gradient maps interpolate
-  classic, linear and perceptual gradients; colour balance midtones and
-  vibrance are fitted to Photoshop output
+  classic, linear and perceptual gradients with their smoothness; colour
+  balance midtones and vibrance are fitted to Photoshop output
 - [fix] An adjustment inside a pass-through group that carries an enabled
   layer style stays within the group, as in Photoshop, instead of passing
   through to the layers beneath

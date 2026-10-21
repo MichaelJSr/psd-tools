@@ -87,7 +87,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from psd_tools.api.utils import AllocBudget, check_pixel_size
+from psd_tools.api.utils import AllocBudget, check_growth, check_pixel_size
 from psd_tools.composite import paint
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.utils import divide
@@ -759,6 +759,11 @@ _GLOW_RANGE_FLOOR = 15.0
 # from.
 _SHADOW_BYTES = 64
 
+# How far past the floor check_growth() allows a shadow's, glow's, satin's or
+# bevel's box may grow: this many times the box it is grown from. A shadow's
+# distance is the file's, and nothing else bounds how far it moves the canvas.
+_EFFECT_GROWTH = 4
+
 # Entries in a contour's transfer table. Photoshop states a contour's points
 # on a 0-255 grid along both axes.
 _CONTOUR_STEPS = 256
@@ -810,8 +815,21 @@ def drop_shadow_bbox(
     The distance and size are the file's, so the box they grow is checked
     before anything is allocated on it, as a stroke's is. Raises
     :class:`ValueError` when the grown box is over the per-axis limit or
-    ``max_alloc_bytes``, which the callers read as an unreadable shadow.
+    ``max_alloc_bytes``, or far out of proportion to ``bbox``, which the
+    callers read as an unreadable shadow.
     """
+    return _cast_canvas(bbox, distance, angle, size, max_alloc_bytes, _SHADOW_BYTES)
+
+
+def _cast_canvas(
+    bbox: tuple[int, int, int, int],
+    distance: float,
+    angle: float,
+    size: float,
+    max_alloc_bytes: AllocBudget | None,
+    bytes_per_pixel: int,
+) -> tuple[int, int, int, int]:
+    """:py:func:`drop_shadow_bbox`, checked at ``bytes_per_pixel``."""
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     dx, dy = _shadow_offset(distance, angle)
@@ -823,28 +841,38 @@ def drop_shadow_bbox(
         math.ceil(bbox[3] + max(dy, 0.0)) + margin,
     )
     width, height = grown[2] - grown[0], grown[3] - grown[1]
+    check_growth(width * height, _area(bbox), _EFFECT_GROWTH)
     check_pixel_size(
         width,
         height,
         max_alloc_bytes=max_alloc_bytes,
-        estimated_bytes=width * height * _SHADOW_BYTES,
+        estimated_bytes=width * height * bytes_per_pixel,
         warn=False,
     )
     return grown
+
+
+def _area(bbox: tuple[int, int, int, int]) -> int:
+    return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
 
 
 def outer_glow_bbox(
     bbox: tuple[int, int, int, int],
     size: float,
     max_alloc_bytes: AllocBudget | None = None,
+    gradient: bool = False,
 ) -> tuple[int, int, int, int]:
     """The canvas :py:func:`draw_outer_glow` needs to draw a glow on.
 
     A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the size
     on every side, with the same fringe, checked against the same budget and
-    raising the same way.
+    raising the same way. A ``gradient`` glow costs a gradient's lookup on
+    top, which :py:func:`glow_paint` runs across the whole canvas.
     """
-    return drop_shadow_bbox(bbox, 0.0, 0.0, size, max_alloc_bytes)
+    per_pixel = _SHADOW_BYTES
+    if gradient:
+        per_pixel += paint.GRADIENT_FILL_BYTES
+    return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, per_pixel)
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
@@ -1247,7 +1275,9 @@ def glow_paint(
     along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
-    colors, opacities = paint._make_gradient_color(color_mode, desc[Key.Gradient])
+    colors, opacities = paint._make_gradient_color(
+        color_mode, desc[Key.Gradient], getattr(desc.get(b"gs99"), "enum", None)
+    )
     if colors is None:
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)
@@ -1374,24 +1404,37 @@ def _blur(alpha: np.ndarray, sigma: float, radius: float) -> np.ndarray:
 
 
 def inner_bbox(
-    bbox: tuple[int, int, int, int],
-    reach: float,
-    max_alloc_bytes: AllocBudget | None = None,
+    bbox: tuple[int, int, int, int], reach: float
 ) -> tuple[int, int, int, int]:
-    """The canvas a satin or a bevel is drawn on: ``bbox`` grown by ``reach``.
+    """The box a satin or a bevel reaches over: ``bbox`` grown by ``reach``.
 
     The silhouette is read on this box, so that a blur or an offset near the
     viewport's edge sees the layer past it rather than an edge that is not
     there (#804). The two pixels added on top are the blur's antialiased
-    fringe and the offset's interpolation. Checked against the per-axis limit
-    and ``max_alloc_bytes`` as :py:func:`drop_shadow_bbox` is, raising
-    :class:`ValueError`. An empty ``bbox`` is returned untouched.
+    fringe and the offset's interpolation. Raises :class:`ValueError` when
+    the box grows far out of proportion to ``bbox``. An empty ``bbox`` is
+    returned untouched.
+
+    Nothing is allocated on this box itself: the canvas is the part of it
+    the viewport needs, which :py:func:`check_inner_canvas` checks.
     """
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     margin = math.ceil(max(reach, 0.0)) + 2
     grown = (bbox[0] - margin, bbox[1] - margin, bbox[2] + margin, bbox[3] + margin)
-    width, height = grown[2] - grown[0], grown[3] - grown[1]
+    check_growth(_area(grown), _area(bbox), _EFFECT_GROWTH)
+    return grown
+
+
+def check_inner_canvas(
+    bbox: tuple[int, int, int, int], max_alloc_bytes: AllocBudget | None = None
+) -> None:
+    """Raise :class:`ValueError` if a satin or bevel cannot be drawn on ``bbox``.
+
+    That is, if the box is over the per-axis limit, or what drawing on it
+    peaks at is over ``max_alloc_bytes``.
+    """
+    width, height = bbox[2] - bbox[0], bbox[3] - bbox[1]
     check_pixel_size(
         width,
         height,
@@ -1399,14 +1442,18 @@ def inner_bbox(
         estimated_bytes=width * height * _INNER_BYTES,
         warn=False,
     )
-    return grown
 
 
 def satin_geometry(desc: Descriptor) -> tuple[float, float]:
-    """A satin's ``(distance, size)``, read as :py:func:`shadow_geometry` reads."""
+    """A satin's ``(distance, size)``, read as :py:func:`shadow_geometry` reads.
+
+    Both are held to what Photoshop can write, the distance whichever way it
+    points.
+    """
     distance = float(desc.get(Key.Distance, _SATIN_DEFAULT))
     size = float(desc.get(Key.Blur, _SATIN_DEFAULT))
     _finite("Satin", distance=distance, size=size)
+    distance = math.copysign(min(abs(distance), _MAX_STROKE_SIZE), distance)
     return distance, min(max(size, 0.0), _MAX_STROKE_SIZE)
 
 

@@ -684,8 +684,8 @@ _BlendSpace = tuple[
 ]
 
 # ``gs99`` methods that blend somewhere other than the document's own arrays:
-# perceptual in Oklab, linear in linear-light sRGB. Classic, and a missing or
-# unknown key, blend the canvas values directly.
+# perceptual in Oklab, linear in linear-light sRGB. Classic, smooth, and a
+# missing or unknown key, blend the canvas values directly.
 _BLEND_SPACES: dict[bytes, _BlendSpace] = {
     GradientInterpolation.PERCEPTUAL.value: (_srgb_to_oklab, _oklab_to_srgb),
     GradientInterpolation.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),

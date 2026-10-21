@@ -140,6 +140,8 @@ def _preserve_alpha(func: F) -> F:
             alpha = img[..., color_channels:]
 
             out = func(color, colormode, *args, **kwargs)
+            if out is None:
+                return None
             if out.shape[2] != color_channels:
                 raise ValueError(
                     f"Adjustment function returned {out.shape[2]} channels, "
@@ -745,15 +747,15 @@ def apply_channelmixer(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: ChannelMixer,
-) -> np.ndarray:
-    """Apply a channel mixer adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a channel mixer adjustment to an image, or None where it is not rendered."""
     if colormode != ColorMode.RGB:
         logger.info("Channel mixer isn't currently supported for %s.", colormode)
-        return img
+        return None
 
     records = _channelmixer_records(layer)
     if records is None:
-        return img
+        return None
     if layer.monochrome:
         records = np.repeat(records[:1], 3, axis=0)
 
@@ -791,13 +793,13 @@ def apply_blackandwhite(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: BlackAndWhite,
-) -> np.ndarray:
-    """Apply a black & white adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a black & white adjustment to an image, or None where it is not rendered."""
     if colormode != ColorMode.RGB:
         logger.info("Black & White isn't currently supported for %s.", colormode)
-        return img
+        return None
     if layer._data is None:
-        return img
+        return None
     if layer.use_tint:
         logger.info("Black & White tint is not rendered.")
 
@@ -824,11 +826,11 @@ def apply_gradientmap(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: GradientMap,
-) -> np.ndarray:
-    """Apply a gradient map adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a gradient map adjustment to an image, or None where it is not rendered."""
     lut = _gradientmap_lut(layer, colormode)
     if lut is None:
-        return img
+        return None
 
     luminance = np.clip(_gradientmap_luminance(img, colormode), 0, 1)
     if layer.reversed:
@@ -848,10 +850,12 @@ def _gradientmap_luminance(
     return _get_luminance(img, colormode)
 
 
-# A gradient map stop's colour space id and the scale of its components.
+# A gradient map stop's colour space id and the scale of its components. A
+# grayscale component is ink, as a descriptor's ``Gry `` is: its maximum is black.
 _STOP_SPACE_RGB = 0
 _STOP_SPACE_GRAYSCALE = 8
 _STOP_COMPONENT_MAX = np.float32(65535.0)
+_STOP_GRAY_MAX = np.float32(10000.0)
 _STOP_LOCATION_MAX = 4096.0
 
 
@@ -873,7 +877,7 @@ def _gradientmap_lut(
         if stop.mode == _STOP_SPACE_RGB:
             rgb = np.array(stop.color[:3], dtype=np.float32) / _STOP_COMPONENT_MAX
         elif stop.mode == _STOP_SPACE_GRAYSCALE:
-            rgb = np.full(3, stop.color[0] / _STOP_COMPONENT_MAX, dtype=np.float32)
+            rgb = np.full(3, _1 - stop.color[0] / _STOP_GRAY_MAX, dtype=np.float32)
         else:
             logger.info(
                 "Gradient map stop colour space %d is not supported.", stop.mode
@@ -884,8 +888,14 @@ def _gradientmap_lut(
         colors.append(np.clip(rgb, _0, _1))
 
     size = _get_lut_size(layer)
+    smoothness = min(max(block.interpolation / _STOP_LOCATION_MAX, 0.0), 1.0)
     ramp = _gradient_ramp(
-        _lut_domain(size), locations, midpoints, np.array(colors), block.method
+        _lut_domain(size),
+        locations,
+        midpoints,
+        np.array(colors),
+        block.method,
+        smoothness,
     )
     return _rows_from_rgb(colormode, ramp)
 
@@ -914,11 +924,14 @@ def _gradient_ramp(
     midpoints: list[float],
     colors: NDArray[np.float32],
     method: bytes,
+    smoothness: float = 0.0,
 ) -> NDArray[np.float32]:
     """Sample a stop gradient at ``t``; ends are clamped to the end stops.
 
     Two stops at one location make a hard edge: the segment into it ends in
     the first stop's colour and the segment out of it starts in the second's.
+    ``smoothness``, from 0 to 1, eases each blend towards a smoothstep as a
+    gradient fill's is (``paint._blend_stops``).
     """
     if len(locations) == 1:
         return np.repeat(colors[:1], len(t), axis=0)
@@ -937,6 +950,7 @@ def _gradient_ramp(
         # reaches one half.
         m = min(max(midpoints[k + 1], 0.01), 0.99)
         u = np.where(u <= m, _HALF * u / m, _HALF + _HALF * (u - m) / (1 - m))
+        u = u + smoothness * ((3 - 2 * u) * u * u - u) / 2
         out[inside] = values[k] + u[:, None] * (values[k + 1] - values[k])
     return from_space(out).astype(np.float32, copy=False)
 
@@ -997,14 +1011,14 @@ def apply_colorbalance(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: ColorBalance,
-) -> np.ndarray:
-    """Apply a color balance adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a color balance adjustment to an image, or None where it is not rendered."""
     if colormode != ColorMode.RGB:
         logger.info("Color balance isn't currently supported for %s.", colormode)
-        return img
+        return None
     shadows, midtones, highlights = layer.shadows, layer.midtones, layer.highlights
     if shadows is None or midtones is None or highlights is None:
-        return img
+        return None
 
     # A midtone amount is a per-channel gamma. Preserve Luminosity centres the
     # three amounts on their mean, so that a shift toward one primary darkens
@@ -1046,11 +1060,11 @@ def apply_vibrance(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: Vibrance,
-) -> np.ndarray:
-    """Apply a vibrance adjustment to an image."""
+) -> np.ndarray | None:
+    """Apply a vibrance adjustment to an image, or None where it is not rendered."""
     if colormode != ColorMode.RGB:
         logger.info("Vibrance isn't currently supported for %s.", colormode)
-        return img
+        return None
     vibrance = layer.vibrance / 100.0
     saturation = layer.saturation / 100.0
     if vibrance == 0 and saturation == 0:
@@ -1120,7 +1134,8 @@ def _vibrance(
 
 
 """Adjustment function table."""
-AdjustmentFn = Callable[..., np.ndarray]
+# A function returns None for an adjustment it does not render.
+AdjustmentFn = Callable[..., np.ndarray | None]
 ADJUSTMENT_FUNC: dict[str, AdjustmentFn] = {
     "brightnesscontrast": apply_brightnesscontrast,
     "levels": apply_levels,
