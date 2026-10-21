@@ -12,13 +12,13 @@ Changelog
   ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
 - [fix] The compositor renders channel mixer, black & white, colour balance
   and vibrance adjustment layers on RGB documents, and gradient maps on RGB,
-  grayscale and CMYK documents, instead of skipping them. Channel mixer and
-  black & white are exact; gradient maps interpolate classic, linear and
-  perceptual gradients; colour balance midtones and vibrance are fitted to
-  Photoshop output
-- [fix] A pass-through group that carries an enabled layer style is composited
-  as an isolated source, as in Photoshop: an adjustment inside it stays within
-  the group, and its children's blend modes no longer reach the layers beneath
+  grayscale and CMYK documents, instead of skipping them. Channel mixer is
+  exact, black & white is exact without its tint; gradient maps interpolate
+  classic, linear and perceptual gradients; colour balance midtones and
+  vibrance are fitted to Photoshop output
+- [fix] An adjustment inside a pass-through group that carries an enabled
+  layer style stays within the group, as in Photoshop, instead of passing
+  through to the layers beneath
 
 1.25.0 (2026-10-14)
 -------------------

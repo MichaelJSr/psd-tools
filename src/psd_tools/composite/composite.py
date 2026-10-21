@@ -1780,10 +1780,10 @@ class Compositor:
             color_b = self._color
             alpha_b = self._alpha
 
-        # Photoshop composites a group on its own when it has clip layers, a
-        # fill under 100 or a layer style, so an adjustment inside such a
-        # group stops at the group's shape instead of passing through. A
-        # non-pass-through group is composited on its own anyway.
+        # Photoshop keeps an adjustment inside a group that has clip layers, a
+        # fill under 100 or a layer style within the group's shape instead of
+        # passing it through; the children's own blend modes still reach the
+        # backdrop. A non-pass-through group is composited on its own anyway.
         shape_const, _ = self._get_const(layer)
         isolate_adjustments = (
             shape_const < 1.0
