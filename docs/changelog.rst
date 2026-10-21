@@ -50,10 +50,10 @@ Changelog
 - [fix] An adjustment inside a pass-through group that carries an enabled
   layer style stays within the group, as in Photoshop, instead of passing
   through to the layers beneath
-- [fix] A shape layer with Align Edges that is redrawn from its path snaps an
-  edge lying on a pixel boundary onto it, and a centred stroke of odd width
-  covers the pixels below and right of the edge, as Photoshop does, instead
-  of half-covering the pixels either side
+- [fix] A shape layer with Align Edges that is redrawn from its path is
+  snapped onto the pixel grid as Photoshop does: the box of its visible edge
+  moves to whole pixels and the path with it, so a centred stroke of odd
+  width lands on pixel centres instead of half-covering the pixels either side
 
 1.25.0 (2026-10-14)
 -------------------

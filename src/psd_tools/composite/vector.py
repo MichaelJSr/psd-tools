@@ -34,8 +34,8 @@ def draw_vector_mask(
 
     The coverage is the area of the path inside each pixel, computed by
     :py:mod:`psd_tools.composite.scanline`. Filling needs no aggdraw. A layer
-    that aligns its edges has the anchors that lie on a pixel boundary snapped
-    onto it.
+    that aligns its edges is snapped onto the pixel grid first; see
+    :py:func:`_alignment`.
     """
     return _draw_path(
         layer, brush={"color": 255}, viewport=viewport, align=_alignment(layer)
@@ -67,8 +67,9 @@ _STROKE_LIVE_BYTES = 13
 # Slack on a distance to the silhouette, measured from a pixel-resolution edge.
 _BOUNDARY_MARGIN = 1.0
 _RIDGE_DROP = 0.5
-# How close to a pixel boundary an anchor must be for Align Edges to snap it.
-_ALIGN_TOLERANCE = 0.01
+# Align Edges rounds half up, and a coordinate this far short of the half
+# still rounds up.
+_ALIGN_SLACK = 0.025
 
 
 @require_aggdraw
@@ -104,9 +105,8 @@ def draw_stroke(
     The pen follows each input path, so it is kept to the neighbourhood of the
     combined shape's boundary, which is where Photoshop strokes (#889).
 
-    Under Align Edges a centred pen of odd width on a pixel boundary would
-    half-cover the pixels either side; Photoshop moves it half a pixel down
-    and right, onto the pixel centres.
+    Under Align Edges the pen follows the snapped path, so its outer edge
+    lies on the pixel grid; see :py:func:`_alignment`.
 
     Requires aggdraw, which draws the pen. Only a stroke does; a fill is
     rasterized by :py:mod:`psd_tools.composite.scanline`.
@@ -144,8 +144,6 @@ def draw_stroke(
     radius = float(pen["width"]) / 2.0 * _MITER_REACH
     near = _near_silhouette(layer, radius, viewport)
     align = _alignment(layer)
-    if align is not None and not sided and _is_odd(width):
-        align = 0.5
     outline = _draw_path(layer, pen=pen, viewport=viewport, near=near, align=align)
     if not sided:
         return outline
@@ -169,22 +167,63 @@ def draw_stroke(
     return outline * inside
 
 
-def _alignment(layer: "Layer") -> float | None:
+def _alignment(layer: "Layer") -> tuple[np.ndarray, np.ndarray] | None:
     """
-    How far past a pixel boundary Align Edges puts an anchor lying on it.
+    The scale and offset Align Edges applies to the layer's path, x first.
 
-    ``0.0`` for a fill; ``None`` when the layer does not align its edges.
+    Photoshop snaps the box of the shape's visible edge -- the outer edge of
+    an enabled stroke, otherwise the path -- onto the pixel grid: its origin
+    to the nearest pixel and its size to a whole number of pixels, half up.
+    The path is scaled and shifted with that box, so a centred stroke of odd
+    width lands on pixel centres and one of even width on pixel boundaries.
+
+    ``None`` when the layer does not align its edges or has no path.
     """
     blocks = layer._record.tagged_blocks
     if blocks is None or not blocks.get_data(Tag.USING_ALIGNED_RENDERING, 0):
         return None
-    return 0.0
+    box = _path_box(layer)
+    if box is None:
+        return None
+    margin = 0.0
+    stroke = layer.stroke
+    if stroke is not None and stroke.enabled:
+        alignment = stroke.line_alignment
+        if alignment is StrokeAlignment.OUTER:
+            margin = float(stroke.line_width)
+        elif alignment is not StrokeAlignment.INNER:
+            margin = float(stroke.line_width) / 2.0
+    size = box[1] - box[0]
+    origin = _snap(box[0] - margin)
+    inner_size = _snap(size + 2.0 * margin) - 2.0 * margin
+    # A box with no extent in an axis, or one the rounding would empty,
+    # keeps its size there.
+    scalable = (size > 0.0) & (inner_size > 0.0)
+    scale = np.where(scalable, inner_size / np.where(scalable, size, 1.0), 1.0)
+    offset = origin + margin - box[0] * scale
+    return scale, offset
 
 
-def _is_odd(width: float) -> bool:
-    """Whether ``width`` is an odd whole number of pixels."""
-    nearest = round(width)
-    return abs(width - nearest) <= _ALIGN_TOLERANCE and nearest % 2 == 1
+def _snap(values: np.ndarray) -> np.ndarray:
+    """``values`` rounded to whole pixels the way Align Edges does."""
+    return np.floor(values + 0.5 + _ALIGN_SLACK)
+
+
+def _path_box(layer: "Layer") -> np.ndarray | None:
+    """Bounding box of the layer's path in document pixels: ``[[x0, y0], [x1, y1]]``."""
+    assert layer.vector_mask is not None
+    doc_size = (layer._psd.width, layer._psd.height)
+    polylines: list[np.ndarray] = []
+    for subpath in layer.vector_mask.paths:
+        knots = [x for x in subpath if isinstance(x, Knot)]
+        if len(knots) > 1:
+            polylines.append(_flatten_subpath(subpath, *doc_size))
+        elif knots:
+            polylines.append(_knot_points(knots, *doc_size, None)[:, 0])
+    if not polylines:
+        return None
+    points = np.concatenate(polylines)
+    return np.stack([points.min(axis=0), points.max(axis=0)])
 
 
 def can_bury_arcs(layer: "Layer") -> bool:
@@ -370,14 +409,14 @@ def _draw_path(
     viewport: tuple[int, int, int, int] | None = None,
     near: np.ndarray | None = None,
     closed_only: bool = False,
-    align: float | None = None,
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """
     Rasterize a layer's vector mask, filled by ``brush`` and outlined by ``pen``.
 
     ``near`` limits the outline of a closed subpath to where it is nonzero; see
     :py:func:`_near_silhouette`. ``closed_only`` fills the closed subpaths alone.
-    ``align`` snaps the anchors; see :py:func:`_knot_points`.
+    ``align`` snaps the path onto the pixel grid; see :py:func:`_alignment`.
 
     A mask with an initial fill rule and no path of its own reveals all, so
     the plane starts out covered -- but only for a brush. The seed describes a
@@ -451,7 +490,7 @@ def _draw_subpath(
     pen: dict[str, int | float] | None,
     near: np.ndarray | None = None,
     closed_only: bool = False,
-    align: float | None = None,
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """
     Rasterize one merged path component, filled by ``brush``, outlined by ``pen``.
@@ -497,7 +536,7 @@ def _fill_subpath(
     subpath_list: list,
     viewport: tuple[int, int, int, int],
     doc_size: tuple[int, int],
-    align: float | None = None,
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """
     Area of the path inside each pixel of ``viewport``.
@@ -519,29 +558,27 @@ def _fill_subpath(
 
 
 def _knot_points(
-    knots: list[Knot], width: int, height: int, align: float | None
+    knots: list[Knot],
+    width: int,
+    height: int,
+    align: tuple[np.ndarray, np.ndarray] | None,
 ) -> np.ndarray:
     """
     Anchor, preceding and leaving point of each knot in document pixels, x first.
 
-    With ``align``, each anchor coordinate within ``_ALIGN_TOLERANCE`` of a whole
-    pixel moves to that pixel plus ``align``, and its handles move with it.
+    ``align`` is the scale and offset of :py:func:`_alignment`, applied to
+    every point.
     """
     points = np.array(
         [(k.anchor, k.preceding, k.leaving) for k in knots], dtype=np.float64
     )[:, :, ::-1] * (width, height)
-    if align is not None and len(knots):
-        anchor = points[:, :1]
-        nearest = np.round(anchor)
-        shift = np.where(
-            np.abs(anchor - nearest) <= _ALIGN_TOLERANCE, nearest + align - anchor, 0.0
-        )
-        points = points + shift
+    if align is not None:
+        points = points * align[0] + align[1]
     return points
 
 
 def _flatten_subpath(
-    subpath, width: int, height: int, align: float | None = None
+    subpath, width: int, height: int, align: tuple[np.ndarray, np.ndarray] | None = None
 ) -> np.ndarray:
     """
     Polyline through one subpath, in document coordinates, x first.
@@ -570,7 +607,7 @@ def _stroke_subpath(
     viewport: tuple[int, int, int, int],
     doc_size: tuple[int, int],
     pen: dict[str, int | float],
-    align: float | None = None,
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> np.ndarray:
     """
     Rasterize the outline of a path with aggdraw.
@@ -605,7 +642,7 @@ def _generate_symbol(
     width: int,
     height: int,
     command: str = "C",
-    align: float | None = None,
+    align: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> Generator[str | float, None, None]:
     """Sequence generator for SVG path."""
     knots = [x for x in path if isinstance(x, Knot)]

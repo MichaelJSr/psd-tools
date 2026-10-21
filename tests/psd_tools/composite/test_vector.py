@@ -1,6 +1,7 @@
 import logging
+import math
 import sys
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -1408,13 +1409,29 @@ def test_an_inner_stroke_keeps_its_opacity_at_the_path_edge() -> None:
     assert alpha[partial] == pytest.approx(0.5 * shape[partial], abs=1e-4)
 
 
-def _aligned_rectangle(
-    box: tuple[float, float, float, float], aligned: bool = True
-) -> tuple[PSDImage, Layer]:
-    """``double-stroke-effects.psd``'s shape, its path replaced by ``box``.
+# An aggdraw pen is not bit-stable across versions.
+_PEN_SLACK = 1 / 255
+# Photoshop's rounding carries slack, calibrated against its rasters of 1 px
+# stroked rectangles: a visible edge this far short of the half still rounds
+# up, and one this far short stays down.
+_ROUNDS_UP_SHORT_OF_HALF = 0.02
+_STAYS_DOWN_SHORT_OF_HALF = 0.05
 
-    The layer aligns its edges and carries a centred 1 px stroke. ``box`` is
-    in document pixels on the 32x32 canvas.
+_Point = tuple[float, float]
+
+
+def _aligned_shape(
+    knots: list[tuple[_Point, _Point, _Point]],
+    aligned: bool = True,
+    line_width: float = 1.0,
+    line_alignment: bytes = b"strokeStyleAlignCenter",
+    stroked: bool = True,
+) -> tuple[PSDImage, Layer]:
+    """``double-stroke-effects.psd``'s shape, its path replaced by ``knots``.
+
+    Each knot is its preceding handle, anchor and leaving handle, as (x, y) in
+    document pixels on the 32x32 canvas. The layer aligns its edges and
+    carries a centred 1 px stroke; the other arguments forge over that.
     """
     psd = PSDImage.open(full_name("effects/double-stroke-effects.psd"))
     layer = psd[1]
@@ -1423,56 +1440,132 @@ def _aligned_rectangle(
     assert layer.tagged_blocks.get_data(Tag.USING_ALIGNED_RENDERING) == 1
     if not aligned:
         del layer._record.tagged_blocks[Tag.USING_ALIGNED_RENDERING]
+    width = cast(UnitFloat, layer.stroke._data[b"strokeStyleLineWidth"])
+    layer.stroke._data[b"strokeStyleLineWidth"] = UnitFloat(
+        unit=width.unit, value=line_width
+    )
+    layer.stroke._data[b"strokeStyleLineAlignment"] = Enumerated(
+        b"strokeStyleLineAlignment", line_alignment
+    )
+    layer.stroke._data[b"strokeEnabled"] = Bool(stroked)
     setting = layer.tagged_blocks.get_data(Tag.VECTOR_MASK_SETTING2)
-    x0, y0, x1, y1 = box
-    knots: list[Any] = []
-    for x, y in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]:
-        point = (y / psd.height, x / psd.width)  # knots are (y, x) fractions
-        knots.append(ClosedKnotLinked(point, point, point))
+
+    def fraction(point: _Point) -> tuple[float, float]:
+        return (point[1] / psd.height, point[0] / psd.width)  # knots are (y, x)
+
+    items: list[Any] = [
+        ClosedKnotLinked(fraction(preceding), fraction(anchor), fraction(leaving))
+        for preceding, anchor, leaving in knots
+    ]
     keep = [x for x in setting.path if not isinstance(x, ClosedPath)]
-    setting.path._items = keep + [ClosedPath(items=knots, operation=1, index=0)]
+    setting.path._items = keep + [ClosedPath(items=items, operation=1, index=0)]
     assert "_vector_mask" not in layer.__dict__
     return psd, layer
 
 
-def _union(layer: Layer) -> np.ndarray:
-    """The layer's fill and stroke over each other, one column through the middle."""
+def _aligned_rectangle(
+    box: tuple[float, float, float, float], **kwargs: Any
+) -> tuple[PSDImage, Layer]:
+    """:py:func:`_aligned_shape` with a rectangle, ``box`` as (x0, y0, x1, y1)."""
+    x0, y0, x1, y1 = box
+    corners: list[_Point] = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    return _aligned_shape([(c, c, c) for c in corners], **kwargs)
+
+
+def _profiles(layer: Layer) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The layer's fill, stroke, and the two over each other, one column through the middle."""
+    assert layer.stroke is not None
     fill = vector.draw_vector_mask(layer)[:, 16, 0]
-    stroke = vector.draw_stroke(layer)[:, 16, 0]
-    return fill + stroke - fill * stroke
+    stroke = vector.draw_stroke(layer)[:, 16, 0] if layer.stroke.enabled else fill * 0
+    return fill, stroke, fill + stroke - fill * stroke
 
 
-def test_align_edges_snaps_an_edge_on_a_pixel_boundary() -> None:
-    """Edges a hair off a pixel boundary fill whole rows under Align Edges.
+def test_align_edges_puts_a_centred_odd_stroke_on_whole_pixels() -> None:
+    """Under Align Edges the box of the stroke's outer edge lands on whole pixels.
 
-    The card corpus's separator rectangles sit that far off; Photoshop's
-    raster of them has no partial row. The centred 1 px pen covers the row
-    below each edge: inside at the top, outside at the bottom.
+    A rectangle from y 5.0144 to 26.5525 with a centred 1 px stroke is
+    visible from 4.5144 to 27.0525: 22.538 px, which Photoshop draws as 23
+    whole rows from row 5. The far edge follows that size rather than its own
+    rounding, which would have stopped a row short.
     """
-    off = 0.005
-    _, layer = _aligned_rectangle((4.0, 3.0 - off, 28.0, 27.0 + off))
-    fill = vector.draw_vector_mask(layer)[:, 16, 0]
-    assert list(fill[1:5]) == [0.0, 0.0, 1.0, 1.0]
-    assert list(fill[25:29]) == [1.0, 1.0, 0.0, 0.0]
-    union = _union(layer)
-    assert list(union[1:5]) == [0.0, 0.0, 1.0, 1.0]
-    assert list(union[25:29]) == [1.0, 1.0, 1.0, 0.0]
+    _, layer = _aligned_rectangle((4.0, 5.0144, 28.0, 26.5525))
+    fill, stroke, union = _profiles(layer)
+    assert stroke[4:6] == pytest.approx([0.0, 1.0], abs=_PEN_SLACK)
+    assert stroke[27:29] == pytest.approx([1.0, 0.0], abs=_PEN_SLACK)
+    assert fill[6:27] == pytest.approx(1.0, abs=1e-6)
+    assert union[4:29] == pytest.approx([0.0] + [1.0] * 23 + [0.0], abs=_PEN_SLACK)
 
 
-def test_align_edges_leaves_an_edge_between_pixel_boundaries() -> None:
-    """An edge halfway across a pixel is not on a boundary and keeps its area."""
-    _, layer = _aligned_rectangle((4.0, 2.5, 28.0, 27.5))
-    fill = vector.draw_vector_mask(layer)[:, 16, 0]
-    assert fill[2] == pytest.approx(0.5, abs=1e-6)
-    assert fill[27] == pytest.approx(0.5, abs=1e-6)
-    assert fill[3] == 1.0 and fill[26] == 1.0
+def test_align_edges_rounds_up_a_little_short_of_the_half() -> None:
+    """Photoshop's rounding carries slack: just short of the half still rounds up."""
+    top = 4.0 - _ROUNDS_UP_SHORT_OF_HALF  # the stroke's outer edge, at 3.48
+    _, layer = _aligned_rectangle((4.0, top, 28.0, 27.0))
+    _, _, union = _profiles(layer)
+    assert union[3:5] == pytest.approx([0.0, 1.0], abs=_PEN_SLACK)
+
+    top = 4.0 - _STAYS_DOWN_SHORT_OF_HALF  # at 3.45
+    _, layer = _aligned_rectangle((4.0, top, 28.0, 27.0))
+    _, _, union = _profiles(layer)
+    assert union[2:4] == pytest.approx([0.0, 1.0], abs=_PEN_SLACK)
+
+
+def test_align_edges_puts_an_even_stroke_on_the_boundary() -> None:
+    """A centred 2 px stroke straddles a path edge that lands on a pixel boundary."""
+    _, layer = _aligned_rectangle((4.0, 3.3, 28.0, 27.0), line_width=2.0)
+    fill, stroke, _ = _profiles(layer)
+    assert stroke[1:5] == pytest.approx([0.0, 1.0, 1.0, 0.0], abs=_PEN_SLACK)
+    assert fill[2:4] == pytest.approx([0.0, 1.0], abs=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("line_alignment", "stroke_row"),
+    [(b"strokeStyleAlignInside", 3), (b"strokeStyleAlignOutside", 2)],
+)
+def test_align_edges_snaps_a_sided_stroke_by_its_visible_edge(
+    line_alignment: bytes, stroke_row: int
+) -> None:
+    """The box that snaps is the visible one.
+
+    That is the path for an inner stroke and a width further out for an
+    outer one. Either way the path edge at 3.3 lands on row 3 and the stroke
+    fills one whole row beside it.
+    """
+    _, layer = _aligned_rectangle((4.0, 3.3, 28.0, 27.0), line_alignment=line_alignment)
+    fill, stroke, _ = _profiles(layer)
+    assert fill[2:4] == pytest.approx([0.0, 1.0], abs=1e-6)
+    expected = [0.0] * 4
+    expected[stroke_row - 1] = 1.0
+    assert stroke[1:5] == pytest.approx(expected, abs=_PEN_SLACK)
+
+
+def test_align_edges_moves_a_curves_handles_with_its_box() -> None:
+    """A circle snaps by its box like a rectangle does, handles and all.
+
+    Radius 12.3 about (16, 15.9) spans 24.6 px, from y 3.6: Align Edges
+    makes that 25 px from row 4, so the top row the circle touched is bare
+    and its area is that of the larger circle. Handles left behind would
+    distort it.
+    """
+    cx, cy, r = 16.0, 15.9, 12.3
+    k = 0.5523 * r  # a cubic's handle length for a quarter circle
+    knots: list[tuple[_Point, _Point, _Point]] = [
+        ((cx - k, cy - r), (cx, cy - r), (cx + k, cy - r)),
+        ((cx + r, cy - k), (cx + r, cy), (cx + r, cy + k)),
+        ((cx + k, cy + r), (cx, cy + r), (cx - k, cy + r)),
+        ((cx - r, cy + k), (cx - r, cy), (cx - r, cy - k)),
+    ]
+    _, layer = _aligned_shape(knots, stroked=False)
+    fill = vector.draw_vector_mask(layer)[:, :, 0]
+    assert fill[3].max() == 0.0 and fill[4, 16] > 0.0
+    assert fill[29].max() == 0.0 and fill[28, 16] > 0.0
+    assert fill.sum() == pytest.approx(math.pi * 12.5**2, abs=1.0)
 
 
 def test_without_align_edges_a_pen_straddles_the_boundary() -> None:
     """The snap belongs to Align Edges: without it the pen is centred on the path."""
     off = 0.005
     _, layer = _aligned_rectangle((4.0, 3.0 - off, 28.0, 27.0 + off), aligned=False)
-    union = _union(layer)
+    _, _, union = _profiles(layer)
     assert union[2] == pytest.approx(0.5, abs=0.02)
     assert union[27] == pytest.approx(0.5, abs=0.02)
 
