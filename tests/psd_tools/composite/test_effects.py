@@ -26,7 +26,7 @@ from psd_tools.composite.effects import (
     _signed_distance,
     stroke_bbox,
 )
-from psd_tools.constants import Tag
+from psd_tools.constants import BlendMode, Tag
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass
 
@@ -1486,6 +1486,46 @@ def test_an_unreadable_overlay_is_dropped_and_the_document_still_renders() -> No
         ),
         _rendered("effects/stroke-composite.psd", kind="coloroverlay", mutate=_disable),
     )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="an overlay on a pass-through group covers the group's box, not its alpha",
+)
+def test_an_overlay_on_a_pass_through_group_covers_the_groups_alpha() -> None:
+    """The overlay of a pass-through group paints only where the group does.
+
+    ``masks.psb``'s header group, pass-through, holds a band faded to a
+    hundredth of its opacity and is given the divider's gradient overlay.
+    Photoshop paints the overlay over the band's own alpha, so over grey
+    the band's middle stays grey to within that hundredth. Here the
+    overlay is painted at full strength instead: the group's source is the
+    backdrop with the band over it, and the effect canvas paints over the
+    group's whole box as if that source were the group alone (#707).
+    """
+    psd = PSDImage.open(full_name("masks.psb"))
+    header = next(layer for layer in psd if layer.name == "Header")
+    assert header.blend_mode is BlendMode.PASS_THROUGH
+    band = next(layer for layer in psd.descendants() if layer.name == "Rectangle 2")
+    for effect in list(band.effects):
+        effect.descriptor[Key.Enabled] = False
+    band.opacity = 3
+    divider = next(layer for layer in psd.descendants() if layer.name == "divider")
+    header.tagged_blocks.set_data(
+        Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
+        divider.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO),
+    )
+    assert [type(effect).__name__ for effect in header.effects] == ["GradientOverlay"]
+
+    viewport = (0, 0, 640, 200)
+    compositor = Compositor(
+        viewport,
+        np.full((200, 640, 3), 0.5, dtype=np.float32),
+        np.ones((200, 640, 1), dtype=np.float32),
+    )
+    compositor.apply(header)
+    middle = compositor.result_over_backdrop()[(band.bbox[1] + band.bbox[3]) // 2, 320]
+    assert np.allclose(middle, 0.5, atol=3 / 255.0 + 1e-6), middle
 
 
 @pytest.mark.parametrize("force", [False, True])

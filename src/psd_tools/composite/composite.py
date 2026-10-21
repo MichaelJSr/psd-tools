@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image
 
 from psd_tools.api import numpy_io, pil_io
-from psd_tools.api.effects import DropShadow
+from psd_tools.api.effects import DropShadow, OuterGlow
 from psd_tools.api.layers import (
     AdjustmentLayer,
     Artboard,
@@ -30,6 +30,10 @@ from psd_tools.composite.effects import (
     draw_drop_shadow,
     draw_stroke_effect_split,
     drop_shadow_bbox,
+    glow_falloff,
+    glow_geometry,
+    glow_paint,
+    outer_glow_bbox,
     shadow_geometry,
     stroke_band,
     stroke_bbox,
@@ -39,6 +43,7 @@ from psd_tools.constants import (
     BlendMode,
     ChannelID,
     ColorMode,
+    GlowTechnique,
     Knockout,
     Resource,
     StrokeAlignment,
@@ -232,10 +237,10 @@ def _stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     """``layer.bbox`` grown to every box its strokes are drawn on.
 
     A stroke, effect or vector, is one of the two things in this module that
-    reach outside the layer, and :py:func:`_shadow_reach` measures the other:
+    reach outside the layer, and :py:func:`_beneath_reach` measures the other:
     the three overlays draw on ``layer.bbox`` and are pasted from it, and
-    glow, satin and bevel are not implemented at all. :py:func:`_effect_reach`
-    is the two together, and is what the callers below ask.
+    satin and bevel are not implemented at all. :py:func:`_effect_reach` is
+    the two together, and is what the callers below ask.
 
     ``find("stroke")`` rather than a descriptor walk, so this stays in lockstep
     with the loop in :py:meth:`Compositor._add_stroke_effects` that actually
@@ -286,42 +291,48 @@ def _cast_bbox(
     return layer.bbox
 
 
-def _shadow_reach(
+def _beneath_reach(
     layer: Layer, memo: "_ContentBBoxes | None" = None
 ) -> tuple[int, int, int, int]:
-    """``layer.bbox`` grown to every box its drop shadows are drawn on.
+    """``layer.bbox`` grown to every box its drop shadows and outer glows are drawn on.
 
-    The shadow's half of :py:func:`_effect_reach`, measured the way
-    :py:func:`_stroke_reach` measures a stroke and degrading the same way: an
-    effect whose box cannot be read is skipped, which leaves the box wider
-    than what gets drawn and never narrower, because
-    :py:meth:`Compositor._apply_drop_shadows` calls ``drop_shadow_bbox()`` on
-    the same box and values and drops the same effect.
+    The half of :py:func:`_effect_reach` that lies beneath the layer,
+    measured the way :py:func:`_stroke_reach` measures a stroke and degrading
+    the same way: an effect whose box cannot be read is skipped, which leaves
+    the box wider than what gets drawn and never narrower, because
+    :py:meth:`Compositor._apply_drop_shadows` and
+    :py:meth:`Compositor._apply_outer_glows` call the same bbox function on
+    the same box and values and drop the same effect.
 
     The box is grown from :py:func:`_cast_bbox`, not from ``layer.bbox``, so a
     group's shadow is measured from everything the group casts it from. The
-    group's own shadow list is read first, so a group with no shadow never
+    group's own effect lists are read first, so a group with neither never
     measures its contents here.
     """
     bbox = layer.bbox
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
         return bbox
     shadows = _readable(layer, "dropshadow")
-    if not shadows:
+    glows = _readable(layer, "outerglow")
+    if not shadows and not glows:
         return bbox
     cast_from = _cast_bbox(layer, memo)
+    budget = layer._psd._max_alloc_bytes
     for effect in shadows:
         shadow = cast(DropShadow, effect)
         try:
             distance, size, _ = shadow_geometry(shadow.descriptor)
             bbox = utils.union_bbox(
-                bbox,
-                drop_shadow_bbox(
-                    cast_from, distance, shadow.angle, size, layer._psd._max_alloc_bytes
-                ),
+                bbox, drop_shadow_bbox(cast_from, distance, shadow.angle, size, budget)
             )
         except _UNREADABLE as error:
             logger.debug("Cannot measure a drop shadow of %s: %s", layer, error)
+    for effect in glows:
+        try:
+            size, _, _ = glow_geometry(effect.descriptor)
+            bbox = utils.union_bbox(bbox, outer_glow_bbox(cast_from, size, budget))
+        except _UNREADABLE as error:
+            logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
     return bbox
 
 
@@ -335,7 +346,7 @@ def _effect_reach(
     shadow loses it as surely as one that clips its stroke, and a layer whose
     own box has cleared the viewport can still cast a shadow back into it.
     """
-    return utils.union_bbox(_stroke_reach(layer), _shadow_reach(layer, memo))
+    return utils.union_bbox(_stroke_reach(layer), _beneath_reach(layer, memo))
 
 
 _ContentBBoxes = dict[int, tuple[int, int, int, int]]
@@ -374,8 +385,8 @@ class _PassCache:
     the retention is the part that grows.
 
     ``group_alphas`` holds the alpha of the same composites, under the same
-    keys, for a group's drop shadow: that is cast from how opaque the
-    contents are rather than from what they cover. A composite keeps only
+    keys, for a group's drop shadow or outer glow: those are cast from how
+    opaque the contents are rather than from what they cover. A composite keeps only
     the canvas it was asked for: a stroke and a shadow on one group ask on
     different boxes, so the other would not be read.
     """
@@ -1377,11 +1388,11 @@ class Compositor:
         # Beneath everything else the layer paints, and before the layer is
         # resolved rather than only before it is composited: a pass-through
         # group's contents blend with the canvas they are resolved over, and
-        # its shadow is part of that canvas. A pass-through group that knocks
-        # out loses its shadow's colour the way it loses that of every layer
-        # beneath it, because it is resolved over its knockout backdrop and
-        # re-applied against this canvas (#707).
-        self._apply_drop_shadows(layer)
+        # its shadow and glow are part of that canvas. A pass-through group
+        # that knocks out loses their colour the way it loses that of every
+        # layer beneath it, because it is resolved over its knockout backdrop
+        # and re-applied against this canvas (#707).
+        self._apply_beneath_effects(layer)
         source = self._resolve_source(layer)
         source, outer = self._compose_effects(layer, source)
         if outer and _composites_as_passthrough(source, layer.blend_mode):
@@ -1522,14 +1533,13 @@ class Compositor:
     ) -> tuple[_Source, list[_OuterEffect]]:
         """The layer's effects: the inner ones in its source, the outer beside.
 
-        A drop shadow is neither, and is not composed here: it lies beneath
-        the layer and goes on before the layer is resolved -- see
-        :py:meth:`_apply_drop_shadows`.
+        A drop shadow and an outer glow are neither, and are not composed
+        here: they lie beneath the layer and go on before the layer is
+        resolved -- see :py:meth:`_apply_beneath_effects`.
 
-        TODO: Inner shadow, the two glows, satin and bevel are not drawn at
-        all, so where they would land is not settled here either. An inner one
-        joins the overlays; an outer glow is an outer effect with a blur, which
-        ``draw_drop_shadow()`` already draws the coverage of.
+        TODO: Inner shadow, inner glow, satin and bevel are not drawn at all,
+        so where they would land is not settled here either. The first three
+        join the overlays; a bevel has an outer part beside the layer too.
         """
         canvas = _EffectCanvas(self, source)
         for effect_name in _OVERLAY_DRAWS:
@@ -2472,7 +2482,7 @@ class Compositor:
     def _cast_shape(
         self, layer: Layer, viewport: tuple[int, int, int, int]
     ) -> np.ndarray:
-        """What casts the layer's drop shadow, on ``viewport``.
+        """What casts the layer's drop shadow or outer glow, on ``viewport``.
 
         How opaque the layer is, before its opacity and fill opacity, and
         under its mask: an object's own coverage, and a group's composited
@@ -2481,12 +2491,12 @@ class Compositor:
         layer that would cast a shadow from the mask's empty margin.
 
         Read afresh on ``viewport`` rather than taken from the resolved
-        source, which :py:meth:`_trace_shape` pastes from where it can. The
-        shadow goes on before the layer is resolved, so there is no source
-        yet; and a group resolved over this canvas can take alpha from it
-        through a knockout, which would make the shadow depend on the
-        viewport. The group's contents are composited over nothing, once per
-        box and pass, as :py:meth:`_get_group_shape` does for a stroke.
+        source, which :py:meth:`_trace_shape` pastes from where it can. Both
+        go on before the layer is resolved, so there is no source yet; and a
+        group resolved over this canvas can take alpha from it through a
+        knockout, which would make the shadow depend on the viewport. The
+        group's contents are composited over nothing, once per box and pass,
+        as :py:meth:`_get_group_shape` does for a stroke.
         """
         mask = self._get_mask(layer, viewport)
         own = (
@@ -2536,6 +2546,15 @@ class Compositor:
                 continue
             knockout = np.minimum(knockout + (band - inside), 1.0)
         return knockout
+
+    def _apply_beneath_effects(self, layer: Layer) -> None:
+        """Composite what lies beneath the layer: its drop shadows, then its glows.
+
+        Called before the layer is resolved: see :py:meth:`apply`. The outer
+        glows go over the shadows, as Photoshop stacks them.
+        """
+        self._apply_drop_shadows(layer)
+        self._apply_outer_glows(layer)
 
     def _apply_drop_shadows(self, layer: Layer) -> None:
         """Composite every drop shadow of the layer, beneath the layer.
@@ -2617,6 +2636,79 @@ class Compositor:
             if coverage.any():
                 self._apply_source(
                     color, coverage, coverage * effect_opacity * opacity, blend_mode
+                )
+
+    def _apply_outer_glows(self, layer: Layer) -> None:
+        """Composite every outer glow of the layer, beneath the layer.
+
+        As :py:meth:`_apply_drop_shadows`, from the same silhouette on a box
+        grown the same way, faded by the layer opacity and not by its fill
+        opacity, each effect guarded the same way. There is no knockout
+        switch: ``glow_paint()`` always cuts the glow away under the
+        silhouette.
+
+        The paint is drawn on the glow's own box, since a gradient glow's
+        colour follows its falloff, and pasted beside it; where the glow
+        covers nothing the colour pasted there is never read.
+        """
+        glows = _readable(layer, "outerglow")
+        if not glows:
+            return
+        _, opacity = self._get_const(layer)
+        if opacity <= 0.0:
+            return
+        cast_from = _cast_bbox(layer, self._cache.content_bboxes)
+        for effect in glows:
+            glow = cast(OuterGlow, effect)
+            try:
+                size, spread, range_ = glow_geometry(glow.descriptor)
+                effect_opacity = glow.opacity / 100.0
+                if not math.isfinite(effect_opacity):
+                    raise ValueError("opacity %r is not finite" % effect_opacity)
+                blend_mode = glow.blend_mode
+                precise = glow.glow_type == GlowTechnique.PRECISE_MATTE
+                contour = contour_table(glow.contour)
+                anti_aliased = glow.anti_aliased
+                noise = glow.noise
+                jitter = glow.quality_jitter
+                bbox = outer_glow_bbox(cast_from, size, layer._psd._max_alloc_bytes)
+            except _UNREADABLE as error:
+                logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
+                continue
+            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
+                continue
+            if noise > 0.0:
+                logger.debug("The noise of an outer glow of %s is not applied", layer)
+            if jitter > 0.0:
+                logger.debug("The jitter of an outer glow of %s is not applied", layer)
+            silhouette = self._cast_shape(layer, bbox)
+            try:
+                falloff = glow_falloff(
+                    silhouette,
+                    size=size,
+                    spread=spread,
+                    range_=range_,
+                    precise=precise,
+                    contour=contour,
+                    anti_aliased=anti_aliased,
+                )
+                color, coverage = glow_paint(
+                    bbox,
+                    layer._psd.color_mode,
+                    glow.descriptor,
+                    silhouette,
+                    falloff,
+                )
+            except _UNREADABLE as error:
+                logger.debug("Cannot draw an outer glow of %s: %s", layer, error)
+                continue
+            coverage = paste(self._viewport, bbox, coverage)
+            if coverage.any():
+                self._apply_source(
+                    paste(self._viewport, bbox, color),
+                    coverage,
+                    coverage * effect_opacity * opacity,
+                    blend_mode,
                 )
 
     def _add_stroke_effects(
