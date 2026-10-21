@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from psd_tools import PSDImage
+from psd_tools.compression import compress
 from psd_tools.constants import Compression, Tag
 from psd_tools.psd.descriptor import Bool, Descriptor, List
 from psd_tools.psd.filter_effects import (
@@ -23,8 +24,6 @@ MAX_CHANNELS = 24
 
 def _plane(array: np.ndarray) -> FilterEffectChannel:
     h, w = array.shape
-    from psd_tools.compression import compress
-
     data = compress(array.tobytes(), Compression.RLE, w, h, 8, 2)
     return FilterEffectChannel(
         is_written=1, compression=int(Compression.RLE), data=data
@@ -35,8 +34,6 @@ def _with_filter_mask(
     psd: PSDImage, layer, source: np.ndarray, alpha: np.ndarray, mask: np.ndarray
 ):
     """Attach smart filters to *layer* whose FEid source is *source* under *mask*."""
-    from psd_tools.compression import compress
-
     x0, y0, x1, y1 = layer.bbox
     h, w = y1 - y0, x1 - x0
     channels = [_plane(source[..., i]) for i in range(3)]
