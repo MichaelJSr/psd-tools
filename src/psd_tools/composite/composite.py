@@ -66,6 +66,7 @@ from psd_tools.composite.effects import (
     stroke_band,
     stroke_bbox,
     stroke_reach,
+    texture_height,
 )
 from psd_tools.composite.text_blend import (
     TEXT_BLEND_GAMMA,
@@ -3996,8 +3997,9 @@ class Compositor:
                 continue
             if bevel.use_shape:
                 logger.debug("The shape contour of a bevel of %s is not applied", layer)
+            texture = None
             if bevel.use_texture:
-                logger.debug("The texture of a bevel of %s is not applied", layer)
+                texture = self._bevel_texture(layer, bevel, bbox, size)
             silhouette = self._cast_shape(layer, bbox)
             try:
                 amounts = draw_bevel(
@@ -4013,6 +4015,7 @@ class Compositor:
                     altitude=altitude,
                     contour=contour,
                     anti_aliased=anti_aliased,
+                    texture=texture,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a bevel of %s: %s", layer, error)
@@ -4032,6 +4035,65 @@ class Compositor:
                                 color, beside, opacity * canvas.opacity, blend_mode
                             )
                         )
+
+    def _bevel_texture(
+        self,
+        layer: Layer,
+        bevel: BevelEmboss,
+        bbox: tuple[int, int, int, int],
+        size: float,
+    ) -> np.ndarray | None:
+        """A bevel's texture on ``bbox``: its pattern's luminance as a height field.
+
+        The pattern is tiled at the texture's scale from the layer's reference
+        point when the texture is linked with the layer (a group's from its
+        content box), else from the document's origin, and the phase moves it;
+        :py:func:`texture_height` turns its luminance into height. None, and
+        the bevel goes on untextured, when the pattern is not in the document
+        or cannot be read.
+        """
+        try:
+            fill, _ = paint.draw_pattern_fill(
+                bbox, layer._psd, bevel.descriptor, self._texture_origin(layer, bevel)
+            )
+        except _UNREADABLE as error:
+            logger.debug("Cannot read the texture of a bevel of %s: %s", layer, error)
+            return None
+        if fill is None:
+            logger.debug("The texture pattern of a bevel of %s is not in the document", layer)
+            return None
+        if fill.shape[2] >= 3:
+            luminance = fill[:, :, 0] * 0.299 + fill[:, :, 1] * 0.587 + fill[:, :, 2] * 0.114
+        else:
+            luminance = fill.mean(axis=2)
+        return texture_height(
+            np.clip(luminance, 0.0, 1.0),
+            size=size,
+            depth=bevel.texture_depth,
+            inverted=bevel.texture_inverted,
+        )
+
+    def _texture_origin(
+        self, layer: Layer, bevel: BevelEmboss
+    ) -> tuple[int, int, int, int]:
+        """Where a bevel texture's tiling starts, as a box for ``draw_pattern_fill``."""
+        x = y = 0.0
+        if bevel.texture_aligned:
+            point = (
+                None
+                if isinstance(layer, GroupMixin)
+                else layer.tagged_blocks.get_data(Tag.REFERENCE_POINT)
+            )
+            if point is not None:
+                x, y = float(point[0]), float(point[1])
+            else:
+                _, layout = _overlay_boxes(
+                    layer, self._viewport, self._cache.content_bboxes
+                )
+                x, y = float(layout[0]), float(layout[1])
+        dx, dy = bevel.texture_phase
+        ox, oy = int(round(x + dx)), int(round(y + dy))
+        return (ox, oy, ox, oy)
 
     def _add_stroke_effects(
         self,

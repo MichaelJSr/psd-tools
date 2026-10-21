@@ -646,6 +646,34 @@ class BevelEmboss(_Effect, _AngleMixin):
         """Using texture."""
         return get_scalar(self.descriptor, b"useTexture", bool, False)
 
+    @property
+    def texture_depth(self) -> float:
+        """Texture depth in percent (-1000 to 1000), 100 where the descriptor does not say."""
+        return get_scalar(self.descriptor, b"textureDepth", float, 100.0)
+
+    @property
+    def texture_scale(self) -> float:
+        """Texture scale in percent."""
+        return get_scalar(self.descriptor, Key.Scale, float, 100.0)
+
+    @property
+    def texture_inverted(self) -> bool:
+        """Whether the texture is inverted."""
+        return get_scalar(self.descriptor, Key.InvertTexture, bool, False)
+
+    @property
+    def texture_aligned(self) -> bool:
+        """Whether the texture is linked with the layer (tiled from its reference point)."""
+        return get_scalar(self.descriptor, Key.Alignment, bool, True)
+
+    @property
+    def texture_phase(self) -> tuple[float, float]:
+        """The texture's phase, in pixels."""
+        phase = self.descriptor.get(b"phase")
+        if phase is None:
+            return (0.0, 0.0)
+        return (float(phase.get(Key.Horizontal, 0.0)), float(phase.get(Key.Vertical, 0.0)))
+
 
 @register(Klass.ChromeFX.value)
 class Satin(_Effect, _ColorMixin):
