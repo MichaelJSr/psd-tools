@@ -868,7 +868,9 @@ def composite_pil(
     # through -- so it is a narrowing of the damage, not a guarantee.
     #
     # Rounded, not truncated, as Photoshop's export is.
-    pixels = np.rint(np.clip(255 * color, 0, 255)).astype(np.uint8)
+    pixels = np.clip(255 * color, 0, 255)
+    np.rint(pixels, out=pixels)
+    pixels = pixels.astype(np.uint8)
     if mode == "1":
         # `fromarray(uint8, "1")` does not mean "these bytes, as bilevel". PIL
         # takes the raw mode literally at one bit per pixel, so it consumes one
@@ -907,9 +909,9 @@ def composite_pil(
     # Gating this on `not force` dropped it on exactly the paths the branch
     # above had just diverted here.
     if skip_alpha and delay_alpha_application:
-        alpha_as_image = Image.fromarray(
-            np.rint(255 * np.squeeze(alpha, axis=2)).astype(np.uint8), "L"
-        )
+        plane = np.clip(255 * np.squeeze(alpha, axis=2), 0, 255)
+        np.rint(plane, out=plane)
+        alpha_as_image = Image.fromarray(plane.astype(np.uint8), "L")
     icc = None
     if apply_icc and Resource.ICC_PROFILE in psd_image.image_resources:
         icc = psd_image.image_resources.get_data(Resource.ICC_PROFILE)

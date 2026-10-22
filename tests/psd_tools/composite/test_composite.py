@@ -2285,6 +2285,31 @@ def test_composite_pil_clips_rather_than_wrapping_at_the_uint8_cast(
     assert pixels.min() == expected and pixels.max() == expected, pixels
 
 
+@pytest.mark.parametrize(
+    "value, expected", [(1.002, 255), (1.2, 255), (-0.2, 0), (-5.0, 0)]
+)
+def test_composite_pil_clips_the_delayed_alpha_rather_than_wrapping(
+    monkeypatch: pytest.MonkeyPatch, value: float, expected: int
+) -> None:
+    """The CMYK alpha plane saturates at the cast as the colour does (#757).
+
+    Rounding wraps from just above 1.0, so the stand-in sits there too.
+    """
+    psd = PSDImage.open(full_name("adjustments/levels_cmyk.psd"))
+    real = composite_module.composite
+
+    def out_of_range(*args: Any, **kwargs: Any) -> Any:
+        color, shape, alpha = real(*args, **kwargs)
+        return color, shape, np.full_like(alpha, value)
+
+    monkeypatch.setattr(composite_module, "composite", out_of_range)
+    image = composite_module.composite_pil(psd, 1.0, 0.0, None, None, False)
+    assert isinstance(image, Image.Image)
+    assert image.mode == "RGBA"
+    planes = np.asarray(image)[:, :, 3]
+    assert planes.min() == expected and planes.max() == expected, planes
+
+
 def _grouped(psd: PSDImage, layer_list: Any, name: str) -> Any:
     """An isolated group holding ``layer_list``.
 
