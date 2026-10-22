@@ -2530,37 +2530,38 @@ def test_an_artboard_still_clips_its_contents_to_its_frame() -> None:
     assert alpha[64:73, :].max() == 0, "the horizontal gap between artboards"
 
 
-def test_a_traced_group_shape_matches_the_one_it_composites_with() -> None:
-    """Re-reading a group must yield what compositing it yields (#808).
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "transparency/knockout-deep-nested.psd",
+        "transparency/knockout-isolated-groups.psd",
+        "transparency/knockout-shallow-nested-pt.psd",
+        "masks3.psd",
+    ],
+)
+def test_a_traced_group_alpha_matches_the_one_it_composites_with(
+    filename: str,
+) -> None:
+    """Re-reading a group yields the alpha compositing it yields (#808).
 
-    ``_get_group_shape()`` composites a group's contents a second time, on the
-    box a stroke effect draws on. The whole design rests on that second
-    composite agreeing with the first, so it is asserted rather than argued:
-    on the same viewport, the two are the same array.
-
-    A transparent backdrop is enough, and knockout and the document backdrop
-    are deliberately not carried over, because ``shape`` accumulates into
-    ``_shape_g`` -- which starts at zero and is only ever unioned into, so it
-    cannot read a backdrop at all.
+    ``_get_group_alpha()`` composites a group's contents a second time, on the
+    box a stroke effect draws on, over a transparent backdrop and with
+    knockout cutting only the group's own alpha. Over a transparent canvas
+    that is what the group composites to, knockout groups and pass-through
+    ones included, so on the same viewport the two are the same array.
     """
-    for filename in ("transparency/knockout-deep-nested.psd", "masks3.psd"):
-        psd = PSDImage.open(full_name(filename))
-        for group in (sub for sub in _descendants(psd) if isinstance(sub, Group)):
-            compositor = _canvas(psd)
-            inner = (
-                compositor._viewport
-                if group.blend_mode == BlendMode.PASS_THROUGH
-                else utils.intersect(compositor._viewport, _content_bbox(group))
-            )
-            if inner == (0, 0, 0, 0):
-                continue
-            from_get_group = compositor._get_group(group, _read_knockout(group))[1]
-            traced = compositor._get_group_shape(group, compositor._viewport)
-            assert np.array_equal(traced, from_get_group), (filename, group.name)
+    psd = PSDImage.open(full_name(filename))
+    groups = [sub for sub in _descendants(psd) if isinstance(sub, Group)]
+    assert groups
+    for group in groups:
+        compositor = _canvas(psd)
+        from_get_group = compositor._get_group(group, _read_knockout(group))[2]
+        traced = compositor._get_group_alpha(group, compositor._viewport)
+        assert np.array_equal(traced, from_get_group), group.name
 
 
-def test_a_traced_group_shape_applies_the_groups_own_mask() -> None:
-    """The re-read is the group's coverage *through its mask*, as before.
+def test_a_traced_group_alpha_applies_the_groups_own_mask() -> None:
+    """The re-read is the group's alpha *through its mask*.
 
     The object branch multiplies ``_get_object_shape()`` by ``_get_mask()``, and
     the group branch has to do the same or the stroke traces a boundary the
@@ -2579,7 +2580,7 @@ def test_a_traced_group_shape_applies_the_groups_own_mask() -> None:
     wide = (-4, -4, psd.width + 4, psd.height + 4)
     covered = np.ones((psd.height, psd.width, 1), dtype=np.float32)
     traced = compositor._trace_shape(group, wide, covered, traces_mask=False)
-    unmasked = compositor._get_group_shape(group, wide)
+    unmasked = compositor._get_group_alpha(group, wide)
 
     assert not np.allclose(traced, unmasked), "the mask has to bite"
     assert traced.sum() < unmasked.sum()
@@ -2618,11 +2619,11 @@ def test_a_traced_artboard_keeps_its_frame_clip() -> None:
     # A floor rather than an exact count: some of those pixels are
     # anti-aliased vector edges, the class #804 shifts by 1/255, and the claim
     # here is only that the coverage is not clipped away.
-    passthrough = _canvas(psd)._get_group_shape(artboard, wide)
+    passthrough = _canvas(psd)._get_group_alpha(artboard, wide)
     assert outside_the_frame(passthrough) > 16000, "no frame clip, as today"
 
     artboard.blend_mode = BlendMode.NORMAL
-    isolated = _canvas(psd)._get_group_shape(artboard, wide)
+    isolated = _canvas(psd)._get_group_alpha(artboard, wide)
     assert outside_the_frame(isolated) == 0, "an isolated artboard clips to its frame"
 
 
@@ -2653,10 +2654,10 @@ def test_a_traced_group_keeps_its_boxes_apart() -> None:
         (-2, -2, psd.width + 2, psd.height + 2),
         (-6, -6, psd.width, psd.height),
     )
-    first = compositor._get_group_shape(group, narrow)
-    second = compositor._get_group_shape(group, wide)
+    first = compositor._get_group_alpha(group, narrow)
+    second = compositor._get_group_alpha(group, wide)
 
-    assert len(compositor._cache.group_shapes) == 2, "one entry per box"
+    assert len(compositor._cache.group_alphas) == 2, "one entry per box"
     assert first.shape[:2] == (narrow[3] - narrow[1], narrow[2] - narrow[0])
     assert second.shape[:2] == (wide[3] - wide[1], wide[2] - wide[0])
     # Same coverage, each on its own canvas: compare where the boxes overlap.
@@ -2693,12 +2694,12 @@ def test_a_traced_group_is_composited_once_per_box() -> None:
     compositor = _canvas(psd)
     box = (-13, 3, 13, 29)
 
-    first = compositor._get_group_shape(group, box)
-    assert compositor._cache.group_shapes, "the box it composited on is remembered"
+    first = compositor._get_group_alpha(group, box)
+    assert compositor._cache.group_alphas, "the box it composited on is remembered"
 
     composite_module.Compositor.__init__ = counting
     try:
-        again = compositor._get_group_shape(group, box)
+        again = compositor._get_group_alpha(group, box)
     finally:
         composite_module.Compositor.__init__ = real
     assert built == [], "the second ask composites nothing"

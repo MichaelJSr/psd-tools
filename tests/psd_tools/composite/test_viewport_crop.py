@@ -306,11 +306,11 @@ def test_a_small_viewport_draws_a_wide_layers_shadow_on_a_box_near_it(
         assert box[2] - box[0] < layer.width
 
 
-def test_a_traced_group_is_memoised_per_box_and_per_kind() -> None:
-    """A group's trace is kept under its box, coverage and alpha apart.
+def test_a_traced_group_is_memoised_per_box() -> None:
+    """A group's trace is kept under its box.
 
-    Only the kind asked for is composited and kept; a second ask on the same
-    box reads the memo, which is shown by planting a value in it.
+    A second ask on the same box reads the memo, which is shown by planting a
+    value in it.
     """
     psd = PSDImage.open(full_name("effects/group-stroke-off-canvas.psd"))
     group = next(layer for layer in psd if layer.name == "Inside")
@@ -320,13 +320,9 @@ def test_a_traced_group_is_memoised_per_box_and_per_kind() -> None:
         np.zeros((psd.height, psd.width, 1), dtype=np.float32),
     )
     box = group.bbox
-    shape = compositor._get_group_shape(group, box)
+    alpha = compositor._get_group_alpha(group, box)
     key = (id(group), box)
-    assert key in compositor._cache.group_shapes
-    assert key not in compositor._cache.group_alphas
-    planted = np.full_like(shape, 0.25)
-    compositor._cache.group_shapes[key] = planted
-    assert np.array_equal(compositor._get_group_shape(group, box), planted)
-    alpha = compositor._get_group_shape(group, box, alpha=True)
     assert key in compositor._cache.group_alphas
-    assert not np.array_equal(alpha, planted)
+    planted = np.full_like(alpha, 0.25)
+    compositor._cache.group_alphas[key] = planted
+    assert np.array_equal(compositor._get_group_alpha(group, box), planted)

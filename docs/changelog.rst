@@ -23,6 +23,15 @@ Changelog
   Photoshop does: brightness comes before contrast, as a gain on the shadows
   that rolls off into white (its inverse when negative), and an adjustment at
   zero leaves the pixels unchanged. Strong settings change the most
+- [fix] Stroke effects measure from the nearest boundary that an antialiased
+  pixel or a hard step states, in whole-pixel straight, diagonal and
+  knight's-move steps as Photoshop does, so on text a stroke's corners and its
+  edge round curves no longer reach a fraction of a pixel too far. Precise
+  outer and inner glows and chisel bevels share that distance field
+- [fix] A group's stroke effect is traced from how opaque its contents are,
+  not from what they cover, as Photoshop draws it: an outside stroke fills
+  the rest of each pixel of a translucent child instead of stopping at the
+  child's edge
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead

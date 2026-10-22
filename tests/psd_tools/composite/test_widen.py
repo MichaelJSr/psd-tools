@@ -217,7 +217,7 @@ _COMPOSITOR_CALLERS = frozenset(
         "_get_group",
         "_get_object",
         "_apply_clip_layers",
-        "_get_group_shape",
+        "_get_group_alpha",
     }
 )
 

@@ -139,6 +139,11 @@ _GRID_BYTES = 48
 # while a filled shape's boundary band fills enough of it that it does.
 _DENSE_EROSION_DENSITY = 0.15
 
+# The lengths of a diagonal and a knight's move, which with an axis move are
+# the steps :py:func:`_chamfer_length` measures in.
+_DIAGONAL = math.sqrt(2.0)
+_KNIGHT = math.sqrt(5.0)
+
 
 def _enum(desc: Descriptor, key: bytes) -> bytes:
     """The enum ``key`` names, or ``b""`` if the descriptor does not carry one.
@@ -346,7 +351,7 @@ def _prune_offsets(
     span: int,
     offsets: np.ndarray,
     lengths: np.ndarray,
-    partial_pad: np.ndarray,
+    stating_pad: np.ndarray,
     near_pad: np.ndarray,
     outward: bool,
 ) -> np.ndarray:
@@ -361,7 +366,7 @@ def _prune_offsets(
     of one: what it prunes could not have changed the answer.
 
     Most pixels resolve within a few offsets of their own unweighted nearest
-    partial pixel, so the working set thins fast on a smooth boundary --
+    stating pixel, so the working set thins fast on a smooth boundary --
     which is the common case, a circle or a diagonal edge on a canvas much
     bigger than the stroke. It still runs every offset within ``span`` for a
     pixel that never resolves, so this does not change the loop's worst case.
@@ -375,7 +380,7 @@ def _prune_offsets(
         if order.size == 0:
             break
         row, col = prows + down, pcols + across
-        states = partial_pad[row, col]
+        states = stating_pad[row, col]
         stated = near_pad[row, col]
         if outward:
             best = np.minimum(best, np.where(states, stated + length, np.inf))
@@ -398,14 +403,66 @@ def _prune_offsets(
     return result
 
 
+def _chamfer_length(down: np.ndarray, across: np.ndarray) -> np.ndarray:
+    """How far Photoshop measures an offset of ``down`` and ``across`` pixels.
+
+    The shortest path through whole-pixel moves (1, 0), (1, 1) and (2, 1),
+    mirrored to every octant and each at its own length: exact along those
+    directions and a little long between them, which is where Photoshop's
+    strokes stop short of a Euclidean one (``effects/outside-stroke.psd``,
+    ``effects/antialiased-stroke-edge.psd``).
+    """
+    major = np.maximum(np.abs(down), np.abs(across)).astype(np.float64)
+    minor = np.minimum(np.abs(down), np.abs(across)).astype(np.float64)
+    # Below the knight's slope the path takes axis and knight moves, above it
+    # knight and diagonal ones.
+    shallow = minor * _KNIGHT + (major - 2.0 * minor)
+    steep = (major - minor) * _KNIGHT + (2.0 * minor - major) * _DIAGONAL
+    return np.where(2.0 * minor <= major, shallow, steep).astype(np.float32)
+
+
+def _chamfer_transform(mask: np.ndarray) -> np.ndarray:
+    """:py:func:`_chamfer_length` from each set pixel to the nearest clear one.
+
+    What ``distance_transform_edt`` returns, in Photoshop's metric. Each pass
+    takes every row in turn from the one or two before it, then along itself
+    both ways, so it finds every path that never turns back up, and the
+    second pass, run bottom to top, every one that never turns back down;
+    the shortest path to a pixel is one or the other.
+    """
+    height, width = mask.shape
+    field = np.where(mask, np.inf, 0.0)
+    cols = np.arange(width, dtype=np.float64)
+    moves = ((1, 0, 1.0), (1, 1, _DIAGONAL), (1, 2, _KNIGHT), (2, 1, _KNIGHT))
+    for order in (range(height), range(height - 1, -1, -1)):
+        step = 1 if order.start == 0 else -1
+        for row in order:
+            line = field[row]
+            for down, across, length in moves:
+                before = row - step * down
+                if not 0 <= before < height or across >= width:
+                    continue
+                source = field[before] + length
+                if across == 0:
+                    np.minimum(line, source, out=line)
+                else:
+                    np.minimum(line[across:], source[:-across], out=line[across:])
+                    np.minimum(line[:-across], source[across:], out=line[:-across])
+            np.minimum(line, np.minimum.accumulate(line - cols) + cols, out=line)
+            back = np.minimum.accumulate((line + cols)[::-1])[::-1] - cols
+            np.minimum(line, back, out=line)
+    return field.astype(np.float32)
+
+
 def _nearest_boundary(
-    alpha: np.ndarray, partial: np.ndarray, near: np.ndarray, radius: float
+    alpha: np.ndarray, stating: np.ndarray, near: np.ndarray, radius: float
 ) -> np.ndarray:
     """The nearest boundary within ``radius``, as distance, negative inside.
 
-    Every partial pixel states one boundary, ``near`` from its own centre and
-    so up to half a pixel either side of it. A pixel with no coverage of its
-    own is ``min`` over those of ``|x - p| + near[p]`` -- the nearest
+    Every pixel in ``stating`` states one boundary, ``near`` from its own
+    centre and so up to half a pixel either side of it. A pixel that states
+    none is ``min`` over those of ``|x - p| + near[p]``, with ``|x - p|``
+    the :py:func:`_chamfer_length` of the offset -- the nearest
     *boundary*, which is not the nearest pixel stating one: the offsets span a
     pixel, so a pixel one further away can win. Taking the nearest pixel's
     word for it leaves the answer to whichever of two equidistant pixels a
@@ -414,15 +471,16 @@ def _nearest_boundary(
     value it renders.
 
     That minimum is a grey erosion of ``near`` by a cone -- ``scipy``'s
-    ``grey_erosion`` with a disc footprint and ``-length`` as the structuring
+    ``grey_erosion`` with a footprint of the offsets within ``radius`` and
+    ``-length`` as the structuring
     function, which computes it without a Python-level pass per offset. The
     dual, the nearest boundary from *inside*, is the same erosion of
     ``-near``, negated.
 
-    An erosion runs the disc footprint over every pixel of whatever it is
+    An erosion runs the footprint over every pixel of whatever it is
     given, so it only pays for itself where ``active`` -- the pixels an
     answer is wanted for -- is a healthy share of the region a crop bounding
-    the partial pixels would cover: a filled shape's boundary, where the band
+    the stating pixels would cover: a filled shape's boundary, where the band
     the footprint runs over is close to that box already. Where the boundary
     is a thin outline on a much bigger canvas -- a circle, an ellipse, a
     diagonal edge -- that box is close to the shape's own bounding box while
@@ -434,7 +492,7 @@ def _nearest_boundary(
     length, dropping each pixel out as soon as no offset still to come could
     improve its answer -- exactly, per the bound in its own docstring. A
     smooth boundary resolves most pixels within a handful of offsets of their
-    own nearest partial pixel, which is the common shape of this branch's
+    own nearest stating pixel, which is the common shape of this branch's
     input, but a pixel that never resolves still costs every offset within
     ``radius``: pruning cuts the constant this branch runs at, not the shape
     of its worst case, which stays the one the erosion branch exists to
@@ -453,43 +511,43 @@ def _nearest_boundary(
 
     # Beyond the reach of any boundary, and so of any band: infinitely far
     # out from a clear pixel and infinitely far in from an opaque one.
-    field = np.where(partial, near, np.where(alpha >= 1, -np.inf, np.inf)).astype(
+    field = np.where(stating, near, np.where(alpha >= 1, -np.inf, np.inf)).astype(
         np.float32
     )
-    active = (distance_transform_edt(~partial) <= radius) & ~partial
+    active = (distance_transform_edt(~stating) <= radius) & ~stating
     if not active.any():
         return field
 
     height, width = alpha.shape
     # An offset past the canvas's longest side reaches no pixel.
     span = math.ceil(min(radius, max(height, width) - 1))
-    rows_p, cols_p = np.nonzero(partial)
+    rows_p, cols_p = np.nonzero(stating)
     r0, r1 = max(rows_p.min() - span, 0), min(rows_p.max() + span + 1, height)
     c0, c1 = max(cols_p.min() - span, 0), min(cols_p.max() + span + 1, width)
     crop = (slice(r0, r1), slice(c0, c1))
     density = active.sum() / ((r1 - r0) * (c1 - c0))
 
     if density >= _DENSE_EROSION_DENSITY:
-        sub_partial, sub_near, sub_alpha, sub_active = (
-            partial[crop],
+        sub_stating, sub_near, sub_alpha, sub_active = (
+            stating[crop],
             near[crop],
             alpha[crop],
             active[crop],
         )
         grid = np.mgrid[-span : span + 1, -span : span + 1]
-        length = np.hypot(*grid).astype(np.float32)
+        length = _chamfer_length(*grid)
         kwargs = {
             "footprint": length <= radius,
             "structure": -length,
             "mode": "constant",
         }
         outward = grey_erosion(
-            np.where(sub_partial, sub_near, np.inf).astype(np.float32),
+            np.where(sub_stating, sub_near, np.inf).astype(np.float32),
             cval=np.inf,
             **kwargs,
         )
         inward = -grey_erosion(
-            np.where(sub_partial, -sub_near, np.inf).astype(np.float32),
+            np.where(sub_stating, -sub_near, np.inf).astype(np.float32),
             cval=np.inf,
             **kwargs,
         )
@@ -498,26 +556,26 @@ def _nearest_boundary(
         return field
 
     offsets = np.mgrid[-span : span + 1, -span : span + 1].reshape(2, -1).T
-    lengths = np.hypot(offsets[:, 0], offsets[:, 1]).astype(np.float32)
+    lengths = _chamfer_length(offsets[:, 0], offsets[:, 1])
     within = lengths <= radius
     offsets, lengths = offsets[within], lengths[within]
     ascending = np.argsort(lengths, kind="stable")
     offsets, lengths = offsets[ascending], lengths[ascending]
 
-    # partial's own pixels sit inside `crop` by construction (it is padded out
+    # stating's own pixels sit inside `crop` by construction (it is padded out
     # to `span` around their bounding box), and so does every active pixel --
     # nothing an offset lookup needs is outside it. Padding that crop, rather
     # than the whole canvas, is what keeps this branch's own memory use tied
     # to the shape's extent instead of the much bigger canvas around it.
-    sub_partial, sub_near, sub_alpha, sub_active = (
-        partial[crop],
+    sub_stating, sub_near, sub_alpha, sub_active = (
+        stating[crop],
         near[crop],
         alpha[crop],
         active[crop],
     )
     flat = np.flatnonzero(sub_active)
     rows, cols = np.unravel_index(flat, sub_active.shape)
-    partial_pad = np.pad(sub_partial, span, constant_values=False)
+    stating_pad = np.pad(sub_stating, span, constant_values=False)
     near_pad = np.pad(sub_near, span, constant_values=0.0)
     inside = (sub_alpha >= 1).ravel()[flat]
 
@@ -527,7 +585,7 @@ def _nearest_boundary(
         span,
         offsets,
         lengths,
-        partial_pad,
+        stating_pad,
         near_pad,
         outward=True,
     )
@@ -537,7 +595,7 @@ def _nearest_boundary(
         span,
         offsets,
         lengths,
-        partial_pad,
+        stating_pad,
         near_pad,
         outward=False,
     )
@@ -561,85 +619,94 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     ``effects/antialiased-stroke-edge.psd`` are the fixtures this is measured
     against (#799).
 
-    Coverage says nothing about an edge that has none, so a mask stepping
-    0 -> 1 keeps the exact Euclidean distance to the iso-contour, ``base``.
-    One mask can carry both -- a shape antialiased along one side and butted
-    against its own bounding box along another -- so the two are chosen
-    between per pixel, by which boundary is nearer. Seeding a single transform
-    from both instead costs the corners, where a feathered edge meets a hard
-    one.
+    A step from opaque straight to clear states a boundary too, half a pixel
+    from the centre of the pixel on either side of it. One mask can carry both --
+    a glyph antialiased round its curves and stepping hard along its stems --
+    and every pixel takes the nearest boundary any pixel states, of either
+    kind (``effects/antialiased-stroke-edge.psd``, where a partial edge meets
+    a hard one): :py:func:`_nearest_boundary` for the partial pixels, a
+    distance transform for the steps. What stays approximate is that a
+    pixel's ``near`` is applied along the line to that pixel rather than
+    along the boundary's own normal, which parts company with the truth
+    around a curve the way :py:func:`_distance_band` does when it paints the
+    arc.
 
-    A pixel outside the partial band takes the nearest of the boundaries the
-    band states, which :py:func:`_nearest_boundary` solves for outright. What
-    stays approximate is that a partial pixel's ``near`` is applied along the
-    line to that pixel rather than along the boundary's own normal, which
-    parts company with the truth around a curve the way
-    :py:func:`_distance_band` does when it paints the arc.
+    Distances are measured in Photoshop's metric, :py:func:`_chamfer_length`,
+    whatever kind of boundary they are measured from.
 
-    A mask that is flat at 0 or 1 has no boundary at all. That is not a case
-    to fall through: ``distance_transform_edt`` is undefined on an input with
-    no zeros and reports distances to a phantom feature off the array corner,
-    which a band paints as a wedge in the corner of the canvas. Being
-    uniformly infinitely far from the boundary leaves every band empty, which
-    is right. A mask flat at a *partial* value is not one of these -- every
-    pixel of it states a boundary, so it takes a stroke over all of it.
+    A mask that is flat at 0 or 1 has no boundary at all, and every pixel is
+    infinitely far from one, which leaves every band empty. A mask flat at a
+    *partial* value is not one of these -- every pixel of it states a
+    boundary, so it takes a stroke over all of it.
     """
     if reach is None:
         # No band named, so no bound: far enough that nothing is out of range.
         reach = float(math.hypot(*alpha.shape))
     _require_scipy("Stroke effects")
-    from scipy.ndimage import (  # type: ignore[import-untyped]  # noqa: PLC0415
-        distance_transform_edt,
-    )
 
     partial = (alpha > 0) & (alpha < 1)
-    # The boundary segments no coverage describes: a step from opaque straight
-    # to clear. Every pixel of a smoothly antialiased shape has coverage, so
-    # this is usually empty and the iso-contour below is never computed --
-    # which is what keeps the field to one transform rather than three.
-    hard = (alpha >= 1) & _grow(alpha <= 0)
-    hard |= (alpha <= 0) & _grow(alpha >= 1)
-
-    if not partial.any() or hard.any():
-        # ``distance_transform_edt`` measures to the nearest pixel of the other
-        # class, so the two pixels straddling the boundary both come back 1.0
-        # rather than the 0.5 their centres really sit at. The magnitude is
-        # shrunk to put the boundary back between them; subtracting 0.5
-        # outright would be right outside and a full pixel wrong inside, where
-        # the sign is negative.
+    if not partial.any():
+        # Measured to the nearest pixel of the other class, the two pixels
+        # straddling the boundary both come back 1.0 rather than the 0.5
+        # their centres really sit at. The magnitude is shrunk to put the
+        # boundary back between them; subtracting 0.5 outright would be right
+        # outside and a full pixel wrong inside, where the sign is negative.
         inside = alpha >= 0.5
         if inside.all():
-            base = np.full(alpha.shape, -np.inf, dtype=np.float32)
-        elif not inside.any():
-            base = np.full(alpha.shape, np.inf, dtype=np.float32)
-        else:
-            base = distance_transform_edt(~inside).astype(np.float32)
-            base -= distance_transform_edt(inside).astype(np.float32)
-            base = np.sign(base) * np.maximum(np.abs(base) - 0.5, 0.0)
-        if not partial.any():
-            return base
+            return np.full(alpha.shape, -np.inf, dtype=np.float32)
+        if not inside.any():
+            return np.full(alpha.shape, np.inf, dtype=np.float32)
+        base = _chamfer_transform(~inside) - _chamfer_transform(inside)
+        return np.sign(base) * np.maximum(np.abs(base) - 0.5, 0.0)
 
-    # What a partial pixel states, and what a pixel with none of its own takes
-    # from the nearest boundary any of them states.
-    near = (0.5 - alpha).astype(np.float32)
-    stated = _nearest_boundary(alpha, partial, near, reach)
+    # The pixels on either side of a step from opaque straight to clear.
+    hard = (alpha >= 1) & _grow(alpha <= 0)
+    hard |= (alpha <= 0) & _grow(alpha >= 1)
+    # What each states: a partial pixel by its coverage, a hard one at the
+    # edge it shares with the other side.
+    near = (0.5 - np.clip(alpha, 0.0, 1.0)).astype(np.float32)
+    field = _nearest_boundary(alpha, partial, near, reach)
     if not hard.any():
-        return stated
+        return field
 
-    # ``base`` is exact along a hard step, and is the better answer for any
-    # pixel nearer one of them than it is to the partial band.
-    distance = distance_transform_edt(~partial)
-    to_hard = distance_transform_edt(~hard)
-    field = np.where(partial, near, np.where(distance <= to_hard, stated, base))
-    return field.astype(np.float32)
+    # A hard step states the same half pixel all along it, so the nearest one
+    # is a distance transform, which unlike the erosion does not scale with
+    # ``reach``. Nothing past ``reach`` of the steps is in range, so a crop
+    # that far round them holds every path the transform needs.
+    height, width = alpha.shape
+    span = math.ceil(reach)
+    rows, cols = np.nonzero(hard)
+    crop = (
+        slice(max(rows.min() - span, 0), min(rows.max() + span + 1, height)),
+        slice(max(cols.min() - span, 0), min(cols.max() + span + 1, width)),
+    )
+    sub_hard, sub_alpha = hard[crop], alpha[crop]
+    inside = sub_alpha >= 1
+    to_opaque = _chamfer_transform(~(sub_hard & inside))
+    to_clear = _chamfer_transform(~(sub_hard & ~inside))
+    opaque_ok, clear_ok = to_opaque <= reach, to_clear <= reach
+    outward = np.minimum(
+        np.where(opaque_ok, to_opaque - 0.5, np.inf),
+        np.where(clear_ok, to_clear + 0.5, np.inf),
+    )
+    inward = np.maximum(
+        np.where(opaque_ok, -0.5 - to_opaque, -np.inf),
+        np.where(clear_ok, 0.5 - to_clear, -np.inf),
+    )
+    sub_field = field[crop]
+    stated = np.where(
+        inside, np.maximum(sub_field, inward), np.minimum(sub_field, outward)
+    )
+    field[crop] = np.where(sub_hard | partial[crop], near[crop], stated)
+    return field
 
 
 def _distance_band(distance: np.ndarray, lo: float, hi: float) -> np.ndarray:
     """Coverage of the band between ``lo`` and ``hi``, antialiased.
 
-    A distance field has unit gradient, so a linear ramp across one pixel is the
-    exact area of a pixel cut by a straight edge, and a fractional width is not
-    quantized. Where the band's edge curves, the ramp only approximates it.
+    The ramp runs linearly across one pixel of the distance, as Photoshop
+    draws it, so a fractional width is not quantized; along an axis that is
+    the exact area of a pixel cut by a straight edge.
     """
     return np.clip(hi - distance + 0.5, 0, 1) * np.clip(distance - lo + 0.5, 0, 1)
 
