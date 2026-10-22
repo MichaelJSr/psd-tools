@@ -1088,13 +1088,44 @@ def test_a_pixel_layers_overlay_is_laid_out_on_its_over_half_opaque_pixels() -> 
 
 def test_an_overlay_keeps_its_layout_without_pixels_over_half_opaque() -> None:
     """A layer under half opaque throughout, and a type layer, keep the box given."""
-    psd, layer = _soft_edged_layer()
+    psd, _ = _soft_edged_layer()
     faint = PixelLayer.frompil(Image.new("RGBA", (6, 6), (255, 255, 255, 127)), psd)
     assert _opaque_bounds(faint, faint.bbox) == faint.bbox
     text = next(
         x for x in PSDImage.open(full_name("layer_effects.psd")) if x.kind == "type"
     )
     assert _opaque_bounds(text, (1, 2, 3, 4)) == (1, 2, 3, 4)
+
+
+def test_an_overlay_keeps_its_layout_when_its_pixels_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, layer = _soft_edged_layer()
+
+    def unreadable(*args: object, **kwargs: object) -> None:
+        raise ValueError("corrupt channel")
+
+    monkeypatch.setattr(layer, "numpy", unreadable)
+    assert _opaque_bounds(layer, layer.bbox) == layer.bbox
+
+
+def test_an_overlay_not_aligned_with_its_layer_leaves_its_pixels_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    psd, layer = _soft_edged_layer()
+    desc = _gradient(angle=90.0)
+    desc[Key.Alignment] = Bool(False)
+    expected, _ = paint.draw_gradient_fill(
+        layer.bbox, psd.color_mode, desc, psd.viewbox
+    )
+
+    def unread(*args: object, **kwargs: object) -> None:
+        raise AssertionError("read the layer's pixels")
+
+    monkeypatch.setattr(layer, "numpy", unread)
+    color, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
+    assert color is not None and expected is not None
+    assert np.array_equal(color, expected)
 
 
 def test_a_gradient_stroke_effect_not_aligned_with_its_layer_is_laid_out_on_the_document() -> (

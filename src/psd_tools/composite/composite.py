@@ -334,12 +334,16 @@ def _opaque_bounds(layer: Layer, layout: _Box) -> _Box:
     """The box of a pixel or smart object layer's pixels over half opaque.
 
     Photoshop lays such a layer's gradient overlay out on it, so a soft edge
-    does not stretch the ramp. Any other layer, and one with no pixel that
-    opaque, keeps ``layout``.
+    does not stretch the ramp. Masks are not read. Any other layer, one with
+    no pixel that opaque, and one whose pixels cannot be read keep ``layout``.
     """
     if not isinstance(layer, (PixelLayer, SmartObjectLayer)):
         return layout
-    shape = layer.numpy("shape")
+    try:
+        shape = layer.numpy("shape")
+    except _UNREADABLE as error:
+        logger.debug("Cannot read the shape of %s: %s", layer, error)
+        return layout
     if shape is None:
         return layout
     opaque = shape[..., 0] > 0.5
@@ -359,11 +363,14 @@ def _opaque_bounds(layer: Layer, layout: _Box) -> _Box:
 def _draw_gradient_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
+    # With Algn off the ramp spans the document, so the pixels go unread.
+    if bool(descriptor.get(Key.Alignment, True)):
+        layout = _opaque_bounds(layer, layout)
     return paint.draw_gradient_fill(
         box,
         layer._psd.color_mode,
         descriptor,
-        paint.gradient_anchor(layer._psd, descriptor, _opaque_bounds(layer, layout)),
+        paint.gradient_anchor(layer._psd, descriptor, layout),
     )
 
 
