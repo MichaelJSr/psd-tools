@@ -196,3 +196,19 @@ def test_a_mask_combined_with_a_vector_mask_is_not_moved() -> None:
         mask.offset = (0, 0)
     assert mask.bbox == (15, -1, 33, 9)
     assert not psd.is_updated()
+
+
+@pytest.mark.parametrize("name", ["Ellipse 1", "Rounded Rectangle 1"])
+def test_a_mask_drawn_from_a_vector_mask_is_not_moved(name: str) -> None:
+    # Without real-mask fields the stored mask renders the vector path alone:
+    # a shape layer's, and a pixel layer's with no user mask.
+    psd = PSDImage.open(full_name("clipping-mask2.psd"))
+    layer = next(x for x in psd.descendants() if x.name == name)
+    mask = layer.mask
+    assert layer.has_vector_mask() and mask is not None
+    assert mask.data.real_flags is None
+    bbox = mask.bbox
+    with pytest.raises(ValueError, match="vector mask"):
+        mask.left += 10
+    assert mask.bbox == bbox
+    assert not psd.is_updated()

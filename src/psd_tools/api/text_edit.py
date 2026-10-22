@@ -194,12 +194,12 @@ def add_font(
     fonts = _font_set(layer.resource_dict)
     if fonts is None:
         raise ValueError("the layer's EngineData has no FontSet")
-    names = [str(f["Name"].value) for f in fonts]
+    names = _font_names(fonts)
     if name in names:
         return names.index(name)
     entry = _font_entry(name, font_type, script, synthetic)
     shared = _font_set(layer.document_resources)
-    if shared is not None and name not in [str(f["Name"].value) for f in shared]:
+    if shared is not None and name not in _font_names(shared):
         shared.append(copy.deepcopy(entry))
     fonts.append(entry)
     layer.__dict__.pop("_typesetting", None)
@@ -210,6 +210,10 @@ def add_font(
 def _font_set(resources: engine_data.Dict) -> engine_data.List | None:
     fonts = resources.get("FontSet")
     return fonts if isinstance(fonts, engine_data.List) else None
+
+
+def _font_names(fonts: engine_data.List | None) -> list[str]:
+    return [str(f["Name"].value) for f in fonts or ()]
 
 
 def _font_entry(
@@ -296,9 +300,7 @@ def _values(
     values: dict[str, Any] = {}
     for key, value in keys.items():
         if key == "Font" and isinstance(value, str):
-            names = [
-                str(f["Name"].value) for f in layer.resource_dict.get("FontSet", [])
-            ]
+            names = _font_names(_font_set(layer.resource_dict))
             if value not in names:
                 raise ValueError(
                     f"font {value!r} is not in the layer's FontSet {names}; "

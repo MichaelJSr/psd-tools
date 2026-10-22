@@ -273,6 +273,20 @@ def test_a_type_layer_copied_across_documents_drops_its_text_index() -> None:
     ]
 
 
+def test_a_type_layer_moved_across_documents_drops_its_text_index() -> None:
+    # The deprecated cross-document move, the copy's counterpart.
+    source = PSDImage.open(full_name("layer-edit.psd"))
+    text = next(x for x in source if x.name == "Text")
+    assert isinstance(text, Group)
+    dest = PSDImage.open(full_name("layers/type-layer.psd"))
+    dest.append(text)
+    assert [cast(TypeLayer, x)._data.text_data.get(b"TextIndex") for x in text] == [
+        None,
+        None,
+    ]
+    assert cast(TypeLayer, dest[0])._data.text_data.get(b"TextIndex") == 0
+
+
 def test_a_type_layer_in_a_copied_group_drops_its_text_index() -> None:
     source = PSDImage.open(full_name("layer-edit.psd"))
     text = next(x for x in source if x.name == "Text")

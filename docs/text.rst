@@ -65,8 +65,9 @@ A document Photoshop CC wrote keeps a second copy of every layer's text in
 its ``Txt2`` block, and a layer's ``TextIndex`` points Photoshop at it in
 place of the layer's own ``EngineData``. An edited layer drops its
 ``TextIndex``, so Photoshop opens it with the edit; so does a type layer
-:py:meth:`~psd_tools.api.layers.Layer.copy_to` takes into another document,
-whose index would name one of that document's layers.
+copied into another document by
+:py:meth:`~psd_tools.api.layers.Layer.copy_to`, or moved there, whose index
+would name one of that document's layers.
 
 Rendering
 ---------

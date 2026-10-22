@@ -8,13 +8,14 @@ Changelog
   of another layer's, from any document, patterns included;
   ``Layer.clear_effects()`` removes them.
 - [api] ``Mask.offset``, ``Mask.left`` and ``Mask.top`` are writable: setting
-  them moves a pixel mask without moving its layer.
+  them moves a pixel mask without moving its layer. A layer with a vector
+  mask, shape layers included, raises ``ValueError``.
 - [api] ``TypeLayer.add_font()`` adds a face to the layer's ``FontSet`` for
   ``set_span_style(Font=...)``.
 - [api] ``PSDImage.save()`` takes ``update_preview=False`` to keep the stored
   preview after an edit. The default is unchanged.
 - [fix] Photoshop shows a type layer's edits from ``set_text()`` and
-  ``set_span_style()``, and the text of a type layer ``copy_to()`` took into
+  ``set_span_style()``, and the text of a type layer copied or moved into
   another document; such a layer drops its ``TextIndex``.
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on

@@ -110,7 +110,7 @@ from PIL import Image, ImageChops
 import psd_tools.psd.engine_data as engine_data
 from psd_tools.api import numpy_io, pil_io, text_edit
 from psd_tools.api._resources import ResourceTransfer
-from psd_tools.api.effects import Effects
+from psd_tools.api.effects import _EFFECTS_TAGS, Effects
 from psd_tools.api.mask import Mask
 from psd_tools.api.protocols import GroupMixinProtocol, LayerProtocol, PSDProtocol
 from psd_tools.api.shape import Origination, Stroke, VectorMask
@@ -1426,8 +1426,9 @@ class Layer(LayerProtocol):
         narrowing a 32-bit layer tone-maps as Photoshop does. The patterns and
         linked smart objects it uses are copied into the destination document,
         patterns unconverted to its colour mode. A type layer copied into
-        another document drops its ``TextIndex``. Clipping is positional: the layers clipped to this one are not
-        copied, and a copy keeps its own clipping flag.
+        another document drops its ``TextIndex``. Clipping is positional: the
+        layers clipped to this one are not copied, and a copy keeps its own
+        clipping flag.
 
         :param group: The destination :py:class:`~psd_tools.api.layers.Group` or
             document.
@@ -1608,12 +1609,7 @@ class Layer(LayerProtocol):
 
 
 _LAYERLESS_MODES = (ColorMode.BITMAP, ColorMode.INDEXED, ColorMode.MULTICHANNEL)
-_EFFECT_BLOCK_TAGS = (
-    Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
-    Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V0,
-    Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1,
-    Tag.EFFECTS_LAYER,
-)
+_EFFECT_BLOCK_TAGS = (*_EFFECTS_TAGS, Tag.EFFECTS_LAYER)
 
 
 def _insertion_index(parent: "GroupMixin", index: Any) -> int:
@@ -2195,6 +2191,8 @@ class GroupMixin(GroupMixinProtocol, Protocol):
             if layer._psd != self._psd:
                 if id(layer) in converted:
                     layer._apply_reencoded(converted[id(layer)])
+                if isinstance(layer, TypeLayer) and layer._type_data is not None:
+                    text_edit._drop_text_index(layer)
                 transfer.add(layer._psd, _layer_records(layer))
                 layer.__dict__.pop("_smart_object", None)
                 layer._psd = self._psd

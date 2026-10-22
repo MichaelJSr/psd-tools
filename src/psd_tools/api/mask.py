@@ -151,8 +151,9 @@ class Mask(MaskProtocol):
         left unchanged. The real user mask moves with the pixel mask.
 
         :raises ValueError: if ``value`` is not two integers, or the layer
-            also has a vector mask, whose combination with the pixel mask a
-            move would leave stale.
+            has a vector mask. Its stored mask is then drawn from the vector
+            mask, alone or combined with the user mask, and a move would
+            leave the two apart.
         """
         return self.left, self.top
 
@@ -165,11 +166,9 @@ class Mask(MaskProtocol):
         dx, dy = left - self.left, top - self.top
         if not (dx or dy):
             return
+        if self._layer.has_vector_mask():
+            raise ValueError("Cannot move the mask of a layer with a vector mask")
         data = self._data
-        if data.real_flags is not None and self._layer.has_vector_mask():
-            raise ValueError(
-                "Cannot move a pixel mask that is combined with a vector mask"
-            )
         data.left, data.right = data.left + dx, data.right + dx
         data.top, data.bottom = data.top + dy, data.bottom + dy
         if data.real_left is not None and data.real_right is not None:

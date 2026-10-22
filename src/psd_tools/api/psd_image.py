@@ -451,7 +451,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         Mark the document's stored preview as stale.
 
         While marked, :py:meth:`save` regenerates the flattened preview from
-        the layers, :py:meth:`composite` re-renders instead of returning the
+        the layers unless given ``update_preview=False``,
+        :py:meth:`composite` re-renders instead of returning the
         stored preview, and :py:meth:`Layer.composite()
         <psd_tools.api.layers.Layer.composite>` redraws vectors instead of
         using a layer's stored pixels.
