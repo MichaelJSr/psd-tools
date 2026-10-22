@@ -1048,10 +1048,9 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
                 if _has_filters(blocks):
                     self._filter_records.append(record)
             else:
-                for key in adjustments.TYPES.keys():
-                    if key in blocks:
-                        layer = adjustments.TYPES[key](current_group, record, channels)
-                        break
+                kind = _adjustment_kind(blocks)
+                if kind is not None:
+                    layer = kind(current_group, record, channels)
 
             # If nothing applies, this is either a shape or pixel layer.
             shape_condition = record.flags.pixel_data_irrelevant and (
@@ -1148,3 +1147,13 @@ def _build_record_tree(
         channel_image_data.append(layer._channels)
 
     return (layer_records, channel_image_data)
+
+
+def _adjustment_kind(blocks: TaggedBlocks) -> type[layers.Layer] | None:
+    """Return the adjustment or fill layer class the blocks select, or `None`."""
+    keys = [key for key in adjustments.TYPES if key in blocks]
+    # Other adjustments carry CgEd too (a Curves preset's name), so it selects
+    # Brightness/Contrast only when no other adjustment block is present.
+    if len(keys) > 1 and Tag.CONTENT_GENERATOR_EXTRA_DATA in keys:
+        keys.remove(Tag.CONTENT_GENERATOR_EXTRA_DATA)
+    return adjustments.TYPES[keys[0]] if keys else None

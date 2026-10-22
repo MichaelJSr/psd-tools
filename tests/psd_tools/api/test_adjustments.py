@@ -1,14 +1,18 @@
+import io
 import logging
 
 import pytest
 
 from psd_tools.api import adjustments
 from psd_tools.api.adjustments import GradientFill, PatternFill, SolidColorFill
+from psd_tools.api.layers import AdjustmentLayer
 from psd_tools.api.psd_image import PSDImage
+from psd_tools.constants import Tag
 from psd_tools.psd.adjustments import Curves as CurvesData
 from psd_tools.psd.adjustments import CurvesExtraMarker
 from psd_tools.psd.adjustments import Levels as LevelsData
 from psd_tools.psd.descriptor import Descriptor, Integer, String
+from psd_tools.psd.document import PSD
 
 from ..utils import full_name
 
@@ -70,6 +74,46 @@ def test_curves_without_extra_records_reads_none(
     assert isinstance(layer, adjustments.Curves)
     monkeypatch.setattr(layer, "_data", CurvesData(version=4))
     assert layer.extra is None
+
+
+def _with_preset_block(filename: str) -> PSDImage:
+    """Open `filename` with a Curves-preset CgEd block added to its first layer."""
+    with open(full_name(filename), "rb") as f:
+        psd = PSD.read(f)
+    layer_info = psd.layer_and_mask_information.layer_info
+    assert layer_info is not None
+    layer_info.layer_records[0].tagged_blocks.set_data(
+        Tag.CONTENT_GENERATOR_EXTRA_DATA,
+        items={
+            b"Vrsn": Integer(1),
+            b"curvesPresetKind": Integer(2),
+            b"curvesPresetFileName": String("Negative (RGB)"),
+        },
+    )
+    buffer = io.BytesIO()
+    psd.write(buffer)
+    buffer.seek(0)
+    return PSDImage.open(buffer)
+
+
+@pytest.mark.parametrize(
+    "filename, kind, key",
+    [
+        ("layers/curves.psd", adjustments.Curves, Tag.CURVES),
+        ("layers/levels.psd", adjustments.Levels, Tag.LEVELS),
+        ("layers/hue-saturation.psd", adjustments.HueSaturation, Tag.HUE_SATURATION),
+        ("layers/black-and-white.psd", adjustments.BlackAndWhite, Tag.BLACK_AND_WHITE),
+        ("layers/gradient-map.psd", adjustments.GradientMap, Tag.GRADIENT_MAP),
+    ],
+)
+def test_an_adjustment_with_a_cged_block_keeps_its_kind(
+    filename: str, kind: type[AdjustmentLayer], key: Tag
+) -> None:
+    layer = _with_preset_block(filename)[0]
+    assert Tag.CONTENT_GENERATOR_EXTRA_DATA in layer.tagged_blocks
+    assert type(layer) is kind
+    assert isinstance(layer, AdjustmentLayer)
+    assert layer._data is layer.tagged_blocks.get_data(key)
 
 
 def test_exposure(psd: PSDImage) -> None:

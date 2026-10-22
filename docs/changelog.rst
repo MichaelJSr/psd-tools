@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
+  layer set from a preset does, is read as its own adjustment instead of as a
+  Brightness/Contrast at 0/0 that left the image unchanged. Only layers that
+  carry both blocks change
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead
