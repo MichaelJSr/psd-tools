@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A layer or group whose Blending Options > Channels leaves a colour
+  channel out composites into the other channels only: the excluded one keeps
+  what is beneath, and over transparency gets coverage but no colour. Files
+  that leave every channel checked are unchanged
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead
