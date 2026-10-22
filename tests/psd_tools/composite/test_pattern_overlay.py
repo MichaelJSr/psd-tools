@@ -11,7 +11,7 @@ from psd_tools.api.layers import Layer
 from psd_tools.composite import paint
 from psd_tools.composite.composite import _draw_pattern_overlay, _style_bbox
 from psd_tools.constants import Tag
-from psd_tools.psd.descriptor import Bool, Descriptor, Double
+from psd_tools.psd.descriptor import Bool, Descriptor, Double, String
 
 from ..utils import full_name
 
@@ -169,11 +169,17 @@ def test_a_right_angle_turns_the_tiles_about_the_origin(
     assert np.array_equal(drawn, np.tile(panel, reps)[:150, :200])
 
 
-def test_a_non_finite_pattern_angle_is_rejected() -> None:
+@pytest.mark.parametrize(
+    "angle", [Double(float("inf")), Double(float("nan")), String("left")]
+)
+def test_an_unreadable_pattern_angle_leaves_the_tiles_unturned(angle: object) -> None:
+    """A fill layer's draw has no guard, so the angle cannot raise."""
     psd, _, desc = _overlay()
-    desc[b"Angl"] = Double(float("inf"))
-    with pytest.raises(ValueError, match="not finite"):
-        paint.draw_pattern_fill(psd.viewbox, psd, desc)
+    expected, _ = paint.draw_pattern_fill(psd.viewbox, psd, desc)
+    desc[b"Angl"] = angle
+    drawn, _ = paint.draw_pattern_fill(psd.viewbox, psd, desc)
+    assert drawn is not None and expected is not None
+    assert np.array_equal(drawn, expected)
 
 
 def test_an_enlarged_pattern_keeps_its_samples_on_the_origin() -> None:

@@ -360,11 +360,10 @@ def _turn_panel(panel: np.ndarray, desc: Descriptor) -> np.ndarray:
     """The panel turned counter-clockwise by ``Angl``, a multiple of 90 degrees.
 
     Turned about the tiling's origin, the tiles are the turned panel laid
-    from that origin. Any other angle is left unturned.
+    from that origin. Any other angle, or one that is not a finite number,
+    is left unturned.
     """
-    angle = float(desc.get(Key.Angle, 0.0))
-    if not math.isfinite(angle):
-        raise ValueError("Pattern angle is not finite.")
+    angle = _finite(desc, Key.Angle, 0.0)
     turns = angle / 90.0
     if turns != round(turns):
         logger.debug("Pattern angle %s is not a right angle; not applied", angle)
