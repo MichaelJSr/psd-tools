@@ -867,6 +867,34 @@ def _content_bbox(
     return bbox
 
 
+# PROTO(speed): local-box compositing switch and the largest share of the
+# viewport a box may cover before the layer goes on the whole viewport.
+import os as _os
+
+_LOCAL_BOXES = _os.environ.get("PSD_LOCAL_BOXES", "1") == "1"
+_LOCAL_SHARE = float(_os.environ.get("PSD_LOCAL_SHARE", "0.6"))
+
+
+def _box_safe(layer: Layer, cache: "_PassCache") -> bool:
+    """Whether everything ``layer`` paints stays inside its paint box.
+
+    An adjustment rewrites the canvas wherever its mask reaches, and a
+    knockout reads a backdrop; a group holding either is composited whole.
+    """
+    memo = cache.__dict__.setdefault("box_safe", {})
+    known = memo.get(id(layer))
+    if known is not None:
+        return known
+    if isinstance(layer, AdjustmentLayer) or _read_knockout(layer):
+        safe = False
+    elif layer.is_group():
+        safe = all(_box_safe(child, cache) for child in cast(GroupMixin, layer))
+    else:
+        safe = True
+    memo[id(layer)] = safe
+    return safe
+
+
 def composite_pil(
     layer: Layer | PSDImage,
     color: float | Sequence[float] | np.ndarray,
@@ -2255,11 +2283,64 @@ class Compositor:
             return
         excluded = _excluded_channels(layer, self._channels)
         if not excluded:
+            box = self._local_box(layer) if _LOCAL_BOXES else None
+            if box is not None:
+                self._apply_in_box(layer, box)
+                return
             self._apply_layer(layer)
             return
         held = self._hold_channels(excluded, clip_compositing)
         self._apply_layer(layer)
         self._restore_channels(held)
+
+    # PROTO(speed): composite a layer on the box it can paint, not the viewport.
+    def _local_box(self, layer: Layer) -> tuple[int, int, int, int] | None:
+        """The box ``layer`` paints within, when compositing it there is safe."""
+        if isinstance(layer, AdjustmentLayer) or not _box_safe(layer, self._cache):
+            return None
+        box = utils.intersect(
+            self._viewport, _paint_bbox(layer, self._cache.content_bboxes)
+        )
+        if box == (0, 0, 0, 0):
+            return None
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        if area > _LOCAL_SHARE * self.width * self.height:
+            return None
+        return box
+
+    def _apply_in_box(self, layer: Layer, box: tuple[int, int, int, int]) -> None:
+        """:py:meth:`_apply_layer` on ``box``; the canvases outside it stay as they are."""
+        x0, y0 = self._viewport[0], self._viewport[1]
+        sl = (slice(box[1] - y0, box[3] - y0), slice(box[0] - x0, box[2] - x0))
+        sub = object.__new__(Compositor)
+        sub.__dict__.update(self.__dict__)
+        sub._viewport = box
+        for name in ("_color_0", "_alpha_0", "_color", "_alpha", "_alpha_g", "_shape_g"):
+            setattr(sub, name, getattr(self, name)[sl])
+        if self._enclosing is not None:
+            sub._enclosing = _Isolation(
+                alpha=self._enclosing.alpha[sl],
+                backdrop_color=self._enclosing.backdrop_color[sl],
+                backdrop_alpha=self._enclosing.backdrop_alpha[sl],
+            )
+        parent_resolve = self._resolve_document_backdrop
+
+        def document_backdrop() -> tuple[np.ndarray, np.ndarray] | None:
+            resolved = parent_resolve()
+            return None if resolved is None else (resolved[0][sl], resolved[1][sl])
+
+        sub._document_backdrop_fn = document_backdrop
+        sub._document_backdrop_resolved = False
+        sub._document_backdrop = None
+        before = {name: getattr(sub, name) for name in ("_color", "_alpha", "_alpha_g", "_shape_g")}
+        sub._apply_layer(layer)
+        for name, old in before.items():
+            new = getattr(sub, name)
+            if new is old:
+                continue
+            canvas = getattr(self, name).copy()
+            canvas[sl] = new
+            setattr(self, name, canvas)
 
     def _apply_layer(self, layer: Layer) -> None:
         """Composite an accepted layer, its effects and its clip layers."""
