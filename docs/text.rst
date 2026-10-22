@@ -40,7 +40,8 @@ Assigning :py:attr:`~psd_tools.api.layers.TypeLayer.text` or calling
 :py:meth:`~psd_tools.api.layers.TypeLayer.set_text` replaces the text and
 re-fits the style runs: the unchanged prefix and suffix keep their styles,
 replaced text takes the style of the first character it replaces, inserted
-text continues the run before it, and paragraphs are rebuilt from ``'\r'``.
+text continues the run before it, and paragraph runs are rebuilt to end at
+each ``'\r'`` and each forced line break ``'\x03'``.
 :py:meth:`~psd_tools.api.layers.TypeLayer.set_span_style` and
 :py:meth:`~psd_tools.api.layers.TypeLayer.set_run_style` write
 ``StyleSheetData`` keys on a range of characters::
@@ -52,6 +53,16 @@ text continues the run before it, and paragraphs are rebuilt from ``'\r'``.
 Edits never render. Until :py:meth:`~psd_tools.api.layers.TypeLayer.rasterize`
 runs, the layer's pixels, ``composite()`` and a saved file still show
 Photoshop's raster of the old text.
+
+A layer's text is also stored in its story in the document's ``Txt2``
+block (the layer's ``TextIndex`` is the story's index), and that story is
+what Photoshop reads: it rebuilds the layer's own EngineData from it on
+save. Every edit above writes the story too, its glyph layout left for
+Photoshop to redo; a style key with no story feature raises
+``ValueError``. :py:attr:`~psd_tools.api.layers.TypeLayer.story_text`
+reads the story and :py:meth:`~psd_tools.api.layers.TypeLayer.sync_story`
+brings a stale one (a file edited by an older version) back to the
+layer's text.
 
 Rendering
 ---------

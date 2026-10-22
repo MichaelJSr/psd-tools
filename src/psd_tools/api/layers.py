@@ -3138,9 +3138,9 @@ class TypeLayer(Layer):
         Replace the text, keeping the character styles.
 
         ``keep="runs"`` keeps the runs of the unchanged prefix and suffix and
-        gives the replaced middle the style at the edit start; paragraphs are
-        rebuilt from ``'\r'``, a new one inheriting the paragraph the edit
-        started in. ``keep="single"`` collapses the styles to the first run.
+        gives the replaced middle the style at the edit start; paragraph runs
+        are rebuilt to end at each ``'\r'`` and ``'\x03'``, a new one
+        inheriting the paragraph the edit started in. ``keep="single"`` collapses the styles to the first run.
         The last paragraph's ``'\r'`` is added, so a ``text`` that ends in
         one gains an empty paragraph. The pixels are untouched until
         :py:meth:`rasterize`.
@@ -3175,6 +3175,25 @@ class TypeLayer(Layer):
     ) -> None:
         """:py:meth:`set_span_style` over style run ``index``."""
         text_edit.set_run_style(self, index, fill=fill, **keys)
+
+    @property
+    def story_text(self) -> str | None:
+        r"""
+        Text of the layer's story in the document's Txt2 block.
+
+        The final ``'\r'`` is included; None without a story. Photoshop
+        reads this text, not :py:attr:`text`.
+        """
+        return text_edit.story_text(self)
+
+    def sync_story(self) -> bool:
+        """
+        Bring the layer's Txt2 story to the layer's text.
+
+        The runs are spliced as :py:meth:`set_text` does; True when the story
+        changed.
+        """
+        return text_edit.sync_story(self)
 
     def rasterize(
         self, fonts: "FontMap | None" = None, options: "Options | None" = None
