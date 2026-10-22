@@ -1094,6 +1094,41 @@ def test_composite_pil_force_keeps_cmyk_alpha_reachable() -> None:
     assert np.array_equal(np.asarray(forced)[:, :, 3], lazy_alpha)
 
 
+def test_composite_pil_rounds_to_the_nearest_byte() -> None:
+    """Colour and alpha leave the compositor rounded, as Photoshop's export is."""
+    psd = PSDImage.open(full_name("gradient-styles.psd"))
+    image = psd.composite(ignore_preview=True, force=True, apply_icc=False)
+    assert isinstance(image, Image.Image)
+    assert image.mode == "RGBA"
+    color, _, alpha = composite(psd, force=True)
+    exact = 255 * np.concatenate((color, alpha), axis=2)
+    pixels = np.asarray(image)
+    assert np.array_equal(pixels, np.rint(exact).astype(np.uint8))
+    assert not np.array_equal(pixels, exact.astype(np.uint8))
+
+
+def test_composite_pil_rounds_the_delayed_alpha_to_the_nearest_byte() -> None:
+    """CMYK hands its alpha to ``post_process()`` as a plane, rounded too."""
+    psd = PSDImage.open(full_name("adjustments/levels_cmyk.psd"))
+    color, _, alpha = composite(psd, force=True)
+
+    plain = psd.composite(ignore_preview=True, force=True, apply_icc=False)
+    assert isinstance(plain, Image.Image)
+    assert plain.mode == "CMYK"
+    ink = 255 * color
+    # post_process() inverts CMYK on the way out.
+    assert np.array_equal(np.asarray(plain), 255 - np.rint(ink).astype(np.uint8))
+    assert not np.array_equal(np.asarray(plain), 255 - ink.astype(np.uint8))
+
+    profiled = psd.composite(ignore_preview=True, force=True)
+    assert isinstance(profiled, Image.Image)
+    assert profiled.mode == "RGBA"
+    exact = 255 * alpha[:, :, 0]
+    planes = np.asarray(profiled)[:, :, 3]
+    assert np.array_equal(planes, np.rint(exact).astype(np.uint8))
+    assert not np.array_equal(planes, exact.astype(np.uint8))
+
+
 def test_composite_layer_filter() -> None:
     psd = PSDImage.open(full_name("colormodes/4x4_8bit_rgba.psd"))
     # Check layer_filter.
