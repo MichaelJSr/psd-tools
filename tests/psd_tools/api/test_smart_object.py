@@ -4,12 +4,20 @@ from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.smart_object import SmartObject
-from psd_tools.constants import LinkedLayerType
+from psd_tools.compression import compress
+from psd_tools.constants import Compression, LinkedLayerType, Tag
+from psd_tools.psd.descriptor import Bool, Descriptor, List
+from psd_tools.psd.filter_effects import (
+    FilterEffect,
+    FilterEffectChannel,
+    FilterEffectExtra,
+)
 
 from ..utils import full_name
 
@@ -69,6 +77,88 @@ def test_smart_object_external(
     assert external_object.filesize == 17272
     with external_object.open(full_name("")) as f:
         assert f.read() == linked_layer_png
+
+
+def test_smart_filter_accessors_without_filters(
+    embedded_object: SmartObject,
+) -> None:
+    assert embedded_object.filters is None
+    assert embedded_object.has_enabled_filters is False
+    assert embedded_object.filter_mask_enabled is False
+    assert embedded_object.filter_mask_extends_white is True
+    assert embedded_object.filter_effect() is None
+    assert embedded_object.filter_source() is None
+    assert embedded_object.filter_mask() is None
+
+
+def _rle_plane(array: np.ndarray, version: int) -> FilterEffectChannel:
+    h, w = array.shape
+    data = compress(array.tobytes(), Compression.RLE, w, h, 8, version)
+    return FilterEffectChannel(
+        is_written=1, compression=int(Compression.RLE), data=data
+    )
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_smart_filter_accessors_read_the_document_block(version: int) -> None:
+    """*version* 2 writes 4-byte RLE row counts, as Photoshop does; 1 writes 2-byte."""
+    psd = PSDImage.open(full_name("layers/smartobject-layer.psd"))
+    layer = psd[0]
+    assert isinstance(layer, SmartObjectLayer) and psd.tagged_blocks is not None
+    so = layer.smart_object
+    x0, y0, x1, y1 = layer.bbox
+    h, w = y1 - y0, x1 - x0
+    rng = np.random.default_rng(version)
+    source = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+    alpha = rng.integers(0, 256, (h, w), dtype=np.uint8)
+    mask = rng.integers(0, 256, (h + 2, w), dtype=np.uint8)
+    channels = [_rle_plane(source[..., i], version) for i in range(3)]
+    channels += [FilterEffectChannel(is_written=0) for _ in range(22)]
+    channels.append(_rle_plane(alpha, version))
+    extra = FilterEffectExtra(
+        is_written=1,
+        rectangle=[y0 - 1, x0, y1 + 1, x1],  # type: ignore[list-item]
+        compression=int(Compression.RLE),
+        data=_rle_plane(mask, version).data,
+    )
+    item = FilterEffect(
+        uuid="0",
+        version=1,
+        rectangle=(y0, x0, y1, x1),
+        depth=8,
+        max_channels=24,
+        channels=channels,
+        extra=extra,
+    )
+    psd.tagged_blocks.set_data(Tag.FILTER_EFFECTS2, version=1, items=[item])
+    fx = Descriptor(classID=b"null")
+    fx[b"enab"] = Bool(True)
+    fx[b"filterMaskEnable"] = Bool(True)
+    fx[b"filterMaskExtendWithWhite"] = Bool(False)
+    entry = Descriptor(classID=b"null")
+    entry[b"enab"] = Bool(False)
+    entries = List()
+    entries.append(entry)
+    fx[b"filterFXList"] = entries
+    assert so._config is not None
+    so._config.data[b"filterFX"] = fx
+
+    assert so.filters is fx
+    assert so.has_enabled_filters is False
+    entry[b"enab"] = Bool(True)
+    assert so.has_enabled_filters is True
+    assert so.filter_mask_enabled is True
+    assert so.filter_mask_extends_white is False
+    assert so.filter_effect() is item
+    stored = so.filter_source()
+    assert stored is not None
+    assert stored[0] == layer.bbox
+    assert np.array_equal(stored[1], source)
+    assert stored[2] is not None and np.array_equal(stored[2], alpha)
+    painted = so.filter_mask()
+    assert painted is not None
+    assert painted[0] == (x0, y0 - 1, x1, y1 + 1)
+    assert np.array_equal(painted[1], mask)
 
 
 # ---------------------------------------------------------------------------
