@@ -228,8 +228,9 @@ def test_a_gradient_overlay_on_an_adjustment_layer_is_laid_out_on_its_mask() -> 
     """The ramp spans the mask's box, not the layer's empty box or the canvas.
 
     Black to white at 0 degrees over the 50 px band: the ramp runs from the
-    band's left edge to its right, the same on every row. Laid out on the
-    canvas it would start at three quarters white.
+    band's left edge to its right, the same on every row, and is halfway at
+    the band's middle column. Laid out on the canvas it would start at three
+    quarters white.
     """
     psd, layer = _exposure()
     desc = _forge(layer, "Gradient Overlay", Enum.GradientFill)
@@ -245,9 +246,9 @@ def test_a_gradient_overlay_on_an_adjustment_layer_is_laid_out_on_its_mask() -> 
     assert np.allclose(band, band[:1], atol=1e-6)
     ramp = band[0]
     assert ramp[0] == pytest.approx(0.0, abs=1 / 255)
-    assert ramp[-1] == pytest.approx(1.0, abs=1 / 255)
+    assert 0.95 < ramp[-1] < 1.0
     assert np.all(np.diff(ramp) > 0)
-    assert ramp[24] <= 0.5 <= ramp[25]
+    assert ramp[25] == pytest.approx(0.5, abs=1 / 255)
 
 
 def test_an_inner_shadow_on_an_adjustment_layer_is_cast_from_its_mask() -> None:

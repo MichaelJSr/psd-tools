@@ -32,6 +32,15 @@ Changelog
   not from what they cover, as Photoshop draws it: an outside stroke fills
   the rest of each pixel of a translucent child instead of stopping at the
   child's edge
+- [fix] A gradient is sampled at each pixel's index across its box, as
+  Photoshop draws it on pixel, smart object and fill layers, instead of being
+  stretched to put its end stops on the end pixels: the last pixel now falls
+  one pixel short of the far stop. Gradient overlays, fill layers and strokes
+  move by up to a pixel along the ramp. Type layers' overlays move the same
+  way, unconfirmed against Photoshop
+- [fix] A gradient overlay on a pixel or smart object layer is laid out on the
+  bounds of the layer's pixels over half opaque, as Photoshop does, instead of
+  on the layer's box, so a soft edge no longer stretches the ramp
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead
