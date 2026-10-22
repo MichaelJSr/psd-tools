@@ -12,6 +12,12 @@ Changelog
   channel out composites into the other channels only: the excluded one keeps
   what is beneath, and over transparency reads zero (black in RGB, full ink
   in CMYK). Files that leave every channel checked are unchanged
+- [fix] "Layer knocks out drop shadow" cuts the shadow only where the layer's
+  paint and strokes do not hide it already, as Photoshop does: a Normal layer
+  at full fill no longer cuts it from under soft or antialiased edges. A layer
+  at fill 0, or in another mode, still cuts it under its whole shape. A
+  pass-through group hides it only where its children's shadows, glows,
+  outer strokes and outer bevels or embosses do too
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead
