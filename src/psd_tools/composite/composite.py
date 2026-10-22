@@ -4155,7 +4155,8 @@ class Compositor:
                 above_share = above_share + share
             else:
                 above_share = above_share + share * band.opacity
-            above_beside = above_beside + beside * band.opacity
+            # What the run's outer half is painted at, layer opacity included.
+            above_beside = above_beside + beside * band.opacity * canvas.opacity
         del runs
 
         for band, share, beside, above_share, above_beside in reversed(halves):

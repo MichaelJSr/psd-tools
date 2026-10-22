@@ -165,8 +165,11 @@ def test_rings_that_meet_within_a_pixel_fill_it_between_them(opacity: float) -> 
     np.testing.assert_allclose(_below(psd)[1], half, atol=1e-6)
 
 
+@pytest.mark.parametrize("layer_opacity", [255, 128])
 @pytest.mark.parametrize("opacity", [100.0, 50.0])
-def test_bands_keep_their_stacking_order_across_blend_modes(opacity: float) -> None:
+def test_bands_keep_their_stacking_order_across_blend_modes(
+    opacity: float, layer_opacity: int
+) -> None:
     """Normal 1.5 px over Multiply 3 px over Normal 5 px: the second row.
 
     Only adjacent bands in one blend mode are added into one source, so the
@@ -174,17 +177,21 @@ def test_bands_keep_their_stacking_order_across_blend_modes(opacity: float) -> N
     ring's outer half-pixel goes over the Multiply band, not under it. The
     bands of different modes still add on the pixel they share: half the
     first ring and half the multiplied backdrop, with the backdrop showing
-    only through the first ring's own half when it is faded.
+    only through the first ring's own half when it is faded. The layer's
+    opacity fades the two halves together.
     """
     psd, layer = _rectangle()
     backdrop = _backdrop(psd)
+    layer.opacity = layer_opacity
     _strokes(layer, (1.5, _RED, opacity), (3.0, _GREY, 100.0), (5.0, _BLUE, 100.0))
     _instances(layer, b"frameFXMulti", 3)[1][Key.Mode] = Enumerated(
         typeID=b"BlnM", enum=Enum.Multiply
     )
     first = _over(opacity / 100.0, _RED, tuple(backdrop[1]))
     multiplied = tuple(backdrop[1] * _GREY)
-    np.testing.assert_allclose(_below(psd)[1], _over(0.5, first, multiplied), atol=1e-6)
+    shared = _over(0.5, first, multiplied)
+    expected = _over(layer_opacity / 255.0, shared, tuple(backdrop[1]))
+    np.testing.assert_allclose(_below(psd)[1], expected, atol=1e-6)
 
 
 @pytest.mark.parametrize("opacity", [100.0, 50.0])
