@@ -1401,6 +1401,10 @@ class _EffectSink(Protocol):
         opacity: float,
     ) -> None: ...
 
+    def replace(
+        self, coverage: np.ndarray, color: np.ndarray, opacity: float
+    ) -> None: ...
+
 
 class _EffectCanvas:
     """The layer's own canvas, where the effects inside it composite into it.
@@ -1524,6 +1528,23 @@ class _EffectCanvas:
         # covers, so the shape takes the coverage it was drawn on.
         self._shape = utils.union(self._shape, coverage)
 
+    def replace(self, coverage: np.ndarray, color: np.ndarray, opacity: float) -> None:
+        """Paint an effect in place of the layer, inside its region.
+
+        What ``coverage`` covers of the layer and the effects under this one
+        is knocked out, so the effect's opacity shows the backdrop rather
+        than the layer.
+        """
+        if not coverage.any():
+            return
+        self._start()
+        color = self._compositor._fit_source(color)
+        kept = 1.0 - coverage
+        alpha = coverage * opacity
+        self._premultiplied = kept * self._premultiplied + alpha * color
+        self._alpha = kept * self._alpha + alpha
+        self._shape = utils.union(self._shape, coverage)
+
     def source(self) -> _Source:
         """The layer and the effects inside it, as one source to composite."""
         if not self._painted:
@@ -1590,6 +1611,14 @@ class _AdjustmentCanvas:
             return
         shape = self._region * coverage
         self._compositor._apply_source(color, shape, shape * opacity, blend_mode)
+
+    def replace(self, coverage: np.ndarray, color: np.ndarray, opacity: float) -> None:
+        """As :py:meth:`over` Normal.
+
+        The adjustment is already applied to the backdrop under the band and
+        stays there; only the stroke's own opacity fades it.
+        """
+        self.over(coverage, color, BlendMode.NORMAL, opacity)
 
 
 @dataclass
@@ -3820,7 +3849,11 @@ class Compositor:
             # is split. The rest of the band, not ``mask - inside``, so that
             # the two are exactly what was drawn however they divide.
             overlap = np.minimum(inside, canvas.region)
-            canvas.over(canvas.within(overlap), color, blend_mode, opacity)
+            # A Normal stroke replaces the layer under its inner half.
+            if blend_mode is BlendMode.NORMAL:
+                canvas.replace(canvas.within(overlap), color, opacity)
+            else:
+                canvas.over(canvas.within(overlap), color, blend_mode, opacity)
             # ``inside`` is inside the boundary the stroke was traced from,
             # which is the layer's own coverage only while the two are the
             # same shape. A stroke that traces the *mask* -- a fill layer's,

@@ -8,6 +8,9 @@ Changelog
   boosts dark, pale colours more and light ones less, and a negative amount
   lifts very dark pixels toward their brightest channel instead of darkening
   them. It is still an approximation
+- [fix] The inner half of a Normal stroke effect replaces the layer under it,
+  as Photoshop paints it: below full opacity the band shows what is beneath
+  the layer rather than the layer's own pixels
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round
