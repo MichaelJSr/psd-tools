@@ -29,6 +29,15 @@ Changelog
   point, so effects anchored to it move with the layer
 - [api] ``paint.draw_pattern_fill`` takes an ``origin`` for its tiling;
   ``paint.pattern_origin`` computes an overlay's from its descriptor
+- [fix] A smooth gradient with more than two colour or opacity stops curves
+  through its stops as Photoshop does, instead of flattening at each one, and
+  each segment is held between its two stops. Two-stop gradients are unchanged
+- [fix] A colour, gradient or pattern overlay or a satin in Color Dodge,
+  Linear Dodge, Color Burn, Linear Burn, Vivid Light, Linear Light or
+  Difference fades by its colour at less than 100% opacity, as Photoshop
+  does, instead of mixing the full-strength blend with the layer
+- [api] ``psd_tools.composite.blend.fade_source`` wraps a blend function so
+  that a source's opacity fades its colour in those modes
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

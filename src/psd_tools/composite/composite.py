@@ -40,7 +40,7 @@ from psd_tools.api.utils import (
 from psd_tools.composite import paint, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
-from psd_tools.composite.blend import get_blend_func, normal
+from psd_tools.composite.blend import fade_source, get_blend_func, normal
 from psd_tools.composite.effects import (
     bevel_beside,
     bevel_geometry,
@@ -1525,6 +1525,7 @@ class _EffectSink(Protocol):
         color: np.ndarray,
         blend_mode: BlendMode,
         opacity: float | np.ndarray,
+        fades_source: bool = False,
     ) -> None: ...
 
     def replace(
@@ -1633,17 +1634,24 @@ class _EffectCanvas:
         color: np.ndarray,
         blend_mode: BlendMode,
         opacity: float | np.ndarray,
+        fades_source: bool = False,
     ) -> None:
         """Paint an effect over the layer, inside its region.
 
         ``coverage`` is a share of the region, and ``opacity`` the effect's
-        own. The layer's opacity is not applied here -- see :py:meth:`_start`.
+        own; ``fades_source`` is whether that opacity fades the colour in the
+        modes :py:func:`~psd_tools.composite.blend.fade_source` names. The
+        layer's opacity is not applied here -- see :py:meth:`_start`.
         """
         if not coverage.any():
             return
         self._start()
         color = self._compositor._fit_source(color)
         blend_fn = get_blend_func(blend_mode, self._compositor._color_mode)
+        if fades_source:
+            # Only an overlay or a satin fades its colour, at one opacity.
+            assert not isinstance(opacity, np.ndarray)
+            blend_fn = fade_source(blend_fn, blend_mode, opacity)
         alpha = coverage * opacity
         # ``normal`` ignores what is under it, and is also what an effect whose
         # blend mode this module does not know answers, so the un-premultiply
@@ -1743,12 +1751,19 @@ class _AdjustmentCanvas:
         color: np.ndarray,
         blend_mode: BlendMode,
         opacity: float | np.ndarray,
+        fades_source: bool = False,
     ) -> None:
         """Composite an effect onto the canvas, inside the region."""
         if not coverage.any():
             return
         shape = self._region * coverage
-        self._compositor._apply_source(color, shape, shape * opacity, blend_mode)
+        faded = 1.0
+        if fades_source:
+            assert not isinstance(opacity, np.ndarray)
+            faded = opacity
+        self._compositor._apply_source(
+            color, shape, shape * opacity, blend_mode, faded=faded
+        )
 
     knocks_out = False
 
@@ -2340,6 +2355,7 @@ class Compositor:
         blend_mode: BlendMode,
         knockout: Knockout = Knockout.NONE,
         text_gamma: float | None = None,
+        faded: float = 1.0,
     ) -> None:
         """Put a source on the canvases.
 
@@ -2347,6 +2363,9 @@ class Compositor:
         with the backdrop in -- see :py:mod:`psd_tools.composite.text_blend`.
         The blend mode still sees the document's values; only the mix by
         coverage moves into that space.
+
+        ``faded`` is the opacity in ``alpha`` that fades the colour instead,
+        for the modes :py:func:`~psd_tools.composite.blend.fade_source` names.
         """
         color = self._fit_source(color)
         knockout_color, knockout_alpha = self._knockout_backdrop(knockout)
@@ -2365,7 +2384,9 @@ class Compositor:
         alpha_b = knockout_alpha if knockout else alpha_previous
         color_b = knockout_color if knockout else self._color
 
-        blend_fn = get_blend_func(blend_mode, self._color_mode)
+        blend_fn = fade_source(
+            get_blend_func(blend_mode, self._color_mode), blend_mode, faded
+        )
         if text_gamma is not None:
             self._color = self._mix_in_text_space(
                 color,
@@ -3226,7 +3247,7 @@ class Compositor:
                 shape_e = np.ones((self.height, self.width, 1), dtype=np.float32)
             else:
                 shape_e = paste(self._viewport, box, shape_e)
-            canvas.over(shape_e, color, blend_mode, opacity)
+            canvas.over(shape_e, color, blend_mode, opacity, fades_source=True)
 
     def _trace_shape(
         self,
@@ -3800,7 +3821,9 @@ class Compositor:
                 logger.debug("Cannot draw a satin of %s: %s", layer, error)
                 continue
             coverage = paste(self._viewport, bbox, coverage)
-            canvas.over(canvas.within(coverage), color, blend_mode, opacity)
+            canvas.over(
+                canvas.within(coverage), color, blend_mode, opacity, fades_source=True
+            )
 
     def _inner_effect(
         self,

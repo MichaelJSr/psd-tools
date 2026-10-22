@@ -784,22 +784,44 @@ def _collect_stops(
 _RAMP_SAMPLES = 4097
 
 
-def _segment_blend(
-    u: np.ndarray, m: np.ndarray | float, smoothness: float
-) -> np.ndarray:
+def _segment_blend(u: np.ndarray, m: np.ndarray | float) -> np.ndarray:
     """How far a segment's blend has gone at ``u``, its share of the segment.
 
     The blend runs linearly to halfway at the end stop's midpoint ``m`` and
     linearly on to the end; a midpoint on either end of its segment is
-    ignored, as Photoshop's dialog cannot author one. Smoothness then eases
-    the blend towards a smoothstep, with 100% landing halfway between the two.
-    Shared with a gradient map's ramp, so a map and a fill with the same stops
-    blend alike.
+    ignored, as Photoshop's dialog cannot author one.
     """
     with np.errstate(divide="ignore", invalid="ignore"):
         bent = np.where(u <= m, 0.5 * u / m, 0.5 + 0.5 * (u - m) / (1.0 - m))
-    f = np.where((m > 0.0) & (m < 1.0), bent, u)
-    return f + smoothness * ((3.0 - 2.0 * f) * f * f - f) / 2.0
+    return np.where((m > 0.0) & (m < 1.0), bent, u)
+
+
+def _smooth_segments(
+    values: np.ndarray, k: np.ndarray, f: np.ndarray, smoothness: float
+) -> np.ndarray:
+    """The ramp through the stops' ``values``, ``f`` of the way along segment ``k``.
+
+    Linear at no smoothness. Smoothness eases the blend towards a cubic
+    through the stops with the tangents :py:func:`_stop_tangents` gives them,
+    each channel held between the segment's two stop values; a two-stop ramp
+    at 100% lands halfway between linear and a smoothstep. Shared with a
+    gradient map's ramp, so a map and a fill with the same stops blend alike.
+    """
+    start, end = values[k], values[k + 1]
+    linear = start * (1.0 - f) + end * f
+    if smoothness <= 0.0:
+        return linear
+    tangents = _stop_tangents(values)
+    # The cubic Hermite basis on the segment.
+    f2, f3 = f * f, f * f * f
+    cubic = (
+        (2.0 * f3 - 3.0 * f2 + 1.0) * start
+        + (f3 - 2.0 * f2 + f) * tangents[k]
+        + (3.0 * f2 - 2.0 * f3) * end
+        + (f3 - f2) * tangents[k + 1]
+    )
+    cubic = np.clip(cubic, np.minimum(start, end), np.maximum(start, end))
+    return linear + smoothness * (cubic - linear)
 
 
 def _blend_stops(
@@ -807,7 +829,8 @@ def _blend_stops(
 ) -> np.ndarray:
     """Sample the ramp through the stops at every ``Lctn`` unit.
 
-    Each segment blends as :py:func:`_segment_blend` says.
+    Each segment bends at its midpoint as :py:func:`_segment_blend` says and
+    is smoothed as :py:func:`_smooth_segments` says.
     """
     t = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
     locations = np.asarray(X)
@@ -821,10 +844,22 @@ def _blend_stops(
             np.clip((t - locations[k]) / span, 0.0, 1.0),
             (t >= locations[k]).astype(np.float64),
         )
-    f = _segment_blend(u, np.asarray(M)[k + 1], smoothness)
+    f = _segment_blend(u, np.asarray(M)[k + 1])
     values = np.asarray(Y, dtype=np.float64)
     f = f.reshape((-1,) + (1,) * (values.ndim - 1))
-    return values[k] * (1.0 - f) + values[k + 1] * f
+    return _smooth_segments(values, k, f, smoothness)
+
+
+def _stop_tangents(values: np.ndarray) -> np.ndarray:
+    """Each stop's tangent for the smooth blend, over one segment.
+
+    It is half the difference between the stop's neighbours' values, whatever
+    their distance, so a stop sharing a location still counts; an end stop
+    stands in for its own missing neighbour.
+    """
+    before = np.concatenate([values[:1], values[:-1]])
+    after = np.concatenate([values[1:], values[-1:]])
+    return 0.5 * (after - before)
 
 
 # ``color_convert``'s sRGB transfer functions over an array. That module is

@@ -715,3 +715,43 @@ def get_blend_func(
     if color_mode is None or func not in _MODE_AWARE:
         return func
     return functools.partial(func, color_mode=color_mode)
+
+
+# The source colour that leaves the backdrop as it is, for the modes Photoshop
+# fades by moving the source towards it rather than by mixing the blended
+# result with the backdrop.
+_NEUTRAL_SOURCE: dict[BlendMode, float] = {
+    BlendMode.COLOR_DODGE: 0.0,
+    BlendMode.LINEAR_DODGE: 0.0,
+    BlendMode.DIFFERENCE: 0.0,
+    BlendMode.COLOR_BURN: 1.0,
+    BlendMode.LINEAR_BURN: 1.0,
+    BlendMode.VIVID_LIGHT: 0.5,
+    BlendMode.LINEAR_LIGHT: 0.5,
+}
+
+
+def fade_source(
+    blend_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    blend_mode: BlendMode,
+    opacity: float,
+) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
+    """*blend_fn* for a source composited at *opacity* that fades its source.
+
+    Photoshop fades a Color Dodge, Linear Dodge, Color Burn, Linear Burn,
+    Vivid Light, Linear Light or Difference overlay or satin by moving its
+    colour towards the mode's neutral one, so 60% dodges by 60% of the colour.
+    The result is meant to be composited at *opacity* as usual: it is the
+    blend that, mixed with the backdrop by *opacity*, lands where the faded
+    source blends at full strength. Any other mode, and an opacity of 0 or 1,
+    answers *blend_fn*.
+    """
+    neutral = _NEUTRAL_SOURCE.get(blend_mode)
+    if neutral is None or not 0.0 < opacity < 1.0:
+        return blend_fn
+
+    def faded(Cb: np.ndarray, Cs: np.ndarray) -> np.ndarray:
+        blended = blend_fn(Cb, neutral + opacity * (Cs - neutral))
+        return Cb + (blended - Cb) / opacity
+
+    return faded

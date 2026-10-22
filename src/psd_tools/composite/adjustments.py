@@ -932,7 +932,7 @@ def _gradient_ramp(
     """Sample a stop gradient at ``t``; ends are clamped to the end stops.
 
     Stops are taken in location order. Each segment blends as a gradient
-    fill's does (``paint._segment_blend``), in the space the method names:
+    fill's does (``paint._smooth_segments``), in the space the method names:
     perceptual in Oklab, linear in linear light, classic and the rest on the
     sRGB values. Two stops at one location make a hard edge: the segment into
     it ends in the first stop's colour and the segment out of it starts in
@@ -949,8 +949,8 @@ def _gradient_ramp(
     k = np.clip(np.searchsorted(locations, t, side="right") - 1, 0, len(locations) - 2)
     left, span = locations[k], locations[k + 1] - locations[k]
     u = np.divide(t - left, span, out=np.ones_like(left), where=span > 0)
-    f = paint._segment_blend(u, midpoints[k + 1], smoothness)
-    out = values[k] + f[:, None] * (values[k + 1] - values[k])
+    f = paint._segment_blend(u, midpoints[k + 1])
+    out = paint._smooth_segments(values, k, f[:, None], smoothness)
     out[t < locations[0]] = values[0]
     out[t >= locations[-1]] = values[-1]
     if space is not None:
