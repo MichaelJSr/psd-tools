@@ -38,6 +38,15 @@ Changelog
   does, instead of mixing the full-strength blend with the layer
 - [api] ``psd_tools.composite.blend.fade_source`` wraps a blend function so
   that a source's opacity fades its colour in those modes
+- [api] ``PSDImage.save()`` takes ``preview``, a flattened PIL image to store
+  instead of compositing the document, and ``update_preview=False`` to keep
+  the stored preview after an edit. The default is unchanged.
+- [fix] ``PSDImage.save()`` records in ``VersionInfo`` whether the preview it
+  regenerates or stores holds the whole image: an opaque document saved
+  without Maximize Compatibility reports ``has_preview()`` ``True``. Behaviour
+  change: a layered document with no transparency channel that an edit left
+  partly transparent reopens with ``has_preview()`` ``False`` and ``topil()``
+  ``None``, where it kept ``True``; ``composite()`` renders its layers.
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

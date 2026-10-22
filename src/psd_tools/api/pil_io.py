@@ -7,7 +7,12 @@ from typing import TYPE_CHECKING, Literal, cast
 import numpy as np
 from PIL import Image, ImageChops, ImageMath
 
-from psd_tools.api.numpy_io import _BACKGROUND_MODES, _encode_array
+from psd_tools.api.numpy_io import (
+    _BACKGROUND_MODES,
+    _encode_array,
+    encode_image_data,
+    holds_composite,
+)
 from psd_tools.api.utils import (
     AllocBudget,
     check_pixel_size,
@@ -343,6 +348,125 @@ def convert_image_data_to_pil(
 
     image = post_process(image, alpha, icc)
     return _remove_white_background(image, psd.color_mode)
+
+
+_ALPHALESS_MODES = ("1", "P", "CMYK", "LAB")
+
+
+def convert_pil_to_image_data(
+    psd: "PSDProtocol", image: Image.Image
+) -> tuple[list[bytes], bool | None]:
+    """Turn a flattened PIL image into the merged image data section's planes.
+
+    The inverse of :py:meth:`~psd_tools.api.psd_image.PSDImage.composite` with
+    ``apply_icc=False``: *image* holds the document's own color values, in the
+    PIL mode of its color mode, with or without alpha. An ``L`` or ``RGB``
+    image stores an opaque preview; a mode with no alpha band (``1``, ``P``,
+    ``CMYK``, ``LAB``) keeps the document's stored transparency plane. A ``P``
+    image on the document's own table stores its indices as they are.
+
+    Returns the planes and whether they hold the whole image, as
+    :func:`~psd_tools.api.numpy_io.holds_composite` decides; ``None`` for a
+    ``CMYK`` or ``LAB`` image on a layered document with no transparency
+    channel, whose coverage nothing tells. ``1`` and ``P`` images are opaque.
+
+    :raises TypeError: if *image* is not a PIL image.
+    :raises ValueError: if *image* is not the document's size, its mode does
+        not hold the document's color mode, or an indexed document's color
+        table is too short to quantize against.
+    """
+    if not isinstance(image, Image.Image):
+        raise TypeError(f"Preview must be a PIL image, not {type(image).__name__}")
+    if image.size != (psd.width, psd.height):
+        raise ValueError(
+            f"Preview is {image.size[0]}x{image.size[1]}; the document is "
+            f"{psd.width}x{psd.height}"
+        )
+    if psd.color_mode == ColorMode.MULTICHANNEL:
+        raise ValueError("PIL has no mode for a multichannel preview")
+    allowed = {get_pil_mode(psd.color_mode), get_pil_mode(psd.color_mode, True)}
+    if psd.color_mode == ColorMode.INDEXED:
+        allowed = {"P", "PA", "RGB", "RGBA"}
+    if image.mode not in allowed:
+        raise ValueError(
+            f"Preview mode {image.mode!r} does not fit a {psd.color_mode.name} "
+            f"document; expected one of {sorted(allowed)}"
+        )
+    check_pixel_size(
+        psd.width,
+        psd.height,
+        psd.channels,
+        max_alloc_bytes=psd._max_alloc_bytes,
+        estimated_bytes=_pil_encode_peak_bytes(psd, image),
+    )
+    table = b""
+    if psd.color_mode == ColorMode.INDEXED and psd.depth == 8:
+        # Raises on a table too short to quantize against.
+        table = psd._record.color_mode_data.interleave()
+    # Decided on the mode as given: a palette image is flattened below.
+    alpha: np.ndarray | None = None
+    if image.mode not in _ALPHALESS_MODES:
+        alpha = np.ones((psd.height, psd.width, 1), dtype=np.float32)
+    opaque = image.mode in ("1", "P")
+
+    if image.mode in ("P", "PA"):
+        if image.mode == "P" and "transparency" not in image.info:
+            indices = _own_indices(image, table)
+            if indices is not None:
+                holds = holds_composite(psd, indices, alpha)
+                if holds is None:
+                    holds = opaque
+                return encode_image_data(psd, indices, alpha), holds
+            image = image.convert("RGB")
+        else:
+            image = image.convert("RGBA")
+
+    bands = list(image.split())
+    alpha_band = bands.pop() if image.mode in ("LA", "RGBA") else None
+    if image.mode == "CMYK":
+        # The compositor's arrays keep the file's inverted CMYK.
+        bands = [ImageChops.invert(band) for band in bands]
+    # Band by band: `np.asarray()` on a whole "LAB" image reads PIL's offset
+    # chroma buffer rather than the values the bands hold.
+    color = np.stack([np.asarray(band, dtype=np.float32) for band in bands], axis=2)
+    if image.mode != "1":
+        color /= 255.0
+    if alpha_band is not None:
+        alpha = np.asarray(alpha_band, dtype=np.float32)[:, :, np.newaxis] / 255.0
+    holds = holds_composite(psd, color, alpha)
+    if holds is None and opaque:
+        holds = True
+    return encode_image_data(psd, color, alpha), holds
+
+
+def _own_indices(image: Image.Image, table: bytes) -> np.ndarray | None:
+    """Return the index plane of a ``P`` image on the document's own table.
+
+    ``None`` when the palettes differ, or an index points past the image's
+    palette; those go through the quantizer.
+    """
+    palette = image.getpalette("RGB")
+    if not palette or not table.startswith(bytes(palette)):
+        return None
+    indices = np.asarray(image, dtype=np.uint8)
+    if indices.max() >= len(palette) // 3:
+        return None
+    return indices.astype(np.float32)[:, :, np.newaxis] / 255.0
+
+
+def _pil_encode_peak_bytes(psd: "PSDProtocol", image: Image.Image) -> int:
+    """Bytes :func:`convert_pil_to_image_data` allocates at its high-water mark.
+
+    The split bands and a float32 copy of each, the stacked array, the alpha
+    plane, then the stored section decoded for the planes carried over and the
+    packed planes beside it.
+    """
+    pixels = psd.width * psd.height
+    bands = len(image.getbands())
+    row = (psd.width * max(psd.depth, 8) + 7) // 8
+    return (
+        pixels * bands * (1 + 4 + 4) + pixels * 4 + 2 * row * psd.height * psd.channels
+    )
 
 
 def _layer_peak_bytes(
