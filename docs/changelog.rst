@@ -4,12 +4,13 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
-- [fix] "Layer knocks out drop shadow" cuts the shadow only where the layer's
-  paint and strokes do not hide it already, as Photoshop does: a Normal layer
-  at full fill no longer cuts it from under soft or antialiased edges. A layer
-  at fill 0, or in another mode, still cuts it under its whole shape. A
-  pass-through group hides it only where its children's shadows, glows,
-  outer strokes and outer bevels or embosses do too
+- [fix] "Layer knocks out drop shadow" no longer cuts the shadow from under a
+  Normal layer's soft or antialiased edges and strokes where their own paint
+  hides it, as Photoshop shows it. A layer at fill 0 or in another mode is cut
+  as before
+- [fix] The outer glow of a pass-through group whose children's effects let
+  the backdrop through, such as a coloured Multiply shadow, is no longer too
+  strong at the group's soft edges
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead
