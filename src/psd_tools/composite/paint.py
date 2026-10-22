@@ -690,11 +690,13 @@ def _offset_share(point: Descriptor | None, key: bytes) -> float:
 def _ramp_axis(start: float, count: int, extent: int, scale: float) -> np.ndarray:
     """``count`` ramp coordinates from pixel ``start``.
 
-    The box's first and last pixels sit at -extent/scale and extent/scale, so
-    a ramp as long as the box puts a stop on each end pixel, as Photoshop does.
+    Photoshop samples a pixel at its index, not its centre: the box's edges
+    sit at -extent/scale and extent/scale, its first pixel on the near edge
+    and its last one pixel short of the far edge.
     """
-    step = 2.0 * extent / scale / (extent - 1) if extent > 1 else 0.0
-    return (-extent / scale + (start + np.arange(count)) * step).astype(np.float32)
+    return ((start + np.arange(count) - extent / 2.0) * (2.0 / scale)).astype(
+        np.float32
+    )
 
 
 def _make_linear_gradient(X: np.ndarray, Y: np.ndarray, angle: float) -> np.ndarray:

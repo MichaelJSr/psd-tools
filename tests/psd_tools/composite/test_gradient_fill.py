@@ -136,20 +136,49 @@ def _grey(desc: Descriptor, width: int, height: int) -> np.ndarray:
     return color[..., 0]
 
 
+def _row(
+    color_mode: ColorMode, desc: Descriptor
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """``desc`` drawn on a 101 px row whose ramp is laid out on its first 100 px.
+
+    A pixel is sampled at its index, so pixel ``x`` is ``x``% along the ramp
+    and the last one lands on the end stop.
+    """
+    return paint.draw_gradient_fill(
+        (0, 0, 101, 1), color_mode, desc, anchor=(0, 0, 100, 1)
+    )
+
+
+def _grey_row(desc: Descriptor) -> np.ndarray:
+    """The red plane of :py:func:`_row`'s row."""
+    color, _ = _row(ColorMode.RGB, desc)
+    assert color is not None and color.shape == (1, 101, 3)
+    return color[0, :, 0]
+
+
 def test_a_vertical_ramp_spans_the_height_of_a_wide_box() -> None:
-    """The first stop sits on the bottom row and the last on the top row."""
+    """The last stop sits on the top row, the first one row below the bottom.
+
+    Photoshop samples a pixel at its index, so the box's top edge is the top
+    row and its bottom edge lies past the last row.
+    """
     grey = _grey(_gradient(angle=90.0), 800, 80)
     assert np.allclose(grey, grey[:, :1]), "every column is the same ramp"
-    assert np.allclose(grey[:, 0], 1.0 - np.arange(80) / 79, atol=1e-5)
+    assert np.allclose(grey[:, 0], 1.0 - np.arange(80) / 80, atol=1e-5)
 
 
 @pytest.mark.parametrize(
     "angle", [0.0, 90.0, -90.0, 180.0, 270.0, 90.00000000000001, 89.99999, -88.92]
 )
-def test_an_axis_ramp_reaches_both_stops_whatever_the_aspect(angle: float) -> None:
-    grey = _grey(_gradient(angle=angle), 100, 20)
-    assert grey.min() == pytest.approx(0.0, abs=1 / 255)
-    assert grey.max() == pytest.approx(1.0, abs=1 / 255)
+def test_an_axis_ramp_spans_the_box_whatever_the_aspect(angle: float) -> None:
+    """Down the box's middle the near edge is on a stop, the far one a step short."""
+    width, height = 100, 20
+    grey = _grey(_gradient(angle=angle), width, height)
+    vertical = abs(math.sin(math.radians(angle))) > 0.5
+    line = grey[:, width // 2] if vertical else grey[height // 2, :]
+    near, far = float(line[0]), float(line[-1])
+    assert min(near, 1.0 - near) == pytest.approx(0.0, abs=1 / 255)
+    assert abs(far - near) == pytest.approx(1.0 - 1.0 / line.size, abs=1 / 255)
 
 
 def test_a_diagonal_ramp_spans_the_chord_through_the_centre() -> None:
@@ -190,19 +219,20 @@ def test_scale_shortens_the_ramp_around_the_centre() -> None:
 @pytest.mark.parametrize(
     ("angle", "offset", "centre"),
     [
-        (90.0, (0.0, 25.0), 74.5),
-        (90.0, (0.0, -25.0), 24.5),
-        (0.0, (25.0, 0.0), 74.5),
-        (0.0, (-25.0, 0.0), 24.5),
+        (90.0, (0.0, 25.0), 75),
+        (90.0, (0.0, -25.0), 25),
+        (0.0, (25.0, 0.0), 75),
+        (0.0, (-25.0, 0.0), 25),
     ],
 )
 def test_offset_moves_the_centre_by_a_share_of_the_box(
-    angle: float, offset: tuple[float, float], centre: float
+    angle: float, offset: tuple[float, float], centre: int
 ) -> None:
+    """The halfway grey lands on the pixel whose index is the moved centre."""
     grey = _grey(_gradient(angle=angle, offset=offset), 100, 100)
     line = grey[:, 0] if angle == 90.0 else grey[0, :]
     halfway = np.flatnonzero(np.isclose(line, 0.5, atol=1 / 198))
-    assert set(halfway.tolist()) == {math.floor(centre), math.ceil(centre)}
+    assert halfway.tolist() == [centre]
 
 
 @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
@@ -238,10 +268,10 @@ def test_co_located_stops_make_a_hard_edge() -> None:
     assert np.allclose(shape[0, :50, 0], 1.0) and np.allclose(shape[0, 50:, 0], 0.0)
 
     desc = _gradient(stops=[_stop(BLACK, 0), _stop(WHITE, 4096), _stop(red, 4096)])
-    color, _ = paint.draw_gradient_fill((0, 0, 100, 1), ColorMode.RGB, desc)
+    color, _ = _row(ColorMode.RGB, desc)
     assert color is not None
-    assert color[0, 98, 0] == pytest.approx(98 / 99, abs=1e-5)
-    assert np.allclose(color[0, 99], [1.0, 0.0, 0.0], atol=1e-6)
+    assert color[0, 99, 0] == pytest.approx(0.99, abs=1e-5)
+    assert np.allclose(color[0, 100], [1.0, 0.0, 0.0], atol=1e-6)
 
 
 def test_the_midpoint_is_read_from_the_stop_that_ends_the_segment() -> None:
@@ -249,12 +279,10 @@ def test_the_midpoint_is_read_from_the_stop_that_ends_the_segment() -> None:
 
     On the first stop it names a segment that does not exist.
     """
-    plain = _grey(_gradient(), 100, 1)[0]
-    bent = _grey(_gradient(stops=[_stop(BLACK, 0), _stop(WHITE, 4096, 25)]), 100, 1)[0]
-    unbent = _grey(_gradient(stops=[_stop(BLACK, 0, 25), _stop(WHITE, 4096)]), 100, 1)[
-        0
-    ]
-    assert np.allclose(bent, _bent_at(0.25, np.arange(100) / 99), atol=1e-5)
+    plain = _grey_row(_gradient())
+    bent = _grey_row(_gradient(stops=[_stop(BLACK, 0), _stop(WHITE, 4096, 25)]))
+    unbent = _grey_row(_gradient(stops=[_stop(BLACK, 0, 25), _stop(WHITE, 4096)]))
+    assert np.allclose(bent, _bent_at(0.25, np.arange(101) / 100), atol=1e-5)
     assert np.array_equal(unbent, plain)
 
 
@@ -263,12 +291,8 @@ def test_stops_blend_in_ramp_order_whatever_order_they_are_listed() -> None:
     red = (255.0, 0.0, 0.0)
     listed = [_stop(BLACK, 0), _stop(WHITE, 4096), _stop(red, 2048)]
     sorted_stops = [_stop(BLACK, 0), _stop(red, 2048), _stop(WHITE, 4096)]
-    color, _ = paint.draw_gradient_fill(
-        (0, 0, 101, 1), ColorMode.RGB, _gradient(stops=listed)
-    )
-    expected, _ = paint.draw_gradient_fill(
-        (0, 0, 101, 1), ColorMode.RGB, _gradient(stops=sorted_stops)
-    )
+    color, _ = _row(ColorMode.RGB, _gradient(stops=listed))
+    expected, _ = _row(ColorMode.RGB, _gradient(stops=sorted_stops))
     assert color is not None and expected is not None
     assert np.array_equal(color, expected)
     assert color[0, 50].tolist() == pytest.approx([1.0, 0.0, 0.0], abs=1e-5)
@@ -293,10 +317,10 @@ def test_full_smoothness_eases_the_blend_halfway_to_a_smoothstep(
     smoothness: float | None,
 ) -> None:
     along = np.arange(101) / 100
-    grey = _grey(_gradient(smoothness=smoothness), 101, 1)[0]
+    grey = _grey_row(_gradient(smoothness=smoothness))
     assert np.allclose(grey, _smoothed(along), atol=1e-5)
     assert grey[25] == pytest.approx(0.203125) and grey[50] == 0.5
-    half = _grey(_gradient(smoothness=0.5), 101, 1)[0]
+    half = _grey_row(_gradient(smoothness=0.5))
     assert np.allclose(half, (along + _smoothed(along)) / 2, atol=1e-5)
 
 
@@ -348,7 +372,8 @@ def test_a_smooth_ramp_matches_photoshops_own_pixels() -> None:
 
     Its preview shows the ramp through a 16x94 mask, laid out on that mask's
     box; drawn on the same box, the fill's own blend has to match Photoshop's
-    pixels down the opaque column, and the linear blend must not.
+    pixels down the opaque column to within half a level, and the linear
+    blend must not.
     """
     psd = PSDImage.open(full_name("gradient-fill.psb"))
     fill = psd[2]
@@ -366,7 +391,7 @@ def test_a_smooth_ramp_matches_photoshops_own_pixels() -> None:
     smooth, _ = paint.draw_gradient_fill(mask.bbox, ColorMode.RGB, desc)
     assert smooth is not None
     rendered = smooth[rows.start - 6 : rows.stop - 6, column - 44]
-    assert np.abs(rendered - photoshop).max() < 3 / 255
+    assert np.abs(rendered - photoshop).max() < 0.5 / 255
 
     desc[Key.Gradient][Key.Interpolation] = Double(0.0)
     linear, _ = paint.draw_gradient_fill(mask.bbox, ColorMode.RGB, desc)
@@ -380,9 +405,15 @@ def test_a_smooth_ramp_matches_photoshops_own_pixels() -> None:
 def _ramp(
     stops: list[Descriptor], smoothness: float = 1.0, method: bytes | None = None
 ) -> np.ndarray:
-    """``stops`` drawn on a 4097 px row in 0-255 levels: pixel ``x`` is ``Lctn`` x."""
+    """``stops`` drawn on a 4097 px row in 0-255 levels: pixel ``x`` is ``Lctn`` x.
+
+    The ramp is laid out on the row's first 4096 px, so the last pixel is one
+    past that box and lands on ``Lctn`` 4096.
+    """
     desc = _gradient(stops=stops, smoothness=smoothness, method=method)
-    color, _ = paint.draw_gradient_fill((0, 0, 4097, 1), ColorMode.RGB, desc)
+    color, _ = paint.draw_gradient_fill(
+        (0, 0, 4097, 1), ColorMode.RGB, desc, anchor=(0, 0, 4096, 1)
+    )
     assert color is not None
     return color[0] * 255.0
 
@@ -606,7 +637,9 @@ def test_a_smooth_transparency_ramp_is_held_between_its_stops(
         method=method,
         smoothness=1.0,
     )
-    _, alpha = paint.draw_gradient_fill((0, 0, 4097, 1), ColorMode.RGB, desc)
+    _, alpha = paint.draw_gradient_fill(
+        (0, 0, 4097, 1), ColorMode.RGB, desc, anchor=(0, 0, 4096, 1)
+    )
     assert alpha is not None
     assert np.isfinite(alpha).all()
     assert alpha.min() >= 0.0 and alpha.max() <= 1.0
@@ -617,9 +650,9 @@ def test_a_transparency_midpoint_shapes_the_alpha_ramp_alone() -> None:
     desc = _gradient(
         transparency=[_opacity_stop(100.0, 0), _opacity_stop(0.0, 4096, 25)]
     )
-    color, shape = paint.draw_gradient_fill((0, 0, 100, 1), ColorMode.RGB, desc)
+    color, shape = _row(ColorMode.RGB, desc)
     assert color is not None and shape is not None
-    along = np.arange(100) / 99
+    along = np.arange(101) / 100
     assert np.allclose(shape[0, :, 0], 1.0 - _bent_at(0.25, along), atol=1e-5)
     assert np.allclose(color[0, :, 0], along, atol=1e-5)
 
@@ -640,7 +673,7 @@ HALFWAY_GREY = {
 
 @pytest.mark.parametrize("method", list(HALFWAY_GREY), ids=str)
 def test_each_method_blends_in_its_own_space(method: bytes | None) -> None:
-    grey = _grey(_gradient(method=method), 101, 1)[0]
+    grey = _grey_row(_gradient(method=method))
     assert grey[50] == pytest.approx(HALFWAY_GREY[method], abs=0.002)
     assert grey[0] == pytest.approx(0.0, abs=1e-3) and grey[100] == pytest.approx(
         1.0, abs=1e-3
@@ -660,7 +693,7 @@ def test_an_unknown_method_under_gs99_yields_to_the_fill_layers_key() -> None:
         enum=GradientMethod.PERCEPTUAL.value,
     )
     assert paint._gradient_method(desc) == GradientMethod.PERCEPTUAL.value
-    grey = _grey(desc, 101, 1)[0]
+    grey = _grey_row(desc)
     assert grey[50] == pytest.approx(
         HALFWAY_GREY[GradientMethod.PERCEPTUAL.value], abs=0.002
     )
@@ -700,8 +733,8 @@ def test_a_fill_layer_names_its_method_under_its_own_key(
     assert color is not None and color.shape == (32, 32, 3)
     grey = color[:, 0, 0]
     assert np.allclose(color, grey[:, None, None])
-    # The midpoint sits between the two middle rows of an even-height ramp.
-    assert (grey[15] + grey[16]) / 2 == pytest.approx(HALFWAY_GREY[method], abs=0.003)
+    # The midpoint sits on the row whose index is half the height.
+    assert grey[16] == pytest.approx(HALFWAY_GREY[method], abs=0.003)
 
 
 def test_a_fill_layers_linear_method_renders_its_fixture_as_photoshop_did() -> None:
@@ -757,8 +790,7 @@ def test_a_gradient_stroke_names_its_method_under_the_fill_layers_key() -> None:
     assert not np.array_equal(stroke_key, classic)
     grey = stroke_key[:, 0, 0]
     assert np.allclose(stroke_key, grey[:, None, None])
-    rows = len(grey)
-    halfway = (grey[rows // 2 - 1] + grey[rows // 2]) / 2
+    halfway = grey[len(grey) // 2]
     assert halfway == pytest.approx(
         HALFWAY_GREY[GradientMethod.PERCEPTUAL.value], abs=0.003
     )
@@ -806,8 +838,7 @@ def test_stops_native_to_a_non_rgb_canvas_land_on_the_ramps_ends(
     color_mode: ColorMode, stops: list[Descriptor]
 ) -> None:
     """The ends are the stops as the canvas stores them, whatever the method."""
-    perceptual, _ = paint.draw_gradient_fill(
-        (0, 0, 101, 1),
+    perceptual, _ = _row(
         color_mode,
         _gradient(stops=stops, method=GradientMethod.PERCEPTUAL.value),
     )
@@ -817,11 +848,8 @@ def test_stops_native_to_a_non_rgb_canvas_land_on_the_ramps_ends(
     assert np.allclose(perceptual[0, 100], ends[1], atol=1e-6)
     # The transparency stops carry no colour, so they are eased all the same.
     fade = [_opacity_stop(100.0, 0), _opacity_stop(0.0, 4096)]
-    _, classic_shape = paint.draw_gradient_fill(
-        (0, 0, 101, 1), color_mode, _gradient(stops=stops, transparency=fade)
-    )
-    _, eased_shape = paint.draw_gradient_fill(
-        (0, 0, 101, 1),
+    _, classic_shape = _row(color_mode, _gradient(stops=stops, transparency=fade))
+    _, eased_shape = _row(
         color_mode,
         _gradient(
             stops=stops,
@@ -835,9 +863,8 @@ def test_stops_native_to_a_non_rgb_canvas_land_on_the_ramps_ends(
 
 def test_rgb_stops_in_a_cmyk_document_still_blend_perceptually() -> None:
     """Their trip through sRGB is the classic path's too, so only the middle moves."""
-    classic, _ = paint.draw_gradient_fill((0, 0, 101, 1), ColorMode.CMYK, _gradient())
-    perceptual, _ = paint.draw_gradient_fill(
-        (0, 0, 101, 1),
+    classic, _ = _row(ColorMode.CMYK, _gradient())
+    perceptual, _ = _row(
         ColorMode.CMYK,
         _gradient(method=GradientMethod.PERCEPTUAL.value),
     )
@@ -865,12 +892,8 @@ def test_grey_stops_on_a_grayscale_canvas_blend_as_their_rgb_spelling_does(
 ) -> None:
     """A grey survives the trip through sRGB, so how it is stored changes nothing."""
     as_grey = [_grey_stop(100.0, 0), _grey_stop(0.0, 4096)]
-    from_grey, _ = paint.draw_gradient_fill(
-        (0, 0, 101, 1), ColorMode.GRAYSCALE, _gradient(stops=as_grey, method=method)
-    )
-    from_rgb, _ = paint.draw_gradient_fill(
-        (0, 0, 101, 1), ColorMode.GRAYSCALE, _gradient(method=method)
-    )
+    from_grey, _ = _row(ColorMode.GRAYSCALE, _gradient(stops=as_grey, method=method))
+    from_rgb, _ = _row(ColorMode.GRAYSCALE, _gradient(method=method))
     assert from_grey is not None and from_rgb is not None
     assert from_grey.shape == (1, 101, 1)
     assert np.allclose(from_grey, from_rgb, atol=1e-6)
@@ -897,7 +920,8 @@ def test_a_perceptual_fill_fades_along_the_fitted_ease() -> None:
     _, perceptual = paint.create_fill(layer, layer.bbox)
     assert classic is not None and perceptual is not None
     blend = classic[:, 0, 0]
-    assert blend[-1] == pytest.approx(1.0) and blend[0] == pytest.approx(0.0)
+    assert blend[0] == pytest.approx(0.0), "the top row is on the clear stop"
+    assert 0.95 < blend[-1] < 1.0, "the bottom row is a row short of opaque"
     assert (np.diff(blend) > 0).all()
     assert np.allclose(perceptual[:, 0, 0], _eased(blend), atol=1e-5)
     assert np.allclose(perceptual, perceptual[:, :1, :])
@@ -912,11 +936,8 @@ def test_a_perceptual_transparency_ramp_is_the_eased_classic_one(
     """The ease is a function of the blended opacity, so a mirrored ramp mirrors."""
     locations = (4096, 0) if ascending else (0, 4096)
     stops = [_opacity_stop(100.0, locations[0]), _opacity_stop(0.0, locations[1])]
-    _, classic = paint.draw_gradient_fill(
-        (0, 0, 101, 1), ColorMode.RGB, _gradient(transparency=stops)
-    )
-    _, perceptual = paint.draw_gradient_fill(
-        (0, 0, 101, 1),
+    _, classic = _row(ColorMode.RGB, _gradient(transparency=stops))
+    _, perceptual = _row(
         ColorMode.RGB,
         _gradient(transparency=stops, method=GradientMethod.PERCEPTUAL.value),
     )
@@ -935,8 +956,7 @@ def test_a_perceptual_ramp_between_partial_opacities_still_lands_on_its_stops() 
     construction's own contract.
     """
     stops = [_opacity_stop(80.0, 0), _opacity_stop(20.0, 4096)]
-    _, shape = paint.draw_gradient_fill(
-        (0, 0, 101, 1),
+    _, shape = _row(
         ColorMode.RGB,
         _gradient(transparency=stops, method=GradientMethod.PERCEPTUAL.value),
     )
@@ -996,11 +1016,8 @@ def test_a_ramp_blended_outside_the_canvas_space_keeps_the_stops_own_values(
     color_mode: ColorMode, stops: list[Descriptor], method: bytes
 ) -> None:
     """The stops sit where the classic blend puts them; only the way between moves."""
-    viewport = (0, 0, 101, 1)
-    classic, _ = paint.draw_gradient_fill(viewport, color_mode, _gradient(stops=stops))
-    blended, _ = paint.draw_gradient_fill(
-        viewport, color_mode, _gradient(stops=stops, method=method)
-    )
+    classic, _ = _row(color_mode, _gradient(stops=stops))
+    blended, _ = _row(color_mode, _gradient(stops=stops, method=method))
     assert classic is not None and blended is not None
     assert np.allclose(blended[0, 0], classic[0, 0], atol=1e-6)
     assert np.allclose(blended[0, 100], classic[0, 100], atol=1e-6)
