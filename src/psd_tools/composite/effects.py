@@ -790,11 +790,10 @@ _GLOW_GRADIENT_BYTES = 192
 # on a 0-255 grid along both axes.
 _CONTOUR_STEPS = 256
 
-# How many coverage levels spread grows a silhouette at, at most. A silhouette
-# with no more distinct coverages than this is grown at each of them, so none
-# is rounded to another; one with more, an antialiased or feathered one, is
-# grown at this many of its own, spaced evenly between its lowest and highest.
-_SPREAD_LEVELS = 16
+# The least coverage Photoshop's 8-bit matte holds. Spread counts a pixel
+# as covered from here; a composited silhouette's fainter fringe, which the
+# float canvas keeps, counts as clear.
+_SPREAD_FLOOR = 1.0 / 255.0
 
 
 def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
@@ -972,54 +971,45 @@ def _contoured(alpha: np.ndarray, table: np.ndarray, anti_aliased: bool) -> np.n
     return table[np.rint(alpha * last).astype(np.intp)]
 
 
-def _spread(alpha: np.ndarray, grow: float) -> np.ndarray:
-    """``alpha`` grown by ``grow`` pixels, keeping the coverage it grows.
+def _spread_pixels(size: float, spread: float) -> int:
+    """How many whole pixels of ``size`` a ``spread`` percentage grows a matte by.
 
-    A grey dilation by a disc: every pixel takes the highest coverage within
-    ``grow`` of it, so a half-covered silhouette grows into a half-covered
-    matte rather than an opaque one. It is taken a coverage level at a time,
-    each level a binary silhouette grown along its distance transform with
-    the edge antialiased, and the levels summed, each weighted by the step
-    in coverage it stands for.
+    Photoshop dilates by whole pixels: a spread that rounds to none leaves
+    the matte to the blur, so a feather stays soft under it.
+    """
+    size = max(float(size), 0.0)
+    return math.floor(size * min(max(float(spread), 0.0), 100.0) / 100.0 + 0.5)
 
-    The levels are the silhouette's own coverages: all of them when it has
-    few, which rounds none and costs a binary silhouette a single transform.
-    With more, they are the lowest of its coverages at or above each of that
-    many evenly spaced values between its lowest and highest, so a coverage
-    grows at a level less than one space below it, and the grown fringe is
-    never more than a space under a full grey dilation's. The spacing
-    follows wherever the coverage lies: a feather that never passes 5% is
-    grown in steps of a fifteenth of 5%.
+
+def _spread(alpha: np.ndarray, pixels: int) -> np.ndarray:
+    """``alpha`` grown by ``pixels`` whole pixels from wherever it is covered.
+
+    Photoshop spreads the matte's coverage, not its coverage levels: every
+    pixel covered by at least :data:`_SPREAD_FLOOR` counts as covered, the
+    matte is opaque over all of them and out to the grown edge, and the
+    edge is antialiased over the pixel it crosses. So a feathered edge is
+    cast from its outermost fringe and comes out hard, and a half-covered
+    silhouette casts an opaque matte.
+
+    The edge is grown from where the coverage ends, read off the outermost
+    covered pixels: a pixel's coverage reaches that share of the way across
+    it, so a fully covered pixel's edge is half a pixel past its centre, as
+    :py:func:`_signed_distance` puts a hard edge, and a feather's faint
+    fringe ends about half a pixel short of its centre.
     """
     from scipy.ndimage import distance_transform_edt  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    levels = np.unique(alpha[alpha > 0.0])
-    if levels.size > _SPREAD_LEVELS:
-        spaced = np.linspace(levels[0], levels[-1], _SPREAD_LEVELS)
-        picks = np.searchsorted(levels, spaced, side="left")
-        levels = np.unique(levels[np.minimum(picks, levels.size - 1)])
-    grown = np.zeros(alpha.shape, dtype=np.float32)
-    reach = grown
-    previous: np.ndarray | None = None
-    below = 0.0
-    for level in levels:
-        inside = alpha >= level
-        if not inside.any():
-            break  # The levels only shrink from here.
-        # Consecutive levels no pixel falls between are one silhouette, and
-        # share its transform.
-        if previous is None or not np.array_equal(inside, previous):
-            if inside.all():
-                reach = np.ones(alpha.shape, dtype=np.float32)
-            else:
-                # Half a pixel past the centre of the nearest pixel inside,
-                # the way ``_signed_distance()`` measures a hard edge.
-                outside = distance_transform_edt(~inside).astype(np.float32)
-                reach = np.clip(grow + 1.0 - outside, 0.0, 1.0)
-            previous = inside
-        grown += (float(level) - below) * reach
-        below = float(level)
-    return np.maximum(alpha, grown)
+    # A hair under the floor: the complement of an 8-bit level, taken in
+    # float32, lands an ulp short of it.
+    inside = alpha >= _SPREAD_FLOOR * (1.0 - 1e-6)
+    if inside.all():
+        return np.ones(alpha.shape, dtype=np.float32)
+    if not inside.any():
+        return np.zeros(alpha.shape, dtype=np.float32)
+    outside, nearest = distance_transform_edt(~inside, return_indices=True)
+    edge = alpha[nearest[0], nearest[1]]
+    grown = np.clip(pixels + edge - outside, 0.0, 1.0)
+    return np.where(inside, np.float32(1.0), grown).astype(np.float32)
 
 
 def draw_drop_shadow(
@@ -1145,9 +1135,11 @@ def _soft_matte(
     """``alpha`` grown by the spread and blurred by what is left of the size.
 
     ``spread`` is a percentage of ``size``, which is how Photoshop's dialog
-    states it, even though the descriptor labels the value in pixels. It
-    *grows* the silhouette before the blur, and the blur takes what is left
-    of ``size``, so the matte turns hard-edged at 100%.
+    states it, even though the descriptor labels the value in pixels. Its
+    whole pixels (:py:func:`_spread_pixels`) *grow* the silhouette's coverage
+    before the blur (:py:func:`_spread`), and the blur takes what is left
+    of ``size``, so the matte turns hard-edged at 100%, and a feathered
+    edge is hardened by a spread of a pixel.
 
     The blur is cut off at that remaining radius, rounded to a whole pixel,
     so the matte reaches at most a pixel or two past ``size`` from the
@@ -1162,10 +1154,10 @@ def _soft_matte(
 
     alpha = alpha.astype(np.float32)
     size = max(float(size), 0.0)
-    grow = size * min(max(float(spread), 0.0), 100.0) / 100.0
-    if grow > 0.0 and alpha.any():
-        alpha = _spread(alpha, grow)
-    radius = size - grow
+    pixels = _spread_pixels(size, spread)
+    if pixels > 0:
+        alpha = _spread(alpha, pixels)
+    radius = max(size - pixels, 0.0)
     sigma = radius * sigma_per_size
     if sigma > 1e-3:
         alpha = ndimage.gaussian_filter(
