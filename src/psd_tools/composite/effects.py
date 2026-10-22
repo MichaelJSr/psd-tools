@@ -1225,6 +1225,10 @@ def _cast_matte(
         )
     alpha = _soft_matte(alpha, size, spread, _SHADOW_SIGMA_PER_SIZE, outside=outside)
     dx, dy = _shadow_offset(distance, angle)
+    import os as _os
+    _w = _os.environ.get("PSD_WHOLE_SHADOW", "")
+    if _w == "all" or (_w == "drop" and outside == 0.0):
+        dx, dy = float(math.floor(dx + 0.5)), float(math.floor(dy + 0.5))
     if dx or dy:
         alpha = ndimage.shift(alpha, (dy, dx), order=1, mode="constant", cval=outside)
     return np.clip(alpha, 0.0, 1.0)
