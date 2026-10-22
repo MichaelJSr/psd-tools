@@ -4,6 +4,14 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A smart object whose smart filters have a painted filter mask is
+  composited through it, as Photoshop shows it: filtered where the mask is
+  white, the object as it was before its filters where it is black, instead
+  of filtered everywhere. Other smart objects are unchanged
+- [api] ``SmartObject`` reads its smart filters: ``filters``,
+  ``has_enabled_filters``, ``filter_mask_enabled``,
+  ``filter_mask_extends_white``, ``filter_effect()``, ``filter_source()`` and
+  ``filter_mask()``
 - [fix] A vibrance adjustment matches Photoshop more closely: a positive amount
   boosts dark, pale colours more and light ones less, and a negative amount
   lifts very dark pixels toward their brightest channel instead of darkening
