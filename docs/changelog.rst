@@ -15,8 +15,7 @@ Changelog
   preview after an edit. The default is unchanged.
 - [fix] Photoshop shows a type layer's edits from ``set_text()`` and
   ``set_span_style()``, and the text of a type layer ``copy_to()`` took into
-  another document: such a layer drops its ``TextIndex``, which made
-  Photoshop read the document's stored copy of the text instead.
+  another document; such a layer drops its ``TextIndex``.
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

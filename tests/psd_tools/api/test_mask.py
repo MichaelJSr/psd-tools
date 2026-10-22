@@ -137,10 +137,13 @@ def test_an_unmoved_mask_keeps_the_preview_current() -> None:
     assert not psd.is_updated()
 
 
-def test_mask_offset_takes_two_values() -> None:
-    _, digit = _digit()
-    with pytest.raises(ValueError, match="2"):
-        digit.mask.offset = (1, 2, 3)  # type: ignore[assignment]
+@pytest.mark.parametrize("value", [(1, 2, 3), (1.5, 2), 7, None])
+def test_mask_offset_takes_two_integers(value: Any) -> None:
+    psd, digit = _digit()
+    with pytest.raises(ValueError, match="2 integers"):
+        digit.mask.offset = value
+    assert digit.mask.bbox == (4, 30, 44, 36)
+    assert not psd.is_updated()
 
 
 def test_a_moved_mask_round_trips_through_save() -> None:

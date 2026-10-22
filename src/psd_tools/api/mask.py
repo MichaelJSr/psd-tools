@@ -36,6 +36,7 @@ Note that creating a pixel layer from RGBA image will automatically create a use
 """
 
 import logging
+import operator
 from typing import Any, cast
 
 from PIL import Image
@@ -146,21 +147,22 @@ class Mask(MaskProtocol):
         (left, top) tuple. Writable.
 
         Setting it moves the mask on the canvas, keeping its size and
-        pixels; the layer stays where it is, as when the mask is unlinked
-        in Photoshop. The real user mask moves with the pixel mask.
+        pixels. The layer stays where it is and the mask's link flag is
+        left unchanged. The real user mask moves with the pixel mask.
 
-        :raises ValueError: if the layer also has a vector mask, whose
-            combination with the pixel mask a move would leave stale.
+        :raises ValueError: if ``value`` is not two integers, or the layer
+            also has a vector mask, whose combination with the pixel mask a
+            move would leave stale.
         """
         return self.left, self.top
 
     @offset.setter
     def offset(self, value: tuple[int, int]) -> None:
-        if len(value) != 2:
-            raise ValueError(
-                f"Offset must be a tuple of 2 integers, got {len(value)} elements"
-            )
-        dx, dy = int(value[0]) - self.left, int(value[1]) - self.top
+        try:
+            left, top = map(operator.index, value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Offset must be 2 integers, got {value!r}") from None
+        dx, dy = left - self.left, top - self.top
         if not (dx or dy):
             return
         data = self._data

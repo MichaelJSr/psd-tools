@@ -6,9 +6,7 @@ renders and needs no optional dependency: the stored pixels stay as they
 are until :py:meth:`TypeLayer.rasterize
 <psd_tools.api.layers.TypeLayer.rasterize>` replaces them.
 
-An edited layer drops its ``TextIndex``: Photoshop reads a layer that keeps
-one from the document's own copy of the text (the ``Txt2`` block), which
-the edit does not reach, and one without from the layer itself.
+An edited layer drops its ``TextIndex``, so Photoshop shows the edit.
 """
 
 from __future__ import annotations
@@ -352,7 +350,7 @@ def _set_stored_text(layer: TypeLayer, text: str) -> None:
 
 
 def _drop_text_index(layer: TypeLayer) -> None:
-    """Make Photoshop read the layer's own text data rather than ``Txt2``."""
+    """Unlink the layer from ``Txt2``."""
     layer._data.text_data.pop(b"TextIndex", None)
 
 
