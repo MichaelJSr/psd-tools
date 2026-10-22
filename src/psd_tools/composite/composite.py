@@ -1168,6 +1168,18 @@ def _read_knockout(layer: Layer) -> Knockout:
         return Knockout.NONE
 
 
+def _excluded_channels(layer: Layer, channels: int) -> list[int]:
+    """The colour channels a layer's Blending Options > Channels leaves out.
+
+    Indices into a canvas ``channels`` wide; one beyond it names no colour
+    channel and is ignored.
+    """
+    restricted = layer.tagged_blocks.get_data(Tag.CHANNEL_BLENDING_RESTRICTIONS_SETTING)
+    if not restricted:
+        return []
+    return sorted({index for index in restricted if index < channels})
+
+
 def _document_backdrop(
     psd: "PSDProtocol | None", viewport: tuple[int, int, int, int]
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -1835,6 +1847,18 @@ class _Isolation:
     backdrop_alpha: np.ndarray
 
 
+class _HeldChannels(NamedTuple):
+    """The channels a layer is excluded from, as they were before it went on."""
+
+    channels: list[int]
+    # The canvas's colour in those channels.
+    color: np.ndarray
+    # The alpha of the content they belong to.
+    alpha: np.ndarray
+    # ``color`` as a share of that content, or None to keep it as it is.
+    premultiplied: np.ndarray | None
+
+
 def _unmix(
     color: np.ndarray,
     backdrop_color: np.ndarray,
@@ -2103,6 +2127,16 @@ class Compositor:
 
         if not self._accepts(layer, clip_compositing):
             return
+        excluded = _excluded_channels(layer, self._channels)
+        if not excluded:
+            self._apply_layer(layer)
+            return
+        held = self._hold_channels(excluded, clip_compositing)
+        self._apply_layer(layer)
+        self._restore_channels(held)
+
+    def _apply_layer(self, layer: Layer) -> None:
+        """Composite an accepted layer, its effects and its clip layers."""
         if isinstance(layer, AdjustmentLayer):
             # An adjustment contributes no source of its own; it rewrites the
             # canvas that is already there. Its style is drawn from its mask,
@@ -2185,6 +2219,60 @@ class Compositor:
             # Composited by the layer it clips to, through _apply_clip_layers().
             return False
         return True
+
+    def _hold_channels(
+        self, channels: list[int], clip_compositing: bool
+    ) -> _HeldChannels:
+        """What the excluded channels hold before the layer goes on.
+
+        A layer keeps an excluded channel's premultiplied value in the content
+        it joins: the enclosing isolated group's own when adjustments read
+        that (see :py:meth:`_apply_adjustment`), the canvas otherwise. Over an
+        opaque backdrop the channel stays as it was; where the layer covers
+        transparency it adds coverage and leaves that channel at zero. A clip
+        layer keeps its base's colour, since the base's alpha is the result's.
+        """
+        color = self._color[..., channels]
+        if clip_compositing:
+            return _HeldChannels(channels, color, self._alpha, None)
+        alpha = self._content_alpha()
+        content = color
+        if self._adjustment_isolated:
+            backdrop_color, backdrop_alpha = self._isolation_backdrop()
+            content = _unmix(
+                color, backdrop_color[..., channels], backdrop_alpha, alpha
+            )
+        return _HeldChannels(channels, color, alpha, alpha * content)
+
+    def _restore_channels(self, held: _HeldChannels) -> None:
+        """Put the excluded channels back as :py:meth:`_hold_channels` held them."""
+        kept = held.color
+        if held.premultiplied is not None:
+            alpha = self._content_alpha()
+            premultiplied = held.premultiplied
+            if self._adjustment_isolated:
+                backdrop_color, backdrop_alpha = self._isolation_backdrop()
+                premultiplied = (
+                    premultiplied
+                    + (1.0 - alpha)
+                    * backdrop_alpha
+                    * backdrop_color[..., held.channels]
+                )
+            # Where the content's alpha did not move, neither did the channel.
+            kept = np.where(
+                alpha == held.alpha,
+                held.color,
+                utils.clip(utils.divide(premultiplied, self._alpha, fill=held.color)),
+            )
+        color = np.array(self._color, copy=True)
+        color[..., held.channels] = kept
+        self._color = color
+
+    def _content_alpha(self) -> np.ndarray:
+        """How opaque the content a layer joins is: see :py:meth:`_hold_channels`."""
+        if self._adjustment_isolated:
+            return self._isolation_alpha()
+        return self._alpha
 
     def _resolve_source(self, layer: Layer) -> _Source:
         """Resolve a layer into the operands the blend equations take.
