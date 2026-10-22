@@ -865,3 +865,18 @@ def test_new_writes_hdrt_only_at_depth_32(
     buffer.seek(0)
     reopened = PSDImage.open(buffer)
     assert reopened._record.color_mode_data.value == value
+
+
+def test_save_can_keep_the_stored_preview_after_an_edit(tmp_path: Path) -> None:
+    psd = PSDImage.open(full_name("colormodes/4x4_8bit_rgb.psd"))
+    stored = psd._record.image_data.data
+    psd[-1].visible = not psd[-1].visible
+    assert psd.is_updated()
+    psd.save(tmp_path / "kept.psd", update_preview=False)
+    assert PSDImage.open(tmp_path / "kept.psd")._record.image_data.data == stored
+    assert psd.is_updated()
+    pytest.importorskip("aggdraw")
+    pytest.importorskip("scipy")
+    psd.save(tmp_path / "regenerated.psd")
+    regenerated = PSDImage.open(tmp_path / "regenerated.psd")
+    assert regenerated._record.image_data.data != stored

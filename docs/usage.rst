@@ -66,7 +66,11 @@ The opened PSD file can be saved::
 
 If the PSD File's layer structure was updated, saving it will update the ImageData section.
 However, the rendered image is likely different from the Photoshop's rendering due to the
-limited rendering support in psd_tools.
+limited rendering support in psd_tools. ``update_preview=False`` keeps the stored
+preview instead, which skips compositing the document; the saved preview then
+shows the layers as they were::
+
+    psdimage.save('output.psd', update_preview=False)
 
 Working with Layers
 -------------------
