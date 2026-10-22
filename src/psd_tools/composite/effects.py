@@ -1763,16 +1763,18 @@ def _slopes(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """The surface's slope down and across, as a Sobel operator takes it.
 
     A central difference along each axis, smoothed by ``_SLOPE_ACROSS``
-    along the other.
+    along the other; the edge pixels repeat past the border.
     """
-    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
-
-    step = np.array([-0.5, 0.0, 0.5], dtype=np.float32)
-    across = np.array(_SLOPE_ACROSS, dtype=np.float32)
-    gy = ndimage.correlate1d(height, step, axis=0, mode="nearest")
-    gy = ndimage.correlate1d(gy, across, axis=1, mode="nearest")
-    gx = ndimage.correlate1d(height, step, axis=1, mode="nearest")
-    gx = ndimage.correlate1d(gx, across, axis=0, mode="nearest")
+    height = height.astype(np.float32, copy=False)
+    if not height.size:
+        return np.zeros_like(height), np.zeros_like(height)
+    padded = np.pad(height, 1, mode="edge")
+    half = np.float32(0.5)
+    dy = (padded[2:, :] - padded[:-2, :]) * half
+    dx = (padded[:, 2:] - padded[:, :-2]) * half
+    before, middle, after = (np.float32(weight) for weight in _SLOPE_ACROSS)
+    gy = dy[:, :-2] * before + dy[:, 1:-1] * middle + dy[:, 2:] * after
+    gx = dx[:-2, :] * before + dx[1:-1, :] * middle + dx[2:, :] * after
     return gy, gx
 
 
