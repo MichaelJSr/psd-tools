@@ -625,6 +625,44 @@ def test_a_nested_bevelled_group_is_composited_once_for_its_silhouette(
     assert np.array_equal(cut, whole[top:bottom, left:right])
 
 
+def test_a_bevelled_group_over_the_budget_is_drawn_on_its_cut_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A group's whole box over the budget falls back to the viewport's reach.
+
+    ``layer_effects.psd``'s ``Bevel`` in a group carrying its bevel, with the
+    canvas charged enough per pixel that the group's whole box is over a
+    budget its box cut to the viewport fits.
+    """
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    viewport = (150, 40, 200, 70)
+
+    def bevelled() -> tuple[PSDImage, Layer]:
+        psd = PSDImage.open(full_name("layer_effects.psd"))
+        node = _layer(psd, "Bevel")
+        block = node.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+        group = psd.create_group([node], name="G", blend_mode=BlendMode.NORMAL)
+        group.tagged_blocks.set_data(
+            Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, copy.deepcopy(block)
+        )
+        return psd, group
+
+    psd, group = bevelled()
+    expected = _rendered(psd, viewport)
+
+    monkeypatch.setattr(effects, "_INNER_BYTES", 2048)
+    psd, group = bevelled()
+    bevel = _bevel_of(group)
+    _, size, soften = effects.bevel_geometry(bevel.descriptor)
+    technique = bevel.bevel_type or BevelTechnique.SOFT_MATTE
+    reach = effects.bevel_reach(size, soften, technique)
+    cast_from = compositing._cast_bbox(group, {})
+    grown = effects.inner_bbox(cast_from, reach)
+    psd.max_alloc_bytes = (grown[2] - grown[0]) * (grown[3] - grown[1]) * 2048 - 1
+    effects.inner_bbox(cast_from, reach, psd.max_alloc_bytes, within=viewport)
+    assert np.array_equal(_rendered(psd, viewport), expected)
+
+
 def test_without_scipy_the_effects_are_left_out_with_a_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

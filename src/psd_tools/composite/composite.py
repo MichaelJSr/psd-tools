@@ -3904,13 +3904,22 @@ class Compositor:
         and a nested group's contents are composited for it once per pass.
         The other effects cut a group's box as an object's
         (:py:func:`_within_reach`), which draws on less but composites a
-        nested group again for each compositor above it.
+        nested group again for each compositor above it. A group's box that
+        is over the budget is cut as an object's is, so the effect is still
+        drawn where what reaches the viewport fits.
         Raises as :py:func:`inner_bbox` does, and when the box is out of
         proportion to the layer and the viewport.
         """
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        within = None if isinstance(layer, GroupMixin) else self._viewport
-        bbox = inner_bbox(cast_from, reach, layer._psd._max_alloc_bytes, within=within)
+        budget = layer._psd._max_alloc_bytes
+        bbox: tuple[int, int, int, int] | None = None
+        if isinstance(layer, GroupMixin):
+            try:
+                bbox = inner_bbox(cast_from, reach, budget)
+            except ValueError:
+                pass
+        if bbox is None:
+            bbox = inner_bbox(cast_from, reach, budget, within=self._viewport)
         self._check_effect_growth(bbox, cast_from)
         return bbox
 
@@ -4313,7 +4322,8 @@ class Compositor:
                 above_share = above_share + share
             else:
                 above_share = above_share + share * band.opacity
-            above_beside = above_beside + beside * band.opacity
+            # What the run's outer half is painted at, layer opacity included.
+            above_beside = above_beside + beside * band.opacity * canvas.opacity
         del runs
 
         for band, share, beside, above_share, above_beside in reversed(halves):
