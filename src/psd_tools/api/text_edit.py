@@ -23,7 +23,7 @@ from psd_tools.psd import engine_data
 if TYPE_CHECKING:
     from psd_tools.api.layers import TypeLayer
 
-__all__ = ["set_run_style", "set_span_style", "set_text", "utf16_prefix"]
+__all__ = ["add_font", "set_run_style", "set_span_style", "set_text", "utf16_prefix"]
 
 Keep = Literal["runs", "single"]
 #: ``(unit start, unit end, run data)``
@@ -123,9 +123,9 @@ def set_span_style(
 
     ``keys`` are ``StyleSheetData`` names with plain Python values
     (``FauxBold=True``, ``Tracking=50``, ``FontSize=20.0``); ``Font`` takes
-    a PostScript name already in the layer's ``FontSet``. ``fill`` is an RGB
-    triple in 0..1. Runs are split at the ends of the span and equal
-    neighbours merged.
+    a PostScript name in the layer's ``FontSet``, which :func:`add_font`
+    extends. ``fill`` is an RGB triple in 0..1. Runs are split at the ends
+    of the span and equal neighbours merged.
     """
     text = _editor_text(layer)
     if not 0 <= start <= end <= len(text):
@@ -172,6 +172,57 @@ def set_run_style(
     set_span_style(
         layer, _str_index(units, u0), _str_index(units, u1), fill=fill, **keys
     )
+
+
+def add_font(
+    layer: TypeLayer,
+    name: str,
+    *,
+    font_type: int = 1,
+    script: int = 0,
+    synthetic: int = 0,
+) -> int:
+    """Add the face PostScript ``name`` to the layer's ``FontSet``.
+
+    Returns the face's index, the value a run's ``Font`` key holds. A face
+    already listed keeps its entry. ``font_type`` is Photoshop's outline
+    flag, ``1`` for TrueType and ``0`` for PostScript (CFF or Type 1);
+    ``script`` and ``synthetic`` are stored as given, ``0`` being Roman
+    and none. The face is appended, so no run changes font, and the
+    document resources in the layer's EngineData list it too.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("a font needs a PostScript name")
+    fonts = _font_set(layer.resource_dict)
+    if fonts is None:
+        raise ValueError("the layer's EngineData has no FontSet")
+    names = [str(f["Name"].value) for f in fonts]
+    if name in names:
+        return names.index(name)
+    entry = _font_entry(name, font_type, script, synthetic)
+    shared = _font_set(layer.document_resources)
+    if shared is not None and name not in [str(f["Name"].value) for f in shared]:
+        shared.append(copy.deepcopy(entry))
+    fonts.append(entry)
+    layer.__dict__.pop("_typesetting", None)
+    _drop_text_index(layer)
+    return len(fonts) - 1
+
+
+def _font_set(resources: engine_data.Dict) -> engine_data.List | None:
+    fonts = resources.get("FontSet")
+    return fonts if isinstance(fonts, engine_data.List) else None
+
+
+def _font_entry(
+    name: str, font_type: int, script: int, synthetic: int
+) -> engine_data.Dict:
+    entry = engine_data.Dict()
+    entry["Name"] = engine_data.String(name)
+    entry["Script"] = engine_data.Integer(int(script))
+    entry["FontType"] = engine_data.Integer(int(font_type))
+    entry["Synthetic"] = engine_data.Integer(int(synthetic))
+    return entry
 
 
 def _editor_text(layer: TypeLayer) -> str:
@@ -252,7 +303,8 @@ def _values(
             ]
             if value not in names:
                 raise ValueError(
-                    f"font {value!r} is not in the layer's FontSet {names}"
+                    f"font {value!r} is not in the layer's FontSet {names}; "
+                    "add it with add_font()"
                 )
             value = names.index(value)
         values[key] = _element(value)

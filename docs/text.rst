@@ -49,6 +49,14 @@ text continues the run before it, and paragraphs are rebuilt from ``'\r'``.
     layer.set_span_style(10, 14, fill=(0.8, 0.1, 0.1), FauxBold=True)
     layer.set_run_style(0, Tracking=20)
 
+A run's ``Font`` names a face in the layer's ``FontSet``.
+:py:meth:`~psd_tools.api.layers.TypeLayer.add_font` appends one and returns
+its index; ``font_type`` is ``1`` for TrueType outlines and ``0`` for
+PostScript (CFF or Type 1) ones::
+
+    layer.add_font("stoogedings-Regular")
+    layer.set_span_style(0, 6, Font="stoogedings-Regular")
+
 Edits never render. Until :py:meth:`~psd_tools.api.layers.TypeLayer.rasterize`
 runs, the layer's pixels, ``composite()`` and a saved file still show
 Photoshop's raster of the old text.

@@ -1158,6 +1158,49 @@ class Layer(LayerProtocol):
         """
         return Effects(self)
 
+    def copy_effects_from(self, source: "Layer") -> None:
+        """
+        Replace this layer's effects with a copy of ``source``'s.
+
+        As Photoshop's Copy and Paste Layer Style, without the blending
+        options: every effects block of ``source`` is deep-copied, master
+        switch and disabled entries included, and this layer's own are
+        dropped, so a source with no effects clears them. ``source`` may be
+        in another document; the patterns its effects use are copied into
+        this one, as :py:meth:`copy_to` does.
+
+        :param source: The layer whose effects are copied.
+        :raises TypeError: If ``source`` is not a layer.
+        """
+        if not isinstance(source, Layer):
+            raise TypeError(f"Expected a layer, got {type(source).__name__}")
+        if source is self:
+            return
+        copies = TaggedBlocks()
+        for tag in _EFFECT_BLOCK_TAGS:
+            if tag in source.tagged_blocks:
+                copies[tag] = deepcopy(source.tagged_blocks[tag])
+        if source._psd is not self._psd:
+            ResourceTransfer(self._psd).add_blocks(source._psd, copies)
+        self._replace_effect_blocks(copies)
+
+    def clear_effects(self) -> None:
+        """Remove this layer's effects blocks, as Photoshop's Clear Layer Style."""
+        self._replace_effect_blocks(TaggedBlocks())
+
+    def _replace_effect_blocks(self, copies: TaggedBlocks) -> None:
+        blocks = self.tagged_blocks
+        stale = [tag for tag in _EFFECT_BLOCK_TAGS if tag in blocks]
+        if not (stale or len(copies)):
+            return
+        for tag in stale:
+            if tag not in copies:
+                del blocks[tag]
+        # An existing block is replaced where it stands.
+        for tag in copies:
+            blocks[tag] = copies[tag]
+        self._psd.mark_updated()
+
     @property
     def tagged_blocks(self) -> TaggedBlocks:
         """
@@ -1567,6 +1610,12 @@ class Layer(LayerProtocol):
 
 
 _LAYERLESS_MODES = (ColorMode.BITMAP, ColorMode.INDEXED, ColorMode.MULTICHANNEL)
+_EFFECT_BLOCK_TAGS = (
+    Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
+    Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V0,
+    Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1,
+    Tag.EFFECTS_LAYER,
+)
 
 
 def _insertion_index(parent: "GroupMixin", index: Any) -> int:
@@ -3148,11 +3197,34 @@ class TypeLayer(Layer):
 
         ``keys`` are ``StyleSheetData`` names with plain values, such as
         ``FauxBold=True``, ``Tracking=50`` or ``FontSize=20.0``; ``Font``
-        takes a PostScript name already in the layer's ``FontSet``. ``fill``
-        is an RGB triple in 0..1. Runs are split at the span's ends and
-        equal neighbours merged.
+        takes a PostScript name in the layer's ``FontSet``, which
+        :py:meth:`add_font` extends. ``fill`` is an RGB triple in 0..1.
+        Runs are split at the span's ends and equal neighbours merged.
         """
         text_edit.set_span_style(self, start, end, fill=fill, **keys)
+
+    def add_font(
+        self,
+        name: str,
+        *,
+        font_type: int = 1,
+        script: int = 0,
+        synthetic: int = 0,
+    ) -> int:
+        """
+        Add the face PostScript ``name`` to the layer's ``FontSet``.
+
+        Returns the face's index; a face already listed keeps its entry.
+        ``font_type`` is ``1`` for TrueType outlines and ``0`` for
+        PostScript (CFF or Type 1) ones. No run changes font until
+        :py:meth:`set_span_style` sets ``Font`` to ``name``.
+
+        :raises ValueError: If ``name`` is empty or the layer's EngineData
+            has no ``FontSet``.
+        """
+        return text_edit.add_font(
+            self, name, font_type=font_type, script=script, synthetic=synthetic
+        )
 
     def set_run_style(
         self,

@@ -4,6 +4,13 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [api] ``Layer.copy_effects_from()`` replaces a layer's effects with a copy
+  of another layer's, from any document, patterns included;
+  ``Layer.clear_effects()`` removes them.
+- [api] ``Mask.offset``, ``Mask.left`` and ``Mask.top`` are writable: setting
+  them moves a pixel mask without moving its layer.
+- [api] ``TypeLayer.add_font()`` adds a face to the layer's ``FontSet`` for
+  ``set_span_style(Font=...)``.
 - [api] ``PSDImage.save()`` takes ``update_preview=False`` to keep the stored
   preview after an edit. The default is unchanged.
 - [fix] Photoshop shows a type layer's edits from ``set_text()`` and

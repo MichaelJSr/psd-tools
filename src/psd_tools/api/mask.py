@@ -75,7 +75,7 @@ class Mask(MaskProtocol):
 
     @property
     def left(self) -> int:
-        """Left coordinate."""
+        """Left coordinate. Writable: see :py:attr:`offset`."""
         if self.has_real():
             return (
                 self._data.real_left
@@ -83,6 +83,10 @@ class Mask(MaskProtocol):
                 else self._data.left
             )
         return self._data.left
+
+    @left.setter
+    def left(self, value: int) -> None:
+        self.offset = (value, self.top)
 
     @property
     def right(self) -> int:
@@ -97,7 +101,7 @@ class Mask(MaskProtocol):
 
     @property
     def top(self) -> int:
-        """Top coordinate."""
+        """Top coordinate. Writable: see :py:attr:`offset`."""
         if self.has_real():
             return (
                 self._data.real_top
@@ -105,6 +109,10 @@ class Mask(MaskProtocol):
                 else self._data.top
             )
         return self._data.top
+
+    @top.setter
+    def top(self, value: int) -> None:
+        self.offset = (self.left, value)
 
     @property
     def bottom(self) -> int:
@@ -131,6 +139,42 @@ class Mask(MaskProtocol):
     def size(self) -> tuple[int, int]:
         """(Width, Height) tuple."""
         return self.width, self.height
+
+    @property
+    def offset(self) -> tuple[int, int]:
+        """
+        (left, top) tuple. Writable.
+
+        Setting it moves the mask on the canvas, keeping its size and
+        pixels; the layer stays where it is, as when the mask is unlinked
+        in Photoshop. The real user mask moves with the pixel mask.
+
+        :raises ValueError: if the layer also has a vector mask, whose
+            combination with the pixel mask a move would leave stale.
+        """
+        return self.left, self.top
+
+    @offset.setter
+    def offset(self, value: tuple[int, int]) -> None:
+        if len(value) != 2:
+            raise ValueError(
+                f"Offset must be a tuple of 2 integers, got {len(value)} elements"
+            )
+        dx, dy = int(value[0]) - self.left, int(value[1]) - self.top
+        if not (dx or dy):
+            return
+        data = self._data
+        if data.real_flags is not None and self._layer.has_vector_mask():
+            raise ValueError(
+                "Cannot move a pixel mask that is combined with a vector mask"
+            )
+        data.left, data.right = data.left + dx, data.right + dx
+        data.top, data.bottom = data.top + dy, data.bottom + dy
+        if data.real_left is not None and data.real_right is not None:
+            data.real_left, data.real_right = data.real_left + dx, data.real_right + dx
+        if data.real_top is not None and data.real_bottom is not None:
+            data.real_top, data.real_bottom = data.real_top + dy, data.real_bottom + dy
+        self._layer._psd.mark_updated()
 
     @property
     def disabled(self) -> bool:
