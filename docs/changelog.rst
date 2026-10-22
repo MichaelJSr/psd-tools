@@ -61,6 +61,9 @@ Changelog
   (``gs99``), opacity and blend mode are honoured; noise and jitter are read
   but not applied, and the blur and range approximate Photoshop's. Without
   ``scipy`` it is skipped with a warning (#382, #680)
+- [fix] An outer glow with a spread is cast from a soft-edged layer's
+  coverage, as Photoshop draws it, and a Normal layer's partial pixels no
+  longer fade its glow twice (#680)
 - [fix] A gradient stop whose location or opacity is out of range or not a
   number is held to 0-100%, as a stop's colour is, and so is a noise
   gradient's transparency. A gradient fill, overlay or stroke with one could

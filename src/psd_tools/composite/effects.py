@@ -763,6 +763,24 @@ _GLOW_SIGMA_PER_SIZE = 0.45
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
 
+# The spread, in pixels, from which an outer glow is cast from the layer's
+# coverage rather than its opacity: half a pixel, the least that rounds to a
+# whole one. And what the opacity is scaled by, held to one, to read as
+# coverage. Both fitted against Photoshop's renders of soft-edged layers;
+# the tests pin the values.
+_GLOW_SPREAD_PIXELS = 0.5
+_GLOW_COVERAGE_GAIN = 20.0
+
+# How far below one a coverage still counts as opaque when the coverage
+# reading looks for an antialiased edge: one 8-bit step, so a layer painted
+# a step short of solid, or a 32-bit one a rounding short, still has edges.
+_OPAQUE_STEP = 1.0 / 255.0
+
+# How far, in pixels along the axes, a partial pixel may lie from an opaque
+# one and from a clear one and still read as the shape's antialiased edge:
+# two, the width of the band a resampled edge is antialiased over.
+_GLOW_EDGE_REACH = 2
+
 # What a glow's range is held above, in the same percent, when its falloff is
 # squeezed: a range read as the inverse of the slider would draw a 1% range as
 # a hard band, and Photoshop draws a soft halo. Fitted against Photoshop's
@@ -1196,6 +1214,33 @@ def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
 
 
+def _glow_coverage(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
+    """What a glow of ``size`` and ``spread`` is cast from.
+
+    A glow with no spread is cast from the layer's opacity. One spread by
+    half a pixel or more (:data:`_GLOW_SPREAD_PIXELS`) is cast from its
+    coverage: the opacity scaled by :data:`_GLOW_COVERAGE_GAIN` and held to
+    one, so a soft-edged or faint layer glows as the shape it fades out to
+    and only its faintest pixels cast less than a solid one. A partial pixel
+    within :data:`_GLOW_EDGE_REACH` of both a clear pixel and an opaque one
+    is a hard shape's antialiased edge and keeps its opacity, so text and a
+    resampled shape cast from exactly where their edges lie; the neighbours
+    are read along the axes, as :py:func:`_signed_distance` reads a hard
+    step. Photoshop's renders of such layers split the same way.
+    """
+    alpha = alpha.astype(np.float32)
+    grow = max(float(size), 0.0) * min(max(float(spread), 0.0), 100.0) / 100.0
+    if grow < _GLOW_SPREAD_PIXELS:
+        return alpha
+    covered = alpha > 0.0
+    near_clear, near_opaque = ~covered, alpha >= 1.0 - _OPAQUE_STEP
+    for _ in range(_GLOW_EDGE_REACH):
+        near_clear, near_opaque = _grow(near_clear), _grow(near_opaque)
+    edge = covered & near_clear & near_opaque
+    coverage = np.clip(alpha * _GLOW_COVERAGE_GAIN, 0.0, 1.0)
+    return np.where(edge, alpha, coverage).astype(np.float32)
+
+
 def glow_falloff(
     shape: np.ndarray,
     *,
@@ -1212,7 +1257,10 @@ def glow_falloff(
     :py:func:`outer_glow_bbox` sizes; the result is ``(height, width)`` on
     it, one at the silhouette's edge and dying away over ``size`` pixels: a
     shadow's matte cast nowhere, squeezed by the range (:py:func:`_ranged`)
-    and then mapped by the contour. It is not cut under the silhouette.
+    and then mapped by the contour. A glow spread by half a pixel or more is
+    cast from the silhouette's coverage rather than its opacity, so a soft
+    edge glows as the shape it fades out to, while a hard shape's
+    antialiased edge keeps its opacity. It is not cut under the silhouette.
 
     ``precise`` ramps the matte by its distance from the silhouette instead
     of blurring it (:py:func:`_precise_matte`). A size of zero draws nothing
@@ -1227,8 +1275,10 @@ def glow_falloff(
             "Outer glow parameters must be finite: size=%r spread=%r range=%r"
             % (size, spread, range_)
         )
-    alpha = shape[:, :, 0].astype(np.float32)
-    if size <= 0.0 or not alpha.any():
+    if size <= 0.0:
+        return np.zeros(shape.shape[:2], dtype=np.float32)
+    alpha = _glow_coverage(shape[:, :, 0], size, spread)
+    if not alpha.any():
         return np.zeros(alpha.shape, dtype=np.float32)
     if precise:
         matte = _precise_matte(alpha, size, spread)
@@ -1240,15 +1290,25 @@ def glow_falloff(
     return np.clip(falloff, 0.0, 1.0).astype(np.float32)
 
 
-def _beside(coverage: np.ndarray, shape: np.ndarray) -> np.ndarray:
+def _beside(coverage: np.ndarray, shape: np.ndarray, over: float = 0.0) -> np.ndarray:
     """``coverage`` cut away under the silhouette, as ``(height, width, 1)``.
 
-    Cut whatever the layer's own opacity, since Photoshop never shows an
-    outer glow through its layer.
+    The glow has what the silhouette leaves of each pixel, ``1 - shape``,
+    whatever the layer's own opacity: Photoshop never shows an outer glow
+    through its layer. ``over`` is how much of its silhouette a Normal layer
+    paints when it is composited on top, its fill opacity and opacity
+    together. That compositing keeps ``1 - shape * over`` of what lies
+    beneath, so the glow goes on at the ratio of the two and shows at
+    ``1 - shape`` once the layer is on, rather than faded by the layer's
+    edge twice. At zero it is the plain complement, for a layer that paints
+    nothing or blends in another mode.
     """
-    return np.clip(coverage * (1.0 - shape[:, :, 0]), 0.0, 1.0).astype(np.float32)[
-        :, :, None
-    ]
+    silhouette = shape[:, :, 0]
+    beside = 1.0 - silhouette
+    if over > 0.0:
+        under = 1.0 - silhouette * over
+        beside = np.divide(beside, under, out=np.zeros_like(beside), where=under > 0.0)
+    return np.clip(coverage * beside, 0.0, 1.0).astype(np.float32)[:, :, None]
 
 
 def glow_paint(
@@ -1257,6 +1317,7 @@ def glow_paint(
     desc: Descriptor,
     shape: np.ndarray,
     falloff: np.ndarray,
+    over: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
     """What an outer glow is painted with, on ``viewport``: its colour and coverage.
 
@@ -1272,12 +1333,15 @@ def glow_paint(
     and a translucent stop holds the glow at its opacity for as long as the
     falloff is above it. The gradient's reverse flag turns it around, and its
     stops blend in the method ``gs99`` names, as an overlay's do. Either way
-    the coverage is cut away under the silhouette. A descriptor with neither
-    raises as the solid colour reader does.
+    the coverage is cut away under the silhouette. ``over`` is how much of
+    the silhouette a Normal layer composited on top paints, its fill opacity
+    and opacity together; the coverage under it is raised so the glow shows
+    at ``1 - shape`` once the layer is on. Zero leaves the plain complement.
+    A descriptor with neither raises as the solid colour reader does.
     """
     if Key.Gradient not in desc:
         color, _ = paint.draw_solid_color_fill(viewport, color_mode, desc)
-        return color, _beside(falloff, shape)
+        return color, _beside(falloff, shape, over)
     along = 1.0 - falloff
     if bool(desc.get(Key.Reverse, False)):
         along = 1.0 - along
@@ -1290,7 +1354,7 @@ def glow_paint(
     coverage = falloff
     if opacities is not None:
         coverage = np.minimum(coverage, np.asarray(opacities(along), dtype=np.float32))
-    return color, _beside(coverage, shape)
+    return color, _beside(coverage, shape, over)
 
 
 def _glow_range(matte: np.ndarray, glow_range: float) -> np.ndarray:
