@@ -12,6 +12,13 @@ Changelog
   ``has_enabled_filters``, ``filter_mask_enabled``,
   ``filter_mask_extends_white``, ``filter_effect()``, ``filter_source()`` and
   ``filter_mask()``
+- [fix] ``PSDImage.composite()`` and ``Layer.composite()`` round each value
+  to the nearest byte instead of truncating it, as Photoshop's export does, so
+  colour and alpha bytes can move up by one level, and a bitmap document's
+  pixel turns white from 0.5 rather than 128/255. The float arrays of
+  ``psd_tools.composite.composite()`` are unchanged. An 8-bit posterize
+  adjustment truncates each level to a whole byte, as Photoshop does.
+  **Rendering change** for every composited image
 - [fix] A vibrance adjustment matches Photoshop more closely: a positive amount
   boosts dark, pale colours more and light ones less, and a negative amount
   lifts very dark pixels toward their brightest channel instead of darkening

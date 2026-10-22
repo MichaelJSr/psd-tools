@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from psd_tools.api import adjustments
 from psd_tools.api.layers import Group, Layer
@@ -354,6 +355,37 @@ def test_posterize_composite_icc(name: str, colormode: str) -> None:
 def test_posterize_composite_error(name: str, colormode: str) -> None:
     filename = f"adjustments/{name}_{colormode}.psd"
     check_composite_quality(filename, posterize_tests[name], False)
+
+
+@pytest.mark.parametrize("colormode", ["rgb", "grayscale"])
+def test_posterize_matches_photoshop_bytes(colormode: str) -> None:
+    """Photoshop's 8-bit levels are whole bytes, so its export is matched exactly.
+
+    The fixture's posterized edges are the only channels left to differ.
+    """
+    filename = f"adjustments/posterize_{colormode}"
+    reference = np.asarray(Image.open(full_name(filename + ".png")))
+    psd = PSDImage.open(full_name(filename + ".psd"))
+    result = np.asarray(
+        psd.composite(apply_icc=True, layer_filter=lambda layer: layer.is_visible())
+    )
+    assert np.mean(result == reference) > 0.999
+
+
+def test_posterize_truncates_8_bit_levels_to_whole_bytes() -> None:
+    psd = PSDImage.open(full_name("adjustments/posterize_rgb.psd"))
+    layer = next(
+        x
+        for x in psd.descendants()
+        if isinstance(x, adjustments.Posterize) and x.posterize == 13
+    )
+    ramp = np.linspace(0, 1, 256, dtype=np.float32).reshape(1, 256, 1)
+    out = 255 * _applied(
+        apply_posterize(np.repeat(ramp, 3, axis=2), ColorMode.RGB, layer)
+    )
+    exact = 255 * np.unique(np.floor(255 / 256 * ramp * 13)) / 12
+    assert not np.array_equal(exact, np.floor(exact)), "13 levels are not whole bytes"
+    np.testing.assert_allclose(np.unique(out), np.floor(exact), atol=1e-3)
 
 
 # Threshold

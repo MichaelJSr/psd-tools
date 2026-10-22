@@ -856,24 +856,20 @@ def composite_pil(
         color = color[:, :, 0]
     if color.shape[0] == 0 or color.shape[1] == 0:
         return None
-    # Clipped, not cast straight: numpy *wraps* an out-of-range float, so a
-    # component at 1.2 would arrive as byte 50 rather than as white -- an
-    # unrelated colour instead of a saturated one (#757).
-    #
-    # Nothing reaches here out of range today: `Compositor` clips its own
-    # arrays, the descriptor readers clamp at the source, and no file under
-    # tests/psd_files arrives out of range in either force mode even with a
-    # deliberately out-of-range backdrop. So this changes no output; it is here
-    # so the failure mode of the next producer is a clipped colour rather than
-    # a wrapped one. Note it does not make the cast total -- np.clip passes NaN
-    # through -- so it is a narrowing of the damage, not a guarantee.
-    pixels = np.clip(255 * color, 0, 255).astype(np.uint8)
+    # Clipped, not cast straight: numpy *wraps* an out-of-range float, so 1.2
+    # would arrive as byte 50 rather than as white (#757). np.clip passes NaN
+    # through. Rounded, not truncated, as Photoshop's export is.
+    pixels = 255 * color
+    np.clip(pixels, 0, 255, out=pixels)
+    np.rint(pixels, out=pixels)
+    pixels = pixels.astype(np.uint8)
     if mode == "1":
         # `fromarray(uint8, "1")` does not mean "these bytes, as bilevel". PIL
         # takes the raw mode literally at one bit per pixel, so it consumes one
         # byte per eight columns and expands its bits across the row -- a 4x4
         # document came back as the bits of its first four bytes. Build the
         # plane in "L", where a byte is a pixel, and reduce it afterwards.
+        # Rounded, its threshold of byte 128 makes 0.5 and up white.
         image = Image.fromarray(pixels, "L").convert("1", dither=Image.Dither.NONE)
     elif mode == "LAB":
         # The same trap as "1", in a different raw mode. PIL's "LAB" unpacker
@@ -906,9 +902,10 @@ def composite_pil(
     # Gating this on `not force` dropped it on exactly the paths the branch
     # above had just diverted here.
     if skip_alpha and delay_alpha_application:
-        alpha_as_image = Image.fromarray(
-            (255 * np.squeeze(alpha, axis=2)).astype(np.uint8), "L"
-        )
+        plane = 255 * np.squeeze(alpha, axis=2)
+        np.clip(plane, 0, 255, out=plane)
+        np.rint(plane, out=plane)
+        alpha_as_image = Image.fromarray(plane.astype(np.uint8), "L")
     icc = None
     if apply_icc and Resource.ICC_PROFILE in psd_image.image_resources:
         icc = psd_image.image_resources.get_data(Resource.ICC_PROFILE)

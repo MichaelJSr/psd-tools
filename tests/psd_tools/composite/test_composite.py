@@ -927,8 +927,8 @@ def test_composite_pil_multichannel_force_keeps_the_spot_channel_intact() -> Non
     assert isinstance(image, Image.Image)
     assert image.mode == "LA"
     planes = np.asarray(image)
-    expected_color = (255 * truth[:, :, 0]).astype(np.uint8)
-    expected_alpha = (255 * truth_alpha[:, :, 0]).astype(np.uint8)
+    expected_color = np.rint(255 * truth[:, :, 0]).astype(np.uint8)
+    expected_alpha = np.rint(255 * truth_alpha[:, :, 0]).astype(np.uint8)
     assert np.array_equal(planes[:, :, 0], expected_color)
     assert np.array_equal(planes[:, :, 1], expected_alpha)
 
@@ -1056,7 +1056,7 @@ def test_composite_pil_force_pixels_match_the_numpy_path(colormode: str) -> None
     assert isinstance(image, Image.Image)
     color, _, _ = composite(psd, force=True)
 
-    expected = (255 * color).astype(np.uint8)
+    expected = np.rint(255 * color).astype(np.uint8)
     if colormode == "bitmap":
         expected = (expected > 127).astype(np.uint8)  # PIL reports "1" as 0/1
     if image.mode == "CMYK":
@@ -1092,6 +1092,41 @@ def test_composite_pil_force_keeps_cmyk_alpha_reachable() -> None:
     lazy_alpha = np.asarray(lazy)[:, :, 3]
     assert set(np.unique(lazy_alpha).tolist()) == {0, 255}  # bare px are bare
     assert np.array_equal(np.asarray(forced)[:, :, 3], lazy_alpha)
+
+
+def test_composite_pil_rounds_to_the_nearest_byte() -> None:
+    """Colour and alpha leave the compositor rounded, as Photoshop's export is."""
+    psd = PSDImage.open(full_name("gradient-styles.psd"))
+    image = psd.composite(ignore_preview=True, force=True, apply_icc=False)
+    assert isinstance(image, Image.Image)
+    assert image.mode == "RGBA"
+    color, _, alpha = composite(psd, force=True)
+    exact = 255 * np.concatenate((color, alpha), axis=2)
+    pixels = np.asarray(image)
+    assert np.array_equal(pixels, np.rint(exact).astype(np.uint8))
+    assert not np.array_equal(pixels, exact.astype(np.uint8))
+
+
+def test_composite_pil_rounds_the_delayed_alpha_to_the_nearest_byte() -> None:
+    """CMYK hands its alpha to ``post_process()`` as a plane, rounded too."""
+    psd = PSDImage.open(full_name("adjustments/levels_cmyk.psd"))
+    color, _, alpha = composite(psd, force=True)
+
+    plain = psd.composite(ignore_preview=True, force=True, apply_icc=False)
+    assert isinstance(plain, Image.Image)
+    assert plain.mode == "CMYK"
+    ink = 255 * color
+    # post_process() inverts CMYK on the way out.
+    assert np.array_equal(np.asarray(plain), 255 - np.rint(ink).astype(np.uint8))
+    assert not np.array_equal(np.asarray(plain), 255 - ink.astype(np.uint8))
+
+    profiled = psd.composite(ignore_preview=True, force=True)
+    assert isinstance(profiled, Image.Image)
+    assert profiled.mode == "RGBA"
+    exact = 255 * alpha[:, :, 0]
+    planes = np.asarray(profiled)[:, :, 3]
+    assert np.array_equal(planes, np.rint(exact).astype(np.uint8))
+    assert not np.array_equal(planes, exact.astype(np.uint8))
 
 
 def test_composite_layer_filter() -> None:
@@ -2248,6 +2283,31 @@ def test_composite_pil_clips_rather_than_wrapping_at_the_uint8_cast(
     assert isinstance(image, Image.Image)
     pixels = np.asarray(image.convert("RGB"))
     assert pixels.min() == expected and pixels.max() == expected, pixels
+
+
+@pytest.mark.parametrize(
+    "value, expected", [(1.002, 255), (1.2, 255), (-0.2, 0), (-5.0, 0)]
+)
+def test_composite_pil_clips_the_delayed_alpha_rather_than_wrapping(
+    monkeypatch: pytest.MonkeyPatch, value: float, expected: int
+) -> None:
+    """The CMYK alpha plane saturates at the cast as the colour does (#757).
+
+    Rounding wraps from just above 1.0, so the stand-in sits there too.
+    """
+    psd = PSDImage.open(full_name("adjustments/levels_cmyk.psd"))
+    real = composite_module.composite
+
+    def out_of_range(*args: Any, **kwargs: Any) -> Any:
+        color, shape, alpha = real(*args, **kwargs)
+        return color, shape, np.full_like(alpha, value)
+
+    monkeypatch.setattr(composite_module, "composite", out_of_range)
+    image = composite_module.composite_pil(psd, 1.0, 0.0, None, None, False)
+    assert isinstance(image, Image.Image)
+    assert image.mode == "RGBA"
+    planes = np.asarray(image)[:, :, 3]
+    assert planes.min() == expected and planes.max() == expected, planes
 
 
 def _grouped(psd: PSDImage, layer_list: Any, name: str) -> Any:

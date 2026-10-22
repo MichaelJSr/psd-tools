@@ -298,7 +298,7 @@ def test_white_fill_is_white_on_a_cmyk_document(
         (0, 0, 4, 4), ColorMode.CMYK, _color_desc(klass, fields)
     )
     assert fill is not None
-    image = Image.fromarray((255 * fill).astype(np.uint8), "CMYK")
+    image = Image.fromarray(np.rint(255 * fill).astype(np.uint8), "CMYK")
     rendered = post_process(image, None, None).convert("RGB")
     assert rendered.getpixel((0, 0)) == (255, 255, 255)
 
@@ -316,7 +316,7 @@ def test_cmyk_fill_lightness_survives_the_round_trip() -> None:
             ColorMode.CMYK,
             _color_desc(Klass.Grayscale.value, {Key.Gray: gray}),
         )
-        image = Image.fromarray((255 * fill).astype(np.uint8), "CMYK")
+        image = Image.fromarray(np.rint(255 * fill).astype(np.uint8), "CMYK")
         pixel = post_process(image, None, None).convert("RGB").getpixel((0, 0))
         assert isinstance(pixel, tuple)
         seen.append(pixel[0])
@@ -428,7 +428,7 @@ def test_lab_out_of_range_clamps_rather_than_wrapping(field: Key, value: float) 
     result = _get_color(ColorMode.LAB, _color_desc(Klass.LabColor.value, fields))
     assert all(0.0 <= c <= 1.0 for c in result), result
     assert result[axes.index(field)] == (1.0 if value > 0 else 0.0)
-    pixels = (255 * np.array(result, dtype=np.float32)).astype(np.uint8)
+    pixels = np.rint(255 * np.array(result, dtype=np.float32)).astype(np.uint8)
     assert pixels[axes.index(field)] == (255 if value > 0 else 0)
 
 
@@ -986,10 +986,9 @@ def test_out_of_range_components_saturate_rather_than_wrapping(
     result = _get_color(color_mode, _color_desc(class_id, fields))
     assert all(0.0 <= c <= 1.0 for c in result), (label, result)
     assert result == pytest.approx(expected), label
-    # The point of the clamp is what the cast then does with it. ``astype``
-    # truncates rather than rounds, which is why the model below uses ``int``.
-    pixels = (255 * np.array(result, dtype=np.float32)).astype(np.uint8)
-    want = [int(255 * np.float32(c)) for c in expected]
+    # The point of the clamp is what the cast then does with it: it rounds.
+    pixels = np.rint(255 * np.array(result, dtype=np.float32)).astype(np.uint8)
+    want = [round(255 * float(np.float32(c))) for c in expected]
     assert pixels.tolist() == want, label
 
 
@@ -1281,8 +1280,8 @@ def test_cmyk_stroke_on_an_rgb_document_is_the_ink_it_asks_for() -> None:
     forged ones, but a stroke's ``strokeStyleContent`` is evidently not
     normalized the same way, so a real file reaches this path.
 
-    Read as ink, that stroke is ``(8, 9, 9)``; read in canvas convention it is
-    ``(162, 152, 150)``, a mid grey, which is the defect at three-quarters of
+    Read as ink, that stroke is ``(8, 10, 10)``; read in canvas convention it
+    is ``(162, 153, 151)``, a mid grey, which is the defect at three-quarters of
     the axis rather than at the extreme the forged white shows.
 
     Asserted at ``create_fill_desc()`` rather than through a render, because
@@ -1304,4 +1303,4 @@ def test_cmyk_stroke_on_an_rgb_document_is_the_ink_it_asks_for() -> None:
         for key in (Key.Cyan, Key.Magenta, Key.Yellow, Key.Black)
     )
     assert color[0, 0] == pytest.approx(cmyk_to_rgb(*ink), abs=1e-6)
-    assert (255 * color[0, 0]).astype(np.uint8).tolist() == [8, 9, 9]
+    assert np.rint(255 * color[0, 0]).astype(np.uint8).tolist() == [8, 10, 10]

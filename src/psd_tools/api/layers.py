@@ -2643,8 +2643,7 @@ class Artboard(Group):
                 return (1.0 if white else 0.0), 1.0
             elif color_mode == ColorMode.LAB:
                 # LAB: L in [0,1]; a and b are offset-encoded, so neutral is
-                # 128/255 rather than 0.5 -- 0.5 truncates to byte 127 on the
-                # way out where Photoshop writes 128 (#743).
+                # 128/255 rather than 0.5 (#743).
                 return (
                     (1.0 if white else 0.0, LAB_NEUTRAL_CHROMA, LAB_NEUTRAL_CHROMA),
                     1.0,
