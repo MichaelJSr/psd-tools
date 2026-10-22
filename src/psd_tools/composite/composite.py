@@ -167,8 +167,10 @@ def _beside_covers(layer: Layer) -> bool:
     That is its drop shadows, outer glows, outer strokes and the bevels that
     reach outside it (:py:func:`_beside_paints`). Each keeps ``1 - alpha``
     of what it lands on in Normal or Dissolve, and as a solid colour its
-    mode paints whatever it lands on: black in Multiply, white in Screen.
-    One at 0% paints nothing. An effect that cannot be read does not cover.
+    mode paints whatever it lands on: every channel 0 in Multiply, 1 in
+    Screen, as RGB or grayscale black and white are. A CMYK or Lab black
+    does not: some of its channels blend with what it lands on. One at 0%
+    paints nothing. An effect that cannot be read does not cover.
     """
     color_mode = layer._psd.color_mode
     for name in ("dropshadow", "outerglow", "stroke", "bevelemboss"):
@@ -3905,7 +3907,7 @@ class Compositor:
         _, opacity = self._get_const(layer)
         if opacity <= 0.0:
             return
-        covers = _covers_beneath(layer, self._layer_filter)
+        covers: bool | None = None
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         for effect in shadows:
             shadow = cast(DropShadow, effect)
@@ -3965,6 +3967,8 @@ class Compositor:
                 logger.debug("Cannot draw a drop shadow of %s: %s", layer, error)
                 continue
             if knocks_out:
+                if covers is None:
+                    covers = _covers_beneath(layer, self._layer_filter)
                 coverage = coverage * (
                     1.0 - self._knockout_shape(layer, bbox, silhouette, covers)
                 )

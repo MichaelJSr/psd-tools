@@ -664,52 +664,148 @@ def test_a_faint_stroke_beside_a_soft_edge_shows_the_backdrop_not_the_shadow() -
 
 
 @pytest.mark.parametrize(
+    ("mode", "opacity"),
+    [(Enum.Normal, 100.0), (Enum.Normal, 50.0), (Enum.Multiply, 100.0)],
+    ids=["normal", "normal at 50%", "multiply"],
+)
+def test_a_strokes_antialiased_rim_hides_the_shadow_at_its_opacity(
+    mode: bytes, opacity: float
+) -> None:
+    """Beside the square the stroke alone claims ``b`` of a pixel.
+
+    A Normal stroke at opacity ``o`` hides ``o * b`` of the shadow once on,
+    so the cut leaves the shadow at ``(1 - b) / (1 - o * b)`` and it shows at
+    ``1 - b``. A Multiply stroke hides none of it and the cut takes ``b``.
+    The shadow is spread past the rim, where it is opaque.
+    """
+    layer, shadow = _soft_square(keep_stroke=True)
+    shadow[Key.Blur] = Double(10.0)
+    stroke = cast(Stroke, next(iter(layer.effects.find("stroke"))))
+    stroke.descriptor[Key.Mode] = Enumerated(Type.BlendMode, mode)
+    stroke.descriptor[Key.Opacity] = Double(opacity)
+    viewport = _around(layer, 12)
+    left, top, right, bottom = layer.bbox
+    beside = np.ones((viewport[3] - viewport[1], viewport[2] - viewport[0]), bool)
+    beside[
+        top - viewport[1] : bottom - viewport[1],
+        left - viewport[0] : right - viewport[0],
+    ] = False
+
+    alpha = _alone(layer, viewport)[:, :, 0]
+    shadow[Key.Enabled] = False
+    o = opacity / 100.0
+    band = _alone(layer, viewport)[:, :, 0] / o
+    rim = beside & (band > 0.0) & (band < 1.0)
+    assert rim.any()
+    shadow[Key.Enabled] = True
+    shadow[b"layerConceals"] = False
+    assert np.allclose(_alone(layer, viewport)[:, :, 0][rim], 1.0, atol=1e-6)
+    b = band[rim]
+    p = o if mode == Enum.Normal else 0.0
+    expected = o * b + (1.0 - o * b) * (1.0 - b) / (1.0 - p * b)
+    assert np.allclose(alpha[rim], expected, atol=1e-5), alpha[rim]
+
+
+# The card's one stroke, inside, Normal and black, and switched off.
+_STROKES = b"frameFXMulti"
+_RED = {Key.Red: 255.0}
+_OUTSIDE_MULTIPLY = {Key.Style: Enum.OutsetFrame, Key.Mode: Enum.Multiply}
+
+
+@pytest.mark.parametrize(
     ("kind", "values", "covers"),
     [
         (Klass.DropShadow, {}, True),
-        (Klass.DropShadow, {b"Rd  ": 255.0}, False),
+        (Klass.DropShadow, {Key.Color: _RED}, False),
+        (Klass.DropShadow, {Key.Color: _RED, Key.Mode: None}, False),
         (Klass.DropShadow, {Key.Mode: Enum.Screen}, False),
-        (Klass.DropShadow, {Key.Mode: Enum.Normal, b"Rd  ": 255.0}, True),
+        (Klass.DropShadow, {Key.Mode: Enum.Normal, Key.Color: _RED}, True),
         (Klass.OuterGlow, {}, True),
-        (Klass.OuterGlow, {b"Bl  ": 0.0}, False),
-        (Klass.OuterGlow, {b"Bl  ": 0.0, Key.Opacity: 0.0}, True),
+        (Klass.OuterGlow, {Key.Color: {Key.Blue: 0.0}}, False),
+        (Klass.OuterGlow, {Key.Color: {Key.Blue: 0.0}, Key.Opacity: 0.0}, True),
+        (Klass.OuterGlow, {Key.Gradient: Descriptor()}, False),
+        (_STROKES, {Key.Style: Enum.OutsetFrame, Key.Color: _RED}, True),
+        (_STROKES, _OUTSIDE_MULTIPLY, True),
+        (_STROKES, {**_OUTSIDE_MULTIPLY, Key.Color: _RED}, False),
+        (
+            _STROKES,
+            {**_OUTSIDE_MULTIPLY, Key.Style: Enum.CenteredFrame, Key.Color: _RED},
+            False,
+        ),
+        (_STROKES, {Key.Mode: Enum.Multiply, Key.Color: _RED}, True),
+        (
+            _STROKES,
+            {
+                **_OUTSIDE_MULTIPLY,
+                Key.PaintType: Enum.GradientFill,
+                Key.Gradient: Descriptor(),
+            },
+            False,
+        ),
+        (
+            _STROKES,
+            {
+                **_OUTSIDE_MULTIPLY,
+                Key.PaintType: Enum.Pattern,
+                Key.Pattern: Descriptor(),
+            },
+            False,
+        ),
     ],
     ids=[
         "black multiply",
         "red multiply",
+        "red with no mode",
         "screen shadow",
         "normal",
         "white screen",
         "yellow screen",
         "at 0%",
+        "gradient glow",
+        "outside normal stroke",
+        "outside black multiply stroke",
+        "outside red multiply stroke",
+        "centre red multiply stroke",
+        "inside red multiply stroke",
+        "outside gradient multiply stroke",
+        "outside pattern multiply stroke",
     ],
 )
 def test_a_pass_through_group_covers_as_the_effects_beside_its_children_do(
     kind: bytes, values: dict[bytes, Any], covers: bool
 ) -> None:
-    """A child's shadow or glow lands on the backdrop in its own mode.
+    """A child's shadow, glow or outer stroke lands on the backdrop in its own mode.
 
     It is part of the group's alpha, so the group keeps ``1 - alpha`` of what
     lies beneath only where it does too: in Normal, or as a colour its mode
-    paints whatever it lands on -- black multiplied, white screened. A child
-    effect at 0% paints nothing and has no say.
+    paints whatever it lands on -- black multiplied, white screened. A drop
+    shadow with no mode multiplies. A gradient or pattern is not taken to
+    cover. A child effect at 0%, or a stroke inside the child, paints nothing
+    beside it and has no say. ``values`` maps keys to what to put there, or
+    to None to remove one, and a dict to the colour channels to set.
     """
     psd, layer = _masks_card()
     group = psd.create_group([layer])
     assert group.blend_mode == BlendMode.PASS_THROUGH
     block = layer.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
-    effect = block[kind]
+    effect = block[kind][0] if kind == _STROKES else block[kind]
     effect[Key.Enabled] = Bool(True)
     effect[b"present"] = Bool(True)
     for key, value in values.items():
-        if key == Key.Mode:
-            effect[key] = Enumerated(Type.BlendMode, value)
-        elif key == Key.Opacity:
+        if value is None:
+            del effect[key]
+        elif isinstance(value, dict):
+            for channel, level in value.items():
+                effect[key][channel] = Double(level)
+        elif isinstance(value, float):
             effect[key] = Double(value)
+        elif isinstance(value, Enum):
+            effect[key] = Enumerated(effect[key].typeID, value)
         else:
-            effect[Key.Color][key] = Double(value)
+            effect[key] = value
     if kind != Klass.DropShadow:
         block[Klass.DropShadow][Key.Enabled] = Bool(False)
+    assert sum(effect.enabled for effect in layer.effects) == 1
     assert _covers_beneath(layer, None)
     assert _covers_beneath(group, None) is covers
 
