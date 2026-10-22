@@ -531,10 +531,8 @@ def draw_pattern_fill(
 
     .. todo:: Test this.
     """
-    pattern_id = desc[Enum.Pattern][Key.ID].value.rstrip("\x00")
-    pattern = psd._get_pattern(pattern_id)
+    pattern = _find_pattern(psd, desc)
     if not pattern:
-        logger.error("Pattern not found: %s", pattern_id)
         return None, None
 
     budget = getattr(psd, "_max_alloc_bytes", None)
@@ -581,6 +579,15 @@ def draw_pattern_fill(
     if pixels.shape[2] > channels:
         return pixels[:, :, :channels], pixels[:, :, -1:]
     return pixels, None
+
+
+def _find_pattern(psd: Any, desc: Descriptor) -> Any | None:
+    """The document's pattern that *desc* names; logged when it is missing."""
+    pattern_id = desc[Enum.Pattern][Key.ID].value.rstrip("\x00")
+    pattern = psd._get_pattern(pattern_id)
+    if not pattern:
+        logger.error("Pattern not found: %s", pattern_id)
+    return pattern
 
 
 @require_scipy

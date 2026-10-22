@@ -41,7 +41,7 @@ from psd_tools.api.utils import (
 )
 from psd_tools.composite import paint, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
-from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
+from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
 from psd_tools.composite.blend import fade_source, get_blend_func, normal
 from psd_tools.composite.effects import (
     bevel_beside,
@@ -770,12 +770,18 @@ class _PassCache:
 
     ``scipy_warned`` is set once a pass has logged that its effects are left
     out for want of scipy, so a document with many of them says it once.
+
+    ``unfiltered`` is the last smart object whose filter mask
+    :py:func:`_unfilter_under_mask` blended, with the result: each effect cast
+    from the layer reads it again, and the blend decodes the document's
+    ``FEid`` planes. It holds the layer itself, and one layer's pixels.
     """
 
     content_bboxes: _ContentBBoxes = field(default_factory=dict)
     group_shapes: _GroupShapes = field(default_factory=dict)
     group_alphas: _GroupShapes = field(default_factory=dict)
     scipy_warned: bool = False
+    unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -1989,6 +1995,10 @@ def _remix(
     )
 
 
+# A bevel texture's colour planes, by its pattern's mode. An indexed pattern's
+# one plane holds palette indices, not grey levels.
+_TEXTURE_PLANES = {ColorMode.RGB: 3, ColorMode.GRAYSCALE: 1}
+
 # Float32 planes of ``layer.bbox`` that _blend_unfiltered() allocates at its
 # peak, beside the arrays it is given.
 _UNFILTER_PLANES = 8
@@ -3139,7 +3149,13 @@ class Compositor:
             if shape is None:
                 shape = np.ones((layer.height, layer.width, 1), dtype=np.float32)
         elif color is not None and isinstance(layer, SmartObjectLayer):
+            memo = self._cache.unfiltered
+            if memo is not None and memo[0] is layer:
+                return memo[1], memo[2]
+            stored = color
             color, shape = _unfilter_under_mask(layer, color, shape)
+            if color is not stored:
+                self._cache.unfiltered = (layer, color, shape)
         return color, shape
 
     @staticmethod
@@ -4356,7 +4372,7 @@ class Compositor:
         :py:func:`texture_height` turns its luminance into height; the
         pattern's alpha is not read. None, and the bevel goes on untextured,
         when the pattern is not in the document or cannot be read, or the
-        document is neither RGB nor grayscale.
+        document or the pattern is neither RGB nor grayscale.
         """
         if layer._psd.color_mode not in (ColorMode.RGB, ColorMode.GRAYSCALE):
             logger.debug(
@@ -4364,6 +4380,16 @@ class Compositor:
             )
             return None
         try:
+            pattern = paint._find_pattern(layer._psd, bevel.descriptor)
+            if pattern is None:  # _find_pattern has logged it
+                return None
+            planes = _TEXTURE_PLANES.get(pattern.image_mode)
+            if planes is None:
+                logger.debug(
+                    "The texture pattern of a bevel of %s is neither RGB nor grey",
+                    layer,
+                )
+                return None
             _, layout = _overlay_boxes(
                 layer, self._viewport, self._cache.content_bboxes
             )
@@ -4374,19 +4400,10 @@ class Compositor:
         except _UNREADABLE as error:
             logger.debug("Cannot read the texture of a bevel of %s: %s", layer, error)
             return None
-        if fill is None:  # draw_pattern_fill has logged the missing pattern
+        if fill is None or fill.shape[2] != planes:
+            logger.debug("Cannot read the texture of a bevel of %s", layer)
             return None
-        if fill.shape[2] == 3:
-            luminance = (
-                fill[:, :, 0] * 0.299 + fill[:, :, 1] * 0.587 + fill[:, :, 2] * 0.114
-            )
-        elif fill.shape[2] == 1:
-            luminance = fill[:, :, 0]
-        else:
-            logger.debug(
-                "The texture pattern of a bevel of %s is neither RGB nor grey", layer
-            )
-            return None
+        luminance = fill[:, :, 0] if planes == 1 else fill @ _BT601_LUMINANCE
         return texture_height(
             np.clip(luminance, 0.0, 1.0),
             size=size,
