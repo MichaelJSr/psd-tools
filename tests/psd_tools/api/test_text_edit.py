@@ -438,3 +438,14 @@ def test_story_index_out_of_range_refuses() -> None:
     with pytest.raises(ValueError, match="TextIndex 7"):
         layer.set_text("B.F.B.")
     assert layer.text == "B.F.B"
+
+
+def test_story_shared_with_another_layer_refuses() -> None:
+    layer = story_layer("Name")
+    psd = cast(PSDImage, layer._psd)
+    other = next(x for x in psd.descendants() if x.name == "Ability")
+    index = layer._data.text_data[b"TextIndex"].value
+    cast(TypeLayer, other)._data.text_data[b"TextIndex"].value = index  # a copy
+    with pytest.raises(ValueError, match="also 'Ability'"):
+        layer.set_text("B.F.B.")
+    assert layer.text == "B.F.B" and not psd.is_updated()

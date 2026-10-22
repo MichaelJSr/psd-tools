@@ -498,6 +498,8 @@ class _Story:
 def _story(layer: TypeLayer) -> _Story | None:
     """Return the layer's Txt2 story; None without Txt2 or a TextIndex."""
     psd = getattr(layer, "_psd", None)
+    if psd is None:
+        return None
     record = getattr(psd, "_record", None)
     info = getattr(record, "layer_and_mask_information", None)
     blocks = getattr(info, "tagged_blocks", None)
@@ -519,6 +521,11 @@ def _story(layer: TypeLayer) -> _Story | None:
     i = int(getattr(index, "value", index))
     if not 0 <= i < len(stories):
         raise ValueError(f"TextIndex {i} outside the {len(stories)} Txt2 stories")
+    for other in psd.descendants():  # a copied layer keeps its source's index
+        if other is not layer and getattr(other, "kind", None) == "type":
+            j = other._data.text_data.get(b"TextIndex")
+            if j is not None and int(getattr(j, "value", j)) == i:
+                raise ValueError(f"TextIndex {i} is also {other.name!r}'s")
     story = stories[i]
     model = story.get(keys.model) if isinstance(story, engine_data.Dict) else None
     if not isinstance(model, engine_data.Dict) or keys.text not in model:
