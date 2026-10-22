@@ -67,6 +67,7 @@ from psd_tools.composite.effects import (
     stroke_band,
     stroke_bbox,
     stroke_reach,
+    texture_height,
 )
 from psd_tools.composite.text_blend import (
     TEXT_BLEND_GAMMA,
@@ -284,12 +285,23 @@ def _draw_color_overlay(
     return paint.draw_solid_color_fill(box, layer._psd.color_mode, descriptor)
 
 
+def _tiling_origin(
+    layer: Layer, descriptor: Descriptor, layout: _Box
+) -> tuple[int, int]:
+    """Where a pattern of ``layer``'s style laid out across ``layout`` starts.
+
+    A layer's tiling starts at its reference point, a group's at its layout
+    box, which is the document's origin for a pass-through group; see
+    :py:func:`paint.pattern_origin`.
+    """
+    point = None if layer.is_group() else _reference_point(layer)
+    return paint.pattern_origin(descriptor, layout, point)
+
+
 def _draw_pattern_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    # A group's tiling starts at its layout box.
-    point = None if layer.is_group() else _reference_point(layer)
-    origin = paint.pattern_origin(descriptor, layout, point)
+    origin = _tiling_origin(layer, descriptor, layout)
     fill, shape = paint.draw_pattern_fill(
         box, layer._psd, descriptor, layout, origin=origin
     )
@@ -4043,7 +4055,8 @@ class Compositor:
         layer, over everything else inside it; what an outer bevel, an emboss or
         a pillow emboss puts beside it is an outer effect, as an outset
         stroke is. A stroke emboss, which bevels the stroke rather than the
-        layer, a shape contour and a texture are not drawn.
+        layer, and a shape contour are not drawn; a texture is
+        (:py:meth:`_bevel_texture`).
         """
         bevels = _readable(layer, "bevelemboss")
         if not bevels or not self._has_scipy("Bevels"):
@@ -4087,8 +4100,9 @@ class Compositor:
                 continue
             if bevel.use_shape:
                 logger.debug("The shape contour of a bevel of %s is not applied", layer)
+            texture = None
             if bevel.use_texture:
-                logger.debug("The texture of a bevel of %s is not applied", layer)
+                texture = self._bevel_texture(layer, bevel, bbox, size)
             silhouette = self._cast_shape(layer, bbox)
             try:
                 amounts = draw_bevel(
@@ -4104,6 +4118,7 @@ class Compositor:
                     altitude=altitude,
                     contour=contour,
                     anti_aliased=anti_aliased,
+                    texture=texture,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a bevel of %s: %s", layer, error)
@@ -4123,6 +4138,58 @@ class Compositor:
                                 color, beside, opacity * canvas.opacity, blend_mode
                             )
                         )
+
+    def _bevel_texture(
+        self,
+        layer: Layer,
+        bevel: BevelEmboss,
+        bbox: tuple[int, int, int, int],
+        size: float,
+    ) -> np.ndarray | None:
+        """A bevel's texture on ``bbox``: its pattern's luminance as a height field.
+
+        The pattern tiles from where a pattern overlay of the layer would
+        (:py:func:`_tiling_origin`), at the texture's scale;
+        :py:func:`texture_height` turns its luminance into height; the
+        pattern's alpha is not read. None, and the bevel goes on untextured,
+        when the pattern is not in the document or cannot be read, or the
+        document is neither RGB nor grayscale.
+        """
+        if layer._psd.color_mode not in (ColorMode.RGB, ColorMode.GRAYSCALE):
+            logger.debug(
+                "A bevel texture is drawn in RGB and grayscale only: %s", layer
+            )
+            return None
+        try:
+            _, layout = _overlay_boxes(
+                layer, self._viewport, self._cache.content_bboxes
+            )
+            origin = _tiling_origin(layer, bevel.descriptor, layout)
+            fill, _ = paint.draw_pattern_fill(
+                bbox, layer._psd, bevel.descriptor, origin=origin
+            )
+        except _UNREADABLE as error:
+            logger.debug("Cannot read the texture of a bevel of %s: %s", layer, error)
+            return None
+        if fill is None:  # draw_pattern_fill has logged the missing pattern
+            return None
+        if fill.shape[2] == 3:
+            luminance = (
+                fill[:, :, 0] * 0.299 + fill[:, :, 1] * 0.587 + fill[:, :, 2] * 0.114
+            )
+        elif fill.shape[2] == 1:
+            luminance = fill[:, :, 0]
+        else:
+            logger.debug(
+                "The texture pattern of a bevel of %s is neither RGB nor grey", layer
+            )
+            return None
+        return texture_height(
+            np.clip(luminance, 0.0, 1.0),
+            size=size,
+            depth=bevel.texture_depth,
+            inverted=bevel.texture_inverted,
+        )
 
     def _add_stroke_effects(
         self,

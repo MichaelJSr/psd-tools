@@ -1491,6 +1491,13 @@ _BEVEL_SIGMA_PER_SIZE = 0.45
 _SOFTEN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SLOPE_PER_DEPTH = 1.0
 
+# How high a bevel's texture stands at a texture depth of 100%, per pixel of
+# the effect's size, and how a slope along one axis is smoothed along the
+# other (a Sobel operator). Fitted against a Photoshop export of a textured
+# bevel, not a preview fixture.
+_TEXTURE_HEIGHT_PER_DEPTH = 1.0
+_SLOPE_ACROSS = (0.25, 0.5, 0.25)
+
 # How wide the gaussian that rounds a chisel soft bevel's faces is, per pixel
 # of size, and how far it reads, in sigmas. Not fitted: no fixture preview
 # carries the technique. The reach is what ``bevel_reach`` adds for it.
@@ -1502,7 +1509,8 @@ _SLOPE_LIMIT_TRUNCATE = 4.0
 # gradients, and the float64 transients of the filters.
 _INNER_BYTES = 64
 
-# The deepest bevel Photoshop writes, in percent.
+# The deepest bevel Photoshop writes, in percent, and the deepest texture
+# either way.
 _MAX_BEVEL_DEPTH = 1000.0
 
 # What a satin's distance and size, and a bevel's depth and size, read as
@@ -1734,6 +1742,42 @@ def _bevel_height(
     return height
 
 
+def texture_height(
+    luminance: np.ndarray, *, size: float, depth: float, inverted: bool
+) -> np.ndarray:
+    """A bevel texture's surface, in pixels of height, from the pattern's luminance.
+
+    The pattern's dark pixels stand up and its light ones sink, the other
+    way round when ``inverted``; at a texture ``depth`` of 100% the darkest
+    pixel is as high as the bevel's band is wide (``size``), and the depth
+    scales that, negative depths turning the texture over. A depth past what
+    Photoshop writes is held to it.
+    """
+    relief = luminance if inverted else 1.0 - luminance
+    depth = float(np.clip(depth, -_MAX_BEVEL_DEPTH, _MAX_BEVEL_DEPTH))
+    scale = max(float(size), 0.0) * depth / 100.0 * _TEXTURE_HEIGHT_PER_DEPTH
+    return (relief * scale).astype(np.float32)
+
+
+def _slopes(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The surface's slope down and across, as a Sobel operator takes it.
+
+    A central difference along each axis, smoothed by ``_SLOPE_ACROSS``
+    along the other; the edge pixels repeat past the border.
+    """
+    height = height.astype(np.float32, copy=False)
+    if not height.size:
+        return np.zeros_like(height), np.zeros_like(height)
+    padded = np.pad(height, 1, mode="edge")
+    half = np.float32(0.5)
+    dy = (padded[2:, :] - padded[:-2, :]) * half
+    dx = (padded[:, 2:] - padded[:, :-2]) * half
+    before, middle, after = (np.float32(weight) for weight in _SLOPE_ACROSS)
+    gy = dy[:, :-2] * before + dy[:, 1:-1] * middle + dy[:, 2:] * after
+    gx = dx[:-2, :] * before + dx[1:-1, :] * middle + dx[2:, :] * after
+    return gy, gx
+
+
 def draw_bevel(
     viewport: tuple[int, int, int, int],
     shape: np.ndarray,
@@ -1748,6 +1792,7 @@ def draw_bevel(
     altitude: float,
     contour: np.ndarray | None = None,
     anti_aliased: bool = False,
+    texture: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """How much highlight and how much shadow a bevel paints, on ``viewport``.
 
@@ -1760,7 +1805,12 @@ def draw_bevel(
     ``soften`` blurs the lighting before that split, and ``contour`` (the
     gloss contour, read as :py:func:`draw_drop_shadow` reads one) maps the
     lighting first, the flat layer's with it, so a flat face takes neither
-    under any contour.
+    under any contour. The slope is a Sobel operator's, fitted to one
+    Photoshop export: a one pixel step lights the two pixels astride it.
+
+    ``texture`` (from :py:func:`texture_height`, on ``viewport``) is laid on
+    the surface before it is lit, so the bevel's faces and the flat layer
+    alike carry its bumps.
 
     Both results are ``(height, width, 1)`` over the whole canvas; the caller
     keeps the parts the style paints, inside the silhouette and beside it,
@@ -1779,10 +1829,13 @@ def draw_bevel(
     )
     alpha = shape[:, :, 0].astype(np.float32)
     height = _bevel_height(alpha, style, technique, max(float(size), 0.0))
+    if texture is not None:
+        _finite("Bevel", texture=float(np.abs(texture).max()) if texture.size else 0.0)
+        height = height + texture.reshape(height.shape).astype(np.float32)
     slope = max(float(depth), 0.0) / 100.0 * _BEVEL_SLOPE_PER_DEPTH
     if not up:
         slope = -slope
-    gy, gx = np.gradient(height)
+    gy, gx = _slopes(height)
     nx, ny = -slope * gx, -slope * gy
     norm = np.sqrt(nx * nx + ny * ny + 1.0)
     theta, phi = math.radians(angle), math.radians(min(max(altitude, 0.0), 90.0))

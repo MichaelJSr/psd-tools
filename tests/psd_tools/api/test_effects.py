@@ -80,6 +80,40 @@ def test_bevel(fixture: PSDImage) -> None:
     assert effect.use_texture is False
 
 
+def test_bevel_texture(fixture: PSDImage) -> None:
+    """The texture keys Photoshop writes, read back; their defaults without them."""
+    effect = fixture[1].effects[0]
+    assert isinstance(effect, effects.BevelEmboss)
+    assert effect.texture_pattern is None
+    assert effect.texture_depth == 100.0
+    assert effect.texture_scale == 100.0
+    assert effect.texture_inverted is False
+    assert effect.texture_aligned is True
+    assert effect.texture_phase == (0.0, 0.0)
+
+    pattern = Descriptor(classID=b"Ptrn")
+    pattern[Key.Name] = String("bear\x00")
+    pattern[Key.ID] = String("7385669b-cd6e-ba42-b73d-ad31c07ca331\x00")
+    phase = Descriptor(classID=b"Pnt ")
+    phase[Key.Horizontal] = Double(3.0)
+    phase[Key.Vertical] = Double(-2.5)
+    descriptor = effect.descriptor
+    descriptor[b"useTexture"] = Bool(True)
+    descriptor[Key.InvertTexture] = Bool(True)
+    descriptor[Key.Alignment] = Bool(False)
+    descriptor[Key.Scale] = UnitFloat(unit=Unit.Percent, value=50.0)
+    descriptor[b"textureDepth"] = UnitFloat(unit=Unit.Percent, value=400.0)
+    descriptor[Enum.Pattern] = pattern
+    descriptor[b"phase"] = phase
+    assert effect.use_texture is True
+    assert effect.texture_pattern is pattern
+    assert effect.texture_depth == 400.0
+    assert effect.texture_scale == 50.0
+    assert effect.texture_inverted is True
+    assert effect.texture_aligned is False
+    assert effect.texture_phase == (3.0, -2.5)
+
+
 def test_bevel_altitude_follows_the_global_light() -> None:
     """``layer_params.psb`` sets its global altitude to 40; the descriptor says 30."""
     psd = PSDImage.open(full_name("layer_params.psb"))
