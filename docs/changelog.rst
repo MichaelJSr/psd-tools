@@ -4,6 +4,14 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [api] ``Layer.copy_effects_from()`` replaces a layer's effects with a copy
+  of another layer's, from any document, patterns included;
+  ``Layer.clear_effects()`` removes them.
+- [api] ``Mask.offset``, ``Mask.left`` and ``Mask.top`` are writable: setting
+  them moves a pixel mask without moving its layer. A layer with a vector
+  mask, shape layers included, raises ``ValueError``.
+- [api] ``TypeLayer.add_font()`` adds a face to the layer's ``FontSet``, and
+  to the document's ``Txt2`` font set, for ``set_span_style(Font=...)``.
 - [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
   layer set from a preset does, is read as its own adjustment instead of as a
   Brightness/Contrast at 0/0 that left the image unchanged. Only layers that

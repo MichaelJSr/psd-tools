@@ -6,7 +6,7 @@ import pytest
 
 from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
-from psd_tools.api.text_edit import set_span_style, set_text, utf16_prefix
+from psd_tools.api.text_edit import add_font, set_span_style, set_text, utf16_prefix
 from psd_tools.constants import Tag
 from psd_tools.psd import engine_data
 
@@ -504,3 +504,147 @@ def test_named_story_takes_span_styles() -> None:
 def text2_named(layer: TypeLayer) -> Any:
     index = int(layer._data.text_data[b"TextIndex"])
     return txt2(layer)["DocumentObjects"]["TextObjects"][index]["Model"]
+
+
+def font_set(layer: TypeLayer, section: str = "ResourceDict") -> list[tuple[str, int]]:
+    fonts = layer._engine_data[section]["FontSet"]
+    return [(str(f["Name"].value), int(f["FontType"].value)) for f in fonts]
+
+
+def txt2_fonts(layer: TypeLayer) -> Any:
+    """The Txt2 FontSet entries: numbered (CC) or named keys."""
+    root = txt2(layer)
+    if "0" in root:
+        return root["0"]["1"]["0"]
+    return root["DocumentResources"]["FontSet"]["Resources"]
+
+
+def txt2_font_names(layer: TypeLayer) -> list[str]:
+    names = []
+    for font in txt2_fonts(layer):
+        node = font["0"]["0"]["0"] if "0" in font else font["Resource"]["Identifier"]
+        names.append(str(node.value if "0" in font else node["Name"].value))
+    return names
+
+
+def assert_story_in_step(layer: TypeLayer) -> None:
+    """The story holds the layer's text, alone under its TextIndex."""
+    assert layer.story_text == layer.text + "\r"
+    assert not layer.sync_story()
+    indices = [
+        int(x._data.text_data[b"TextIndex"])
+        for x in cast(PSDImage, layer._psd).descendants()
+        if isinstance(x, TypeLayer)
+    ]
+    assert len(indices) == len(set(indices))
+
+
+def test_add_font_appends_a_face() -> None:
+    layer = open_layer("layers/type-layer.psd")
+    names = [name for name, _ in font_set(layer)]
+    story_names = txt2_font_names(layer)
+    assert layer.add_font("stoogedings-Regular") == len(names)
+    assert font_set(layer)[len(names)] == ("stoogedings-Regular", 1)
+    assert font_set(layer, "DocumentResources")[-1] == ("stoogedings-Regular", 1)
+    entry = layer.resource_dict["FontSet"][len(names)]
+    assert [str(k.value) for k in entry] == ["Name", "Script", "FontType", "Synthetic"]
+    assert isinstance(entry["Name"], engine_data.String)
+    assert txt2_font_names(layer) == story_names + ["stoogedings-Regular"]
+    # An appended face moves no run's font and leaves the preview current.
+    assert layer.font_names == ["ArialMT"]
+    assert not layer._psd.is_updated()
+
+
+def test_add_font_keeps_a_listed_face() -> None:
+    layer = open_layer("layers/type-layer.psd")
+    before, story_before = font_set(layer), txt2_font_names(layer)
+    assert add_font(layer, "AdobeInvisFont", font_type=1) == 1
+    assert add_font(layer, "Face-Regular", font_type=0) == len(before)
+    assert add_font(layer, "Face-Regular") == len(before)
+    assert font_set(layer) == before + [("Face-Regular", 0)]
+    assert txt2_font_names(layer) == story_before + ["Face-Regular"]
+
+
+def test_add_font_writes_txt2_entries_as_photoshop_does() -> None:
+    # A Txt2 face is a CoolTypeFont: its name, and Script (1) and
+    # Synthetic (3) only when set; type-layer.psd's KozGoPr6N has Script 1.
+    layer = open_layer("layers/type-layer.psd")
+    fonts = txt2_fonts(layer)
+    arial, kozgo = (raw(f) for f in fonts[0:4:3])
+    layer.add_font("ArialMT-Copy")
+    layer.add_font("KozGoPr6N-Copy", font_type=2, script=1)
+    assert raw(fonts[-2]) == arial.replace(
+        "ArialMT".encode("utf-16-be"), "ArialMT-Copy".encode("utf-16-be")
+    )
+    assert raw(fonts[-1]) == kozgo.replace(
+        "KozGoPr6N-Regular".encode("utf-16-be"), "KozGoPr6N-Copy".encode("utf-16-be")
+    )
+
+
+@pytest.mark.parametrize("path", [STORY, "text.psd"])
+def test_add_font_round_trips_in_both_font_sets(path: str) -> None:
+    layer = next(
+        x
+        for x in PSDImage.open(full_name(path)).descendants()
+        if isinstance(x, TypeLayer)
+    )
+    index = layer.add_font("stoogedings-Regular")
+    layer.set_span_style(0, 2, Font="stoogedings-Regular")
+    again = next(x for x in saved(layer).descendants() if x.name == layer.name)
+    assert isinstance(again, TypeLayer)
+    assert [name for name, _ in font_set(again)][index] == "stoogedings-Regular"
+    assert "stoogedings-Regular" in [n for n, _ in font_set(again, "DocumentResources")]
+    story_fonts = txt2_font_names(again)
+    assert story_fonts[-1] == "stoogedings-Regular"
+    assert again.font_names[:2] == [layer.font_names[0], "stoogedings-Regular"]
+    runs = (
+        story(again)["0"]["6"]["0"]
+        if "0" in txt2(again)
+        else text2_named(again)["StyleRun"]["RunArray"]
+    )
+    first = (
+        runs[0]["0"]["0"]["6"]["0"]
+        if "0" in txt2(again)
+        else (runs[0]["RunData"]["StyleSheet"]["Features"]["Font"])
+    )
+    assert story_fonts[int(first.value)] == "stoogedings-Regular"
+    assert_story_in_step(again)
+
+
+def test_add_font_then_style_a_span() -> None:
+    layer = open_layer()
+    index = layer.add_font("stoogedings-Regular")
+    layer.set_span_style(0, 4, Font="stoogedings-Regular")
+    assert lengths(layer) == [4, 26]
+    data = layer.engine_dict["StyleRun"]["RunArray"][0]["StyleSheet"]["StyleSheetData"]
+    assert data["Font"].value == index
+    assert layer.font_names == ["ArialMT", "stoogedings-Regular"]
+    buf = io.BytesIO()
+    cast(PSDImage, layer._psd).save(buf)
+    buf.seek(0)
+    again = next(
+        x for x in PSDImage.open(buf).descendants() if isinstance(x, TypeLayer)
+    )
+    assert again.font_names == ["ArialMT", "stoogedings-Regular"]
+    assert [run.style.font_name for p in again.typesetting for run in p.runs][:2] == [
+        "stoogedings-Regular",
+        "ArialMT",
+    ]
+
+
+def test_add_font_refuses_a_layer_without_a_font_set() -> None:
+    layer = open_layer()
+    with pytest.raises(ValueError, match="PostScript name"):
+        layer.add_font("")
+    del layer.resource_dict["FontSet"]
+    with pytest.raises(ValueError, match="FontSet"):
+        layer.add_font("stoogedings-Regular")
+
+
+def test_add_font_keeps_the_text_index() -> None:
+    psd = PSDImage.open(full_name("layer-edit.psd"))
+    ability = next(x for x in psd.descendants() if x.name == "Ability")
+    assert isinstance(ability, TypeLayer)
+    ability.add_font("stoogedings-Regular")
+    assert int(ability._data.text_data[b"TextIndex"]) == 1
+    assert_story_in_step(ability)
