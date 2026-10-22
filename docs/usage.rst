@@ -338,7 +338,9 @@ option::
     shadows, satins and bevels -- are the exception: without it they are left
     out with a warning.
 
-    Note that most layer effects are not supported. Adjustment layers have
+    Layer effects are approximated, and some of their settings are not
+    drawn: noise and jitter, a gradient inner glow, and a bevel's stroke
+    emboss style, shape contour and texture. Adjustment layers have
     limited support (BrightnessContrast, Levels, Curves, Exposure,
     HueSaturation, Invert, Posterize, Threshold, ChannelMixer, BlackAndWhite,
     GradientMap, ColorBalance, Vibrance). The compositing result may look

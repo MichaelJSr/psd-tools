@@ -19,6 +19,7 @@ from psd_tools.composite import composite
 from psd_tools.composite.composite import _effect_reach, _style_bbox
 from psd_tools.constants import BlendMode, Tag
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated
+from psd_tools.psd.layer_and_mask import MaskParameters
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
@@ -290,6 +291,31 @@ def test_a_mask_that_reveals_its_outside_gives_the_canvas_as_the_style_box() -> 
     assert layer.mask is not None and layer.mask.background_color == 255
     assert layer.mask.bbox == (100, 0, 200, 200)
     assert _style_bbox(layer) == psd.viewbox
+
+
+def test_a_mask_under_full_density_lays_the_style_out_on_the_canvas() -> None:
+    """Density reveals the layer outside its mask's box, so its effects reach there.
+
+    At density 128 the mask covers ``1 - 128/255`` of every pixel outside its
+    box, and a red overlay paints that share of it. The exposure layers above
+    are hidden so that nothing else touches those pixels.
+    """
+    psd, layer = _exposure()
+    for other in list(psd)[4:]:
+        other.visible = False
+    assert layer.mask is not None
+    layer.mask._data.parameters = MaskParameters(user_mask_density=128)
+    assert _style_bbox(layer) == psd.viewbox
+    before, _, _ = composite(psd)
+    _red_overlay(layer)
+    color, _, _ = composite(psd)
+    share = 1.0 - 128 / 255
+    outside = _outside(color.shape)
+    expected = share * np.array(_RED) + (1.0 - share) * before
+    assert np.allclose(color[outside], expected[outside], atol=1e-6)
+
+    layer.mask._data.parameters = MaskParameters(user_mask_density=255)
+    assert _style_bbox(layer) == _MASK
 
 
 def test_a_styled_adjustment_layer_reaches_as_far_as_its_mask() -> None:

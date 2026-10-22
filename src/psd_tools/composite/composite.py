@@ -31,7 +31,12 @@ from psd_tools.api.layers import (
 )
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.api.utils import check_growth, check_pixel_size, get_color_channels
+from psd_tools.api.utils import (
+    UNLIMITED,
+    check_growth,
+    check_pixel_size,
+    get_color_channels,
+)
 from psd_tools.composite import paint, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
@@ -311,19 +316,32 @@ def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
     own: its mask is its shape, so the mask's box stands in -- empty when the
     mask hides everything -- and the whole canvas where there is no mask or
     the mask reveals what lies outside its box. A vector mask narrows it as
-    it narrows the shape.
+    it narrows the shape. A mask under full density reveals the layer
+    everywhere, as :py:meth:`Compositor._get_mask` folds it in, and narrows
+    nothing.
     """
     if not isinstance(layer, AdjustmentLayer):
         return layer.bbox
     psd = layer._psd
     bbox = (0, 0, psd.width, psd.height)
     mask = layer.mask
-    if mask is not None and not mask.disabled and mask.background_color == 0:
+    parameters = mask.parameters if mask is not None else None
+    vector_density = parameters.vector_mask_density if parameters else None
+    user_density = parameters.user_mask_density if parameters else None
+    if user_density is None:
+        user_density = vector_density
+    if (
+        mask is not None
+        and not mask.disabled
+        and mask.background_color == 0
+        and user_density in (None, 255)
+    ):
         bbox = mask.bbox
     vector = layer.vector_mask if layer.has_vector_mask() else None
     if (
         vector is not None
         and not vector.disabled
+        and vector_density in (None, 255)
         and any(len(path) for path in vector.paths)
     ):
         bbox = utils.intersect(bbox, _path_bbox(layer))
@@ -481,7 +499,12 @@ def _bevel_reach(
     """``layer.bbox`` grown to every box its bevels paint beside the layer on.
 
     An inner bevel stays inside the layer and adds nothing. Degrades as
-    :py:func:`_beneath_reach` does.
+    :py:func:`_beneath_reach` does, except that no budget is checked here,
+    the document's or the module's: the canvas a bevel is drawn on is cut to
+    the viewport first (:py:meth:`Compositor._inner_box`) and only that is
+    checked, so checking the whole grown box would leave this narrower than
+    what is drawn. The size and soften are held to what Photoshop writes, so
+    the box is bounded without one.
     """
     bbox = _reach_base(layer)
     if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
@@ -501,7 +524,7 @@ def _bevel_reach(
                 inner_bbox(
                     _cast_bbox(layer, memo),
                     bevel_reach(size, soften, _bevel_technique(bevel)),
-                    layer._psd._max_alloc_bytes,
+                    UNLIMITED,
                 ),
             )
         except _UNREADABLE as error:
@@ -2312,6 +2335,14 @@ class Compositor:
             content_alpha = self._alpha
             content = self._color
         transformed_color = adjustment_fn(content, colormode, layer)
+        # An adjustment that is not rendered leaves the content as it is; its
+        # clip layers still go over that, as they go over a neutral one. With
+        # none there is nothing to blend: the content would blend with itself.
+        if transformed_color is None:
+            logger.debug("Adjustment layer not rendered: %s", layer.kind)
+            if not layer.has_clip_layers():
+                return
+            transformed_color = content
 
         if layer.has_clip_layers():
             transformed_color = self._apply_clip_layers(
@@ -3167,6 +3198,8 @@ class Compositor:
                 widen=self._widen,
                 color_mode=self._color_mode,
                 cache=self._cache,
+                # Only the alpha and shape are read, which text gamma leaves.
+                text_gamma=None,
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
@@ -3502,15 +3535,18 @@ class Compositor:
     def _inner_box(self, layer: Layer, reach: float) -> tuple[int, int, int, int]:
         """The box an inner effect reaching ``reach`` past an edge is drawn on.
 
-        The silhouette is read on it: the layer's box grown by the reach, but
-        no further than the reach past the viewport, since nothing beyond that
-        reaches back into view. Raises as :py:func:`inner_bbox` does, and when
-        the box is out of proportion to the layer and the viewport.
+        The silhouette is read on it: the layer's box grown by the reach. An
+        object's goes no further than the reach past the viewport, since
+        nothing beyond that reaches back into view. A group's is not cut to
+        the viewport, so it is the same box from every compositor that asks
+        and its contents are composited for it once per pass, as for a drop
+        shadow; cut, a nested group would be composited again at every level.
+        Raises as :py:func:`inner_bbox` does, and when the box is out of
+        proportion to the layer and the viewport.
         """
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
-        bbox = inner_bbox(
-            cast_from, reach, layer._psd._max_alloc_bytes, within=self._viewport
-        )
+        within = None if isinstance(layer, GroupMixin) else self._viewport
+        bbox = inner_bbox(cast_from, reach, layer._psd._max_alloc_bytes, within=within)
         self._check_effect_growth(bbox, cast_from)
         return bbox
 
@@ -3554,7 +3590,7 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a satin of %s: %s", layer, error)
                 continue
-            if bbox == (0, 0, 0, 0):
+            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
             silhouette = self._cast_shape(layer, bbox)
             try:
@@ -3687,7 +3723,7 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a bevel of %s: %s", layer, error)
                 continue
-            if bbox == (0, 0, 0, 0):
+            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
             if bevel.use_shape:
                 logger.debug("The shape contour of a bevel of %s is not applied", layer)

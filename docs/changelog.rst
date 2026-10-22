@@ -41,14 +41,14 @@ Changelog
 - [fix] A stroke effect on a group is drawn around everything the group
   paints, a child's stroke or shadow included, where it stopped at the
   group's own box (#679)
-- [fix] ``OuterGlow.spread`` returns the glow's Spread value; it returned the
-  jitter (#679)
+- [fix] Backwards-incompatible: ``OuterGlow.spread`` returns the glow's
+  Spread value instead of its jitter (#679)
 - [fix] An outer glow layer effect is now rendered when a document is
   composited from its layers, instead of being dropped. Size, spread,
-  technique, range, contour, a solid or gradient colour, opacity and blend
-  mode are honoured; noise and jitter are read but not applied, and the
-  blur and range approximate Photoshop's. Without ``scipy`` it is skipped
-  with a warning (#680)
+  technique, range, contour, a solid or gradient colour, a gradient's method
+  (``gs99``), opacity and blend mode are honoured; noise and jitter are read
+  but not applied, and the blur and range approximate Photoshop's. Without
+  ``scipy`` it is skipped with a warning (#382, #680)
 - [fix] A gradient stop whose location or opacity is out of range or not a
   number is held to 0-100%, as a stop's colour is, and so is a noise
   gradient's transparency. A gradient fill, overlay or stroke with one could
@@ -64,13 +64,13 @@ Changelog
   is composited from its layers; a stroke emboss, a bevel's shape contour and
   its texture are not. Needs ``scipy``; without it they are left out with a
   warning (#379)
-- [fix] ``BevelEmboss.altitude`` returns the document's global altitude when
-  the effect uses global light (#379)
+- [fix] Backwards-incompatible: ``BevelEmboss.altitude`` returns the
+  document's global altitude when the effect uses global light (#379)
 - [fix] A gradient's ramp spans the line through its box at the gradient's
   angle, so a vertical gradient on a wide layer is no longer a flat band, and
   its offset, stop midpoints, smoothness, hard edges, "align with layer" and
   method (classic, perceptual or linear) are honoured. Every gradient overlay,
-  fill layer and gradient stroke renders differently
+  fill layer, gradient stroke and gradient outer glow renders differently
 - [api] ``GradientOverlay``, ``Stroke``, ``OuterGlow`` and ``InnerGlow`` gain
   ``method``, the gradient's method as a new ``GradientMethod`` enum.
   Backwards-incompatible: ``GradientOverlay`` and ``PatternOverlay`` now
@@ -78,17 +78,19 @@ Changelog
   omits them, as Photoshop does; they were 1.0 and False
 - [fix] The compositor renders channel mixer, black & white, colour balance and
   vibrance adjustments on RGB documents, and gradient maps on RGB, grayscale and
-  CMYK documents, instead of skipping them. Colour balance and vibrance are
-  approximate, and a black & white tint is not drawn
+  CMYK documents, instead of skipping them. Gradient maps honour their
+  smoothness, midpoints and method as a gradient fill does; colour balance
+  and vibrance are approximate, and a black & white tint is not drawn. An
+  adjustment the compositor cannot render is left out rather than blended
 - [fix] An adjustment inside a pass-through group with an enabled layer style
-  stays within the group instead of reaching the layers beneath
+  stays within the group instead of reaching the layers beneath. In such a
+  group, or one with clip layers or a fill under 100, it adjusts the group's
+  own content, not the flattened canvas, so a half-transparent layer under it
+  stays half-transparent
 - [fix] Layer effects on an adjustment layer are rendered, with the layer's
   mask as its shape: overlays fill the mask, inner effects and strokes are
   drawn from its edge, shadows and glows are cast from it; without a mask the
   document edge is the layer's. They were dropped
-- [fix] An adjustment inside a styled pass-through group adjusts the group's
-  own content at the content's own opacity, instead of the flattened canvas,
-  so a half-transparent layer under it stays half-transparent over the backdrop
 - [fix] A group's overlays and inner effects cover the group's composited
   alpha, its children's effects included, instead of its children's
   coverage, and a pass-through group's gradient or pattern overlay is laid
