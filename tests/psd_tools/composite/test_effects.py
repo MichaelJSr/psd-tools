@@ -1719,7 +1719,7 @@ def test_an_isolated_group_keeps_a_child_stroke_that_reaches_past_it(
     # stroke of the same size puts three full ones. It is the case that
     # separates a whole fix from a half one.
     assert tuple(centered[16, 7]) == (255, 0, 0)
-    assert tuple(centered[16, 6]) == (255, 127, 127)
+    assert tuple(centered[16, 6]) == (255, 128, 128)
     assert tuple(centered[16, 5]) == (255, 255, 255)
 
 
@@ -1841,11 +1841,8 @@ def test_mark_updated_refreshes_a_preview_the_api_could_not_see(
     psd.save(out)
     saved = PSDImage.open(out).topil()
     assert saved is not None
-    # Within one step, not equal: `composite_pil()` truncates its float array
-    # to bytes and the preview writer rounds it, so the two quantizations of
-    # the same render disagree by an LSB. A whole step is far below the change
-    # being looked for, which saturates the channel it moves.
-    assert np.abs(pixels(saved).astype(int) - fresh.astype(int)).max() <= 1, (
+    # Equal: `composite_pil()` and the preview writer both round to bytes.
+    assert np.array_equal(pixels(saved), fresh), (
         "save() has to write the preview it just regenerated"
     )
 

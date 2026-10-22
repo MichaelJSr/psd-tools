@@ -40,9 +40,9 @@ import math
 #:
 #: Lab's two chroma axes are signed and are stored offset by 128 -- byte 128 is
 #: ``a = 0``, byte 0 is ``a = -128`` -- so a normalized neutral is ``128 / 255``.
-#: The half-step from ``0.5`` is not cosmetic:
-#: :py:func:`psd_tools.composite.composite_pil` truncates rather than rounds on
-#: the way out, so ``0.5`` emits byte 127 where Photoshop writes 128 (#743).
+#: ``0.5`` is not neutral but ``a = -0.5``, which reaches byte 128 only on the
+#: tie rule of the rounding in :py:func:`psd_tools.composite.composite_pil`
+#: (#743).
 LAB_NEUTRAL_CHROMA = 128.0 / 255.0
 
 
@@ -231,9 +231,8 @@ _LAB_KAPPA = 24389.0 / 27.0
 #: Deliberately Lindbloom's ``(0.96422, 1.0, 0.82521)`` and not the ICC PCS
 #: triple ``(0.9642, 1.0, 0.8249)``. Pairing the ICC triple with these matrices
 #: leaves the transform without an exact fixed point: white comes back as
-#: ``(1.0, 1.0, 0.99981)`` and a neutral grey as ``b = -0.025``, which the
-#: compositor's truncating cast turns into byte 127 where Photoshop -- and
-#: :py:data:`LAB_NEUTRAL_CHROMA` -- write 128.
+#: ``(1.0, 1.0, 0.99981)`` and a neutral grey as ``b = -0.025``, where
+#: Photoshop -- and :py:data:`LAB_NEUTRAL_CHROMA` -- give exactly 0.
 _LAB_D50 = (0.96422, 1.0, 0.82521)
 
 # Bradford-adapted, so they carry the D50 adaptation rather than needing a

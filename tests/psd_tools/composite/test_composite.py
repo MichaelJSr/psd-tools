@@ -927,8 +927,8 @@ def test_composite_pil_multichannel_force_keeps_the_spot_channel_intact() -> Non
     assert isinstance(image, Image.Image)
     assert image.mode == "LA"
     planes = np.asarray(image)
-    expected_color = (255 * truth[:, :, 0]).astype(np.uint8)
-    expected_alpha = (255 * truth_alpha[:, :, 0]).astype(np.uint8)
+    expected_color = np.rint(255 * truth[:, :, 0]).astype(np.uint8)
+    expected_alpha = np.rint(255 * truth_alpha[:, :, 0]).astype(np.uint8)
     assert np.array_equal(planes[:, :, 0], expected_color)
     assert np.array_equal(planes[:, :, 1], expected_alpha)
 
@@ -1056,7 +1056,7 @@ def test_composite_pil_force_pixels_match_the_numpy_path(colormode: str) -> None
     assert isinstance(image, Image.Image)
     color, _, _ = composite(psd, force=True)
 
-    expected = (255 * color).astype(np.uint8)
+    expected = np.rint(255 * color).astype(np.uint8)
     if colormode == "bitmap":
         expected = (expected > 127).astype(np.uint8)  # PIL reports "1" as 0/1
     if image.mode == "CMYK":

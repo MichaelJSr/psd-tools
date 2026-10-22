@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] The images ``composite()`` returns round each value to the nearest
+  byte instead of truncating it, as Photoshop's export does, so colour and
+  alpha bytes can move up by one level. The float arrays of
+  ``psd_tools.composite.composite()`` are unchanged
 - [fix] A vibrance adjustment matches Photoshop more closely: a positive amount
   boosts dark, pale colours more and light ones less, and a negative amount
   lifts very dark pixels toward their brightest channel instead of darkening

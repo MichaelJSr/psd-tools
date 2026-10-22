@@ -134,8 +134,7 @@ def _naive_cmyk(color: np.ndarray) -> np.ndarray:
 def _lab(color: np.ndarray) -> np.ndarray:
     """A grey is on Lab's neutral axis: a and b are neutral, L carries it.
 
-    ``a``/``b`` are offset-encoded, so neutral is ``128 / 255``; 0.5 truncates
-    to byte 127 where Photoshop writes 128 (#743).
+    ``a``/``b`` are offset-encoded, so neutral is ``128 / 255``, not 0.5 (#743).
 
     ``L`` is the grey itself, not its L*. This deliberately differs from the
     *fill* path, which converts (#752): a descriptor carries a color picked in
