@@ -62,8 +62,8 @@ _CONTRAST_INNER_DELTA = np.float32(25.0 / 255.0)
 # shoulder's exponent is 1 + s * (p1 + p2 * s), so the curve flattens to the
 # identity as the gain goes to 1.
 _BRIGHTNESS_GAIN_SCALE = 160.0
-_BRIGHTNESS_KNEE = (0.48, 0.21)
-_BRIGHTNESS_SHOULDER = (3.2, -4.65)
+_BRIGHTNESS_KNEE = (0.48, 0.21)  # k0, k1
+_BRIGHTNESS_SHOULDER = (3.2, -4.65)  # p1, p2
 _BRIGHTNESS_GRID = np.linspace(0.0, 1.0, 4097)
 
 # ICC profile gamma approximations for the exposure adjustment.
