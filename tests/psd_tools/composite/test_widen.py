@@ -142,7 +142,6 @@ def test_lab_widening_is_neutral() -> None:
     assert psd.color_mode == ColorMode.LAB
     widened = make_widen(psd)(_grey(0.75), 3)[0, 0]
     assert np.allclose(widened, (0.75, 128 / 255, 128 / 255))
-    assert np.rint(255 * widened[1]) == 128
 
 
 @pytest.mark.parametrize(

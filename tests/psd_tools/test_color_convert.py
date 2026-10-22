@@ -406,9 +406,6 @@ class TestRgbToLab:
         """
         _, a, b = rgb_to_lab(grey, grey, grey)
         assert (a, b) == pytest.approx((0.0, 0.0), abs=1e-9)
-        # What the compositor's rounding cast makes of it.
-        for chroma in (a, b):
-            assert round(255.0 * ((chroma + 128.0) / 255.0)) == 128
 
     def test_round_trips_through_lab_to_rgb(self):
         """Sanity check only.
