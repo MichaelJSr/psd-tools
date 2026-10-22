@@ -186,7 +186,7 @@ def test_a_cast_mattes_reach_is_its_blur_and_its_offset() -> None:
 
 
 def test_a_spread_matte_reads_its_whole_box() -> None:
-    """Spread grows the silhouette at the levels it finds on the canvas."""
+    """A spread matte is drawn on its whole box."""
     assert effects.cast_reach(0.0, 0.0, 2.0, 10.0) is None
     assert effects.glow_reach(2.0, 10.0, precise=False) is None
     # A size of zero is not spread at all.
@@ -194,7 +194,9 @@ def test_a_spread_matte_reads_its_whole_box() -> None:
 
 
 def test_a_precise_glow_is_bounded_whatever_its_spread() -> None:
-    assert effects.glow_reach(5.0, 40.0, precise=True) == 8
+    """Spread to the coverage, it also reads the edge test's reach around it."""
+    assert effects.glow_reach(5.0, 40.0, precise=True) == 8 + effects._GLOW_EDGE_REACH
+    assert effects.glow_reach(5.0, 9.0, precise=True) == 8
     assert effects.glow_reach(5.0, 0.0, precise=False) == 8
 
 

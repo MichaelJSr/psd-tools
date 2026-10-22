@@ -935,9 +935,8 @@ def cast_reach(distance: float, angle: float, size: float, spread: float) -> int
     the silhouette further away than that moves no pixel of the matte, so
     the matte on a box is the matte on any larger box, cut.
 
-    None when the matte is spread: spread grows the silhouette at the
-    coverage levels it finds on the whole canvas, so no part of the canvas
-    can stand for all of it. A spread of a size-0 matte grows nothing.
+    None when the matte is spread; such a matte is drawn on its whole box.
+    A spread of a size-0 matte grows nothing.
     """
     if size > 0.0 and spread > 0.0:
         return None
@@ -949,11 +948,16 @@ def glow_reach(size: float, spread: float, precise: bool) -> int | None:
     """How far a glow's falloff reads from each pixel, as :py:func:`cast_reach`.
 
     A precise glow ramps along the distance to the silhouette and is never
-    spread, so it is bounded whatever its spread.
+    spread, so it is bounded whatever its spread; when its spread reads the
+    coverage (:py:func:`_glow_coverage`), each pixel of the silhouette also
+    reads :data:`_GLOW_EDGE_REACH` around it.
     """
     if not precise and size > 0.0 and spread > 0.0:
         return None
-    return math.ceil(max(size, 0.0)) + 3
+    reach = math.ceil(max(size, 0.0)) + 3
+    if _reads_coverage(size, spread):
+        reach += _GLOW_EDGE_REACH
+    return reach
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
@@ -1263,6 +1267,12 @@ def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
 
 
+def _reads_coverage(size: float, spread: float) -> bool:
+    """Whether a glow of ``size`` and ``spread`` is cast from the coverage."""
+    grow = max(float(size), 0.0) * min(max(float(spread), 0.0), 100.0) / 100.0
+    return grow >= _GLOW_SPREAD_PIXELS
+
+
 def _glow_coverage(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
     """What a glow of ``size`` and ``spread`` is cast from.
 
@@ -1278,8 +1288,7 @@ def _glow_coverage(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
     step. Photoshop's renders of such layers split the same way.
     """
     alpha = alpha.astype(np.float32)
-    grow = max(float(size), 0.0) * min(max(float(spread), 0.0), 100.0) / 100.0
-    if grow < _GLOW_SPREAD_PIXELS:
+    if not _reads_coverage(size, spread):
         return alpha
     covered = alpha > 0.0
     near_clear, near_opaque = ~covered, alpha >= 1.0 - _OPAQUE_STEP
