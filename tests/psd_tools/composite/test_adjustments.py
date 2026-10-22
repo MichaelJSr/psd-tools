@@ -15,8 +15,11 @@ from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import paint
 from psd_tools.composite.adjustments import (
+    _brightness_curve,
+    _lut_domain,
     _rows_from_rgb,
     apply_blackandwhite,
+    apply_brightnesscontrast,
     apply_channelmixer,
     apply_colorbalance,
     apply_curves,
@@ -55,14 +58,14 @@ def _applied(out: np.ndarray | None) -> np.ndarray:
 
 # Tolerances used for MSE computation over test images (shape (200, 200, C), values in [0,1])
 
-LOOSE = 5e-4  # tolerance for approximate adjustment algorithms which can be improved (e.g. brightness/contrast)
+LOOSE = 5e-4  # tolerance for approximate adjustment algorithms which can be improved (e.g. hue/saturation)
 ACCURATE = 5e-5  # tolerance for accurate adjustment algorithms (e.g. curves)
 STRICT = 5e-6  # tolerance for precise adjustment algorithms (e.g. threshold)
 
 
 # Brightness & Contrast
 brightnesscontrast_tests = {
-    "brightnesscontrast": LOOSE,
+    "brightnesscontrast": ACCURATE,
     "brightnesscontrast_legacy": LOOSE,
 }
 brightnesscontrast_colorspaces = ["rgb", "cmyk", "grayscale"]
@@ -88,6 +91,107 @@ def test_brightnesscontrast_composite_error(name: str, colormode: str) -> None:
             "legacy adjustment layers recognized as PixelLayers with no bounding box"
         )
     check_composite_quality(filename, brightnesscontrast_tests[name], False)
+
+
+def _brightness_contrast_layer(
+    brightness: int, contrast: int
+) -> adjustments.BrightnessContrast:
+    """The fixture's first non-legacy layer with the given settings."""
+    psd = PSDImage.open(full_name("adjustments/brightnesscontrast_rgb.psd"))
+    layer = next(
+        layer
+        for layer in psd.descendants()
+        if isinstance(layer, adjustments.BrightnessContrast)
+    )
+    data = Descriptor()
+    data[b"Brgh"] = Integer(brightness)
+    data[b"Cntr"] = Integer(contrast)
+    layer._data = data
+    return layer
+
+
+# Levels Photoshop exports through one non-legacy layer:
+# (brightness, contrast, input level, output level).
+_PHOTOSHOP_BRIGHTNESS_CONTRAST = [
+    (-150, 0, 32, 12),
+    (-150, 0, 128, 50),
+    (-150, 0, 192, 79),
+    (-33, 0, 64, 52),
+    (-33, 0, 128, 104),
+    (-33, 0, 192, 161),
+    (-120, 70, 64, 18),
+    (-120, 70, 128, 43),
+    (-120, 70, 192, 82),
+    (-51, -50, 64, 58),
+    (-51, -50, 128, 103),
+    (-51, -50, 192, 141),
+    (-95, -50, 64, 45),
+    (-95, -50, 128, 82),
+    (0, -50, 64, 76),
+    (0, -50, 192, 180),
+    (4, 100, 64, 41),
+    (4, 100, 128, 134),
+    (-31, 47, 64, 42),
+    (-31, 47, 192, 171),
+    (23, 70, 64, 57),
+    (23, 70, 192, 229),
+    (150, -21, 32, 87),
+    (150, -21, 96, 210),
+]
+# The fitted curve's spread around those levels, up to three quarters of the range.
+_BRIGHTNESS_CONTRAST_LEVELS = 2
+
+
+@pytest.mark.parametrize(
+    ("brightness", "contrast", "level", "expected"), _PHOTOSHOP_BRIGHTNESS_CONTRAST
+)
+def test_brightnesscontrast_matches_photoshop_levels(
+    brightness: int, contrast: int, level: int, expected: int
+) -> None:
+    layer = _brightness_contrast_layer(brightness, contrast)
+    image = np.full((1, 1, 3), level / 255, dtype=np.float32)
+    out = _applied(apply_brightnesscontrast(image, ColorMode.RGB, layer))
+    assert out * 255 == pytest.approx(
+        np.full((1, 1, 3), expected), abs=_BRIGHTNESS_CONTRAST_LEVELS
+    )
+
+
+def test_brightnesscontrast_at_zero_leaves_the_image_unchanged() -> None:
+    """Values between two levels are not truncated to the lower one."""
+    layer = _brightness_contrast_layer(0, 0)
+    image = np.linspace(0, 1, 997, dtype=np.float32).reshape(1, -1, 1)
+    image = np.repeat(image, 3, axis=2)
+    out = _applied(apply_brightnesscontrast(image, ColorMode.RGB, layer))
+    assert np.allclose(out, image, atol=1e-6)
+
+
+@pytest.mark.parametrize("brightness", [-150, -60, -1, 1, 60, 150])
+def test_brightness_and_its_negative_are_inverse_curves(brightness: int) -> None:
+    t = _lut_domain(256)
+    there = _brightness_curve(brightness, t).astype(np.float32)
+    assert _brightness_curve(-brightness, there) == pytest.approx(t, abs=1e-4)
+
+
+@pytest.mark.parametrize("brightness", range(-150, 151, 25))
+@pytest.mark.parametrize("contrast", [-50, 0, 50, 100])
+def test_brightnesscontrast_keeps_black_white_and_order(
+    brightness: int, contrast: int
+) -> None:
+    layer = _brightness_contrast_layer(brightness, contrast)
+    ramp = np.repeat(_lut_domain(256).reshape(1, -1, 1), 3, axis=2)
+    out = _applied(apply_brightnesscontrast(ramp, ColorMode.RGB, layer))[0, :, 0]
+    assert out[0] == pytest.approx(0.0, abs=1e-6)
+    assert out[-1] == pytest.approx(1.0, abs=1e-6)
+    assert (np.diff(out) >= 0).all()
+
+
+@pytest.mark.parametrize("brightness", [-1, 1])
+def test_a_brightness_of_one_moves_no_level_by_much_more_than_one(
+    brightness: int,
+) -> None:
+    """The shoulder flattens to the identity with the gain: no step at zero."""
+    t = _lut_domain(256)
+    assert _brightness_curve(brightness, t) == pytest.approx(t, abs=1.5 / 255)
 
 
 # Levels
