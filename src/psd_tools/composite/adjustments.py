@@ -42,7 +42,6 @@ F = TypeVar("F", bound=Callable)
 
 # Float32 constants used throughout adjustments.
 _0 = np.float32(0.0)
-_HALF = np.float32(0.5)
 _1 = np.float32(1.0)
 _100 = np.float32(100.0)
 _255 = np.float32(255.0)
@@ -56,22 +55,16 @@ _FLOAT_EPSILON = np.float32(1e-9)
 _CONTRAST_CONTROL_X = np.array([0.0, 63.0, 191.0, 255.0], dtype=np.float32) / _255
 _CONTRAST_INNER_DELTA = np.float32(25.0 / 255.0)
 
-# Brightness polynomial coefficients (reverse-engineered from Photoshop).
-# See: https://www.desmos.com/calculator/4fg6glxzqj
-_BRIGHTNESS_POLY_A = (
-    np.float32(1.65),
-    np.float32(-1.0),
-    np.float32(1.96),
-    np.float32(1.0),
-    np.float32(1.0),
-)
-_BRIGHTNESS_POLY_R = (
-    np.float32(0.35),
-    np.float32(10.0),
-    np.float32(0.4),
-    np.float32(4.0),
-    np.float32(1.25),
-)
+# Modern brightness curve, fitted to Photoshop exports. Positive brightness
+# scales the shadows by a gain of exp(brightness / _BRIGHTNESS_GAIN_SCALE) up
+# to a knee, then rolls off into white; negative brightness is its inverse.
+# With s = 1 - 1 / gain, the knee's output level is k0 + k1 * s and the
+# shoulder's exponent is 1 + s * (p1 + p2 * s), so the curve flattens to the
+# identity as the gain goes to 1.
+_BRIGHTNESS_GAIN_SCALE = 160.0
+_BRIGHTNESS_KNEE = (0.48, 0.21)  # k0, k1
+_BRIGHTNESS_SHOULDER = (3.2, -4.65)  # p1, p2
+_BRIGHTNESS_GRID = np.linspace(0.0, 1.0, 4097)
 
 # ICC profile gamma approximations for the exposure adjustment.
 # Dot Gray 20% (Photoshop default grayscale profile) ≈ 1.75.
@@ -226,74 +219,49 @@ def apply_brightnesscontrast(
     """
     Apply a brightness & contrast adjustment to an image.
 
-    Requires scipy for cubic spline interpolation.
+    Brightness is applied first and contrast to its result, through one curve
+    for every channel. Requires scipy for cubic spline interpolation.
     """
     from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    use_legacy: bool = layer.use_legacy
-    b: np.float32 = layer.brightness / np.float32(150.0)
-    c: np.float32 = layer.contrast / _100
-
-    lut_size = _get_lut_size(layer)
-    t = _lut_domain(lut_size)
-
-    if use_legacy:  # these layers are skipped during composing as they are recognized as PixelLayers with no bounding box
+    if layer.use_legacy:  # these layers are skipped during composing as they are recognized as PixelLayers with no bounding box
         return img
 
-    # contrast
+    c = np.float32(layer.contrast) / _100
+    t = _lut_domain(_get_lut_size(layer))
+
     x = _CONTRAST_CONTROL_X
     y = np.array(
         [_0, x[1] - c * _CONTRAST_INNER_DELTA, x[2] + c * _CONTRAST_INNER_DELTA, _1],
         dtype=np.float32,
     )
-    contrast_spline = interpolate.CubicSpline(x, y, bc_type="natural")(t).astype(
-        np.float32, copy=False
-    )
+    contrast = interpolate.CubicSpline(x, y, bc_type="natural")
+    lut = contrast(_brightness_curve(layer.brightness, t)).clip(0.0, 1.0)
 
-    # brightness
-    brightness_spline = _get_brightness_spline(brightness_value=b, t=t)
-
-    # a parametric transformation rotates the brightness spline function 45° degrees
-    x_rotated = t - brightness_spline
-    y_rotated = contrast_spline + brightness_spline
-
-    lut = np.interp(t, x_rotated, y_rotated)
-    lut = lut.astype(np.float32, copy=False).clip(_0, _1)
-
-    channel_id = 1 if colormode == ColorMode.GRAYSCALE else 0
-
-    return _apply_luts({channel_id: lut}, img, colormode)
+    # Interpolated rather than truncated to the LUT's levels as _apply_luts
+    # does: the curve is steep near white, and an identity adjustment must
+    # leave the pixels as they are.
+    return np.interp(img, t, lut).astype(np.float32, copy=False)
 
 
-# TODO: improve brightness function accuracy
-# the non-legacy adjustment was determined using reverse engineering and tuning parameters, it can be improved
-# check brightness curve: https://www.desmos.com/calculator/4fg6glxzqj
-def _get_brightness_spline(
-    brightness_value: np.float32, t: NDArray[np.float32]
-) -> NDArray[np.float32]:
-    a1, a2, a3, a4, a5 = _BRIGHTNESS_POLY_A
-    r1, r2, r3, r4, r5 = _BRIGHTNESS_POLY_R
-
-    b_abs = cast(np.float32, np.abs(brightness_value))
-
-    h = _HALF * (
-        b_abs
-        * (_brightnesscontrast_pol(a1, t, r1) + _brightnesscontrast_pol(a2, t, r2))
-        + (_1 - b_abs)
-        * (_brightnesscontrast_pol(a3, t, r3) + _brightnesscontrast_pol(a4, t, r4))
-        + _brightnesscontrast_pol(a5, t, r5)
-    ).astype(np.float32, copy=False)
-
-    return cast(
-        NDArray[np.float32],
-        brightness_value * t * (_1 - t) * h,
-    )
-
-
-def _brightnesscontrast_pol(
-    a: np.float32, x: NDArray[np.float32], r: np.float32
-) -> NDArray[np.float32]:
-    return np.float32(a) * np.power(x, r, dtype=np.float32)
+def _brightness_curve(brightness: int, t: NDArray[np.float32]) -> NDArray[np.float64]:
+    """Map ``t`` through the modern brightness curve, brightness in [-150, 150]."""
+    if brightness == 0:
+        return t.astype(np.float64)
+    gain = np.exp(abs(brightness) / _BRIGHTNESS_GAIN_SCALE)
+    s = 1.0 - 1.0 / gain
+    knee = _BRIGHTNESS_KNEE[0] + _BRIGHTNESS_KNEE[1] * s
+    power = 1.0 + s * (_BRIGHTNESS_SHOULDER[0] + _BRIGHTNESS_SHOULDER[1] * s)
+    start = knee / gain
+    # The shoulder leaves the knee at the gain's slope and reaches white at 1.
+    rate = gain * (1.0 - start) / (1.0 - knee) - power
+    grid = _BRIGHTNESS_GRID
+    w = np.clip((grid - start) / (1.0 - start), 0.0, 1.0)
+    shoulder = 1.0 - (1.0 - knee) * (1.0 - w) ** power * np.exp(-rate * w)
+    curve = np.where(grid <= start, gain * grid, shoulder)
+    if brightness > 0:
+        return np.interp(t, grid, curve)
+    return np.interp(t, curve, grid)
 
 
 @_preserve_alpha

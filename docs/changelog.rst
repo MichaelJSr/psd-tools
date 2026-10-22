@@ -19,6 +19,10 @@ Changelog
 - [fix] The outer glow of a pass-through group whose children's effects let
   the backdrop through, such as a coloured Multiply shadow, is no longer too
   strong at the group's soft edges
+- [fix] A brightness/contrast adjustment that is not legacy renders as
+  Photoshop does: brightness comes before contrast, as a gain on the shadows
+  that rolls off into white (its inverse when negative), and an adjustment at
+  zero leaves the pixels unchanged. Strong settings change the most
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead
