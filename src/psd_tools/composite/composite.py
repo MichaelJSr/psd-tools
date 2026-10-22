@@ -4059,8 +4059,13 @@ class Compositor:
         (:py:func:`_tiling_origin`), at the texture's scale;
         :py:func:`texture_height` turns its luminance into height. None, and
         the bevel goes on untextured, when the pattern is not in the document
-        or cannot be read.
+        or cannot be read, or the document is neither RGB nor grayscale.
         """
+        if layer._psd.color_mode not in (ColorMode.RGB, ColorMode.GRAYSCALE):
+            logger.debug(
+                "A bevel texture is drawn in RGB and grayscale only: %s", layer
+            )
+            return None
         try:
             _, layout = _overlay_boxes(
                 layer, self._viewport, self._cache.content_bboxes
@@ -4077,12 +4082,17 @@ class Compositor:
                 "The texture pattern of a bevel of %s is not in the document", layer
             )
             return None
-        if fill.shape[2] >= 3:
+        if fill.shape[2] == 3:
             luminance = (
                 fill[:, :, 0] * 0.299 + fill[:, :, 1] * 0.587 + fill[:, :, 2] * 0.114
             )
+        elif fill.shape[2] == 1:
+            luminance = fill[:, :, 0]
         else:
-            luminance = fill.mean(axis=2)
+            logger.debug(
+                "The texture pattern of a bevel of %s is neither RGB nor grey", layer
+            )
+            return None
         return texture_height(
             np.clip(luminance, 0.0, 1.0),
             size=size,

@@ -1509,7 +1509,8 @@ _SLOPE_LIMIT_TRUNCATE = 4.0
 # gradients, and the float64 transients of the filters.
 _INNER_BYTES = 64
 
-# The deepest bevel Photoshop writes, in percent.
+# The deepest bevel Photoshop writes, in percent, and the deepest texture
+# either way.
 _MAX_BEVEL_DEPTH = 1000.0
 
 # What a satin's distance and size, and a bevel's depth and size, read as
@@ -1749,10 +1750,12 @@ def texture_height(
     The pattern's dark pixels stand up and its light ones sink, the other
     way round when ``inverted``; at a texture ``depth`` of 100% the darkest
     pixel is as high as the bevel's band is wide (``size``), and the depth
-    scales that, negative depths turning the texture over.
+    scales that, negative depths turning the texture over. A depth past what
+    Photoshop writes is held to it.
     """
     relief = luminance if inverted else 1.0 - luminance
-    scale = max(float(size), 0.0) * float(depth) / 100.0 * _TEXTURE_HEIGHT_PER_DEPTH
+    depth = float(np.clip(depth, -_MAX_BEVEL_DEPTH, _MAX_BEVEL_DEPTH))
+    scale = max(float(size), 0.0) * depth / 100.0 * _TEXTURE_HEIGHT_PER_DEPTH
     return (relief * scale).astype(np.float32)
 
 

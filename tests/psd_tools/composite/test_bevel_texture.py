@@ -9,6 +9,7 @@ thing that lights the surface, so its bumps can be read off row by row.
 
 import copy
 import functools
+import math
 from typing import Any
 
 import numpy as np
@@ -102,8 +103,8 @@ def _texture(
     return bevel
 
 
-def _document(left: int = 8, top: int = 8) -> tuple[PSDImage, Layer]:
-    psd = PSDImage.new("RGB", (48, 48))
+def _document(left: int = 8, top: int = 8, mode: str = "RGB") -> tuple[PSDImage, Layer]:
+    psd = PSDImage.new(mode, (48, 48))
     psd._record.layer_and_mask_information.tagged_blocks = TaggedBlocks()
     blocks = psd.tagged_blocks
     assert blocks is not None
@@ -236,6 +237,36 @@ def test_a_missing_texture_pattern_draws_the_untextured_bevel() -> None:
     textured = _rendered(psd)
     bevel[b"useTexture"] = Bool(False)
     assert np.array_equal(textured, _rendered(psd))
+
+
+def test_a_texture_deeper_than_photoshop_writes_is_drawn_at_the_deepest() -> None:
+    psd, layer = _document()
+    bevel = _texture(layer, depth=-1e300)
+    forged = _rendered(psd)
+    assert np.isfinite(forged).all()
+    bevel[b"textureDepth"] = Double(-1000.0)
+    assert np.array_equal(forged, _rendered(psd))
+
+
+def test_an_unreadable_texture_depth_drops_the_bevel() -> None:
+    """As any bevel parameter no arithmetic survives does."""
+    psd, layer = _document()
+    bevel = _texture(layer, depth=math.nan)
+    result = _rendered(psd)
+    bevel[Key.Enabled] = Bool(False)
+    assert np.array_equal(result, _rendered(psd))
+
+
+@pytest.mark.parametrize("mode", ["CMYK", "L"])
+def test_a_texture_outside_rgb_draws_the_untextured_bevel(mode: str) -> None:
+    """Grayscale is textured as RGB is; another mode is not."""
+    psd, layer = _document(mode=mode)
+    bevel = _texture(layer)
+    textured = _rendered(psd)
+    bevel[b"useTexture"] = Bool(False)
+    plain = _rendered(psd)
+    assert np.isfinite(textured).all()
+    assert np.array_equal(textured, plain) == (mode == "CMYK")
 
 
 def test_an_inverted_texture_is_one_of_negative_depth() -> None:
