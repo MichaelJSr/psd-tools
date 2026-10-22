@@ -367,8 +367,8 @@ def convert_pil_to_image_data(
 
     Returns the planes and whether they hold the whole image, as
     :func:`~psd_tools.api.numpy_io.holds_composite` decides; ``None`` for a
-    ``CMYK`` or ``LAB`` image on a document with no transparency channel,
-    whose coverage nothing tells. ``1`` and ``P`` images are opaque.
+    ``CMYK`` or ``LAB`` image on a layered document with no transparency
+    channel, whose coverage nothing tells. ``1`` and ``P`` images are opaque.
 
     :raises TypeError: if *image* is not a PIL image.
     :raises ValueError: if *image* is not the document's size, its mode does

@@ -323,11 +323,12 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             with no transparency channel stores the colour alone.
             Regenerated or supplied, the stored preview sets
             :py:meth:`has_preview` to whether the stored planes hold the whole
-            image: ``True`` where the alpha is kept or is opaque everywhere,
-            ``False`` otherwise, even if it was ``True``. A ``"CMYK"`` or
-            ``"LAB"`` image on a document with no transparency channel carries
-            no coverage and leaves it as it was. A document without a
-            VersionInfo resource always reports ``True``.
+            image: ``True`` on a document with no layers and where the alpha
+            is kept or is opaque everywhere, ``False`` otherwise, even if it
+            was ``True``. A ``"CMYK"`` or ``"LAB"`` image on a layered
+            document with no transparency channel carries no coverage and
+            leaves it as it was. A document without a VersionInfo resource
+            always reports ``True``.
         :param update_preview: ``False`` writes the stored preview unchanged,
             even after an edit.
         :raises TypeError: if ``preview`` is not a PIL image.

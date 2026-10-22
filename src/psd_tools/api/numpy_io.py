@@ -860,12 +860,13 @@ def holds_composite(
 ) -> bool | None:
     """Whether the planes :func:`encode_image_data` makes of these arrays are the composite.
 
-    ``True`` where the document's transparency slot takes or keeps the alpha,
-    or where it has none and *alpha* is opaque everywhere. ``False`` where it
-    has none and *alpha* is not opaque, so the colour goes in unmatted with
-    its coverage dropped, or where an indexed document's short colour table
-    keeps the stored planes. ``None`` where *alpha* is ``None`` and there is no
-    slot: nothing tells the coverage.
+    ``True`` for a document with no layers, whose merged planes are the whole
+    image whatever plane reads as its alpha; where the document's transparency
+    slot takes or keeps the alpha; and where it has none and *alpha* is opaque
+    everywhere. ``False`` where it has none and *alpha* is not opaque, so the
+    colour goes in unmatted with its coverage dropped, or where an indexed
+    document's short colour table keeps the stored planes. ``None`` where
+    *alpha* is ``None`` and there is no slot: nothing tells the coverage.
     """
     header = psdimage._record.header
     depth = cast(Literal[1, 8, 16, 32], header.depth)
@@ -876,7 +877,10 @@ def holds_composite(
         and len(psdimage._record.color_mode_data.value) < _COLOR_TABLE_SIZE
     ):
         return False
-    if _transparency_slot(psdimage, get_color_channels(psdimage)) >= 0:
+    if (
+        len(psdimage) == 0
+        or _transparency_slot(psdimage, get_color_channels(psdimage)) >= 0
+    ):
         return True
     if alpha is None:
         return None
