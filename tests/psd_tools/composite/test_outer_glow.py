@@ -709,6 +709,47 @@ def test_a_layer_in_another_mode_leaves_its_glow_the_complement_of_its_alpha() -
     assert np.allclose(row[x0 - 4 : x0], 1.0, atol=1e-6)
 
 
+def test_a_dissolve_layers_glow_is_a_normal_ones() -> None:
+    """Dissolve is drawn as Normal, so it covers ``alpha`` of its glow as Normal does."""
+
+    def render(blend_mode: BlendMode) -> np.ndarray:
+        _, layer = _feathered_stroke_layer("Outset 6")
+        _hard_glow(layer, size=_COVERAGE_SIZE)
+        layer.blend_mode = blend_mode
+        return _over_grey(layer, _around(layer, 8))
+
+    assert np.allclose(render(BlendMode.DISSOLVE), render(BlendMode.NORMAL), atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "blend_mode", [BlendMode.NORMAL, BlendMode.SCREEN, BlendMode.SOFT_LIGHT]
+)
+def test_a_pass_through_groups_glow_is_cut_as_its_childs_would_be(
+    blend_mode: BlendMode,
+) -> None:
+    """A pass-through group covers what lies beneath as its children do.
+
+    Its children go onto the backdrop in their own modes, so a group holding
+    one square, the square's own effects off, glows over mid-grey as the
+    square does when the glow is its own.
+    """
+
+    def render(grouped: bool) -> np.ndarray:
+        psd, layer = _feathered_stroke_layer("Outset 6")
+        viewport = _around(layer, 8)
+        layer.blend_mode = blend_mode
+        if not grouped:
+            _hard_glow(layer, size=_COVERAGE_SIZE)
+            return _over_grey(layer, viewport)
+        _forge_glow(layer, Opacity=0.0)
+        group = psd.create_group([layer])
+        assert group.blend_mode == BlendMode.PASS_THROUGH
+        _hard_glow(group, size=_COVERAGE_SIZE)
+        return _over_grey(group, viewport)
+
+    assert np.allclose(render(True), render(False), atol=1e-6)
+
+
 def test_an_adjustment_layers_glow_is_cut_by_its_mask_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -730,11 +771,10 @@ def test_an_adjustment_layers_glow_is_cut_by_its_mask_alone(
         self: Compositor,
         target: Layer,
         box: tuple[int, int, int, int] | None = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
+        clip_to_path: bool = True,
+    ) -> float | np.ndarray:
         if target is not layer:
-            return read_mask(self, target, box, *args, **kwargs)
+            return read_mask(self, target, box, clip_to_path)
         left, top, right, bottom = self.viewport if box is None else box
         columns = np.arange(left, right, dtype=np.float32)
         ramp = np.clip((columns - 150.0) / 20.0, 0.0, 1.0)

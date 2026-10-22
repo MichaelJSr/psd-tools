@@ -116,8 +116,31 @@ _CANVAS_GROWTH = 4
 
 
 # The layer modes whose compositing keeps ``1 - alpha`` of the backdrop, which
-# an outer glow's cut under a partial pixel relies on.
-_COVERS_BENEATH = frozenset({BlendMode.NORMAL, BlendMode.PASS_THROUGH})
+# an outer glow's cut under a partial pixel relies on. Dissolve is drawn as
+# Normal (``blend.dissolve``).
+_COVERS_BENEATH = frozenset({BlendMode.NORMAL, BlendMode.DISSOLVE})
+
+
+def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
+    """Whether compositing the layer keeps ``1 - alpha`` of what lies beneath.
+
+    A pass-through group puts each child on the backdrop in the child's own
+    mode, so it covers that much only when every child it shows, as
+    ``shown`` (the compositor's layer filter) picks them, does. A clipping
+    child paints onto the layer it clips to and never reaches the backdrop,
+    and an adjustment layer paints nothing.
+    """
+    if isinstance(layer, AdjustmentLayer):
+        return False
+    if layer.blend_mode != BlendMode.PASS_THROUGH:
+        return layer.blend_mode in _COVERS_BENEATH
+    if not layer.is_group():
+        return True  # blended as Normal (``blend.get_blend_func``)
+    return all(
+        _covers_beneath(child, shown)
+        for child in cast(GroupMixin, layer)
+        if (shown is None or shown(child)) and not child.clipping
+    )
 
 
 def _pixels(bbox: tuple[int, int, int, int]) -> int:
@@ -3393,10 +3416,10 @@ class Compositor:
         opacity, each effect guarded the same way. There is no knockout
         switch: ``glow_paint()`` always cuts the glow away under the
         silhouette, leaving what the layer's paint will not cover once it is
-        composited over the glow. Only a Normal or Pass Through layer covers
-        that much of what lies beneath; any other layer, and an adjustment
-        layer, which paints nothing, leaves its glow the plain complement of
-        its silhouette.
+        composited over the glow. Only a layer that covers that much of what
+        lies beneath (:py:func:`_covers_beneath`) has its glow raised to
+        match; any other leaves its glow the plain complement of its
+        silhouette.
 
         The paint is drawn on the glow's own box, since a gradient glow's
         colour follows its falloff, and pasted beside it; where the glow
@@ -3408,11 +3431,8 @@ class Compositor:
         fill_opacity, opacity = self._get_const(layer)
         if opacity <= 0.0:
             return
-        over = 0.0
-        if layer.blend_mode in _COVERS_BENEATH and not isinstance(
-            layer, AdjustmentLayer
-        ):
-            over = fill_opacity * opacity
+        covers = _covers_beneath(layer, self._layer_filter)
+        over = fill_opacity * opacity if covers else 0.0
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         for effect in glows:
             glow = cast(OuterGlow, effect)
