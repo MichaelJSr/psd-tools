@@ -83,6 +83,28 @@ def test_a_path_covers_the_same_pixels_wherever_it_sits_on_the_grid() -> None:
     assert here.sum() > 80, "the shape is not on the canvas"
 
 
+def test_a_pixel_the_path_covers_whole_or_not_at_all_is_exactly_0_or_1() -> None:
+    """The row sum's rounding is not coverage.
+
+    A rectangle a few millionths off the grid (a path Align Edges has scaled)
+    splits each edge piece across two cells, and summed in float64 the parts
+    leave the pixels past the edge a few ulps from 0, and the pixels inside a
+    few ulps from 1 -- by an amount that depends on where the row's sum
+    starts, so on the box the path is drawn on. A reader that tests for any
+    coverage would see a partial pixel there. Both are given the whole number,
+    so the only partial pixels are the edge rows and columns.
+    """
+    rectangle = _rectangle(4.0000023, 3.0000011, 26.0000023, 25.0000011)
+    for shift in (0, 10):
+        shifted = [(x - shift, y - shift) for x, y in rectangle]
+        coverage = scanline.fill_coverage([shifted], 40, 40)
+        rows, cols = np.nonzero((coverage > 0.0) & (coverage < 1.0))
+        on_edge = np.isin(cols, (4 - shift, 26 - shift)) | np.isin(
+            rows, (3 - shift, 25 - shift)
+        )
+        assert on_edge.all(), (shift, coverage[rows[~on_edge], cols[~on_edge]])
+
+
 def test_a_subpath_inside_another_cuts_a_hole_whichever_way_it_winds() -> None:
     """The even-odd rule, which is the one PSD uses.
 

@@ -46,6 +46,7 @@ from psd_tools.composite.effects import (
     bevel_geometry,
     bevel_inside,
     bevel_reach,
+    cast_reach,
     contour_table,
     draw_bevel,
     draw_drop_shadow,
@@ -57,12 +58,14 @@ from psd_tools.composite.effects import (
     glow_falloff,
     glow_geometry,
     glow_paint,
+    glow_reach,
     inner_bbox,
     outer_glow_bbox,
     satin_geometry,
     shadow_geometry,
     stroke_band,
     stroke_bbox,
+    stroke_reach,
 )
 from psd_tools.composite.text_blend import (
     TEXT_BLEND_GAMMA,
@@ -150,6 +153,27 @@ def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
 
 def _pixels(bbox: tuple[int, int, int, int]) -> int:
     return max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
+
+
+def _within_reach(
+    bbox: tuple[int, int, int, int],
+    within: tuple[int, int, int, int],
+    reach: int | None,
+) -> tuple[int, int, int, int]:
+    """The part of ``bbox`` within ``reach`` of ``within``.
+
+    An effect drawn on that part is, over ``within``, the effect drawn on the
+    whole of ``bbox``: each pixel of it reads nothing further than ``reach``
+    away, so what lies beyond cannot show there. The effects module states
+    the reach of each kind, or None for one that reads its whole box, which
+    keeps the box. Empty when nothing of ``bbox`` can show.
+    """
+    if utils.intersect(bbox, within) == (0, 0, 0, 0):
+        return (0, 0, 0, 0)
+    if reach is None:
+        return bbox
+    x0, y0, x1, y1 = within
+    return utils.intersect(bbox, (x0 - reach, y0 - reach, x1 + reach, y1 + reach))
 
 
 # What an effect descriptor psd-tools did not write can raise on the way to
@@ -3475,7 +3499,11 @@ class Compositor:
         outside: np.ndarray | None = None
         for effect in strokes:
             try:
-                bbox = _stroke_box(layer, effect.descriptor, self._cache.content_bboxes)
+                bbox = _within_reach(
+                    _stroke_box(layer, effect.descriptor, self._cache.content_bboxes),
+                    viewport,
+                    stroke_reach(effect.descriptor),
+                )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a stroke effect of %s: %s", layer, error)
                 continue
@@ -3536,7 +3564,9 @@ class Compositor:
         is drawn on its own box, grown from :py:func:`_cast_bbox` so a group's
         has room for its children's effects, and cast from
         :py:meth:`_cast_shape` read on that box, so a layer that runs past the
-        viewport still casts from the part of it out of view.
+        viewport still casts from the part of it out of view. The box is cut
+        to what can reach the viewport (:py:func:`_within_reach`), which is
+        what bounds the cost of a small viewport on a large layer.
 
         The layer opacity fades the shadow with the layer, as it fades an
         outer stroke. Fill opacity does not: it fades the layer's own paint
@@ -3581,10 +3611,20 @@ class Compositor:
                     layer._psd._max_alloc_bytes,
                 )
                 self._check_effect_growth(bbox, cast_from)
+                bbox = _within_reach(
+                    bbox,
+                    self._viewport,
+                    cast_reach(
+                        geometry.distance,
+                        geometry.angle,
+                        geometry.size,
+                        geometry.spread,
+                    ),
+                )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a drop shadow of %s: %s", layer, error)
                 continue
-            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
+            if bbox == (0, 0, 0, 0):
                 continue
             if noise > 0.0:
                 logger.debug("The noise of a drop shadow of %s is not applied", layer)
@@ -3655,13 +3695,17 @@ class Compositor:
                 anti_aliased = glow.anti_aliased
                 noise = glow.noise
                 jitter = glow.quality_jitter
-                bbox = outer_glow_bbox(
-                    cast_from, glow.descriptor, layer._psd._max_alloc_bytes
+                bbox = _within_reach(
+                    outer_glow_bbox(
+                        cast_from, glow.descriptor, layer._psd._max_alloc_bytes
+                    ),
+                    self._viewport,
+                    glow_reach(size, spread, precise),
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure an outer glow of %s: %s", layer, error)
                 continue
-            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
+            if bbox == (0, 0, 0, 0):
                 continue
             if noise > 0.0:
                 logger.debug("The noise of an outer glow of %s is not applied", layer)
@@ -3726,7 +3770,7 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot measure an inner effect of %s: %s", layer, error)
                 continue
-            if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
+            if bbox == (0, 0, 0, 0):
                 continue
             silhouette = silhouettes.get(bbox)
             if silhouette is None:
@@ -3834,7 +3878,7 @@ class Compositor:
         tuple[int, int, int, int],
         Callable[[tuple[int, int, int, int], np.ndarray], np.ndarray],
     ]:
-        """An inner effect's box and the draw of its coverage on that box."""
+        """An inner effect's box, cut to what reaches the viewport, and its draw."""
         inner = cast(InnerShadow | InnerGlow, effect)
         desc = inner.descriptor
         what = "Inner shadow" if isinstance(inner, InnerShadow) else "Inner glow"
@@ -3847,6 +3891,9 @@ class Compositor:
             logger.debug("The noise of an inner effect of %s is not applied", layer)
         bbox = drop_shadow_bbox(cast_from, 0.0, 0.0, size, layer._psd._max_alloc_bytes)
         if isinstance(inner, InnerShadow):
+            bbox = _within_reach(
+                bbox, self._viewport, cast_reach(distance, angle, size, choke)
+            )
 
             def draw_shadow(
                 box: tuple[int, int, int, int], shape: np.ndarray
@@ -3869,6 +3916,7 @@ class Compositor:
         center = glow.glow_source == GlowSource.CENTER
         precise = glow.glow_type == GlowTechnique.PRECISE_MATTE
         glow_range = float(desc.get(Key.InputRange, 50.0))
+        bbox = _within_reach(bbox, self._viewport, glow_reach(size, choke, precise))
 
         def draw_glow(box: tuple[int, int, int, int], shape: np.ndarray) -> np.ndarray:
             return draw_inner_glow(
@@ -4019,8 +4067,13 @@ class Compositor:
             try:
                 # Effect must happen at the layer viewport, grown so an outset
                 # or centered stroke has room for the part of itself that
-                # falls outside the layer (#792).
-                bbox = _stroke_box(layer, effect.descriptor, self._cache.content_bboxes)
+                # falls outside the layer (#792), then cut to what can show on
+                # this compositor's viewport.
+                bbox = _within_reach(
+                    _stroke_box(layer, effect.descriptor, self._cache.content_bboxes),
+                    self._viewport,
+                    stroke_reach(effect.descriptor),
+                )
             except _UNREADABLE as error:
                 logger.debug("Cannot measure a stroke effect of %s: %s", layer, error)
                 continue
