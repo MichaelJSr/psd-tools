@@ -49,13 +49,9 @@ Changelog
   mode are honoured; noise and jitter are read but not applied, and the
   blur and range approximate Photoshop's. Without ``scipy`` it is skipped
   with a warning (#680)
-- [fix] An outer glow with a spread is cast from the layer's coverage rather
-  than its opacity, as Photoshop's renders show, so a soft-edged or faint
-  layer glows as the shape it fades out to; a hard shape's antialiased edge
-  and a glow with no spread still cast from the opacity. Under a partial
-  pixel a glow now shows for the part the layer does not paint, instead of
-  being faded by the layer's edge twice; an adjustment layer paints nothing,
-  so its glow is cut by its mask alone (#680)
+- [fix] An outer glow with a spread is cast from a soft-edged layer's
+  coverage, as Photoshop draws it, and a Normal layer's partial pixels no
+  longer fade its glow twice (#680)
 - [fix] A gradient stop whose location or opacity is out of range or not a
   number is held to 0-100%, as a stop's colour is, and so is a noise
   gradient's transparency. A gradient fill, overlay or stroke with one could

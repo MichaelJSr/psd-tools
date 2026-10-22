@@ -115,6 +115,11 @@ def _styled(effects: Iterator[Any]) -> Iterator[_StyledEffect]:
 _CANVAS_GROWTH = 4
 
 
+# The layer modes whose compositing keeps ``1 - alpha`` of the backdrop, which
+# an outer glow's cut under a partial pixel relies on.
+_COVERS_BENEATH = frozenset({BlendMode.NORMAL, BlendMode.PASS_THROUGH})
+
+
 def _pixels(bbox: tuple[int, int, int, int]) -> int:
     return max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
 
@@ -3388,8 +3393,10 @@ class Compositor:
         opacity, each effect guarded the same way. There is no knockout
         switch: ``glow_paint()`` always cuts the glow away under the
         silhouette, leaving what the layer's paint will not cover once it is
-        composited over the glow; an adjustment layer paints nothing over it,
-        so its glow is left the plain complement of its mask.
+        composited over the glow. Only a Normal or Pass Through layer covers
+        that much of what lies beneath; any other layer, and an adjustment
+        layer, which paints nothing, leaves its glow the plain complement of
+        its silhouette.
 
         The paint is drawn on the glow's own box, since a gradient glow's
         colour follows its falloff, and pasted beside it; where the glow
@@ -3401,7 +3408,11 @@ class Compositor:
         fill_opacity, opacity = self._get_const(layer)
         if opacity <= 0.0:
             return
-        over = 0.0 if isinstance(layer, AdjustmentLayer) else fill_opacity * opacity
+        over = 0.0
+        if layer.blend_mode in _COVERS_BENEATH and not isinstance(
+            layer, AdjustmentLayer
+        ):
+            over = fill_opacity * opacity
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         for effect in glows:
             glow = cast(OuterGlow, effect)

@@ -148,19 +148,12 @@ def _soft_disc(size: int, radius: float, hard_radius: float) -> np.ndarray:
     return soft
 
 
-# What a glow is cast from, fitted on Photoshop's renders of a corpus of
-# layers carrying glows of sizes from ten to two hundred pixels: lens flares
-# and feathered smart objects, and text and resampled shapes, some spread by
-# a percent or two and some not at all. With no spread the glow is the blur
-# of the opacity to within a few percent, however large; spread by a pixel or
-# more, it is the blur of the opacity scaled twentyfold and held to one,
-# which reads the layer's coverage and a little less of its faintest fringe,
-# with a hard shape's antialiased edge kept as it is, since the glow of text
-# or of a resampled shape spread by a pixel or more starts where the shape's
-# edge does, and that edge is up to two pixels wide. The half pixel is where
-# the spread rounds to a whole one, between a corpus card spread by 0.46 px
-# that glows by its opacity and one spread by 0.76 px that glows by its
-# coverage.
+# What a glow is cast from, fitted on Photoshop's renders of layers carrying
+# glows: with no spread the blur of the opacity; spread, the blur of the
+# opacity scaled by the gain and held to one, which reads the layer's
+# coverage, with a hard shape's antialiased edge, up to the reach wide, kept
+# as it is. The switch is the half pixel, where the spread rounds to a whole
+# one.
 _FITTED_COVERAGE_GAIN = 20.0
 _FITTED_SPREAD_PIXELS = 0.5
 _FITTED_EDGE_REACH = 2
@@ -692,6 +685,28 @@ def test_a_layer_over_its_glow_leaves_it_what_its_coverage_leaves() -> None:
     unpainted = _alone(layer, viewport)[y, :, 0]
     assert np.allclose(unpainted[x0 : x0 + 6], 1.0 - ramp[:6], atol=1e-6)
     assert np.allclose(unpainted[x0 - 4 : x0], 1.0, atol=1e-6)
+
+
+def test_a_layer_in_another_mode_leaves_its_glow_the_complement_of_its_alpha() -> None:
+    """Only a Normal layer covers ``alpha`` of its glow, so only its glow is boosted.
+
+    A Soft Light layer lets what lies beneath show through its paint, so its
+    glow is cut by ``1 - alpha`` alone and the square over it covers
+    ``alpha`` of what that leaves: ``alpha + (1 - alpha) ** 2`` over the ramp.
+    """
+    psd, layer = _feathered_stroke_layer("Outset 6")
+    _hard_glow(layer, size=_COVERAGE_SIZE)
+    layer.blend_mode = BlendMode.SOFT_LIGHT
+    viewport = _around(layer, 8)
+    mask = layer.numpy("mask")
+    assert mask is not None
+    ramp = mask[mask.shape[0] // 2, :6, 0]
+
+    y = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1]
+    x0 = layer.bbox[0] - viewport[0]
+    row = _alone(layer, viewport)[y, :, 0]
+    assert np.allclose(row[x0 : x0 + 6], ramp + (1.0 - ramp) ** 2, atol=1e-6), row
+    assert np.allclose(row[x0 - 4 : x0], 1.0, atol=1e-6)
 
 
 def test_an_adjustment_layers_glow_is_cut_by_its_mask_alone(

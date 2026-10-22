@@ -1260,10 +1260,10 @@ def glow_falloff(
     :py:func:`outer_glow_bbox` sizes; the result is ``(height, width)`` on
     it, one at the silhouette's edge and dying away over ``size`` pixels: a
     shadow's matte cast nowhere, squeezed by the range (:py:func:`_ranged`)
-    and then mapped by the contour. A spread glow is cast from the
-    silhouette's coverage rather than its opacity (:py:func:`_glow_coverage`),
-    so a soft edge glows as the shape it fades out to. It is not cut under
-    the silhouette.
+    and then mapped by the contour. A glow spread by half a pixel or more is
+    cast from the silhouette's coverage rather than its opacity, so a soft
+    edge glows as the shape it fades out to, while a hard shape's
+    antialiased edge keeps its opacity. It is not cut under the silhouette.
 
     ``precise`` ramps the matte by its distance from the silhouette instead
     of blurring it (:py:func:`_precise_matte`). A size of zero draws nothing
@@ -1298,13 +1298,13 @@ def _beside(coverage: np.ndarray, shape: np.ndarray, over: float = 0.0) -> np.nd
 
     The glow has what the silhouette leaves of each pixel, ``1 - shape``,
     whatever the layer's own opacity: Photoshop never shows an outer glow
-    through its layer. ``over`` is how much of its silhouette the layer
+    through its layer. ``over`` is how much of its silhouette a Normal layer
     paints when it is composited on top, its fill opacity and opacity
     together. That compositing keeps ``1 - shape * over`` of what lies
     beneath, so the glow goes on at the ratio of the two and shows at
     ``1 - shape`` once the layer is on, rather than faded by the layer's
-    edge twice. At zero it is the plain complement, which is what the layer
-    leaves when it paints nothing.
+    edge twice. At zero it is the plain complement, for a layer that paints
+    nothing or blends in another mode.
     """
     silhouette = shape[:, :, 0]
     beside = 1.0 - silhouette
@@ -1335,9 +1335,12 @@ def glow_paint(
     less, so a gradient opaque at both ends paints what a solid colour would
     and a translucent stop holds the glow at its opacity for as long as the
     falloff is above it. The gradient's reverse flag turns it around. Either
-    way the coverage is cut away under the silhouette, with ``over`` as
-    :py:func:`_beside` takes it. A descriptor with neither raises as the
-    solid colour reader does.
+    way the coverage is cut away under the silhouette. ``over`` is how much
+    of the silhouette a Normal layer composited on top paints, its fill
+    opacity and opacity together; the coverage under it is raised so the
+    glow shows at ``1 - shape`` once the layer is on. Zero leaves the plain
+    complement. A descriptor with neither raises as the solid colour reader
+    does.
     """
     if Key.Gradient not in desc:
         color, _ = paint.draw_solid_color_fill(viewport, color_mode, desc)
