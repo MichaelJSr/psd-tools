@@ -19,6 +19,7 @@ from psd_tools.api.effects import (
     InnerShadow,
     OuterGlow,
     Satin,
+    Stroke,
 )
 from psd_tools.api.layers import (
     AdjustmentLayer,
@@ -68,6 +69,7 @@ from psd_tools.composite.effects import (
     stroke_bbox,
     stroke_reach,
     texture_height,
+    uncovered,
 )
 from psd_tools.composite.text_blend import (
     TEXT_BLEND_GAMMA,
@@ -87,6 +89,7 @@ from psd_tools.constants import (
     Knockout,
     Resource,
     StrokeAlignment,
+    StrokePosition,
     Tag,
 )
 from psd_tools.psd.descriptor import Descriptor
@@ -130,15 +133,20 @@ _CANVAS_GROWTH = 4
 # Normal (``blend.dissolve``).
 _COVERS_BENEATH = frozenset({BlendMode.NORMAL, BlendMode.DISSOLVE})
 
+# The channel value each mode blends to itself whatever lies beneath.
+_FIXED_POINTS = {BlendMode.MULTIPLY: 0.0, BlendMode.SCREEN: 1.0}
+
 
 def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
     """Whether compositing the layer keeps ``1 - alpha`` of what lies beneath.
 
     A pass-through group puts each child on the backdrop in the child's own
-    mode, so it covers that much only when every child it shows, as
-    ``shown`` (the compositor's layer filter) picks them, does. A clipping
-    child paints onto the layer it clips to and never reaches the backdrop,
-    and an adjustment layer paints nothing.
+    mode, and the effects beside the child in theirs, so it covers that much
+    only when every child it shows, as ``shown`` (the compositor's layer
+    filter) picks them, does, and every effect beside one does
+    (:py:func:`_beside_covers`). A clipping child paints onto the layer it
+    clips to and never reaches the backdrop, and an adjustment layer paints
+    nothing.
     """
     if isinstance(layer, AdjustmentLayer):
         return False
@@ -147,10 +155,69 @@ def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     if not layer.is_group():
         return True  # blended as Normal (``blend.get_blend_func``)
     return all(
-        _covers_beneath(child, shown)
+        _covers_beneath(child, shown) and _beside_covers(child)
         for child in cast(GroupMixin, layer)
         if (shown is None or shown(child)) and not child.clipping
     )
+
+
+def _beside_covers(layer: Layer) -> bool:
+    """Whether the drop shadows, outer glows and outer strokes of the layer cover.
+
+    Each keeps ``1 - alpha`` of what it lands on in Normal or Dissolve, and
+    as a solid colour its mode paints whatever it lands on: black in
+    Multiply, white in Screen. One at 0% paints nothing, and an inside
+    stroke paints over the layer, not beside it. An effect that cannot be
+    read does not cover.
+    """
+    color_mode = layer._psd.color_mode
+    for name in ("dropshadow", "outerglow", "stroke"):
+        for effect in _readable(layer, name):
+            try:
+                if not effect.opacity > 0.0:
+                    continue
+                if name == "stroke":
+                    if cast(Stroke, effect).position == StrokePosition.INSIDE:
+                        continue
+                    blend_mode = effect.blend_mode
+                elif name == "dropshadow":
+                    blend_mode = get_blend_mode(
+                        effect.descriptor, Key.Mode, BlendMode.MULTIPLY
+                    )
+                else:
+                    blend_mode = effect.blend_mode
+                if blend_mode in _COVERS_BENEATH:
+                    continue
+                desc = effect.descriptor
+                if (
+                    blend_mode not in _FIXED_POINTS
+                    or Key.Gradient in desc
+                    or Key.Pattern in desc
+                    or any(
+                        value != _FIXED_POINTS[blend_mode]
+                        for value in paint._get_color(color_mode, desc)
+                    )
+                ):
+                    return False
+            except _UNREADABLE as error:
+                logger.debug("Cannot read an effect of %s: %s", layer, error)
+                return False
+    return True
+
+
+def _stroke_paint(effect: _StyledEffect) -> float:
+    """How much of its band a stroke effect paints over what lies beneath.
+
+    Its opacity in Normal or Dissolve; nothing in another mode, which lets
+    the backdrop through, or when it cannot be read.
+    """
+    try:
+        if effect.blend_mode not in _COVERS_BENEATH:
+            return 0.0
+        share = effect.opacity / 100.0
+    except _UNREADABLE:
+        return 0.0
+    return min(max(share, 0.0), 1.0) if math.isfinite(share) else 0.0
 
 
 def _pixels(bbox: tuple[int, int, int, int]) -> int:
@@ -3569,7 +3636,11 @@ class Compositor:
         return utils.clip(self._get_object_coverage(layer, viewport, alpha=True))
 
     def _knockout_shape(
-        self, layer: Layer, viewport: tuple[int, int, int, int], silhouette: np.ndarray
+        self,
+        layer: Layer,
+        viewport: tuple[int, int, int, int],
+        silhouette: np.ndarray,
+        covers: bool = False,
     ) -> np.ndarray:
         """What "layer knocks out drop shadow" cuts the shadow from under.
 
@@ -3580,11 +3651,19 @@ class Compositor:
         *adds* to the silhouette rather than unioning with it, for the reason
         :py:meth:`_apply_outer_effects` gives: it is complementary to the
         coverage it is traced from, so on a pixel the edge cuts the layer
-        covers one part and the stroke the rest, and the shadow is cut from
-        under the whole pixel. The part inside the boundary paints over the
-        layer, not beside it, and on such a pixel comes out equal to the
-        layer's own coverage; added it would count that coverage twice, so
-        it is left out.
+        covers one part and the stroke the rest. The part inside the boundary
+        paints over the layer, not beside it, and on such a pixel comes out
+        equal to the layer's own coverage; added it would count that coverage
+        twice, so it is left out.
+
+        That is the whole cut for a layer whose paint does not cover what
+        lies beneath it. One that ``covers`` (:py:func:`_covers_beneath`)
+        hides part of the shadow itself once composited on top: its paint at
+        its fill opacity, and a Normal stroke's at the stroke's opacity, both
+        faded by the layer opacity. The cut takes only the rest, so the
+        shadow shows at what the shape leaves once the layer is on
+        (:py:func:`~psd_tools.composite.effects.uncovered`): a layer at full
+        fill and opacity, its strokes opaque, cuts nothing.
 
         Each band is drawn as :py:meth:`_add_stroke_effects` draws it, on its
         own :py:func:`_stroke_box` and traced from :py:meth:`_read_traced`,
@@ -3598,13 +3677,12 @@ class Compositor:
         so a stroke dropped only because its paint will not draw still cuts.
         """
         strokes = _readable(layer, "stroke")
-        if not strokes:
-            return silhouette
-        traces_mask = self._traces_mask(layer)
+        traces_mask = self._traces_mask(layer) if strokes else False
         # The bands are nested intervals on one side of the boundary, as
         # :py:meth:`_add_stroke_effects` cuts them, so together they claim the
         # widest of them of a pixel, and that is what adds to the silhouette.
         outside: np.ndarray | None = None
+        painted: np.ndarray | None = None
         for effect in strokes:
             try:
                 bbox = _within_reach(
@@ -3627,9 +3705,17 @@ class Compositor:
                 continue
             band = paste(viewport, bbox, band - inside)
             outside = band if outside is None else np.maximum(outside, band)
-        if outside is None:
-            return silhouette
-        return np.minimum(silhouette + outside, 1.0)
+            if covers:
+                share = band * _stroke_paint(effect)
+                painted = share if painted is None else np.maximum(painted, share)
+        shape = silhouette if outside is None else np.minimum(silhouette + outside, 1.0)
+        if not covers:
+            return shape
+        fill_opacity, opacity = self._get_const(layer)
+        hidden = silhouette * fill_opacity
+        if painted is not None:
+            hidden = hidden + painted
+        return 1.0 - np.clip(uncovered(shape, hidden * opacity), 0.0, 1.0)
 
     def _has_scipy(self, what: str) -> bool:
         """Whether scipy is there to draw the layer's ``what``, warning when it is not.
@@ -3679,11 +3765,11 @@ class Compositor:
         The layer opacity fades the shadow with the layer, as it fades an
         outer stroke. Fill opacity does not: it fades the layer's own paint
         and not its effects, which is what lets a layer at fill 0 cast a
-        shadow and nothing else. With "layer knocks out drop shadow" on, the
-        shadow is cut away under the same silhouette it is cast from rather
-        than under the layer's paint, so a layer faded by fill opacity shows
-        the backdrop through itself and not its shadow; the layer's stroke
-        bands cut it the same way (:py:meth:`_knockout_shape`).
+        shadow and nothing else. With "layer knocks out drop shadow" on, a
+        layer faded by fill opacity shows the backdrop through itself and not
+        its shadow: the shadow is cut under the silhouette it is cast from by
+        what the layer's paint leaves uncovered, and under the layer's stroke
+        bands (:py:meth:`_knockout_shape`).
 
         Each effect is guarded as the strokes are, with the silhouette read
         outside both guards so that a fault compositing a group's contents is
@@ -3696,6 +3782,7 @@ class Compositor:
         _, opacity = self._get_const(layer)
         if opacity <= 0.0:
             return
+        covers = _covers_beneath(layer, self._layer_filter)
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         for effect in shadows:
             shadow = cast(DropShadow, effect)
@@ -3756,7 +3843,7 @@ class Compositor:
                 continue
             if knocks_out:
                 coverage = coverage * (
-                    1.0 - self._knockout_shape(layer, bbox, silhouette)
+                    1.0 - self._knockout_shape(layer, bbox, silhouette, covers)
                 )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
