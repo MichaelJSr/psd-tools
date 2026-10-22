@@ -62,6 +62,7 @@ from PIL import Image
 
 from psd_tools.api import adjustments, layers, numpy_io, pil_io
 from psd_tools.api.protocols import PSDProtocol
+from psd_tools.api.smart_object import _has_filters
 from psd_tools.api.utils import (
     AllocBudget,
     ColorInput,
@@ -130,6 +131,9 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         # sign, but a count of zero has no sign, so a rebuild that momentarily
         # sees no layers would lose it. See _update_record().
         self._merged_alpha: bool = False
+        # The filtered smart objects' records in file order, as opened: the
+        # order of the document's FEid items, which tree edits do not rewrite.
+        self._filter_records: list[LayerRecord] = []
 
         self._psd = self  # For GroupMixin protocol compatibility.
         self._init()
@@ -1041,6 +1045,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
                 or Tag.PLACED_LAYER2 in blocks
             ):
                 layer = layers.SmartObjectLayer(current_group, record, channels)
+                if _has_filters(blocks):
+                    self._filter_records.append(record)
             else:
                 for key in adjustments.TYPES.keys():
                     if key in blocks:

@@ -1,16 +1,21 @@
 import logging
 import sys
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.smart_object import SmartObject
 from psd_tools.constants import LinkedLayerType
+from psd_tools.psd.descriptor import Bool
+from psd_tools.psd.filter_effects import FilterEffect
 
+from ..smart_filters import enable_filters, feid_item, store_items
 from ..utils import full_name
 
 logger = logging.getLogger(__name__)
@@ -69,6 +74,97 @@ def test_smart_object_external(
     assert external_object.filesize == 17272
     with external_object.open(full_name("")) as f:
         assert f.read() == linked_layer_png
+
+
+def test_smart_filter_accessors_without_filters(
+    embedded_object: SmartObject,
+) -> None:
+    assert embedded_object.filters is None
+    assert embedded_object.has_enabled_filters is False
+    assert embedded_object.filter_mask_enabled is False
+    assert embedded_object.filter_mask_extends_white is True
+    assert embedded_object.filter_effect() is None
+    assert embedded_object.filter_source() is None
+    assert embedded_object.filter_mask() is None
+
+
+@dataclass
+class FilteredObject:
+    psd: PSDImage
+    layer: SmartObjectLayer
+    item: FilterEffect
+    source: np.ndarray  # uint8 (h, w, 3)
+    alpha: np.ndarray  # uint8 (h, w)
+    mask: np.ndarray  # uint8 (h + 2, w), one row past the bbox at each end
+
+
+def _filtered_object(version: int = 2) -> FilteredObject:
+    """layers/smartobject-layer.psd with random FEid planes and a taller mask."""
+    psd = PSDImage.open(full_name("layers/smartobject-layer.psd"))
+    layer = psd[0]
+    assert isinstance(layer, SmartObjectLayer)
+    x0, y0, x1, y1 = layer.bbox
+    h, w = y1 - y0, x1 - x0
+    rng = np.random.default_rng(version)
+    source = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+    alpha = rng.integers(0, 256, (h, w), dtype=np.uint8)
+    mask = rng.integers(0, 256, (h + 2, w), dtype=np.uint8)
+    mask_box = (x0, y0 - 1, x1, y1 + 1)
+    item = feid_item(layer.bbox, source, alpha, mask, mask_box, version)
+    store_items(psd, [item])
+    return FilteredObject(psd, layer, item, source, alpha, mask)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_smart_filter_accessors_read_the_document_block(version: int) -> None:
+    """*version* 2 writes 4-byte RLE row counts, as Photoshop does; 1 writes 2-byte."""
+    filtered = _filtered_object(version)
+    layer = filtered.layer
+    so = layer.smart_object
+    fx = enable_filters(layer, extends_white=False)
+    entry = fx[b"filterFXList"][0]
+    entry[b"enab"] = Bool(False)
+
+    assert so.filters is fx
+    assert so.has_enabled_filters is False
+    entry[b"enab"] = Bool(True)
+    assert so.has_enabled_filters is True
+    assert so.filter_mask_enabled is True
+    assert so.filter_mask_extends_white is False
+    assert so.filter_effect() is filtered.item
+    stored = so.filter_source()
+    assert stored is not None
+    assert stored[0] == layer.bbox
+    assert np.array_equal(stored[1], filtered.source)
+    assert stored[2] is not None and np.array_equal(stored[2], filtered.alpha)
+    painted = so.filter_mask()
+    assert painted is not None
+    x0, y0, x1, y1 = layer.bbox
+    assert painted[0] == (x0, y0 - 1, x1, y1 + 1)
+    assert np.array_equal(painted[1], filtered.mask)
+
+
+def test_smart_filter_planes_of_another_depth_are_not_read() -> None:
+    filtered = _filtered_object()
+    layer = filtered.layer
+    enable_filters(layer)
+    filtered.item.depth = 16
+    assert layer.smart_object.filter_source() is None
+    assert layer.smart_object.filter_mask() is None
+
+
+def test_smart_filter_decodes_charge_what_the_caller_holds() -> None:
+    filtered = _filtered_object()
+    layer = filtered.layer
+    enable_filters(layer)
+    so = layer.smart_object
+    budget = 64 * layer.width * layer.height
+    filtered.psd.max_alloc_bytes = budget
+    assert so.filter_mask() is not None and so.filter_source() is not None
+    with pytest.raises(ValueError, match="budget"):
+        so._filter_mask(held=budget)
+    with pytest.raises(ValueError, match="budget"):
+        so._filter_source(held=budget)
 
 
 # ---------------------------------------------------------------------------

@@ -4,12 +4,24 @@ import contextlib
 import io
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import IO
 
+import numpy as np
+
 from psd_tools.api._descriptor import get_scalar
-from psd_tools.api.protocols import LayerProtocol
-from psd_tools.constants import Tag
+from psd_tools.api.numpy_io import _DECOMPRESS_PEAK
+from psd_tools.api.protocols import LayerProtocol, PSDProtocol
+from psd_tools.api.utils import check_pixel_size, get_color_channels
+from psd_tools.compression import decompress, decompress_row_peak_bytes
+from psd_tools.constants import Compression, Tag
+from psd_tools.psd.descriptor import Descriptor
+from psd_tools.psd.filter_effects import (
+    FilterEffect,
+    FilterEffectChannel,
+    FilterEffectExtra,
+)
+from psd_tools.psd.tagged_blocks import TaggedBlocks
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +74,7 @@ class SmartObject:
     """
 
     def __init__(self, layer: LayerProtocol):
+        self._layer = layer
         self._config = None
         for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
             self._config = layer.tagged_blocks.get_data(key)
@@ -339,6 +352,143 @@ class SmartObject:
         else:
             return None
 
+    # -- Smart filters -----------------------------------------------------
+
+    @property
+    def filters(self) -> Descriptor | None:
+        """The smart filter descriptor (``filterFX``), or ``None``."""
+        if self._config is None:
+            return None
+        value = self._config.data.get(b"filterFX")
+        return value if isinstance(value, Descriptor) else None
+
+    @property
+    def has_enabled_filters(self) -> bool:
+        """Whether an enabled smart filter is applied to the object."""
+        fx = self.filters
+        if fx is None or not _flag(fx, b"enab", True):
+            return False
+        items = fx.get(b"filterFXList") or []
+        return any(_flag(item, b"enab", True) for item in items)
+
+    @property
+    def filter_mask_enabled(self) -> bool:
+        """Whether the smart filters' mask is on."""
+        return _flag(self.filters, b"filterMaskEnable", False)
+
+    @property
+    def filter_mask_extends_white(self) -> bool:
+        """Mask value outside its stored rectangle: white (filtered) or black."""
+        return _flag(self.filters, b"filterMaskExtendWithWhite", True)
+
+    def filter_effect(self) -> FilterEffect | None:
+        """Return the document's stored filter input and mask for this layer.
+
+        Photoshop keeps, for each smart object carrying smart filters, the
+        object rendered *before* the filters and the painted filter mask in the
+        document's ``FEid`` block, one item per filtered layer in file order;
+        the layer's own channels hold the filtered result. An item belongs to
+        this layer only if its rectangle contains the layer's bbox: the item at
+        the layer's position among the filtered layers when the document was
+        opened if it does, else the first one that does.
+        """
+        if self.filters is None:
+            return None
+        psd = getattr(self._layer, "_psd", None)
+        blocks = getattr(psd, "tagged_blocks", None)
+        if psd is None or blocks is None:
+            return None
+        items = None
+        for key in (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3):
+            items = blocks.get_data(key)
+            if items is not None:
+                break
+        if not items:
+            return None
+        bbox = self._layer.bbox
+        record = self._layer._record
+        records = psd._filter_records
+        index = next((i for i, r in enumerate(records) if r is record), None)
+        if index is not None and index < len(items) and _contains(items[index], bbox):
+            return items[index]
+        return next((item for item in items if _contains(item, bbox)), None)
+
+    def filter_source(
+        self,
+    ) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
+        """Return the object as rendered before its smart filters.
+
+        ``(bbox, color, alpha)``: ``color`` is ``uint8 (h, w, channels)``, the
+        document's colour channels as stored, and ``alpha`` is ``uint8 (h, w)``
+        or ``None``. ``None`` when the document stores no 8-bit source.
+
+        :raises ValueError: if the planes are over the allocation budget or a
+            plane's RLE row counts do not match its payload.
+        """
+        return self._filter_source()
+
+    def _filter_source(
+        self, held: int = 0
+    ) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
+        """:py:meth:`filter_source`; *held* bytes stay live across the decode."""
+        item = self.filter_effect()
+        if (
+            item is None
+            or item.depth != 8
+            or item.rectangle is None
+            or item.max_channels is None
+            or not item.channels
+        ):
+            return None
+        psd = self._layer._psd
+        top, left, bottom, right = item.rectangle
+        width, height = right - left, bottom - top
+        count = get_color_channels(psd)
+        colour = item.channels[:count]
+        if width <= 0 or height <= 0 or len(colour) < count:
+            return None
+        if not all(_is_stored(channel) for channel in colour):
+            return None
+        index = item.max_channels + 1
+        transparency = item.channels[index] if index < len(item.channels) else None
+        if not _is_stored(transparency):
+            transparency = None
+        planes = colour + ([transparency] if transparency is not None else [])
+        _check_planes(psd, width, height, planes, held + width * height * count)
+        color = np.empty((height, width, count), dtype=np.uint8)
+        for i, channel in enumerate(colour):
+            color[..., i] = _decode_plane(channel, width, height)
+        alpha = None
+        if transparency is not None:
+            alpha = _decode_plane(transparency, width, height)
+        return (left, top, right, bottom), color, alpha
+
+    def filter_mask(self) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
+        """Return the smart filters' mask, or ``None`` when none is stored.
+
+        ``(bbox, mask uint8 (h, w))``; 255 = filtered, 0 = unfiltered.
+
+        :raises ValueError: as :py:meth:`filter_source` does.
+        """
+        return self._filter_mask()
+
+    def _filter_mask(
+        self, held: int = 0
+    ) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
+        """:py:meth:`filter_mask`; *held* bytes stay live across the decode."""
+        item = self.filter_effect()
+        if item is None or item.depth != 8:
+            return None
+        extra = item.extra
+        if not isinstance(extra, FilterEffectExtra) or not _is_stored(extra):
+            return None
+        top, left, bottom, right = extra.rectangle
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            return None
+        _check_planes(self._layer._psd, width, height, [extra], held)
+        return (left, top, right, bottom), _decode_plane(extra, width, height)
+
     def save(
         self,
         filename: str | os.PathLike | None = None,
@@ -400,3 +550,99 @@ class SmartObject:
 
     def __repr__(self) -> str:
         return f"SmartObject({self.filename!r} kind={self.kind!r} type={self.filetype!r} detected={self.detected_filetype!r} size={self.filesize})"
+
+
+def _has_filters(blocks: TaggedBlocks) -> bool:
+    """Whether a layer's smart object data carries smart filters."""
+    for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
+        config = blocks.get_data(key)
+        if config is not None:
+            return isinstance(config.data.get(b"filterFX"), Descriptor)
+    return False
+
+
+def _contains(item: FilterEffect, bbox: tuple[int, int, int, int]) -> bool:
+    """Whether the item's rectangle contains *bbox*."""
+    if item.rectangle is None:
+        return False
+    top, left, bottom, right = item.rectangle
+    return left <= bbox[0] and top <= bbox[1] and right >= bbox[2] and bottom >= bbox[3]
+
+
+def _flag(desc: object, key: bytes, default: bool) -> bool:
+    """Return a boolean descriptor field, or *default* when absent."""
+    if not isinstance(desc, Descriptor):
+        return default
+    value = desc.get(key)
+    return default if value is None else bool(getattr(value, "value", value))
+
+
+def _is_stored(plane: FilterEffectChannel | FilterEffectExtra | None) -> bool:
+    """Whether *plane* carries compressed pixel data."""
+    return (
+        plane is not None
+        and bool(plane.is_written)
+        and plane.compression is not None
+        and len(plane.data) > 0
+    )
+
+
+def _check_planes(
+    psd: PSDProtocol,
+    width: int,
+    height: int,
+    planes: Sequence[FilterEffectChannel | FilterEffectExtra],
+    held: int,
+) -> None:
+    """Check decoding *planes* one at a time against the allocation budget.
+
+    *held* is what stays live across the decodes.
+    """
+    pixels = width * height
+    peak = 0
+    for plane in planes:
+        compression = _compression(plane)
+        peak = max(
+            peak,
+            pixels * _DECOMPRESS_PEAK[compression]
+            + decompress_row_peak_bytes(compression, height),
+        )
+    check_pixel_size(
+        width,
+        height,
+        len(planes),
+        max_alloc_bytes=psd._max_alloc_bytes,
+        estimated_bytes=held + peak,
+        warn=False,
+    )
+
+
+def _decode_plane(
+    plane: FilterEffectChannel | FilterEffectExtra, width: int, height: int
+) -> np.ndarray:
+    """One 8-bit ``FEid`` plane as ``uint8 (height, width)``."""
+    compression = _compression(plane)
+    version = _rle_version(plane.data, height) if compression == Compression.RLE else 1
+    raw = decompress(plane.data, compression, width, height, 8, version)
+    return np.frombuffer(raw, dtype=np.uint8).reshape(height, width)
+
+
+def _compression(plane: FilterEffectChannel | FilterEffectExtra) -> Compression:
+    """Return the plane's compression method."""
+    if plane.compression is None:
+        raise ValueError("FEid plane without a compression method")
+    return Compression(plane.compression)
+
+
+def _rle_version(data: bytes, height: int) -> int:
+    """Return an RLE plane's row count width: version 2 (4 bytes) or 1 (2 bytes).
+
+    Photoshop writes 4-byte counts, the PSB layout, in PSD files too, so the
+    width is read off the payload: the right table sums to its length.
+    """
+    for version, size in ((2, 4), (1, 2)):
+        if len(data) >= size * height:
+            counts = np.frombuffer(data, dtype=f">u{size}", count=height)
+            if size * height + int(counts.sum(dtype=np.int64)) == len(data):
+                return version
+    raise ValueError("RLE row counts do not match the payload length")

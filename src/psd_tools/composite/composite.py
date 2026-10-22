@@ -27,6 +27,7 @@ from psd_tools.api.layers import (
     GroupMixin,
     Layer,
     ShapeLayer,
+    SmartObjectLayer,
     TypeLayer,
 )
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
@@ -1869,6 +1870,97 @@ def _remix(
     )
 
 
+# Float32 planes of ``layer.bbox`` that _blend_unfiltered() allocates at its
+# peak, beside the arrays it is given.
+_UNFILTER_PLANES = 8
+
+
+def _unfilter_under_mask(
+    layer: SmartObjectLayer, color: np.ndarray, shape: np.ndarray | None
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """A filtered smart object's pixels with its filter mask applied.
+
+    Blends the stored pixels with
+    :py:meth:`~psd_tools.api.smart_object.SmartObject.filter_source` through
+    the mask, in premultiplied space on ``layer.bbox``. A missing, disabled or
+    all-white mask, a document that is not RGB, or any error reading the
+    block leaves the stored pixels as they are.
+    """
+    try:
+        so = layer.smart_object
+        if (
+            layer._psd.color_mode != ColorMode.RGB
+            or color.shape[-1] != 3
+            or not (so.has_enabled_filters and so.filter_mask_enabled)
+        ):
+            return color, shape
+        held = sum(numpy_io._backing_bytes(a) for a in (color, shape) if a is not None)
+        mask = so._filter_mask(held)
+        if mask is None:
+            return color, shape
+        box = layer.bbox
+        fill = 255.0 if so.filter_mask_extends_white else 0.0
+        weight = paste(box, mask[0], mask[1][..., None], background=fill)
+        del mask
+        if weight.min() == 255:
+            return color, shape
+        source = so._filter_source(held + numpy_io._backing_bytes(weight))
+        if source is None:
+            return color, shape
+        weight /= 255
+        return _blend_unfiltered(layer, color, shape, weight, source)
+    except Exception as exc:  # the stored pixels are the safe fallback
+        logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
+        return color, shape
+
+
+def _blend_unfiltered(
+    layer: SmartObjectLayer,
+    color: np.ndarray,
+    shape: np.ndarray | None,
+    weight: np.ndarray,
+    source: tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None],
+) -> tuple[np.ndarray, np.ndarray]:
+    """``lerp(source, stored, weight)`` with straight colour, on ``layer.bbox``.
+
+    *weight* is the filter mask on the box, 1 = filtered, and is overwritten.
+    The filtered pixels stand where the source is not stored.
+    """
+    box = layer.bbox
+    sbox, src_color, src_alpha = source
+    height, width = color.shape[:2]
+    inputs = (color, shape, weight, src_color, src_alpha)
+    check_pixel_size(
+        width,
+        height,
+        3,
+        max_alloc_bytes=layer._psd._max_alloc_bytes,
+        estimated_bytes=sum(numpy_io._backing_bytes(a) for a in inputs if a is not None)
+        + _UNFILTER_PLANES * height * width * 4,
+        warn=False,
+    )
+    stored = np.broadcast_to(np.float32(1), (*src_color.shape[:2], 1))
+    unfiltered = paste(box, sbox, stored)
+    unfiltered *= 1 - weight
+    np.subtract(1, unfiltered, out=weight)
+    if src_alpha is not None:
+        src_shape = paste(box, sbox, src_alpha[..., None])
+        src_shape /= 255
+        unfiltered *= src_shape
+        del src_shape
+    if shape is not None:
+        weight *= shape
+    alpha = weight + unfiltered
+    out = paste(box, sbox, src_color)
+    unfiltered /= 255
+    out *= unfiltered
+    out += weight * color
+    np.divide(out, alpha, out=out, where=alpha > 0)
+    np.copyto(out, color, where=alpha <= 0)
+    logger.debug("Smart filter mask applied to %r", layer.name)
+    return out, alpha
+
+
 class Compositor:
     """Composite context.
 
@@ -2863,6 +2955,8 @@ class Compositor:
             color, shape = paint.create_fill(layer, layer.bbox)
             if shape is None:
                 shape = np.ones((layer.height, layer.width, 1), dtype=np.float32)
+        elif color is not None and isinstance(layer, SmartObjectLayer):
+            color, shape = _unfilter_under_mask(layer, color, shape)
         return color, shape
 
     @staticmethod
