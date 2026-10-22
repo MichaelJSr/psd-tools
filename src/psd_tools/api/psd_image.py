@@ -131,9 +131,12 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         # sign, but a count of zero has no sign, so a rebuild that momentarily
         # sees no layers would lose it. See _update_record().
         self._merged_alpha: bool = False
-        # The filtered smart objects' records in file order, as opened: the
-        # order of the document's FEid items, which tree edits do not rewrite.
-        self._filter_records: list[LayerRecord] = []
+        # Every smart object's record as opened, by id, with its index among
+        # the filtered ones in file order -- the order of the document's FEid
+        # items, which tree edits do not rewrite -- and its offset then, where
+        # those items' rectangles stay. The record is held so that its id is
+        # not reused.
+        self._opened_records: dict[int, tuple[LayerRecord, int | None, int, int]] = {}
 
         self._psd = self  # For GroupMixin protocol compatibility.
         self._init()
@@ -984,6 +987,7 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         group_stack: list[layers.Group | PSDImage] = [self]
         records = list(self._record._iter_layers())
         unmatched = self._unmatched_dividers(records)
+        filtered = 0
 
         for index, (record, channels) in enumerate(records):
             current_group = group_stack[-1]
@@ -1045,13 +1049,19 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
                 or Tag.PLACED_LAYER2 in blocks
             ):
                 layer = layers.SmartObjectLayer(current_group, record, channels)
+                position = None
                 if _has_filters(blocks):
-                    self._filter_records.append(record)
+                    position, filtered = filtered, filtered + 1
+                self._opened_records[id(record)] = (
+                    record,
+                    position,
+                    record.left,
+                    record.top,
+                )
             else:
-                for key in adjustments.TYPES.keys():
-                    if key in blocks:
-                        layer = adjustments.TYPES[key](current_group, record, channels)
-                        break
+                kind = _adjustment_kind(blocks)
+                if kind is not None:
+                    layer = kind(current_group, record, channels)
 
             # If nothing applies, this is either a shape or pixel layer.
             shape_condition = record.flags.pixel_data_irrelevant and (
@@ -1148,3 +1158,13 @@ def _build_record_tree(
         channel_image_data.append(layer._channels)
 
     return (layer_records, channel_image_data)
+
+
+def _adjustment_kind(blocks: TaggedBlocks) -> type[layers.Layer] | None:
+    """Return the adjustment or fill layer class the blocks select, or `None`."""
+    keys = [key for key in adjustments.TYPES if key in blocks]
+    # Other adjustments carry CgEd too (a Curves preset's name), so it selects
+    # Brightness/Contrast only when no other adjustment block is present.
+    if len(keys) > 1 and Tag.CONTENT_GENERATOR_EXTRA_DATA in keys:
+        keys.remove(Tag.CONTENT_GENERATOR_EXTRA_DATA)
+    return adjustments.TYPES[keys[0]] if keys else None

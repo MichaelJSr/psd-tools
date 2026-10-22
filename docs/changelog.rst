@@ -4,6 +4,20 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
+  layer set from a preset does, is read as its own adjustment instead of as a
+  Brightness/Contrast at 0/0 that left the image unchanged. Only layers that
+  carry both blocks change
+- [fix] A layer or group whose Blending Options > Channels leaves a colour
+  channel out composites into the other channels only: the excluded one keeps
+  what is beneath, and over transparency reads zero (black in RGB, full ink
+  in CMYK). Files that leave every channel checked are unchanged
+- [fix] "Layer knocks out drop shadow" cuts the shadow only where the layer's
+  paint and strokes do not hide it already, as Photoshop does: a Normal layer
+  at full fill no longer cuts it from under soft or antialiased edges. A layer
+  at fill 0, or in another mode, still cuts it under its whole shape. A
+  pass-through group hides it only where its children's shadows, glows,
+  outer strokes and outer bevels or embosses do too
 - [fix] Stroke effects, precise outer and inner glows and chisel bevels
   measure from the nearest boundary that either an antialiased pixel or a
   hard step states, so on a shape antialiased in places and hard elsewhere,

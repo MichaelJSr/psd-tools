@@ -27,10 +27,11 @@ from psd_tools.composite.composite import (
     Compositor,
     _beneath_reach,
     _content_bbox,
+    _covers_beneath,
     _effect_reach,
     paste,
 )
-from psd_tools.constants import BlendMode, Resource, Tag
+from psd_tools.constants import BevelStyle, BlendMode, Resource, Tag
 from psd_tools.psd.base import ByteElement
 from psd_tools.psd.descriptor import (
     Bool,
@@ -43,7 +44,7 @@ from psd_tools.psd.descriptor import (
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
-from .test_composite import _mse
+from .test_composite import _feathered_stroke_layer, _mse
 
 pytest.importorskip("scipy")
 
@@ -548,6 +549,224 @@ def test_a_drop_shadow_lies_beneath_the_layer_not_beside_it() -> None:
     assert np.all(np.diff(shadow) > 0), "the shadow is not partial here"
     f = fill / 255.0
     assert np.allclose(alpha, f + shadow * (1.0 - f), atol=1e-6)
+
+
+def _soft_square(keep_stroke: bool = False) -> tuple[Layer, Descriptor]:
+    """``feathered-stroke.psd``'s square casting a hard shadow straight under it.
+
+    The square fades across a 6 px mask ramp. The shadow is black, opaque and
+    spread to a band reaching 3 px past the square's box, so it covers the
+    whole ramp in full. With ``keep_stroke`` the square keeps its 6 px outset stroke,
+    which covers what the ramp leaves of each pixel. Returns the square and
+    the shadow's descriptor.
+    """
+    _, layer = _feathered_stroke_layer("Outset 6")
+    block = layer.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    stroke = block[b"FrFX"]
+    _, card = _masks_card()
+    donor = card.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    shadow = copy.deepcopy(donor[Klass.DropShadow])
+    block.clear()
+    block.update(copy.deepcopy(donor))
+    block[Klass.DropShadow] = shadow
+    if keep_stroke:
+        block[b"FrFX"] = stroke
+    shadow[Key.UseGlobalAngle] = False
+    shadow[Key.LocalLightingAngle] = Double(90.0)
+    for key, value in (
+        (Key.Blur, 4.0),
+        (Key.ChokeMatte, 100.0),
+        (Key.Distance, 0.0),
+        (Key.Opacity, 100.0),
+    ):
+        shadow[key] = Double(value)
+    return layer, shadow
+
+
+def _ramp_row(layer: Layer) -> tuple[np.ndarray, np.ndarray, int]:
+    """The ramp's coverage, the row through it and where the ramp starts."""
+    viewport = _around(layer, 8)
+    mask = layer.numpy("mask")
+    assert mask is not None
+    ramp = mask[mask.shape[0] // 2, :6, 0]
+    assert np.all((ramp > 0.0) & (ramp < 1.0)), ramp
+    y = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1]
+    x0 = layer.bbox[0] - viewport[0]
+    return ramp, _alone(layer, viewport)[y, :, 0], x0
+
+
+def test_at_full_fill_the_knockout_leaves_a_soft_edge_its_shadow() -> None:
+    """A Normal layer at full fill hides its shadow itself, so nothing is cut.
+
+    Under the ramp the square paints ``alpha`` of each pixel and the shadow
+    shows through the rest, whole: the row is opaque, as it is with the
+    knockout off. Cut by ``alpha`` as well, the shadow would leave
+    ``alpha + (1 - alpha) ** 2`` there and the ramp translucent.
+    """
+    layer, shadow = _soft_square()
+    viewport = _around(layer, 8)
+    ramp, row, x0 = _ramp_row(layer)
+    assert np.allclose(row[x0 - 3 : x0 + 16], 1.0, atol=1e-6), row
+    knocked_out = _over_grey(layer, viewport)
+    shadow[b"layerConceals"] = False
+    assert np.allclose(knocked_out, _over_grey(layer, viewport), atol=1e-6)
+
+
+@pytest.mark.parametrize("opacity", [255, 128])
+@pytest.mark.parametrize("fill", [0, 128])
+def test_the_knockout_leaves_the_shadow_what_the_layers_shape_leaves(
+    fill: int, opacity: int
+) -> None:
+    """Faded by fill opacity, a layer shows the backdrop through itself.
+
+    The shadow shows at ``1 - alpha`` once the layer is on, the backdrop
+    through the rest of what the layer's paint leaves, so with the shadow
+    opaque under the ramp the alpha there is ``o * (alpha * f + 1 - alpha)``.
+    At fill 0 that is the shadow cut by the layer's coverage.
+    """
+    layer, _ = _soft_square()
+    layer.tagged_blocks.set_data(Tag.BLEND_FILL_OPACITY, ByteElement(fill))
+    layer.opacity = opacity
+    ramp, row, x0 = _ramp_row(layer)
+    f, o = fill / 255.0, opacity / 255.0
+    expected = o * (ramp * f + 1.0 - ramp)
+    assert np.allclose(row[x0 : x0 + 6], expected, atol=1e-5), row[x0 : x0 + 6]
+
+
+def test_a_layer_in_another_mode_cuts_its_shadow_under_its_whole_shape() -> None:
+    """Only a Normal layer's paint hides its shadow, so only its cut is eased.
+
+    A Multiply layer lets what lies beneath show through its paint, so its
+    shadow is cut by ``alpha`` and the layer covers ``alpha`` of what that
+    leaves: ``alpha + (1 - alpha) ** 2`` over the ramp, at full fill.
+    """
+    layer, _ = _soft_square()
+    layer.blend_mode = BlendMode.MULTIPLY
+    ramp, row, x0 = _ramp_row(layer)
+    expected = ramp + (1.0 - ramp) ** 2
+    assert np.allclose(row[x0 : x0 + 6], expected, atol=1e-5), row[x0 : x0 + 6]
+
+
+def test_a_faint_stroke_beside_a_soft_edge_shows_the_backdrop_not_the_shadow() -> None:
+    """The stroke's paint hides the shadow as the layer's does, and no more.
+
+    Over the ramp the square and its outset stroke together claim every
+    pixel whole, so nothing of the shadow may show there. At 50% the stroke
+    paints half of its share, and the backdrop shows through the other half.
+    """
+    layer, _ = _soft_square(keep_stroke=True)
+    stroke = cast(Stroke, next(iter(layer.effects.find("stroke"))))
+    stroke.descriptor[Key.Opacity] = Double(50.0)
+    assert stroke.opacity == 50.0
+    ramp, row, x0 = _ramp_row(layer)
+    expected = ramp + 0.5 * (1.0 - ramp)
+    assert np.allclose(row[x0 : x0 + 6], expected, atol=1e-5), row[x0 : x0 + 6]
+
+
+@pytest.mark.parametrize(
+    ("kind", "values", "covers"),
+    [
+        (Klass.DropShadow, {}, True),
+        (Klass.DropShadow, {b"Rd  ": 255.0}, False),
+        (Klass.DropShadow, {Key.Mode: Enum.Screen}, False),
+        (Klass.DropShadow, {Key.Mode: Enum.Normal, b"Rd  ": 255.0}, True),
+        (Klass.OuterGlow, {}, True),
+        (Klass.OuterGlow, {b"Bl  ": 0.0}, False),
+        (Klass.OuterGlow, {b"Bl  ": 0.0, Key.Opacity: 0.0}, True),
+    ],
+    ids=[
+        "black multiply",
+        "red multiply",
+        "screen shadow",
+        "normal",
+        "white screen",
+        "yellow screen",
+        "at 0%",
+    ],
+)
+def test_a_pass_through_group_covers_as_the_effects_beside_its_children_do(
+    kind: bytes, values: dict[bytes, Any], covers: bool
+) -> None:
+    """A child's shadow or glow lands on the backdrop in its own mode.
+
+    It is part of the group's alpha, so the group keeps ``1 - alpha`` of what
+    lies beneath only where it does too: in Normal, or as a colour its mode
+    paints whatever it lands on -- black multiplied, white screened. A child
+    effect at 0% paints nothing and has no say.
+    """
+    psd, layer = _masks_card()
+    group = psd.create_group([layer])
+    assert group.blend_mode == BlendMode.PASS_THROUGH
+    block = layer.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    effect = block[kind]
+    effect[Key.Enabled] = Bool(True)
+    effect[b"present"] = Bool(True)
+    for key, value in values.items():
+        if key == Key.Mode:
+            effect[key] = Enumerated(Type.BlendMode, value)
+        elif key == Key.Opacity:
+            effect[key] = Double(value)
+        else:
+            effect[Key.Color][key] = Double(value)
+    if kind != Klass.DropShadow:
+        block[Klass.DropShadow][Key.Enabled] = Bool(False)
+    assert _covers_beneath(layer, None)
+    assert _covers_beneath(group, None) is covers
+
+
+@pytest.mark.parametrize(
+    ("style", "values", "covers"),
+    [
+        (BevelStyle.OUTER_BEVEL, {}, True),
+        (BevelStyle.OUTER_BEVEL, {Key.HighlightColor: {Key.Blue: 0.0}}, False),
+        (
+            BevelStyle.OUTER_BEVEL,
+            {Key.HighlightColor: {Key.Blue: 0.0}, Key.HighlightOpacity: 0.0},
+            True,
+        ),
+        (BevelStyle.INNER_BEVEL, {Key.HighlightColor: {Key.Blue: 0.0}}, True),
+        (BevelStyle.EMBOSS, {Key.ShadowColor: {Key.Red: 255.0}}, False),
+        (
+            BevelStyle.PILLOW_EMBOSS,
+            {Key.ShadowColor: {Key.Red: 255.0}, Key.ShadowMode: Enum.Normal},
+            True,
+        ),
+    ],
+    ids=[
+        "outer default",
+        "outer yellow highlight",
+        "outer at 0%",
+        "inner",
+        "emboss red shadow",
+        "pillow normal shadow",
+    ],
+)
+def test_a_pass_through_group_covers_as_the_bevels_beside_its_children_do(
+    style: BevelStyle, values: dict[bytes, Any], covers: bool
+) -> None:
+    """A bevel that reaches outside its layer paints there in its own modes.
+
+    Its Screen highlight and Multiply shadow cover as white and black do,
+    or in Normal; an inner bevel paints over the layer and has no say.
+    """
+    psd, layer = _masks_card()
+    group = psd.create_group([layer])
+    block = layer.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    block[Klass.DropShadow][Key.Enabled] = Bool(False)
+    bevel = block[Klass.BevelEmboss]
+    bevel[Key.Enabled] = Bool(True)
+    bevel[b"present"] = Bool(True)
+    bevel[Key.BevelStyle] = Enumerated(bevel[Key.BevelStyle].typeID, style.value)
+    for key, value in values.items():
+        if isinstance(value, dict):
+            for channel, level in value.items():
+                bevel[key][channel] = Double(level)
+        elif key == Key.ShadowMode:
+            bevel[key] = Enumerated(Type.BlendMode, value)
+        else:
+            bevel[key] = Double(value)
+    assert _covers_beneath(layer, None)
+    assert _covers_beneath(group, None) is covers
 
 
 def test_a_drop_shadow_reaches_a_viewport_its_layer_misses() -> None:

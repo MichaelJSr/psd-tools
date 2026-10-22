@@ -1332,6 +1332,20 @@ def glow_falloff(
     return np.clip(falloff, 0.0, 1.0).astype(np.float32)
 
 
+def uncovered(shape: np.ndarray, hidden: np.ndarray) -> np.ndarray:
+    """What an effect beneath the layer goes on at, so it shows at ``1 - shape``.
+
+    ``shape`` is what of each pixel the layer claims, and ``hidden`` what of
+    it the layer's Normal paint covers once composited on top, which keeps
+    ``1 - hidden`` of what lies beneath. The effect goes on at the ratio of
+    the two rather than faded by the layer's edge twice, and at zero where
+    the paint hides the whole pixel.
+    """
+    beside = 1.0 - shape
+    under = 1.0 - hidden
+    return np.divide(beside, under, out=np.zeros_like(beside), where=under > 0.0)
+
+
 def _beside(coverage: np.ndarray, shape: np.ndarray, over: float = 0.0) -> np.ndarray:
     """``coverage`` cut away under the silhouette, as ``(height, width, 1)``.
 
@@ -1339,17 +1353,15 @@ def _beside(coverage: np.ndarray, shape: np.ndarray, over: float = 0.0) -> np.nd
     whatever the layer's own opacity: Photoshop never shows an outer glow
     through its layer. ``over`` is how much of its silhouette a Normal layer
     paints when it is composited on top, its fill opacity and opacity
-    together. That compositing keeps ``1 - shape * over`` of what lies
-    beneath, so the glow goes on at the ratio of the two and shows at
-    ``1 - shape`` once the layer is on, rather than faded by the layer's
-    edge twice. At zero it is the plain complement, for a layer that paints
-    nothing or blends in another mode.
+    together: that paint hides ``shape * over`` of the glow, which goes on
+    at :py:func:`uncovered`. At zero it is the plain complement, for a layer
+    that paints nothing or blends in another mode.
     """
     silhouette = shape[:, :, 0]
-    beside = 1.0 - silhouette
     if over > 0.0:
-        under = 1.0 - silhouette * over
-        beside = np.divide(beside, under, out=np.zeros_like(beside), where=under > 0.0)
+        beside = uncovered(silhouette, silhouette * over)
+    else:
+        beside = 1.0 - silhouette
     return np.clip(coverage * beside, 0.0, 1.0).astype(np.float32)[:, :, None]
 
 

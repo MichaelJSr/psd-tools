@@ -19,6 +19,7 @@ from psd_tools.api.effects import (
     InnerShadow,
     OuterGlow,
     Satin,
+    Stroke,
 )
 from psd_tools.api.layers import (
     AdjustmentLayer,
@@ -40,7 +41,7 @@ from psd_tools.api.utils import (
 )
 from psd_tools.composite import paint, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
-from psd_tools.composite.adjustments import ADJUSTMENT_FUNC
+from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
 from psd_tools.composite.blend import fade_source, get_blend_func, normal
 from psd_tools.composite.effects import (
     bevel_beside,
@@ -68,6 +69,7 @@ from psd_tools.composite.effects import (
     stroke_bbox,
     stroke_reach,
     texture_height,
+    uncovered,
 )
 from psd_tools.composite.text_blend import (
     TEXT_BLEND_GAMMA,
@@ -87,6 +89,7 @@ from psd_tools.constants import (
     Knockout,
     Resource,
     StrokeAlignment,
+    StrokePosition,
     Tag,
 )
 from psd_tools.psd.descriptor import Descriptor
@@ -130,15 +133,20 @@ _CANVAS_GROWTH = 4
 # Normal (``blend.dissolve``).
 _COVERS_BENEATH = frozenset({BlendMode.NORMAL, BlendMode.DISSOLVE})
 
+# The channel value each mode blends to itself whatever lies beneath.
+_FIXED_POINTS = {BlendMode.MULTIPLY: 0.0, BlendMode.SCREEN: 1.0}
+
 
 def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
     """Whether compositing the layer keeps ``1 - alpha`` of what lies beneath.
 
     A pass-through group puts each child on the backdrop in the child's own
-    mode, so it covers that much only when every child it shows, as
-    ``shown`` (the compositor's layer filter) picks them, does. A clipping
-    child paints onto the layer it clips to and never reaches the backdrop,
-    and an adjustment layer paints nothing.
+    mode, and the effects beside the child in theirs, so it covers that much
+    only when every child it shows, as ``shown`` (the compositor's layer
+    filter) picks them, does, and every effect beside one does
+    (:py:func:`_beside_covers`). A clipping child paints onto the layer it
+    clips to and never reaches the backdrop, and an adjustment layer paints
+    nothing.
     """
     if isinstance(layer, AdjustmentLayer):
         return False
@@ -147,10 +155,88 @@ def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     if not layer.is_group():
         return True  # blended as Normal (``blend.get_blend_func``)
     return all(
-        _covers_beneath(child, shown)
+        _covers_beneath(child, shown) and _beside_covers(child)
         for child in cast(GroupMixin, layer)
         if (shown is None or shown(child)) and not child.clipping
     )
+
+
+def _beside_covers(layer: Layer) -> bool:
+    """Whether what the layer paints beside itself covers.
+
+    That is its drop shadows, outer glows, outer strokes and the bevels that
+    reach outside it (:py:func:`_beside_paints`). Each keeps ``1 - alpha``
+    of what it lands on in Normal or Dissolve, and as a solid colour its
+    mode paints whatever it lands on: black in Multiply, white in Screen.
+    One at 0% paints nothing. An effect that cannot be read does not cover.
+    """
+    color_mode = layer._psd.color_mode
+    for name in ("dropshadow", "outerglow", "stroke", "bevelemboss"):
+        for effect in _readable(layer, name):
+            try:
+                for blend_mode, opacity, desc in _beside_paints(name, effect):
+                    if not opacity > 0.0 or blend_mode in _COVERS_BENEATH:
+                        continue
+                    if (
+                        blend_mode not in _FIXED_POINTS
+                        or Key.Gradient in desc
+                        or Key.Pattern in desc
+                        or any(
+                            value != _FIXED_POINTS[blend_mode]
+                            for value in paint._get_color(color_mode, desc)
+                        )
+                    ):
+                        return False
+            except _UNREADABLE as error:
+                logger.debug("Cannot read an effect of %s: %s", layer, error)
+                return False
+    return True
+
+
+def _beside_paints(
+    name: str, effect: _StyledEffect
+) -> list[tuple[BlendMode, float, Descriptor]]:
+    """The mode, opacity and paint descriptor of each colour an effect puts beside.
+
+    A bevel puts its highlight and its shadow there when its style reaches
+    outside the layer, and an inside stroke or an inner bevel nothing: they
+    paint over the layer.
+    """
+    if name == "bevelemboss":
+        bevel = cast(BevelEmboss, effect)
+        if not bevel_beside(_bevel_style(bevel)):
+            return []
+        halves = []
+        for color, blend_mode, opacity in (
+            (bevel.highlight_color, bevel.highlight_mode, bevel.highlight_opacity),
+            (bevel.shadow_color, bevel.shadow_mode, bevel.shadow_opacity),
+        ):
+            desc = Descriptor()
+            desc[Key.Color] = color
+            halves.append((blend_mode, opacity, desc))
+        return halves
+    if name == "stroke" and cast(Stroke, effect).position == StrokePosition.INSIDE:
+        return []
+    if name == "dropshadow":
+        blend_mode = get_blend_mode(effect.descriptor, Key.Mode, BlendMode.MULTIPLY)
+    else:
+        blend_mode = effect.blend_mode
+    return [(blend_mode, effect.opacity, effect.descriptor)]
+
+
+def _stroke_paint(effect: _StyledEffect) -> float:
+    """How much of its band a stroke effect paints over what lies beneath.
+
+    Its opacity in Normal or Dissolve; nothing in another mode, which lets
+    the backdrop through, or when it cannot be read.
+    """
+    try:
+        if effect.blend_mode not in _COVERS_BENEATH:
+            return 0.0
+        share = effect.opacity / 100.0
+    except _UNREADABLE:
+        return 0.0
+    return min(max(share, 0.0), 1.0) if math.isfinite(share) else 0.0
 
 
 def _pixels(bbox: tuple[int, int, int, int]) -> int:
@@ -679,11 +765,17 @@ class _PassCache:
 
     ``scipy_warned`` is set once a pass has logged that its effects are left
     out for want of scipy, so a document with many of them says it once.
+
+    ``unfiltered`` is the last smart object whose filter mask
+    :py:func:`_unfilter_under_mask` blended, with the result: each effect cast
+    from the layer reads it again, and the blend decodes the document's
+    ``FEid`` planes. It holds the layer itself, and one layer's pixels.
     """
 
     content_bboxes: _ContentBBoxes = field(default_factory=dict)
     group_alphas: _GroupAlphas = field(default_factory=dict)
     scipy_warned: bool = False
+    unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -1160,6 +1252,18 @@ def _read_knockout(layer: Layer) -> Knockout:
             layer,
         )
         return Knockout.NONE
+
+
+def _excluded_channels(layer: Layer, channels: int) -> list[int]:
+    """The colour channels a layer's Blending Options > Channels leaves out.
+
+    Indices into a canvas ``channels`` wide; one beyond it names no colour
+    channel and is ignored.
+    """
+    restricted = layer.tagged_blocks.get_data(Tag.CHANNEL_BLENDING_RESTRICTIONS_SETTING)
+    if not restricted:
+        return []
+    return sorted({index for index in restricted if index < channels})
 
 
 def _document_backdrop(
@@ -1829,6 +1933,18 @@ class _Isolation:
     backdrop_alpha: np.ndarray
 
 
+class _HeldChannels(NamedTuple):
+    """The channels a layer is excluded from, as they were before it went on."""
+
+    channels: list[int]
+    # The canvas's colour in those channels.
+    color: np.ndarray
+    # The alpha of the content they belong to.
+    alpha: np.ndarray
+    # ``color`` as a share of that content, or None to keep it as it is.
+    premultiplied: np.ndarray | None
+
+
 def _unmix(
     color: np.ndarray,
     backdrop_color: np.ndarray,
@@ -1872,6 +1988,10 @@ def _remix(
         )
     )
 
+
+# A bevel texture's colour planes, by its pattern's mode. An indexed pattern's
+# one plane holds palette indices, not grey levels.
+_TEXTURE_PLANES = {ColorMode.RGB: 3, ColorMode.GRAYSCALE: 1}
 
 # Float32 planes of ``layer.bbox`` that _blend_unfiltered() allocates at its
 # peak, beside the arrays it is given.
@@ -2097,6 +2217,16 @@ class Compositor:
 
         if not self._accepts(layer, clip_compositing):
             return
+        excluded = _excluded_channels(layer, self._channels)
+        if not excluded:
+            self._apply_layer(layer)
+            return
+        held = self._hold_channels(excluded, clip_compositing)
+        self._apply_layer(layer)
+        self._restore_channels(held)
+
+    def _apply_layer(self, layer: Layer) -> None:
+        """Composite an accepted layer, its effects and its clip layers."""
         if isinstance(layer, AdjustmentLayer):
             # An adjustment contributes no source of its own; it rewrites the
             # canvas that is already there. Its style is drawn from its mask,
@@ -2179,6 +2309,60 @@ class Compositor:
             # Composited by the layer it clips to, through _apply_clip_layers().
             return False
         return True
+
+    def _hold_channels(
+        self, channels: list[int], clip_compositing: bool
+    ) -> _HeldChannels:
+        """What the excluded channels hold before the layer goes on.
+
+        A layer keeps an excluded channel's premultiplied value in the content
+        it joins: the enclosing isolated group's own when adjustments read
+        that (see :py:meth:`_apply_adjustment`), the canvas otherwise. Over an
+        opaque backdrop the channel stays as it was; where the layer covers
+        transparency it adds coverage and leaves that channel at zero. A clip
+        layer keeps its base's colour, since the base's alpha is the result's.
+        """
+        color = self._color[..., channels]
+        if clip_compositing:
+            return _HeldChannels(channels, color, self._alpha, None)
+        alpha = self._content_alpha()
+        content = color
+        if self._adjustment_isolated:
+            backdrop_color, backdrop_alpha = self._isolation_backdrop()
+            content = _unmix(
+                color, backdrop_color[..., channels], backdrop_alpha, alpha
+            )
+        return _HeldChannels(channels, color, alpha, alpha * content)
+
+    def _restore_channels(self, held: _HeldChannels) -> None:
+        """Put the excluded channels back as :py:meth:`_hold_channels` held them."""
+        kept = held.color
+        if held.premultiplied is not None:
+            alpha = self._content_alpha()
+            premultiplied = held.premultiplied
+            if self._adjustment_isolated:
+                backdrop_color, backdrop_alpha = self._isolation_backdrop()
+                premultiplied = (
+                    premultiplied
+                    + (1.0 - alpha)
+                    * backdrop_alpha
+                    * backdrop_color[..., held.channels]
+                )
+            # Where the content's alpha did not move, neither did the channel.
+            kept = np.where(
+                alpha == held.alpha,
+                held.color,
+                utils.clip(utils.divide(premultiplied, self._alpha, fill=held.color)),
+            )
+        color = np.array(self._color, copy=True)
+        color[..., held.channels] = kept
+        self._color = color
+
+    def _content_alpha(self) -> np.ndarray:
+        """How opaque the content a layer joins is: see :py:meth:`_hold_channels`."""
+        if self._adjustment_isolated:
+            return self._isolation_alpha()
+        return self._alpha
 
     def _resolve_source(self, layer: Layer) -> _Source:
         """Resolve a layer into the operands the blend equations take.
@@ -2959,7 +3143,13 @@ class Compositor:
             if shape is None:
                 shape = np.ones((layer.height, layer.width, 1), dtype=np.float32)
         elif color is not None and isinstance(layer, SmartObjectLayer):
+            memo = self._cache.unfiltered
+            if memo is not None and memo[0] is layer:
+                return memo[1], memo[2]
+            stored = color
             color, shape = _unfilter_under_mask(layer, color, shape)
+            if color is not stored:
+                self._cache.unfiltered = (layer, color, shape)
         return color, shape
 
     @staticmethod
@@ -3558,7 +3748,11 @@ class Compositor:
         return utils.clip(self._get_object_coverage(layer, viewport, alpha=True))
 
     def _knockout_shape(
-        self, layer: Layer, viewport: tuple[int, int, int, int], silhouette: np.ndarray
+        self,
+        layer: Layer,
+        viewport: tuple[int, int, int, int],
+        silhouette: np.ndarray,
+        covers: bool = False,
     ) -> np.ndarray:
         """What "layer knocks out drop shadow" cuts the shadow from under.
 
@@ -3569,11 +3763,19 @@ class Compositor:
         *adds* to the silhouette rather than unioning with it, for the reason
         :py:meth:`_apply_outer_effects` gives: it is complementary to the
         coverage it is traced from, so on a pixel the edge cuts the layer
-        covers one part and the stroke the rest, and the shadow is cut from
-        under the whole pixel. The part inside the boundary paints over the
-        layer, not beside it, and on such a pixel comes out equal to the
-        layer's own coverage; added it would count that coverage twice, so
-        it is left out.
+        covers one part and the stroke the rest. The part inside the boundary
+        paints over the layer, not beside it, and on such a pixel comes out
+        equal to the layer's own coverage; added it would count that coverage
+        twice, so it is left out.
+
+        That is the whole cut for a layer whose paint does not cover what
+        lies beneath it. One that ``covers`` (:py:func:`_covers_beneath`)
+        hides part of the shadow itself once composited on top: its paint at
+        its fill opacity, and a Normal stroke's at the stroke's opacity, both
+        faded by the layer opacity. The cut takes only the rest, so the
+        shadow shows at what the shape leaves once the layer is on
+        (:py:func:`~psd_tools.composite.effects.uncovered`): a layer at full
+        fill and opacity, its strokes opaque, cuts nothing.
 
         Each band is drawn as :py:meth:`_add_stroke_effects` draws it, on its
         own :py:func:`_stroke_box` and traced from :py:meth:`_read_traced`,
@@ -3586,13 +3788,12 @@ class Compositor:
         so a stroke dropped only because its paint will not draw still cuts.
         """
         strokes = _readable(layer, "stroke")
-        if not strokes:
-            return silhouette
-        traces_mask = self._traces_mask(layer)
+        traces_mask = self._traces_mask(layer) if strokes else False
         # The bands are nested intervals on one side of the boundary, as
         # :py:meth:`_add_stroke_effects` cuts them, so together they claim the
         # widest of them of a pixel, and that is what adds to the silhouette.
         outside: np.ndarray | None = None
+        painted: np.ndarray | None = None
         for effect in strokes:
             try:
                 bbox = _within_reach(
@@ -3615,9 +3816,17 @@ class Compositor:
                 continue
             band = paste(viewport, bbox, band - inside)
             outside = band if outside is None else np.maximum(outside, band)
-        if outside is None:
-            return silhouette
-        return np.minimum(silhouette + outside, 1.0)
+            if covers:
+                share = band * _stroke_paint(effect)
+                painted = share if painted is None else np.maximum(painted, share)
+        shape = silhouette if outside is None else np.minimum(silhouette + outside, 1.0)
+        if not covers:
+            return shape
+        fill_opacity, opacity = self._get_const(layer)
+        hidden = silhouette * fill_opacity
+        if painted is not None:
+            hidden = hidden + painted
+        return 1.0 - np.clip(uncovered(shape, hidden * opacity), 0.0, 1.0)
 
     def _has_scipy(self, what: str) -> bool:
         """Whether scipy is there to draw the layer's ``what``, warning when it is not.
@@ -3667,11 +3876,11 @@ class Compositor:
         The layer opacity fades the shadow with the layer, as it fades an
         outer stroke. Fill opacity does not: it fades the layer's own paint
         and not its effects, which is what lets a layer at fill 0 cast a
-        shadow and nothing else. With "layer knocks out drop shadow" on, the
-        shadow is cut away under the same silhouette it is cast from rather
-        than under the layer's paint, so a layer faded by fill opacity shows
-        the backdrop through itself and not its shadow; the layer's stroke
-        bands cut it the same way (:py:meth:`_knockout_shape`).
+        shadow and nothing else. With "layer knocks out drop shadow" on, a
+        layer faded by fill opacity shows the backdrop through itself and not
+        its shadow: the shadow is cut under the silhouette it is cast from by
+        what the layer's paint leaves uncovered, and under the layer's stroke
+        bands (:py:meth:`_knockout_shape`).
 
         Each effect is guarded as the strokes are, with the silhouette read
         outside both guards so that a fault compositing a group's contents is
@@ -3684,6 +3893,7 @@ class Compositor:
         _, opacity = self._get_const(layer)
         if opacity <= 0.0:
             return
+        covers = _covers_beneath(layer, self._layer_filter)
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         for effect in shadows:
             shadow = cast(DropShadow, effect)
@@ -3744,7 +3954,7 @@ class Compositor:
                 continue
             if knocks_out:
                 coverage = coverage * (
-                    1.0 - self._knockout_shape(layer, bbox, silhouette)
+                    1.0 - self._knockout_shape(layer, bbox, silhouette, covers)
                 )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
@@ -4150,7 +4360,7 @@ class Compositor:
         :py:func:`texture_height` turns its luminance into height; the
         pattern's alpha is not read. None, and the bevel goes on untextured,
         when the pattern is not in the document or cannot be read, or the
-        document is neither RGB nor grayscale.
+        document or the pattern is neither RGB nor grayscale.
         """
         if layer._psd.color_mode not in (ColorMode.RGB, ColorMode.GRAYSCALE):
             logger.debug(
@@ -4158,6 +4368,16 @@ class Compositor:
             )
             return None
         try:
+            pattern = paint._find_pattern(layer._psd, bevel.descriptor)
+            if pattern is None:  # _find_pattern has logged it
+                return None
+            planes = _TEXTURE_PLANES.get(pattern.image_mode)
+            if planes is None:
+                logger.debug(
+                    "The texture pattern of a bevel of %s is neither RGB nor grey",
+                    layer,
+                )
+                return None
             _, layout = _overlay_boxes(
                 layer, self._viewport, self._cache.content_bboxes
             )
@@ -4168,19 +4388,10 @@ class Compositor:
         except _UNREADABLE as error:
             logger.debug("Cannot read the texture of a bevel of %s: %s", layer, error)
             return None
-        if fill is None:  # draw_pattern_fill has logged the missing pattern
+        if fill is None or fill.shape[2] != planes:
+            logger.debug("Cannot read the texture of a bevel of %s", layer)
             return None
-        if fill.shape[2] == 3:
-            luminance = (
-                fill[:, :, 0] * 0.299 + fill[:, :, 1] * 0.587 + fill[:, :, 2] * 0.114
-            )
-        elif fill.shape[2] == 1:
-            luminance = fill[:, :, 0]
-        else:
-            logger.debug(
-                "The texture pattern of a bevel of %s is neither RGB nor grey", layer
-            )
-            return None
+        luminance = fill[:, :, 0] if planes == 1 else fill @ _BT601_LUMINANCE
         return texture_height(
             np.clip(luminance, 0.0, 1.0),
             size=size,

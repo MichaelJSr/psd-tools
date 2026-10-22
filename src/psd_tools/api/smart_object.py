@@ -13,7 +13,7 @@ from psd_tools.api._descriptor import get_scalar
 from psd_tools.api.numpy_io import _DECOMPRESS_PEAK
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.utils import check_pixel_size, get_color_channels
-from psd_tools.compression import decompress, decompress_row_peak_bytes
+from psd_tools.compression import _decompress, decompress_row_peak_bytes
 from psd_tools.constants import Compression, Tag
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.psd.filter_effects import (
@@ -366,20 +366,23 @@ class SmartObject:
     def has_enabled_filters(self) -> bool:
         """Whether an enabled smart filter is applied to the object."""
         fx = self.filters
-        if fx is None or not _flag(fx, b"enab", True):
+        if fx is None or not get_scalar(fx, b"enab", bool, True):
             return False
         items = fx.get(b"filterFXList") or []
-        return any(_flag(item, b"enab", True) for item in items)
+        return any(
+            not isinstance(item, Descriptor) or get_scalar(item, b"enab", bool, True)
+            for item in items
+        )
 
     @property
     def filter_mask_enabled(self) -> bool:
         """Whether the smart filters' mask is on."""
-        return _flag(self.filters, b"filterMaskEnable", False)
+        return get_scalar(self.filters, b"filterMaskEnable", bool, False)
 
     @property
     def filter_mask_extends_white(self) -> bool:
         """Mask value outside its stored rectangle: white (filtered) or black."""
-        return _flag(self.filters, b"filterMaskExtendWithWhite", True)
+        return get_scalar(self.filters, b"filterMaskExtendWithWhite", bool, True)
 
     def filter_effect(self) -> FilterEffect | None:
         """Return the document's stored filter input and mask for this layer.
@@ -388,15 +391,25 @@ class SmartObject:
         object rendered *before* the filters and the painted filter mask in the
         document's ``FEid`` block, one item per filtered layer in file order;
         the layer's own channels hold the filtered result. An item belongs to
-        this layer only if its rectangle contains the layer's bbox: the item at
-        the layer's position among the filtered layers when the document was
-        opened if it does, else the first one that does.
+        this layer only if its rectangle contains the layer's bbox as the
+        document was opened: the item at the layer's position among the
+        filtered layers then if it does, else the first one that does. A
+        duplicate pairs as its source does; a layer the document was not opened
+        with has none.
         """
+        paired = self._paired_effect()
+        return None if paired is None else paired[0]
+
+    def _paired_effect(self) -> tuple[FilterEffect, int, int] | None:
+        """:py:meth:`filter_effect`, and how far the layer has moved since."""
         if self.filters is None:
             return None
         psd = getattr(self._layer, "_psd", None)
         blocks = getattr(psd, "tagged_blocks", None)
         if psd is None or blocks is None:
+            return None
+        opened = psd._opened_records.get(id(self._layer._record))
+        if opened is None:
             return None
         items = None
         for key in (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3):
@@ -405,25 +418,29 @@ class SmartObject:
                 break
         if not items:
             return None
-        bbox = self._layer.bbox
-        record = self._layer._record
-        records = psd._filter_records
-        index = next((i for i, r in enumerate(records) if r is record), None)
+        _, index, left, top = opened
+        bbox = (left, top, left + self._layer.width, top + self._layer.height)
         if index is not None and index < len(items) and _contains(items[index], bbox):
-            return items[index]
-        return next((item for item in items if _contains(item, bbox)), None)
+            item = items[index]
+        else:
+            item = next((item for item in items if _contains(item, bbox)), None)
+        if item is None:
+            return None
+        return item, self._layer.left - left, self._layer.top - top
 
     def filter_source(
         self,
     ) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
         """Return the object as rendered before its smart filters.
 
-        ``(bbox, color, alpha)``: ``color`` is ``uint8 (h, w, channels)``, the
-        document's colour channels as stored, and ``alpha`` is ``uint8 (h, w)``
-        or ``None``. ``None`` when the document stores no 8-bit source.
+        ``(bbox, color, alpha)``: ``bbox`` moves with the layer, ``color`` is
+        ``uint8 (h, w, channels)``, the document's colour channels as stored,
+        and ``alpha`` is ``uint8 (h, w)`` or ``None``. ``None`` when the
+        document stores no 8-bit source.
 
-        :raises ValueError: if the planes are over the allocation budget or a
-            plane's RLE row counts do not match its payload.
+        :raises ValueError: if the planes are over the allocation budget, or a
+            plane does not decode or its RLE row counts do not match its
+            payload.
         """
         return self._filter_source()
 
@@ -431,10 +448,12 @@ class SmartObject:
         self, held: int = 0
     ) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
         """:py:meth:`filter_source`; *held* bytes stay live across the decode."""
-        item = self.filter_effect()
+        paired = self._paired_effect()
+        if paired is None:
+            return None
+        item, dx, dy = paired
         if (
-            item is None
-            or item.depth != 8
+            item.depth != 8
             or item.rectangle is None
             or item.max_channels is None
             or not item.channels
@@ -461,12 +480,13 @@ class SmartObject:
         alpha = None
         if transparency is not None:
             alpha = _decode_plane(transparency, width, height)
-        return (left, top, right, bottom), color, alpha
+        return (left + dx, top + dy, right + dx, bottom + dy), color, alpha
 
     def filter_mask(self) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
         """Return the smart filters' mask, or ``None`` when none is stored.
 
-        ``(bbox, mask uint8 (h, w))``; 255 = filtered, 0 = unfiltered.
+        ``(bbox, mask uint8 (h, w))``; 255 = filtered, 0 = unfiltered. The
+        bbox moves with the layer.
 
         :raises ValueError: as :py:meth:`filter_source` does.
         """
@@ -476,8 +496,11 @@ class SmartObject:
         self, held: int = 0
     ) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
         """:py:meth:`filter_mask`; *held* bytes stay live across the decode."""
-        item = self.filter_effect()
-        if item is None or item.depth != 8:
+        paired = self._paired_effect()
+        if paired is None:
+            return None
+        item, dx, dy = paired
+        if item.depth != 8:
             return None
         extra = item.extra
         if not isinstance(extra, FilterEffectExtra) or not _is_stored(extra):
@@ -487,7 +510,8 @@ class SmartObject:
         if width <= 0 or height <= 0:
             return None
         _check_planes(self._layer._psd, width, height, [extra], held)
-        return (left, top, right, bottom), _decode_plane(extra, width, height)
+        bbox = (left + dx, top + dy, right + dx, bottom + dy)
+        return bbox, _decode_plane(extra, width, height)
 
     def save(
         self,
@@ -569,14 +593,6 @@ def _contains(item: FilterEffect, bbox: tuple[int, int, int, int]) -> bool:
     return left <= bbox[0] and top <= bbox[1] and right >= bbox[2] and bottom >= bbox[3]
 
 
-def _flag(desc: object, key: bytes, default: bool) -> bool:
-    """Return a boolean descriptor field, or *default* when absent."""
-    if not isinstance(desc, Descriptor):
-        return default
-    value = desc.get(key)
-    return default if value is None else bool(getattr(value, "value", value))
-
-
 def _is_stored(plane: FilterEffectChannel | FilterEffectExtra | None) -> bool:
     """Whether *plane* carries compressed pixel data."""
     return (
@@ -620,10 +636,13 @@ def _check_planes(
 def _decode_plane(
     plane: FilterEffectChannel | FilterEffectExtra, width: int, height: int
 ) -> np.ndarray:
-    """One 8-bit ``FEid`` plane as ``uint8 (height, width)``."""
+    """One 8-bit ``FEid`` plane as ``uint8 (height, width)``.
+
+    :raises ValueError: if the plane does not decode.
+    """
     compression = _compression(plane)
     version = _rle_version(plane.data, height) if compression == Compression.RLE else 1
-    raw = decompress(plane.data, compression, width, height, 8, version)
+    raw = _decompress(plane.data, compression, width, height, 8, version, strict=True)
     return np.frombuffer(raw, dtype=np.uint8).reshape(height, width)
 
 

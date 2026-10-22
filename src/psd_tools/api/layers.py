@@ -1363,13 +1363,20 @@ class Layer(LayerProtocol):
         # Reconstruct from records so lazy wrappers bind to the copy, without
         # following parent or document references through deepcopy().
         duplicate = self._duplicate(parent)
-        sources: list[LayerProtocol] = [*self._psd.descendants(), self]
+        originals: list[LayerProtocol] = [self]
         if isinstance(self, Group):
-            sources.extend(self.descendants())
+            originals.extend(self.descendants())
         copies: list[Layer] = [duplicate]
         if isinstance(duplicate, Group):
             copies.extend(duplicate.descendants())
+        sources = [*self._psd.descendants(), *originals]
         seed_resource = _issue_layer_ids(self._psd, sources, copies)
+        # A copy pairs with its source's FEid item (SmartObject.filter_effect()).
+        opened = self._psd._opened_records
+        for source, layer in zip(originals, copies, strict=True):
+            entry = opened.get(id(source._record))
+            if entry is not None:
+                opened[id(layer._record)] = (layer._record, *entry[1:])
         if name is not None:
             duplicate.name = name
         clip_layers = (
