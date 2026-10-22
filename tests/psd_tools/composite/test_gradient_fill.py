@@ -14,11 +14,17 @@ from collections.abc import Callable
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from psd_tools import PSDImage
-from psd_tools.api.layers import Layer
+from psd_tools.api.layers import Layer, PixelLayer
 from psd_tools.composite import effects, paint
-from psd_tools.composite.composite import _draw_gradient_overlay, _path_bbox, composite
+from psd_tools.composite.composite import (
+    _draw_gradient_overlay,
+    _opaque_bounds,
+    _path_bbox,
+    composite,
+)
 from psd_tools.composite.effects import draw_stroke_effect
 from psd_tools.constants import GRADIENT_METHOD_KEY, ColorMode, GradientMethod, Tag
 from psd_tools.psd.descriptor import (
@@ -1041,6 +1047,54 @@ def test_an_overlay_not_aligned_with_its_layer_is_laid_out_on_the_document() -> 
     assert aligned is not None and unaligned is not None and on_document is not None
     assert np.array_equal(unaligned, on_document)
     assert not np.array_equal(unaligned, aligned)
+
+
+def _soft_edged_layer() -> tuple[PSDImage, PixelLayer]:
+    """A white 12x10 layer at (4, 3) whose rim is under half opaque.
+
+    Its outer ring is a quarter opaque and the next one just over half, but
+    for that ring's bottom row, just under at 127.
+    """
+    psd = PSDImage.new("RGBA", (20, 16), color=(0, 0, 0, 0))
+    alpha = np.full((10, 12), 64, dtype=np.uint8)
+    alpha[1:9, 1:11] = 128
+    alpha[8, 1:11] = 127
+    alpha[2:8, 2:10] = 255
+    rgba = np.full((10, 12, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = alpha
+    layer = PixelLayer.frompil(Image.fromarray(rgba, "RGBA"), psd, top=3, left=4)
+    psd.append(layer)
+    return psd, layer
+
+
+def test_a_pixel_layers_overlay_is_laid_out_on_its_over_half_opaque_pixels() -> None:
+    """The rim under half opaque stays out of the box the ramp spans.
+
+    Black to white at 90 degrees: white on the top row over half opaque,
+    a seventh of the way per row down the seven such rows, black below.
+    """
+    psd, layer = _soft_edged_layer()
+    assert layer.bbox == (4, 3, 16, 13)
+    opaque = (5, 4, 15, 11)
+    assert _opaque_bounds(layer, layer.bbox) == opaque
+    desc = _gradient(angle=90.0)
+    color, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
+    expected, _ = paint.draw_gradient_fill(layer.bbox, psd.color_mode, desc, opaque)
+    assert color is not None and expected is not None
+    assert np.array_equal(color, expected)
+    rows = np.clip(1.0 - (np.arange(10) - 1) / 7, 0.0, 1.0)
+    assert np.allclose(color[..., 0], rows[:, None], atol=1e-6)
+
+
+def test_an_overlay_keeps_its_layout_without_pixels_over_half_opaque() -> None:
+    """A layer under half opaque throughout, and a type layer, keep the box given."""
+    psd, layer = _soft_edged_layer()
+    faint = PixelLayer.frompil(Image.new("RGBA", (6, 6), (255, 255, 255, 127)), psd)
+    assert _opaque_bounds(faint, faint.bbox) == faint.bbox
+    text = next(
+        x for x in PSDImage.open(full_name("layer_effects.psd")) if x.kind == "type"
+    )
+    assert _opaque_bounds(text, (1, 2, 3, 4)) == (1, 2, 3, 4)
 
 
 def test_a_gradient_stroke_effect_not_aligned_with_its_layer_is_laid_out_on_the_document() -> (

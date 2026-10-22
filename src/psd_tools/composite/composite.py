@@ -26,6 +26,7 @@ from psd_tools.api.layers import (
     FillLayer,
     GroupMixin,
     Layer,
+    PixelLayer,
     ShapeLayer,
     SmartObjectLayer,
     TypeLayer,
@@ -329,6 +330,32 @@ def _draw_pattern_overlay(
     return fill, shape
 
 
+def _opaque_bounds(layer: Layer, layout: _Box) -> _Box:
+    """The box of a pixel or smart object layer's pixels over half opaque.
+
+    Photoshop lays such a layer's gradient overlay out on it, so a soft edge
+    does not stretch the ramp. Any other layer, and one with no pixel that
+    opaque, keeps ``layout``.
+    """
+    if not isinstance(layer, (PixelLayer, SmartObjectLayer)):
+        return layout
+    shape = layer.numpy("shape")
+    if shape is None:
+        return layout
+    opaque = shape[..., 0] > 0.5
+    rows = np.flatnonzero(opaque.any(axis=1))
+    if not rows.size:
+        return layout
+    columns = np.flatnonzero(opaque.any(axis=0))
+    left, top = layer.bbox[0], layer.bbox[1]
+    return (
+        left + int(columns[0]),
+        top + int(rows[0]),
+        left + int(columns[-1]) + 1,
+        top + int(rows[-1]) + 1,
+    )
+
+
 def _draw_gradient_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -336,7 +363,7 @@ def _draw_gradient_overlay(
         box,
         layer._psd.color_mode,
         descriptor,
-        paint.gradient_anchor(layer._psd, descriptor, layout),
+        paint.gradient_anchor(layer._psd, descriptor, _opaque_bounds(layer, layout)),
     )
 
 

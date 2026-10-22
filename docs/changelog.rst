@@ -8,6 +8,9 @@ Changelog
   Photoshop draws it, instead of being stretched to put its end stops on the
   end pixels, so the far end pixel stops a pixel short of its stop. Gradient
   overlays, fill layers and strokes move by up to a pixel along the ramp
+- [fix] A gradient overlay on a pixel or smart object layer is laid out on the
+  bounds of the layer's pixels over half opaque, as Photoshop does, instead of
+  on the layer's box, so a soft edge no longer stretches the ramp
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead
