@@ -8,6 +8,10 @@ Changelog
   measure from the nearest boundary that either an antialiased pixel or a
   hard step states, so on a shape antialiased in places and hard elsewhere,
   such as text, a stroke no longer reaches a fraction of a pixel too far
+- [fix] A group's stroke effect is traced from how opaque its contents are,
+  not from what they cover, as Photoshop draws it: an outside stroke fills
+  the rest of each pixel of a translucent child instead of stopping at the
+  child's edge
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead

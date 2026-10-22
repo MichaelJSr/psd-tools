@@ -642,7 +642,7 @@ def _effect_reach(
 
 
 _ContentBBoxes = dict[int, tuple[int, int, int, int]]
-_GroupShapes = dict[tuple[int, tuple[int, int, int, int]], np.ndarray]
+_GroupAlphas = dict[tuple[int, tuple[int, int, int, int]], np.ndarray]
 
 
 @dataclass
@@ -658,7 +658,7 @@ class _PassCache:
     subtree, then compositing descends and each group inside measures its own
     subtree again -- O(nodes x depth), and exactly quadratic down a chain.
 
-    ``group_shapes`` holds every group coverage ``_get_group_shape()`` has
+    ``group_alphas`` holds every group alpha ``_get_group_alpha()`` has
     composited, keyed by the group and the box it was composited on. Tracing a
     group's stroke composites its whole subtree, and a group inside that
     subtree whose own stroke escapes composites its subtree again, so the work
@@ -671,24 +671,18 @@ class _PassCache:
 
     The memo collapses the composites to one per box; the ``paste()`` back to
     each asking viewport still happens per call, so the remaining cost is
-    quadratic in depth rather than linear. It also retains one coverage canvas
-    per entry until the pass ends, which is new: the trade is bounded work for
+    quadratic in depth rather than linear. It also retains one alpha canvas
+    per entry until the pass ends: the trade is bounded work for
     bounded-lifetime memory, and on a large document with many traced groups
-    the retention is the part that grows.
-
-    ``group_alphas`` holds the alpha of the same composites, under the same
-    keys, for a group's drop shadow or outer glow: those are cast from how
-    opaque the contents are rather than from what they cover. A composite keeps only
-    the canvas it was asked for: a stroke and a shadow on one group ask on
-    different boxes, so the other would not be read.
+    the retention is the part that grows. A group's shadows and glows read the
+    same memo, on their own boxes.
 
     ``scipy_warned`` is set once a pass has logged that its effects are left
     out for want of scipy, so a document with many of them says it once.
     """
 
     content_bboxes: _ContentBBoxes = field(default_factory=dict)
-    group_shapes: _GroupShapes = field(default_factory=dict)
-    group_alphas: _GroupShapes = field(default_factory=dict)
+    group_alphas: _GroupAlphas = field(default_factory=dict)
     scipy_warned: bool = False
 
 
@@ -3396,14 +3390,15 @@ class Compositor:
         follows the viewport edge as if it were the layer's own -- so the
         coverage is read again, on the box actually asked for (#804).
 
-        A group has no stored coverage to re-read, so its contents are
-        composited a second time on that box instead -- unless its stroke
-        traces its mask, which is the one branch of :py:meth:`_read_traced`
+        A group's stroke follows its contents' alpha composited on their own,
+        which ``shape`` is not, so it is always read again -- unless it traces
+        the group's mask, which is the one branch of :py:meth:`_read_traced`
         that never consults a layer's contents at all (#808).
         """
         x0, y0, x1, y1 = viewport
         vx0, vy0, vx1, vy1 = self._viewport
-        if vx0 <= x0 and vy0 <= y0 and x1 <= vx1 and y1 <= vy1:
+        inside = vx0 <= x0 and vy0 <= y0 and x1 <= vx1 and y1 <= vy1
+        if inside and (traces_mask or not isinstance(layer, GroupMixin)):
             return paste(viewport, self._viewport, shape)
         return self._read_traced(layer, viewport, traces_mask)
 
@@ -3424,17 +3419,17 @@ class Compositor:
         # mask on the group -- gets the mask outline alone, which for a group
         # bears no relation to where its contents are. Pre-existing, unreachable
         # in the corpus (the two groups it applies to carry no stroke effect),
-        # and the same inside the viewport as outside, so this change leaves it
-        # be; ``_get_group_shape()`` is what a fix would multiply in.
+        # and the same inside the viewport as outside; ``_get_group_alpha()``
+        # is what a fix would multiply in.
         if isinstance(layer, AdjustmentLayer):
             return self._adjustment_shape(layer, viewport)
         traced = mask = self._get_mask(layer, viewport)
         if not traces_mask:
             # Reading a group as an object finds no pixel data and no fill, so
-            # the only route to its coverage outside this viewport is to
-            # composite its contents again on the box asked for.
+            # the only route to its alpha is to composite its contents again
+            # on the box asked for.
             if isinstance(layer, GroupMixin):
-                traced = self._get_group_shape(layer, viewport) * mask
+                traced = self._get_group_alpha(layer, viewport) * mask
             else:
                 traced = self._get_object_coverage(layer, viewport)
             if _is_shape_layer(layer):
@@ -3462,15 +3457,18 @@ class Compositor:
         inside = vector.draw_vector_mask(layer, viewport) >= 1.0 - _PATH_FULL
         return np.where(inside, mask, stored).astype(np.float32, copy=False)
 
-    def _get_group_shape(
-        self, layer: Layer, viewport: tuple[int, int, int, int], alpha: bool = False
+    def _get_group_alpha(
+        self, layer: Layer, viewport: tuple[int, int, int, int]
     ) -> np.ndarray:
-        """The group's own coverage on ``viewport``, composited a second time.
+        """The group's own alpha on ``viewport``, composited a second time.
 
-        The object path re-reads a layer's stored pixels or redraws its fill.
-        A group has neither -- its coverage *is* a composite -- so the only way
-        to have it on a box wider than this compositor's viewport is to
-        composite its children again on that box (#808).
+        What a group's stroke is traced from and its shadows and glows are
+        cast from: how opaque its contents are, not what they cover, so a
+        child faded to nothing has no stroke round it. The object path
+        re-reads a layer's stored pixels or redraws its fill. A group has
+        neither -- its alpha *is* a composite -- so the only way to have it on
+        a box of the caller's is to composite its children again on that box
+        (#808).
 
         The box is narrowed the way :py:meth:`_get_group` narrows it, and for
         the same reason: ``_content_bbox()`` returns an ``Artboard``'s frame
@@ -3490,19 +3488,12 @@ class Compositor:
         whole box.
 
         The backdrop is transparent and carries neither knockout nor the
-        document backdrop, and ``adjustment_isolated`` and the document
-        backdrop function are left off for the same reason: ``shape``
-        accumulates into
-        ``_shape_g``, which starts at zero and is only ever unioned into, so it
-        cannot read a backdrop. Effects, on the other hand, must run -- an
-        overlay or an inset stroke reaches that canvas in the source its layer
-        is composited from and an outset one beside it, which
-        ``group-clips-child-stroke.psd`` measures.
-
-        ``alpha`` hands back the same composite's alpha instead, memoised on
-        its own. It reads no backdrop either: it starts at zero, and a
-        knockout inside the group reaches for this transparent backdrop, so it
-        can only cut the group's own alpha away.
+        document backdrop: the contents are composited on their own, as an
+        isolated group composites them, so a knockout inside the group can
+        only cut the group's own alpha away, pass-through or not.
+        Effects, on the other hand, must run -- an overlay or an inset stroke
+        reaches that canvas in the source its layer is composited from and an
+        outset one beside it, which ``group-clips-child-stroke.psd`` measures.
         """
         inner = viewport
         if layer.blend_mode != BlendMode.PASS_THROUGH:
@@ -3514,9 +3505,8 @@ class Compositor:
             return np.zeros((height, width, 1), dtype=np.float32)
 
         key = (id(layer), inner)
-        cached = self._cache.group_alphas if alpha else self._cache.group_shapes
-        shape = cached.get(key)
-        if shape is None:
+        alpha = self._cache.group_alphas.get(key)
+        if alpha is None:
             inner_h, inner_w = inner[3] - inner[1], inner[2] - inner[0]
             group_compositor = Compositor(
                 inner,
@@ -3527,14 +3517,13 @@ class Compositor:
                 widen=self._widen,
                 color_mode=self._color_mode,
                 cache=self._cache,
-                # Only the alpha and shape are read, which text gamma leaves.
+                # Only the alpha is read, which text gamma leaves.
                 text_gamma=None,
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
-            shape = group_compositor.alpha if alpha else group_compositor.shape
-            cached[key] = shape
-        return paste(viewport, inner, shape)
+            alpha = self._cache.group_alphas[key] = group_compositor.alpha
+        return paste(viewport, inner, alpha)
 
     def _cast_shape(
         self, layer: Layer, viewport: tuple[int, int, int, int]
@@ -3554,7 +3543,7 @@ class Compositor:
         group resolved over this canvas can take alpha from it through a
         knockout, which would make the shadow depend on the viewport. The
         group's contents are composited over nothing, once per box and pass,
-        as :py:meth:`_get_group_shape` does for a stroke.
+        by :py:meth:`_get_group_alpha`.
 
         A shape redrawn from its path casts what :py:meth:`_get_object` paints
         of it: its stroke as well as its fill, and the stroke alone with the
@@ -3564,7 +3553,7 @@ class Compositor:
         if isinstance(layer, AdjustmentLayer):
             return self._adjustment_shape(layer, viewport)
         if isinstance(layer, GroupMixin):
-            alpha = self._get_group_shape(layer, viewport, alpha=True)
+            alpha = self._get_group_alpha(layer, viewport)
             return utils.clip(alpha * self._get_mask(layer, viewport))
         return utils.clip(self._get_object_coverage(layer, viewport, alpha=True))
 
@@ -3588,9 +3577,8 @@ class Compositor:
 
         Each band is drawn as :py:meth:`_add_stroke_effects` draws it, on its
         own :py:func:`_stroke_box` and traced from :py:meth:`_read_traced`,
-        then pasted onto the shadow's canvas: a group's silhouette is its
-        alpha and its stroke follows its coverage, and the two part company
-        wherever the contents are translucent, so a band traced from the
+        then pasted onto the shadow's canvas: an object's silhouette is its
+        alpha and its stroke follows its coverage, so a band traced from the
         silhouette would cut the shadow where no stroke is painted. The
         stroke's box is the one ``stroke_bbox()`` checked against the
         budget, so the band costs what a stroke does and no more, and a

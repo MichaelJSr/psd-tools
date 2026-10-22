@@ -751,19 +751,17 @@ def test_the_knockout_adds_the_stroke_band_to_the_silhouette(
 
 
 @pytest.mark.parametrize("blend_mode", [BlendMode.PASS_THROUGH, BlendMode.NORMAL])
-def test_the_knockout_band_follows_the_groups_stroke_not_its_alpha(
+def test_a_groups_stroke_and_its_knockout_follow_the_groups_alpha(
     blend_mode: BlendMode,
 ) -> None:
-    """The band the knockout cuts under is the one the stroke is drawn from.
+    """A group's stroke is traced from its alpha, and the knockout cuts under it.
 
-    A group's silhouette is its alpha and its stroke follows its coverage. A
-    half-opaque child covers its pixels fully, so the group's outside stroke
-    lies beyond the child and nothing of it inside; traced from the alpha
-    instead, a flat half-coverage states a boundary at every pixel, and the
-    band would cover the whole child and cut the shadow from under all of
-    it. The shadow is cast straight down from that alpha, ``c``, so under
-    the child it is ``c`` cut by ``c``, and the child composites over what
-    is left.
+    A half-opaque child states a boundary at every one of its pixels, so the
+    group's outside stroke fills the remainder ``1 - c`` of each, as it does
+    across a pixel layer's partial alpha. The knockout cuts the shadow from
+    under the whole band whatever the stroke's opacity, so with it on none of
+    the shadow is left under the child, and with it off the shadow shows
+    there.
     """
     psd = PSDImage.new("RGB", (60, 60))
     child = psd.create_pixel_layer(
@@ -780,25 +778,28 @@ def test_the_knockout_band_follows_the_groups_stroke_not_its_alpha(
     assert cast(
         DropShadow, next(iter(group.effects.find("dropshadow")))
     ).layer_knocks_out
+    stroke = _strokes(group)[0]
+    assert 0.0 < stroke.opacity < 100.0, "a faint stroke, so the knockout shows"
 
     c = 128 / 255.0
-    shadow_left = c * (1.0 - c)
-    alpha = _alone(group, psd.viewbox)
-    assert float(alpha[30, 30, 0]) == pytest.approx(
-        shadow_left + c - shadow_left * c, abs=1e-5
+    painted = c + (1.0 - c) * stroke.opacity / 100.0
+    assert float(_alone(group, psd.viewbox)[30, 30, 0]) == pytest.approx(
+        painted, abs=1e-5
     )
+    shadow[b"layerConceals"] = False
+    assert float(_alone(group, psd.viewbox)[30, 30, 0]) > painted + 0.1
     shadow[Key.Enabled] = False
-    assert float(_alone(group, psd.viewbox)[30, 30, 0]) == pytest.approx(c, abs=1e-5)
+    assert float(_alone(group, psd.viewbox)[30, 30, 0]) == pytest.approx(
+        painted, abs=1e-5
+    )
 
 
-def test_a_groups_knockout_traces_its_stroke_from_the_groups_coverage() -> None:
-    """The band is traced from what the group's stroke is drawn around.
+def test_a_groups_knockout_traces_its_stroke_from_the_groups_alpha() -> None:
+    """The band is traced from the alpha the group's stroke is drawn around.
 
-    The icons cover their pixels fully at 40% opacity. Their alpha, which
-    casts the shadow, states a partial edge at every one of those pixels;
-    traced from it, the outset band would run through the icons and cut the
-    shadow from under them. Traced from their coverage it lies outside them,
-    and inside an icon the knockout is the icon's alpha alone.
+    The icons cover their pixels fully at 40% opacity, so their alpha states
+    a boundary at every one of those pixels: the outset band fills the rest of
+    each, and the knockout is whole across the icons.
     """
     from scipy.ndimage import binary_erosion  # type: ignore[import-untyped]  # noqa: PLC0415
 
@@ -823,7 +824,7 @@ def test_a_groups_knockout_traces_its_stroke_from_the_groups_coverage() -> None:
     icons = np.isclose(silhouette[:, :, 0], 102 / 255.0, atol=1e-6)
     inside = binary_erosion(icons, iterations=3)
     assert inside.any(), "no icon interior"
-    assert np.allclose(knockout[inside], silhouette[inside], atol=1e-6)
+    assert np.allclose(knockout[inside], 1.0, atol=1e-5)
 
 
 def _strokes(layer: Layer) -> list[Stroke]:
