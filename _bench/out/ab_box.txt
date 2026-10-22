@@ -1,0 +1,4 @@
+1	{"card": "Creatures/Isaac/3 Stars/Tainted_Lazarus.psd", "wall": 87.03, "cpu": 49.01, "rss": 1636}	{"card": "Creatures/Isaac/3 Stars/Tainted_Lazarus.psd", "wall": 8.34, "cpu": 5.32, "rss": 1039}	max 0 px_diff 0 px_gt1 0 px_gt24 0 of 2880000
+2	{"card": "Creatures/Everhood/3 Stars/Zigg.psd", "wall": 46.58, "cpu": 30.06, "rss": 1424}	{"card": "Creatures/Everhood/3 Stars/Zigg.psd", "wall": 5.06, "cpu": 3.17, "rss": 1050}	max 0 px_diff 0 px_gt1 0 px_gt24 0 of 2880000
+3	{"card": "Creatures/Other/5 Stars/Bobberlington.psd", "wall": 48.85, "cpu": 31.21, "rss": 1430}	{"card": "Creatures/Other/5 Stars/Bobberlington.psd", "wall": 11.69, "cpu": 7.17, "rss": 1258}	max 0 px_diff 0 px_gt1 0 px_gt24 0 of 2880000
+4	{"card": "Creatures/Hollow Knight/2 Stars/False_Knight.psd", "wall": 42.38, "cpu": 28.76, "rss": 1519}	{"card": "Creatures/Hollow Knight/2 Stars/False_Knight.psd", "wall": 10.31, "cpu": 6.53, "rss": 1070}	max 0 px_diff 0 px_gt1 0 px_gt24 0 of 2880000

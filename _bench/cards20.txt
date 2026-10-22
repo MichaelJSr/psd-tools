@@ -1,0 +1,20 @@
+Creatures/Isaac/3 Stars/Tainted_Lazarus.psd
+Creatures/Everhood/3 Stars/Zigg.psd
+Creatures/Other/5 Stars/Bobberlington.psd
+Creatures/Hollow Knight/2 Stars/False_Knight.psd
+Creatures/Everhood/5 Stars/Chris_&_Jordi.psd
+Creatures/Isaac/4 Stars/Dogma.psd
+Creatures/FTL/5 Stars/Royal_Eradicator_Main_Cannon.psd
+Creatures/Mario/3 Stars/Lord_Crump.psd
+Creatures/Kirby/5 Stars/HR-D3.psd
+Creatures/Kirby/5 Stars/Zero_Override.psd
+Auxiliary/Minions/Mini_Doomer.psd
+Creatures/World Of Warcraft/5 Stars/The_Lich_King.psd
+Creatures/Undertale/4 Stars/Jevil.psd
+Creatures/Omori/5 Stars/omori.psd
+Field/1 Stars/The_Freezer.psd
+Items/Active/3 Stars/Star_Cannon.psd
+Items/Support/2 Stars/Gasoline.psd
+Items/Heal/3 Stars/Hadal_Stew.psd
+Auxiliary/Rulebook/01_Getting_Started.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Restrained.psd
