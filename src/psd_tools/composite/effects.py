@@ -623,12 +623,13 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     from the centre of the pixel on either side of it. One mask can carry both --
     a glyph antialiased round its curves and stepping hard along its stems --
     and every pixel takes the nearest boundary any pixel states, of either
-    kind, which :py:func:`_nearest_boundary` solves for outright
-    (``effects/antialiased-stroke-edge.psd``, where a partial edge meets a
-    hard one). What stays approximate is that a pixel's ``near`` is applied
-    along the line to that pixel rather than along the boundary's own normal,
-    which parts company with the truth around a curve the way
-    :py:func:`_distance_band` does when it paints the arc.
+    kind (``effects/antialiased-stroke-edge.psd``, where a partial edge meets
+    a hard one): :py:func:`_nearest_boundary` for the partial pixels, a
+    distance transform for the steps. What stays approximate is that a
+    pixel's ``near`` is applied along the line to that pixel rather than
+    along the boundary's own normal, which parts company with the truth
+    around a curve the way :py:func:`_distance_band` does when it paints the
+    arc.
 
     Distances are measured in Photoshop's metric, :py:func:`_chamfer_length`,
     whatever kind of boundary they are measured from.
@@ -664,7 +665,40 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     # What each states: a partial pixel by its coverage, a hard one at the
     # edge it shares with the other side.
     near = (0.5 - np.clip(alpha, 0.0, 1.0)).astype(np.float32)
-    return _nearest_boundary(alpha, partial | hard, near, reach)
+    field = _nearest_boundary(alpha, partial, near, reach)
+    if not hard.any():
+        return field
+
+    # A hard step states the same half pixel all along it, so the nearest one
+    # is a distance transform, which unlike the erosion does not scale with
+    # ``reach``. Nothing past ``reach`` of the steps is in range, so a crop
+    # that far round them holds every path the transform needs.
+    height, width = alpha.shape
+    span = math.ceil(reach)
+    rows, cols = np.nonzero(hard)
+    crop = (
+        slice(max(rows.min() - span, 0), min(rows.max() + span + 1, height)),
+        slice(max(cols.min() - span, 0), min(cols.max() + span + 1, width)),
+    )
+    sub_hard, sub_alpha = hard[crop], alpha[crop]
+    inside = sub_alpha >= 1
+    to_opaque = _chamfer_transform(~(sub_hard & inside))
+    to_clear = _chamfer_transform(~(sub_hard & ~inside))
+    opaque_ok, clear_ok = to_opaque <= reach, to_clear <= reach
+    outward = np.minimum(
+        np.where(opaque_ok, to_opaque - 0.5, np.inf),
+        np.where(clear_ok, to_clear + 0.5, np.inf),
+    )
+    inward = np.maximum(
+        np.where(opaque_ok, -0.5 - to_opaque, -np.inf),
+        np.where(clear_ok, 0.5 - to_clear, -np.inf),
+    )
+    sub_field = field[crop]
+    stated = np.where(
+        inside, np.maximum(sub_field, inward), np.minimum(sub_field, outward)
+    )
+    field[crop] = np.where(sub_hard | partial[crop], near[crop], stated)
+    return field
 
 
 def _distance_band(distance: np.ndarray, lo: float, hi: float) -> np.ndarray:

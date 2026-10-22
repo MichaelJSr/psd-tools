@@ -18,14 +18,11 @@ Changelog
   at fill 0, or in another mode, still cuts it under its whole shape. A
   pass-through group hides it only where its children's shadows, glows,
   outer strokes and outer bevels or embosses do too
-- [fix] Stroke effects, precise outer and inner glows and chisel bevels
-  measure from the nearest boundary that either an antialiased pixel or a
-  hard step states, so on a shape antialiased in places and hard elsewhere,
-  such as text, a stroke no longer reaches a fraction of a pixel too far
-- [fix] Stroke effects, precise outer and inner glows and chisel bevels
-  measure distance as Photoshop does, in whole-pixel straight, diagonal and
-  knight's-move steps, so a stroke's corners and its outer edge round curves,
-  as on text, no longer reach a fraction of a pixel too far
+- [fix] Stroke effects measure from the nearest boundary that an antialiased
+  pixel or a hard step states, in whole-pixel straight, diagonal and
+  knight's-move steps as Photoshop does, so on text a stroke's corners and its
+  edge round curves no longer reach a fraction of a pixel too far. Precise
+  outer and inner glows and chisel bevels share that distance field
 - [fix] A group's stroke effect is traced from how opaque its contents are,
   not from what they cover, as Photoshop draws it: an outside stroke fills
   the rest of each pixel of a translucent child instead of stopping at the

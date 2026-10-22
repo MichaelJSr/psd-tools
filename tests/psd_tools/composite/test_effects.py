@@ -509,8 +509,8 @@ def test_hard_edged_stroke_matches_photoshop(filename: str) -> None:
     straight run of the stroke matches Photoshop to the bit, because a ramp
     that is linear in distance is the exact area of a pixel cut by a straight
     edge, and the corners match it to within rounding once the distance is
-    Photoshop's own (:py:func:`_chamfer_length`): a Euclidean one rounds them
-    off into arcs that miss it by tens of levels.
+    Photoshop's own (:py:func:`_chamfer_length`), which a Euclidean one rounds
+    off into arcs.
     """
     check_composite_quality(filename, threshold=1e-6)
 
@@ -715,23 +715,6 @@ def test_an_antialiased_edge_is_stroked_from_its_own_coverage() -> None:
     check_composite_quality("effects/antialiased-stroke-edge.psd", threshold=2e-4)
 
 
-@pytest.mark.parametrize(
-    "filename", ["effects/antialiased-stroke-edge.psd", "effects/feathered-stroke.psd"]
-)
-def test_a_stroke_takes_the_nearer_of_a_partial_and_a_hard_edge(filename: str) -> None:
-    """Where a partial edge meets a hard one, the stroke stops at the nearer.
-
-    Each square's antialiased or feathered side meets hard top and bottom
-    sides at its corners. A pixel past the corner takes whichever boundary is
-    nearer, the one the partial pixels state or the hard step's, rather than
-    the nearer kind of pixel's, and lands within rounding of Photoshop's.
-    """
-    psd = PSDImage.open(full_name(filename))
-    reference = psd.numpy()[..., :3]
-    result = composite(psd)[0]
-    assert float(np.abs(result - reference).max()) < 1.5 / 255.0
-
-
 def test_every_boundary_pixel_states_where_the_boundary_falls() -> None:
     """The field is the nearest boundary any pixel states, of either kind.
 
@@ -803,8 +786,9 @@ def test_the_chamfer_transform_is_the_nearest_clear_pixel() -> None:
 def test_a_stroke_is_measured_in_photoshops_metric(filename: str) -> None:
     """Every pixel of these strokes, corners included, is within rounding.
 
-    Measured in a Euclidean metric instead, the rounded corners and the
-    edges past antialiased pixels miss Photoshop's by tens of levels.
+    In ``antialiased-stroke-edge.psd`` and ``feathered-stroke.psd`` a partial
+    side meets hard ones at each corner, where a pixel takes whichever
+    boundary is nearer.
     """
     psd = PSDImage.open(full_name(filename))
     reference = psd.numpy()
@@ -1279,6 +1263,31 @@ def _erosion_calls(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
     monkeypatch.setattr(scipy.ndimage, "grey_erosion", spy)
     return calls
+
+
+def test_a_hard_step_is_not_eroded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the partial pixels go through the erosion, not a hard step.
+
+    An erosion costs its footprint at every pixel it is given, so a shape hard
+    along most of its edge would pay that over its whole extent.
+    """
+    shapes: list[tuple[int, ...]] = []
+    real_grey_erosion = scipy.ndimage.grey_erosion
+
+    def spy(image: np.ndarray, *args: Any, **kwargs: Any) -> np.ndarray:
+        shapes.append(image.shape)
+        return cast(np.ndarray, real_grey_erosion(image, *args, **kwargs))
+
+    monkeypatch.setattr(scipy.ndimage, "grey_erosion", spy)
+    alpha = np.zeros((200, 300), dtype=np.float32)
+    alpha[20:180, 20:280] = 1.0
+    alpha[20, 150] = 0.5
+    reach = 10.0
+    _signed_distance(alpha, reach)
+    # The one partial pixel's own neighbourhood, out to the reach.
+    side = 2 * int(reach) + 1
+    assert shapes
+    assert all(shape[0] <= side and shape[1] <= side for shape in shapes)
 
 
 def test_a_filled_disc_takes_the_dense_erosion_path(
