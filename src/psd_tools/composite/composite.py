@@ -265,7 +265,12 @@ def _overlay_boxes(
 
 
 def _reference_point(layer: Layer) -> tuple[float, float] | None:
-    """The layer's ``fxrp`` reference point, in document coordinates."""
+    """The layer's ``fxrp`` reference point, in document coordinates.
+
+    None without the tag, so that :py:func:`paint.pattern_origin` falls back
+    to the layer's box; :py:attr:`~psd_tools.api.layers.Layer.reference_point`
+    reads a missing tag as the document's origin.
+    """
     point = layer.tagged_blocks.get_data(Tag.REFERENCE_POINT)
     if point is None:
         return None
@@ -3793,8 +3798,10 @@ class Compositor:
         object's goes no further than the reach past the viewport, since
         nothing beyond that reaches back into view. A group's is not cut to
         the viewport, so it is the same box from every compositor that asks
-        and its contents are composited for it once per pass, as for a drop
-        shadow; cut, a nested group would be composited again at every level.
+        and a nested group's contents are composited for it once per pass.
+        The other effects cut a group's box as an object's
+        (:py:func:`_within_reach`), which draws on less but composites a
+        nested group again for each compositor above it.
         Raises as :py:func:`inner_bbox` does, and when the box is out of
         proportion to the layer and the viewport.
         """

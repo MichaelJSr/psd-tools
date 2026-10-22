@@ -13,13 +13,11 @@ Changelog
   the layer rather than the layer's own pixels
 - [fix] The spread of a drop shadow or outer glow grows the layer's coverage
   by whole pixels, as Photoshop does, so a feathered or faint edge casts a
-  hard, full shadow under any spread of a pixel or more; it grew each
-  coverage level on its own, which left such shadows narrow and light. An
-  inner shadow's or inner glow's choke shrinks the coverage the same way
-- [fix] A layer's stroke effects are composited as nested rings: each band is cut
-  from under the ones listed above it, so a faint or 0 % stroke shows the
-  backdrop rather than the next stroke down, and a type layer's glyph edge
-  meets what the rings leave of the backdrop in the text blend gamma.
+  hard, full shadow or glow under any spread of a pixel or more. An inner
+  shadow's or inner glow's choke shrinks the coverage the same way
+- [fix] A layer's several stroke effects are drawn as nested rings, so a
+  faint or 0% stroke shows the backdrop rather than the stroke listed below
+  it, on a type layer too
 - [fix] A pattern overlay's tiling starts at the layer's reference point moved
   by its phase (the phase alone when not aligned with the layer) and turns by
   a right-angle ``Angl``. A scaled pattern is sampled as Photoshop does, a
@@ -29,9 +27,10 @@ Changelog
   point, so effects anchored to it move with the layer
 - [api] ``paint.draw_pattern_fill`` takes an ``origin`` for its tiling;
   ``paint.pattern_origin`` computes an overlay's from its descriptor
-- [fix] A smooth gradient with more than two colour or opacity stops curves
-  through its stops as Photoshop does, instead of flattening at each one, and
-  each segment is held between its two stops. Two-stop gradients are unchanged
+- [fix] A smooth gradient with more than two colour or opacity stops, a
+  gradient map's included, curves through its stops as Photoshop does,
+  instead of flattening at each one, and each segment is held between its
+  two stops. Two-stop gradients are unchanged
 - [fix] A colour, gradient or pattern overlay or a satin in Color Dodge,
   Linear Dodge, Color Burn, Linear Burn, Vivid Light, Linear Light or
   Difference fades by its colour at less than 100% opacity, as Photoshop
@@ -40,13 +39,14 @@ Changelog
   that a source's opacity fades its colour in those modes
 - [api] ``PSDImage.save()`` takes ``preview``, a flattened PIL image to store
   instead of compositing the document, and ``update_preview=False`` to keep
-  the stored preview after an edit. The default is unchanged.
+  the stored preview after an edit. The default is unchanged
 - [fix] ``PSDImage.save()`` records in ``VersionInfo`` whether the preview it
   regenerates or stores holds the whole image: an opaque document saved
-  without Maximize Compatibility reports ``has_preview()`` ``True``. Behaviour
-  change: a layered document with no transparency channel that an edit left
-  partly transparent reopens with ``has_preview()`` ``False`` and ``topil()``
-  ``None``, where it kept ``True``; ``composite()`` renders its layers.
+  without Maximize Compatibility reports ``has_preview()`` ``True``.
+  Backwards-incompatible: a layered document with no transparency channel
+  that an edit left partly transparent reopens with ``has_preview()``
+  ``False`` and ``topil()`` ``None``, where it kept ``True``; ``composite()``
+  renders its layers
 - [fix] Compositing a viewport draws each layer effect only on the part of
   its box that can reach the viewport, so a small viewport of a large styled
   document renders in a fraction of the time and is the full render cropped
@@ -61,10 +61,10 @@ Changelog
   a straight mix. A layer Photoshop kept as pixels (a substituted font, text
   data without ``bounds``) and a 32-bit document still mix straight. Inside a
   group that carries a layer style the text meets only what the group itself
-  has painted, as Photoshop renders such a group as one layer.
+  has painted, as Photoshop renders such a group as one layer
 - [api] ``composite()``, ``composite_pil()`` and the ``composite()`` methods of
   ``PSDImage``, ``Layer``, ``Group`` and ``Artboard`` take ``text_gamma``;
-  ``None`` restores the straight mix of earlier releases.
+  ``None`` restores the straight mix of earlier releases
 - [fix] A gradient fill layer's or stroke effect's method is read from the
   key it stores it under, by the compositor and by ``Stroke.method``, so a
   perceptual or linear one no longer renders as classic; perceptual also
@@ -98,9 +98,8 @@ Changelog
   (``gs99``), opacity and blend mode are honoured; noise and jitter are read
   but not applied, and the blur and range approximate Photoshop's. Without
   ``scipy`` it is skipped with a warning (#382, #680)
-- [fix] An outer glow with a spread is cast from a soft-edged layer's
-  coverage, as Photoshop draws it, and a Normal layer's partial pixels no
-  longer fade its glow twice (#680)
+- [fix] A Normal layer's partial pixels no longer fade its outer glow twice
+  (#680)
 - [fix] A gradient stop whose location or opacity is out of range or not a
   number is held to 0-100%, as a stop's colour is, and so is a noise
   gradient's transparency. A gradient fill, overlay or stroke with one could

@@ -307,7 +307,7 @@ and one that wants the stored preview kept can say so::
 PIL mode of its color mode, with or without alpha. CMYK and Lab have no PIL
 alpha band, so such a document keeps its stored transparency plane, stale if
 the edit changed the coverage. A layered document with no transparency channel
-stores the colour alone, and its ``has_preview()`` becomes ``True`` when the
+stores the color alone, and its ``has_preview()`` becomes ``True`` when the
 image is opaque everywhere and ``False`` otherwise, so that ``composite()``
 renders the layers; regenerating the preview follows the same rule. A CMYK or
 Lab image carries no coverage, so on such a document it leaves

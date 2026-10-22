@@ -819,9 +819,9 @@ _SHADOW_BYTES = 64
 
 # What one pixel of a gradient glow's canvas costs while ``glow_paint()`` lays
 # the gradient along the falloff: the colour lookup's index and float64 planes
-# for each of up to four channels, beside the silhouette and falloff. Measured
-# with tracemalloc at about 135 bytes a pixel in RGB and 167 in CMYK, plus the
-# arrays held across the call; the shadow's 64 and a fill's 128 are both under.
+# for each of up to four channels, beside the silhouette and falloff, and the
+# arrays held across the call. Those planes put it above a shadow's
+# (:data:`_SHADOW_BYTES`) and a gradient fill's (``paint.GRADIENT_FILL_BYTES``).
 _GLOW_GRADIENT_BYTES = 192
 
 # Entries in a contour's transfer table. Photoshop states a contour's points
