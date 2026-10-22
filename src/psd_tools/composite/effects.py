@@ -944,18 +944,21 @@ def cast_reach(distance: float, angle: float, size: float, spread: float) -> int
     return math.ceil(max(size, 0.0)) + math.ceil(max(abs(dx), abs(dy))) + 3
 
 
-def glow_reach(size: float, spread: float, precise: bool) -> int | None:
+def glow_reach(
+    size: float, spread: float, precise: bool, *, outer: bool = True
+) -> int | None:
     """How far a glow's falloff reads from each pixel, as :py:func:`cast_reach`.
 
     A precise glow ramps along the distance to the silhouette and is never
-    spread, so it is bounded whatever its spread; when its spread reads the
-    coverage (:py:func:`_glow_coverage`), each pixel of the silhouette also
-    reads :data:`_GLOW_EDGE_REACH` around it.
+    spread, so it is bounded whatever its spread; when an ``outer`` glow's
+    spread reads the coverage (:py:func:`_glow_coverage`), each pixel of the
+    silhouette also reads :data:`_GLOW_EDGE_REACH` around it. An inner glow's
+    choke does not read it.
     """
     if not precise and size > 0.0 and spread > 0.0:
         return None
     reach = math.ceil(max(size, 0.0)) + 3
-    if _reads_coverage(size, spread):
+    if outer and _reads_coverage(size, spread):
         reach += _GLOW_EDGE_REACH
     return reach
 
