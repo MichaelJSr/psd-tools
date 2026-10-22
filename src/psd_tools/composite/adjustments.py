@@ -708,8 +708,12 @@ def apply_posterize(
         (lut_size - _1) / lut_size
     )  # including this factor makes the output more accurate, on 8 bits and 16 bits
 
-    out = np.floor(correction_factor * img * levels) / (levels - _1)
-    return out
+    level = np.floor(correction_factor * img * levels)
+    if lut_size == 256:
+        # Photoshop truncates an 8-bit level to a whole byte, which the
+        # compositor's rounding cast then keeps.
+        return np.floor(level * _255 / (levels - _1)) / _255
+    return level / (levels - _1)
 
 
 @_preserve_alpha
