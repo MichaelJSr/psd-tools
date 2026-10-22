@@ -216,3 +216,44 @@ def test_edit_round_trips_through_save() -> None:
     assert lengths(again, "ParagraphRun") == [9, 7, 16]
     # The stored pixels are Photoshop's until rasterize().
     assert again.bbox == layer.bbox == (84, 110, 169, 151)
+
+
+def text_index(layer: TypeLayer) -> object:
+    return layer._data.text_data.get(b"TextIndex")
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda layer: layer.set_text("Gain 3"),
+        lambda layer: layer.set_span_style(0, 2, FauxBold=True),
+        lambda layer: layer.set_run_style(0, Tracking=20),
+    ],
+)
+def test_an_edit_unlinks_the_layer_from_the_document_text(edit: object) -> None:
+    psd = PSDImage.open(full_name("layer-edit.psd"))
+    ability, name = (
+        next(x for x in psd.descendants() if x.name == n) for n in ("Ability", "Name")
+    )
+    assert isinstance(ability, TypeLayer) and isinstance(name, TypeLayer)
+    assert (text_index(ability), text_index(name)) == (1, 0)
+    edit(ability)  # type: ignore[operator]
+    assert text_index(ability) is None
+    assert text_index(name) == 0
+    buf = io.BytesIO()
+    psd.save(buf, update_preview=False)
+    buf.seek(0)
+    again = PSDImage.open(buf)
+    indices = {
+        x.name: text_index(x) for x in again.descendants() if isinstance(x, TypeLayer)
+    }
+    assert indices == {"Ability": None, "Name": 0}
+
+
+def test_an_unchanged_text_keeps_the_link() -> None:
+    psd = PSDImage.open(full_name("layer-edit.psd"))
+    ability = next(x for x in psd.descendants() if x.name == "Ability")
+    assert isinstance(ability, TypeLayer)
+    ability.set_text(ability.text)
+    ability.set_span_style(1, 1, FauxBold=True)
+    assert text_index(ability) == 1

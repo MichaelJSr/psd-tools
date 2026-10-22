@@ -1382,9 +1382,10 @@ class Layer(LayerProtocol):
         converted to the destination's colour mode, depth and file version;
         narrowing a 32-bit layer tone-maps as Photoshop does. The patterns and
         linked smart objects it uses are copied into the destination document,
-        patterns unconverted to its colour mode. Clipping is positional: the
-        layers clipped to this one are not copied, and a copy keeps its own
-        clipping flag.
+        patterns unconverted to its colour mode. A type layer's copy is read
+        by Photoshop from its own text data, not the document's ``Txt2``
+        block. Clipping is positional: the layers clipped to this one are not
+        copied, and a copy keeps its own clipping flag.
 
         :param group: The destination :py:class:`~psd_tools.api.layers.Group` or
             document.
@@ -1426,6 +1427,9 @@ class Layer(LayerProtocol):
         for source, target in zip(sources, copies, strict=False):
             if (converted := source._reencode(group)) is not None:
                 target._apply_reencoded(converted)
+            if isinstance(target, TypeLayer) and target._type_data is not None:
+                # The index points into the source document's text data.
+                text_edit._drop_text_index(target)
         seed_resource = _issue_layer_ids(group._psd, group._psd.descendants(), copies)
         transfer = ResourceTransfer(group._psd)
         for node in copies:

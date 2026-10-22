@@ -2,12 +2,13 @@
 
 import io
 from copy import deepcopy
+from typing import cast
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from psd_tools.api.layers import Group, PixelLayer
+from psd_tools.api.layers import Group, PixelLayer, TypeLayer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.constants import Resource, Tag
 
@@ -247,3 +248,37 @@ def test_copy_into_a_mode_without_layers_is_rejected(name: str) -> None:
         layer.copy_to(dest)
 
     assert len(dest) == 0
+
+
+def test_a_type_layer_copied_across_documents_drops_its_text_index() -> None:
+    # A TextIndex points into the source document's Txt2 block; in the
+    # destination Photoshop would read another layer's text through it.
+    source = PSDImage.open(full_name("layer-edit.psd"))
+    name = next(x for x in source.descendants() if x.name == "Name")
+    dest = PSDImage.open(full_name("layers/type-layer.psd"))
+    assert isinstance(name, TypeLayer)
+    copy = name.copy_to(dest)
+    assert isinstance(copy, TypeLayer)
+    assert copy._data.text_data.get(b"TextIndex") is None
+    assert copy.text == name.text == "Card"
+    assert name._data.text_data.get(b"TextIndex") == 0
+    assert cast(TypeLayer, dest[0])._data.text_data.get(b"TextIndex") == 0
+    buffer = io.BytesIO()
+    dest.save(buffer, update_preview=False)
+    buffer.seek(0)
+    again = PSDImage.open(buffer)
+    assert [cast(TypeLayer, x)._data.text_data.get(b"TextIndex") for x in again] == [
+        0,
+        None,
+    ]
+
+
+def test_a_type_layer_in_a_copied_group_drops_its_text_index() -> None:
+    source = PSDImage.open(full_name("layer-edit.psd"))
+    text = next(x for x in source if x.name == "Text")
+    copy = text.copy_to(PSDImage.new("RGB", (48, 64)))
+    assert isinstance(copy, Group)
+    assert [cast(TypeLayer, x)._data.text_data.get(b"TextIndex") for x in copy] == [
+        None,
+        None,
+    ]

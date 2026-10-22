@@ -5,6 +5,10 @@ UTF-16 code units, so an astral character takes two of them. Editing never
 renders and needs no optional dependency: the stored pixels stay as they
 are until :py:meth:`TypeLayer.rasterize
 <psd_tools.api.layers.TypeLayer.rasterize>` replaces them.
+
+An edited layer drops its ``TextIndex``: Photoshop reads a layer that keeps
+one from the document's own copy of the text (the ``Txt2`` block), which
+the edit does not reach, and one without from the layer itself.
 """
 
 from __future__ import annotations
@@ -295,6 +299,12 @@ def _set_stored_text(layer: TypeLayer, text: str) -> None:
         item.value = text[:-1] + ("\x00" if old.endswith("\x00") else "")
 
 
+def _drop_text_index(layer: TypeLayer) -> None:
+    """Make Photoshop read the layer's own text data rather than ``Txt2``."""
+    layer._data.text_data.pop(b"TextIndex", None)
+
+
 def _touch(layer: TypeLayer) -> None:
     layer.__dict__.pop("_typesetting", None)
+    _drop_text_index(layer)
     layer._psd.mark_updated()
