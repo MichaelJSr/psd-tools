@@ -719,7 +719,7 @@ _PREVIEWS = [
     ("layer_effects.psd", (305, 10, 623, 105), "bevelemboss", 6e-4, 1e-2),
     ("layer_effects.psd", (383, 560, 563, 608), "satin", 1e-5, 5e-2),
     ("layer_comps.psb", (17, 20, 180, 183), "bevelemboss", 2.2e-3, 5e-3),
-    ("layer_params.psb", (117, 66, 484, 139), "bevelemboss", 1.25e-2, 3e-2),
+    ("layer_params.psb", (117, 66, 484, 139), "bevelemboss", 1.25e-2, 2.5e-2),
 ]
 
 

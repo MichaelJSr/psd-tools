@@ -139,6 +139,11 @@ _GRID_BYTES = 48
 # while a filled shape's boundary band fills enough of it that it does.
 _DENSE_EROSION_DENSITY = 0.15
 
+# The lengths of a diagonal and a knight's move, which with an axis move are
+# the steps :py:func:`_chamfer_length` measures in.
+_DIAGONAL = math.sqrt(2.0)
+_KNIGHT = math.sqrt(5.0)
+
 
 def _enum(desc: Descriptor, key: bytes) -> bytes:
     """The enum ``key`` names, or ``b""`` if the descriptor does not carry one.
@@ -398,6 +403,57 @@ def _prune_offsets(
     return result
 
 
+def _chamfer_length(down: np.ndarray, across: np.ndarray) -> np.ndarray:
+    """How far Photoshop measures an offset of ``down`` and ``across`` pixels.
+
+    The shortest path through whole-pixel moves (1, 0), (1, 1) and (2, 1),
+    mirrored to every octant and each at its own length: exact along those
+    directions and a little long between them, which is where Photoshop's
+    strokes stop short of a Euclidean one (``effects/outside-stroke.psd``,
+    ``effects/antialiased-stroke-edge.psd``).
+    """
+    major = np.maximum(np.abs(down), np.abs(across)).astype(np.float64)
+    minor = np.minimum(np.abs(down), np.abs(across)).astype(np.float64)
+    # Below the knight's slope the path takes axis and knight moves, above it
+    # knight and diagonal ones.
+    shallow = minor * _KNIGHT + (major - 2.0 * minor)
+    steep = (major - minor) * _KNIGHT + (2.0 * minor - major) * _DIAGONAL
+    return np.where(2.0 * minor <= major, shallow, steep).astype(np.float32)
+
+
+def _chamfer_transform(mask: np.ndarray) -> np.ndarray:
+    """:py:func:`_chamfer_length` from each set pixel to the nearest clear one.
+
+    What ``distance_transform_edt`` returns, in Photoshop's metric. Each pass
+    takes every row in turn from the one or two before it, then along itself
+    both ways, so it finds every path that never turns back up, and the
+    second pass, run bottom to top, every one that never turns back down;
+    the shortest path to a pixel is one or the other.
+    """
+    height, width = mask.shape
+    field = np.where(mask, np.inf, 0.0)
+    cols = np.arange(width, dtype=np.float64)
+    moves = ((1, 0, 1.0), (1, 1, _DIAGONAL), (1, 2, _KNIGHT), (2, 1, _KNIGHT))
+    for order in (range(height), range(height - 1, -1, -1)):
+        step = 1 if order.start == 0 else -1
+        for row in order:
+            line = field[row]
+            for down, across, length in moves:
+                before = row - step * down
+                if not 0 <= before < height or across >= width:
+                    continue
+                source = field[before] + length
+                if across == 0:
+                    np.minimum(line, source, out=line)
+                else:
+                    np.minimum(line[across:], source[:-across], out=line[across:])
+                    np.minimum(line[:-across], source[across:], out=line[:-across])
+            np.minimum(line, np.minimum.accumulate(line - cols) + cols, out=line)
+            back = np.minimum.accumulate((line + cols)[::-1])[::-1] - cols
+            np.minimum(line, back, out=line)
+    return field.astype(np.float32)
+
+
 def _nearest_boundary(
     alpha: np.ndarray, stating: np.ndarray, near: np.ndarray, radius: float
 ) -> np.ndarray:
@@ -405,7 +461,8 @@ def _nearest_boundary(
 
     Every pixel in ``stating`` states one boundary, ``near`` from its own
     centre and so up to half a pixel either side of it. A pixel that states
-    none is ``min`` over those of ``|x - p| + near[p]`` -- the nearest
+    none is ``min`` over those of ``|x - p| + near[p]``, with ``|x - p|``
+    the :py:func:`_chamfer_length` of the offset -- the nearest
     *boundary*, which is not the nearest pixel stating one: the offsets span a
     pixel, so a pixel one further away can win. Taking the nearest pixel's
     word for it leaves the answer to whichever of two equidistant pixels a
@@ -414,12 +471,13 @@ def _nearest_boundary(
     value it renders.
 
     That minimum is a grey erosion of ``near`` by a cone -- ``scipy``'s
-    ``grey_erosion`` with a disc footprint and ``-length`` as the structuring
+    ``grey_erosion`` with a footprint of the offsets within ``radius`` and
+    ``-length`` as the structuring
     function, which computes it without a Python-level pass per offset. The
     dual, the nearest boundary from *inside*, is the same erosion of
     ``-near``, negated.
 
-    An erosion runs the disc footprint over every pixel of whatever it is
+    An erosion runs the footprint over every pixel of whatever it is
     given, so it only pays for itself where ``active`` -- the pixels an
     answer is wanted for -- is a healthy share of the region a crop bounding
     the stating pixels would cover: a filled shape's boundary, where the band
@@ -477,7 +535,7 @@ def _nearest_boundary(
             active[crop],
         )
         grid = np.mgrid[-span : span + 1, -span : span + 1]
-        length = np.hypot(*grid).astype(np.float32)
+        length = _chamfer_length(*grid)
         kwargs = {
             "footprint": length <= radius,
             "structure": -length,
@@ -498,7 +556,7 @@ def _nearest_boundary(
         return field
 
     offsets = np.mgrid[-span : span + 1, -span : span + 1].reshape(2, -1).T
-    lengths = np.hypot(offsets[:, 0], offsets[:, 1]).astype(np.float32)
+    lengths = _chamfer_length(offsets[:, 0], offsets[:, 1])
     within = lengths <= radius
     offsets, lengths = offsets[within], lengths[within]
     ascending = np.argsort(lengths, kind="stable")
@@ -562,8 +620,7 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     against (#799).
 
     A step from opaque straight to clear states a boundary too, half a pixel
-    from the centre of the pixel on either side of it, where the exact
-    Euclidean distance to the iso-contour puts it. One mask can carry both --
+    from the centre of the pixel on either side of it. One mask can carry both --
     a glyph antialiased round its curves and stepping hard along its stems --
     and every pixel takes the nearest boundary any pixel states, of either
     kind, which :py:func:`_nearest_boundary` solves for outright
@@ -573,37 +630,32 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     which parts company with the truth around a curve the way
     :py:func:`_distance_band` does when it paints the arc.
 
-    A mask that is flat at 0 or 1 has no boundary at all. That is not a case
-    to fall through: ``distance_transform_edt`` is undefined on an input with
-    no zeros and reports distances to a phantom feature off the array corner,
-    which a band paints as a wedge in the corner of the canvas. Being
-    uniformly infinitely far from the boundary leaves every band empty, which
-    is right. A mask flat at a *partial* value is not one of these -- every
-    pixel of it states a boundary, so it takes a stroke over all of it.
+    Distances are measured in Photoshop's metric, :py:func:`_chamfer_length`,
+    whatever kind of boundary they are measured from.
+
+    A mask that is flat at 0 or 1 has no boundary at all, and every pixel is
+    infinitely far from one, which leaves every band empty. A mask flat at a
+    *partial* value is not one of these -- every pixel of it states a
+    boundary, so it takes a stroke over all of it.
     """
     if reach is None:
         # No band named, so no bound: far enough that nothing is out of range.
         reach = float(math.hypot(*alpha.shape))
     _require_scipy("Stroke effects")
-    from scipy.ndimage import (  # type: ignore[import-untyped]  # noqa: PLC0415
-        distance_transform_edt,
-    )
 
     partial = (alpha > 0) & (alpha < 1)
     if not partial.any():
-        # ``distance_transform_edt`` measures to the nearest pixel of the other
-        # class, so the two pixels straddling the boundary both come back 1.0
-        # rather than the 0.5 their centres really sit at. The magnitude is
-        # shrunk to put the boundary back between them; subtracting 0.5
-        # outright would be right outside and a full pixel wrong inside, where
-        # the sign is negative.
+        # Measured to the nearest pixel of the other class, the two pixels
+        # straddling the boundary both come back 1.0 rather than the 0.5
+        # their centres really sit at. The magnitude is shrunk to put the
+        # boundary back between them; subtracting 0.5 outright would be right
+        # outside and a full pixel wrong inside, where the sign is negative.
         inside = alpha >= 0.5
         if inside.all():
             return np.full(alpha.shape, -np.inf, dtype=np.float32)
         if not inside.any():
             return np.full(alpha.shape, np.inf, dtype=np.float32)
-        base = distance_transform_edt(~inside).astype(np.float32)
-        base -= distance_transform_edt(inside).astype(np.float32)
+        base = _chamfer_transform(~inside) - _chamfer_transform(inside)
         return np.sign(base) * np.maximum(np.abs(base) - 0.5, 0.0)
 
     # The pixels on either side of a step from opaque straight to clear.
@@ -618,9 +670,9 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
 def _distance_band(distance: np.ndarray, lo: float, hi: float) -> np.ndarray:
     """Coverage of the band between ``lo`` and ``hi``, antialiased.
 
-    A distance field has unit gradient, so a linear ramp across one pixel is the
-    exact area of a pixel cut by a straight edge, and a fractional width is not
-    quantized. Where the band's edge curves, the ramp only approximates it.
+    The ramp runs linearly across one pixel of the distance, as Photoshop
+    draws it, so a fractional width is not quantized; along an axis that is
+    the exact area of a pixel cut by a straight edge.
     """
     return np.clip(hi - distance + 0.5, 0, 1) * np.clip(distance - lo + 0.5, 0, 1)
 

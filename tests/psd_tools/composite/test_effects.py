@@ -22,6 +22,8 @@ from psd_tools.composite.composite import (
 )
 from psd_tools.composite.effects import (
     _BANDS,
+    _chamfer_length,
+    _chamfer_transform,
     _distance_band,
     _grow,
     _signed_distance,
@@ -504,17 +506,13 @@ def test_hard_edged_stroke_matches_photoshop(filename: str) -> None:
 
     Every file here is squares with no partial alpha anywhere, so the boundary
     the stroke is measured from is a fact rather than a modelling choice. Every
-    straight run of the stroke then matches Photoshop to the bit, because a
-    ramp that is linear in distance is the exact area of a pixel cut by a
-    straight edge. What is left is the corner arcs, where that ramp is only an
-    approximation of a curved cut: a handful of pixels per file, which is why
-    this asserts a bound rather than equality. It is tight enough to separate
-    the band from an approximation of it, which the 0.01 used elsewhere would
-    not be. The two inset files have no arc to approximate at all,
-    an inset offset of a convex polygon being another polygon, and reproduce
-    Photoshop bit for bit.
+    straight run of the stroke matches Photoshop to the bit, because a ramp
+    that is linear in distance is the exact area of a pixel cut by a straight
+    edge, and the corners match it to within rounding once the distance is
+    Photoshop's own (:py:func:`_chamfer_length`): a Euclidean one rounds them
+    off into arcs that miss it by tens of levels.
     """
-    check_composite_quality(filename, threshold=1e-4)
+    check_composite_quality(filename, threshold=1e-6)
 
 
 def test_a_feathered_mask_takes_the_stroke_over_its_whole_ramp() -> None:
@@ -726,13 +724,12 @@ def test_a_stroke_takes_the_nearer_of_a_partial_and_a_hard_edge(filename: str) -
     Each square's antialiased or feathered side meets hard top and bottom
     sides at its corners. A pixel past the corner takes whichever boundary is
     nearer, the one the partial pixels state or the hard step's, rather than
-    the nearer kind of pixel's; the bound is what is left on the corner arcs,
-    where a linear ramp only approximates the curved cut.
+    the nearer kind of pixel's, and lands within rounding of Photoshop's.
     """
     psd = PSDImage.open(full_name(filename))
     reference = psd.numpy()[..., :3]
     result = composite(psd)[0]
-    assert float(np.abs(result - reference).max()) < 32 / 255.0
+    assert float(np.abs(result - reference).max()) < 1.5 / 255.0
 
 
 def test_every_boundary_pixel_states_where_the_boundary_falls() -> None:
@@ -740,9 +737,9 @@ def test_every_boundary_pixel_states_where_the_boundary_falls() -> None:
 
     A partial pixel states ``0.5 - alpha`` from its centre, and a pixel on
     either side of a hard step states half a pixel; every other pixel is the
-    minimum over those of the distance to the pixel plus what it states,
-    negated inside. Checked against that minimum taken outright, on a square
-    antialiased along one side and stepping hard along the rest.
+    minimum over those of the :py:func:`_chamfer_length` to the pixel plus what
+    it states, negated inside. Checked against that minimum taken outright, on
+    a square antialiased along one side and stepping hard along the rest.
     """
     alpha = np.zeros((20, 20), dtype=np.float32)
     alpha[5:15, 5:15] = 1.0
@@ -755,7 +752,7 @@ def test_every_boundary_pixel_states_where_the_boundary_falls() -> None:
     near = 0.5 - alpha
     rows, cols = np.nonzero(partial | hard)
     for y, x in zip(*np.nonzero(~partial & ~hard), strict=True):
-        length = np.hypot(rows - y, cols - x)
+        length = _chamfer_length(rows - y, cols - x)
         within = length <= reach
         stated = near[rows, cols][within]
         if alpha[y, x] >= 1:
@@ -764,6 +761,55 @@ def test_every_boundary_pixel_states_where_the_boundary_falls() -> None:
             expected = np.min(stated + length[within], initial=np.inf)
         assert float(field[y, x]) == pytest.approx(float(expected), abs=1e-5)
     assert np.allclose(field[partial | hard], near[partial | hard])
+
+
+def test_the_chamfer_length_is_exact_along_its_moves_and_long_between() -> None:
+    """Axis, diagonal and knight's moves measure true; other offsets measure long."""
+    exact = np.array([[0, 7], [3, 3], [1, 2], [-2, 4], [5, -5], [-4, 0]])
+    lengths = _chamfer_length(exact[:, 0], exact[:, 1])
+    assert np.allclose(lengths, np.hypot(exact[:, 0], exact[:, 1]))
+    between = np.array([[1, 7], [3, 4], [2, 3], [-1, 5]])
+    lengths = _chamfer_length(between[:, 0], between[:, 1])
+    assert np.all(lengths > np.hypot(between[:, 0], between[:, 1]) + 1e-3)
+    # (3, 4) is a knight's move and two diagonal ones.
+    assert float(_chamfer_length(np.array(3), np.array(4))) == pytest.approx(
+        math.sqrt(5.0) + 2.0 * math.sqrt(2.0), abs=1e-6
+    )
+
+
+def test_the_chamfer_transform_is_the_nearest_clear_pixel() -> None:
+    """The two passes find what the nearest clear pixel measures outright."""
+    rng = np.random.default_rng(7)
+    mask = rng.random((23, 31)) > 0.04
+    field = _chamfer_transform(mask)
+    rows, cols = np.nonzero(~mask)
+    yy, xx = np.mgrid[:23, :31]
+    lengths = _chamfer_length(yy[..., None] - rows, xx[..., None] - cols)
+    assert np.allclose(field, lengths.min(axis=-1), atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "effects/outside-stroke.psd",
+        "effects/center-stroke-sizes.psd",
+        "effects/antialiased-stroke-edge.psd",
+        "effects/feathered-stroke.psd",
+        "effects/group-clips-child-stroke.psd",
+        "effects/group-stroke-off-canvas.psd",
+        "effects/shape-stroke-raster-mask.psd",
+    ],
+)
+def test_a_stroke_is_measured_in_photoshops_metric(filename: str) -> None:
+    """Every pixel of these strokes, corners included, is within rounding.
+
+    Measured in a Euclidean metric instead, the rounded corners and the
+    edges past antialiased pixels miss Photoshop's by tens of levels.
+    """
+    psd = PSDImage.open(full_name(filename))
+    reference = psd.numpy()[..., :3]
+    result = composite(psd)[0]
+    assert float(np.abs(result - reference).max()) < 1.5 / 255.0
 
 
 def test_distance_band_covers_its_width_on_a_pixel_boundary() -> None:
@@ -1022,10 +1068,10 @@ def test_band_fits_the_canvas_stroke_bbox_asks_for(size: float) -> None:
 def test_a_mask_with_no_coverage_to_read_draws_no_stroke(alpha: float) -> None:
     """A stroke needs a boundary to trace, and a flat 0 or 1 mask has none (#799).
 
-    ``distance_transform_edt`` is undefined on an input with no zeros: rather
-    than refusing, it reports distances to a phantom feature off the array
-    corner, and a band built on those paints a wedge of full-coverage stroke
-    into the corner of the canvas. Nothing in the fixture corpus has a
+    A distance transform has nothing to measure to on such a mask, and one
+    that answers anyway -- ``distance_transform_edt`` reports distances to a
+    phantom feature off the array corner -- paints a wedge of full-coverage
+    stroke into the corner of the canvas. Nothing in the fixture corpus has a
     boundaryless mask, so no rendering comparison can catch this and only this
     test does.
 
@@ -1101,9 +1147,9 @@ def test_a_hard_step_keeps_the_pixel_edge_it_has_no_coverage_for() -> None:
 
     Reading the boundary off coverage says nothing about an edge that has no
     coverage to read, and a mask can carry both: a shape antialiased along one
-    side and butted against its own bounding box along another. The step keeps
-    the pixel-edge boundary the Euclidean field gives it, which is what makes
-    reading coverage a no-op on every hard-edged fixture in the corpus.
+    side and butted against its own bounding box along another. The step
+    states the pixel edge itself, which is what makes reading coverage a no-op
+    on every hard-edged fixture in the corpus.
     """
     alpha = np.zeros((4, 16), dtype=np.float32)
     alpha[:, 2:8] = 1.0  # a hard step at x=2, an antialiased edge at x=8
@@ -1120,10 +1166,8 @@ def test_a_hard_step_keeps_the_pixel_edge_it_has_no_coverage_for() -> None:
     assert distance[0, 7] == pytest.approx(-0.75)
     assert distance[0, 8] == pytest.approx(0.25)
     assert distance[0, 9] == pytest.approx(1.25)
-    # Column 5 is the same distance from the step and from the antialiased
-    # pixel, and the coverage reading wins the tie. Asserted because turning
-    # ``distance <= to_hard`` into ``<`` moves it to -2.5 and nothing else in
-    # the file notices.
+    # Column 5 is three pixels from the step and from the antialiased pixel,
+    # whose boundary lies a quarter pixel nearer than the step's.
     assert distance[0, 5] == pytest.approx(-2.75)
 
 

@@ -22,6 +22,10 @@ Changelog
   measure from the nearest boundary that either an antialiased pixel or a
   hard step states, so on a shape antialiased in places and hard elsewhere,
   such as text, a stroke no longer reaches a fraction of a pixel too far
+- [fix] Stroke effects, precise outer and inner glows and chisel bevels
+  measure distance as Photoshop does, in whole-pixel straight, diagonal and
+  knight's-move steps, so a stroke's corners and its outer edge round curves,
+  as on text, no longer reach a fraction of a pixel too far
 - [fix] A group's stroke effect is traced from how opaque its contents are,
   not from what they cover, as Photoshop draws it: an outside stroke fills
   the rest of each pixel of a translucent child instead of stopping at the
