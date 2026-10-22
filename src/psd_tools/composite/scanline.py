@@ -53,12 +53,12 @@ _FLATNESS = 0.002
 # points sit far enough out to ask for more than its visible arc could use.
 _MAX_STEPS = 1000
 
-# How far from a whole number the row sum's rounding can leave a pixel the
-# path covers whole or not at all. Within it the pixel is given the whole
-# number: the residue is a few float64 ulps, which the float32 result keeps
-# at 0 but not at 1, and a reader that tests for any coverage would take it
-# for a partial pixel -- and a different one on every box the path is drawn
-# on, since the sum runs from the box's own edge.
+# How far above 0 the row sum's rounding can leave a pixel the path does not
+# cover. Within it the pixel is given 0: the residue is a few float64 ulps,
+# which the float32 result keeps at 0 though it rounds them away at 1, and a
+# reader that tests for any coverage would take it for a partial pixel -- and
+# a different one on every box the path is drawn on, since the sum runs from
+# the box's own edge.
 _RESIDUE = 1e-9
 
 
@@ -209,7 +209,6 @@ def fill_coverage(polylines: list, width: int, height: int) -> np.ndarray:
         np.mod(rows, 2.0, out=rows)
         np.subtract(1.0, np.abs(rows - 1.0), out=rows)
         rows[rows < _RESIDUE] = 0.0
-        rows[rows > 1.0 - _RESIDUE] = 1.0
         coverage[top:bottom] = rows[:, 1 : width + 1]
     return coverage
 
