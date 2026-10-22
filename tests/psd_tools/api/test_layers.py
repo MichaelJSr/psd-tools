@@ -1481,11 +1481,9 @@ def test_artboard_background_chroma_is_offset_encoded_on_a_lab_document(
 ) -> None:
     """A neutral Lab a/b is 128/255, not 0.5 (#743).
 
-    The two are half a code value apart, which would be beneath notice if the
-    exit rounded -- but ``composite_pil()`` casts with
-    ``(255 * color).astype(np.uint8)``, which truncates, so 0.5 lands on byte
-    127 where Photoshop writes 128 for every neutral. Asserting the tuple alone
-    would not separate them at any sane tolerance, so the byte is asserted too.
+    The two are half a code value apart, and ``composite_pil()``'s rounding
+    puts 0.5 on byte 128 only by its tie rule, so the tuple is asserted
+    exactly and the byte as well.
 
     Forged the same way as the CMYK case above, and for the same reason: no
     shipped fixture is a Lab document with a white or black artboard.
@@ -1505,7 +1503,7 @@ def test_artboard_background_chroma_is_offset_encoded_on_a_lab_document(
     color, alpha = artboard._artboard_background_defaults()
     assert alpha == 1.0
     assert color == (1.0 if bg_type == 2 else 0.0, 128 / 255, 128 / 255)
-    chroma = (255 * np.array(color, dtype=np.float32)).astype(np.uint8)
+    chroma = np.rint(255 * np.array(color, dtype=np.float32)).astype(np.uint8)
     assert chroma[1] == 128
 
 

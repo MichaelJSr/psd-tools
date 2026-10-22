@@ -350,8 +350,7 @@ class TestLabToRgb:
 
         Pairing the ICC PCS D50 with Lindbloom's Bradford matrices leaves the
         transform without a fixed point -- white falls short of 1.0 in blue,
-        and a neutral grey picks up a small negative b, which the compositor's
-        truncating cast turns into byte 127 where Photoshop writes 128.
+        and a neutral grey picks up a small negative b where Photoshop has 0.
         """
         assert lab_to_rgb(100.0, 0.0, 0.0) == pytest.approx((1.0, 1.0, 1.0), abs=1e-7)
         assert lab_to_rgb(0.0, 0.0, 0.0) == (0.0, 0.0, 0.0)
@@ -402,17 +401,14 @@ class TestRgbToLab:
     def test_a_grey_is_exactly_neutral(self, grey):
         """Neutral must be 0.0, not merely near it.
 
-        ``LAB_NEUTRAL_CHROMA`` is ``128/255``, and the compositor truncates on
-        the way out, so a small negative chroma -- which is what the ICC PCS
-        white point gives here -- emits byte 127 instead of 128.
+        ``LAB_NEUTRAL_CHROMA`` is ``128/255``; the ICC PCS white point would
+        give a small negative chroma here instead.
         """
         _, a, b = rgb_to_lab(grey, grey, grey)
         assert (a, b) == pytest.approx((0.0, 0.0), abs=1e-9)
-        # The bound that actually matters: what the compositor's truncating
-        # cast makes of it. The ICC PCS white point gives a chroma here that
-        # is small but lands a byte low.
+        # What the compositor's rounding cast makes of it.
         for chroma in (a, b):
-            assert int(255.0 * ((chroma + 128.0) / 255.0)) == 128
+            assert round(255.0 * ((chroma + 128.0) / 255.0)) == 128
 
     def test_round_trips_through_lab_to_rgb(self):
         """Sanity check only.
