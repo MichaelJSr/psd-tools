@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] Stroke effects, precise outer and inner glows and chisel bevels
+  measure from the nearest boundary that either an antialiased pixel or a
+  hard step states, so on a shape antialiased in places and hard elsewhere,
+  such as text, a stroke no longer reaches a fraction of a pixel too far
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead

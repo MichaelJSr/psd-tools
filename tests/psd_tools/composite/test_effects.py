@@ -717,6 +717,55 @@ def test_an_antialiased_edge_is_stroked_from_its_own_coverage() -> None:
     check_composite_quality("effects/antialiased-stroke-edge.psd", threshold=2e-4)
 
 
+@pytest.mark.parametrize(
+    "filename", ["effects/antialiased-stroke-edge.psd", "effects/feathered-stroke.psd"]
+)
+def test_a_stroke_takes_the_nearer_of_a_partial_and_a_hard_edge(filename: str) -> None:
+    """Where a partial edge meets a hard one, the stroke stops at the nearer.
+
+    Each square's antialiased or feathered side meets hard top and bottom
+    sides at its corners. A pixel past the corner takes whichever boundary is
+    nearer, the one the partial pixels state or the hard step's, rather than
+    the nearer kind of pixel's; the bound is what is left on the corner arcs,
+    where a linear ramp only approximates the curved cut.
+    """
+    psd = PSDImage.open(full_name(filename))
+    reference = psd.numpy()[..., :3]
+    result = composite(psd)[0]
+    assert float(np.abs(result - reference).max()) < 32 / 255.0
+
+
+def test_every_boundary_pixel_states_where_the_boundary_falls() -> None:
+    """The field is the nearest boundary any pixel states, of either kind.
+
+    A partial pixel states ``0.5 - alpha`` from its centre, and a pixel on
+    either side of a hard step states half a pixel; every other pixel is the
+    minimum over those of the distance to the pixel plus what it states,
+    negated inside. Checked against that minimum taken outright, on a square
+    antialiased along one side and stepping hard along the rest.
+    """
+    alpha = np.zeros((20, 20), dtype=np.float32)
+    alpha[5:15, 5:15] = 1.0
+    alpha[5:15, 14] = np.linspace(0.1, 0.9, 10, dtype=np.float32)
+    reach = 6.0
+    field = _signed_distance(alpha, reach)
+
+    partial = (alpha > 0) & (alpha < 1)
+    hard = (alpha >= 1) & _grow(alpha <= 0) | (alpha <= 0) & _grow(alpha >= 1)
+    near = 0.5 - alpha
+    rows, cols = np.nonzero(partial | hard)
+    for y, x in zip(*np.nonzero(~partial & ~hard), strict=True):
+        length = np.hypot(rows - y, cols - x)
+        within = length <= reach
+        stated = near[rows, cols][within]
+        if alpha[y, x] >= 1:
+            expected = np.max(stated - length[within], initial=-np.inf)
+        else:
+            expected = np.min(stated + length[within], initial=np.inf)
+        assert float(field[y, x]) == pytest.approx(float(expected), abs=1e-5)
+    assert np.allclose(field[partial | hard], near[partial | hard])
+
+
 def test_distance_band_covers_its_width_on_a_pixel_boundary() -> None:
     """A stroke of width *w* covers *w* pixels of coverage, fractional *w* too.
 
