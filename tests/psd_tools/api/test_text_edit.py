@@ -235,10 +235,9 @@ def story_layer(name: str, path: str = STORY) -> TypeLayer:
 
 
 def txt2(layer: TypeLayer) -> Any:
-    psd = cast(PSDImage, layer._psd)
-    return psd._record.layer_and_mask_information.tagged_blocks.get_data(
-        Tag.TEXT_ENGINE_DATA
-    )
+    blocks = cast(PSDImage, layer._psd)._record.layer_and_mask_information.tagged_blocks
+    assert blocks is not None
+    return blocks.get_data(Tag.TEXT_ENGINE_DATA)
 
 
 def story(layer: TypeLayer) -> Any:
@@ -406,7 +405,7 @@ def test_story_marks_stay_on_their_characters() -> None:
     layer = story_layer("Ability")
     model = story(layer)["0"]
     marks = engine_data.Dict()  # a KernRun: a manual kern on the first "\r"
-    runs = []
+    runs: list[Any] = []
     for data, n in ((engine_data.Dict(), 32), (None, 1), (engine_data.Dict(), 10)):
         run = engine_data.Dict()
         if data is None:
@@ -425,6 +424,7 @@ def test_story_marks_stay_on_their_characters() -> None:
 def test_set_text_without_a_txt2_block() -> None:
     layer = story_layer("Name")
     blocks = cast(PSDImage, layer._psd)._record.layer_and_mask_information.tagged_blocks
+    assert blocks is not None
     del blocks[Tag.TEXT_ENGINE_DATA]
     assert layer.story_text is None and not layer.sync_story()
     layer.set_text("B.F.B.")
