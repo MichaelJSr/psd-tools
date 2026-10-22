@@ -103,6 +103,9 @@ _NAMED = _Spelling(
     numbered=False,
 )
 
+#: What ends a paragraph run: Photoshop ends one at a forced line break too.
+_PARAGRAPH_ENDS = "\r\x03"
+
 #: StyleSheetData keys a story feature mirrors under the same name, with
 #: Photoshop CC's number for it.
 _FEATURES = {
@@ -142,8 +145,10 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
 
     ``keep="runs"`` keeps the style runs of the unchanged prefix and suffix;
     replaced text takes the style of the first character it replaces and
-    inserted text continues the run before it. Paragraphs are rebuilt from
-    ``\r``, a new one inheriting the paragraph the edit started in.
+    inserted text continues the run before it. Paragraph runs are rebuilt
+    to end at each ``\r`` and each ``\x03`` (a forced line break, which also
+    ends one in Photoshop's files), a new one inheriting the paragraph the
+    edit started in.
     ``keep="single"`` collapses the styles to the first run and the
     paragraphs to the first paragraph. The last paragraph's ``\r`` is
     appended, so a ``text`` ending in one gains an empty paragraph. Setting
@@ -313,7 +318,7 @@ class _Splice:
         out: list[Span] = []
         start = 0
         for i, c in enumerate(self.new):
-            if c == "\r":
+            if c in _PARAGRAPH_ENDS:
                 end = self.new_u[i + 1]
                 data = (
                     spans[0][2]
@@ -682,5 +687,6 @@ def _set_stored_text(layer: TypeLayer, text: str) -> None:
 
 
 def _touch(layer: TypeLayer) -> None:
+    # TextIndex stays: it names the story the edit wrote, which Photoshop reads.
     layer.__dict__.pop("_typesetting", None)
     layer._psd.mark_updated()

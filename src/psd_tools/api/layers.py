@@ -3138,9 +3138,9 @@ class TypeLayer(Layer):
         Replace the text, keeping the character styles.
 
         ``keep="runs"`` keeps the runs of the unchanged prefix and suffix and
-        gives the replaced middle the style at the edit start; paragraphs are
-        rebuilt from ``'\r'``, a new one inheriting the paragraph the edit
-        started in. ``keep="single"`` collapses the styles to the first run.
+        gives the replaced middle the style at the edit start; paragraph runs
+        are rebuilt to end at each ``'\r'`` and ``'\x03'``, a new one
+        inheriting the paragraph the edit started in. ``keep="single"`` collapses the styles to the first run.
         The last paragraph's ``'\r'`` is added, so a ``text`` that ends in
         one gains an empty paragraph. The pixels are untouched until
         :py:meth:`rasterize`.

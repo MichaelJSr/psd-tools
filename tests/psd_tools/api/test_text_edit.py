@@ -449,3 +449,58 @@ def test_story_shared_with_another_layer_refuses() -> None:
     with pytest.raises(ValueError, match="also 'Ability'"):
         layer.set_text("B.F.B.")
     assert layer.text == "B.F.B" and not psd.is_updated()
+
+
+def test_a_forced_line_break_ends_a_paragraph_run() -> None:
+    # Photoshop ends a paragraph run at "\x03" as at "\r", in both blocks.
+    layer = story_layer("Ability")
+    soft = ABILITY.replace("\r", "\x03")
+    layer.set_text(soft)
+    for runs in (
+        lengths(layer, "ParagraphRun"),
+        story_runs(layer, "5"),
+        story_runs(layer, "1", view=True),
+    ):
+        assert runs == [33, 10]
+    layer.set_text(soft.replace("two", "2"))  # an edit past the break keeps it
+    assert lengths(layer, "ParagraphRun") == story_runs(layer, "5") == [33, 8]
+    assert story_runs(layer, "1", view=True) == [33, 8]
+
+
+def test_edits_keep_the_text_index() -> None:
+    # The index names the story the edit wrote; without it the story is orphaned.
+    layer = story_layer("Name")
+    index = int(layer._data.text_data[b"TextIndex"])
+    layer.set_text("B.F.B.")
+    layer.set_span_style(0, 1, fill=(1, 0, 0))
+    name = next(x for x in saved(layer).descendants() if x.name == "Name")
+    assert int(cast(TypeLayer, name)._data.text_data[b"TextIndex"]) == index
+    assert cast(TypeLayer, name).story_text == "B.F.B.\r"
+
+
+def test_named_story_takes_span_styles() -> None:
+    # text.psd's Txt2 names its keys (pre-CC): features by name, the paint
+    # as StreamTag/Color/Type/Values.
+    layer = open_layer()
+    layer.set_span_style(0, 4, fill=(1, 0, 0), FontSize=20.0, Font="AdobeInvisFont")
+    model = text2_named(layer)
+    runs = model["StyleRun"]["RunArray"]
+    assert [int(r["Length"].value) for r in runs] == lengths(layer) == [4, 26]
+    features = runs[0]["RunData"]["StyleSheet"]["Features"]
+    assert float(features["FontSize"].value) == 20.0
+    assert int(features["Font"].value) == 2  # the story's FontSet: AdobeInvisFont
+    paint = features["FillColor"]
+    assert str(paint["StreamTag"].value) == "SimplePaint"
+    assert int(paint["Color"]["Type"].value) == 1
+    assert [float(v.value) for v in paint["Color"]["Values"]] == [1.0, 1.0, 0.0, 0.0]
+    rest = runs[1]["RunData"]["StyleSheet"]["Features"]
+    assert float(rest["FontSize"].value) == 13.0
+    again = cast(
+        TypeLayer, next(x for x in saved(layer).descendants() if x.kind == "type")
+    )
+    assert raw(text2_named(again)) == raw(model)
+
+
+def text2_named(layer: TypeLayer) -> Any:
+    index = int(layer._data.text_data[b"TextIndex"])
+    return txt2(layer)["DocumentObjects"]["TextObjects"][index]["Model"]
