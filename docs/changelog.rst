@@ -112,11 +112,18 @@ Changelog
   Photoshop's default, 120, in a document that states no global angle; it
   was 30
 - [fix] Satin and bevel/emboss layer effects are now rendered when a document
-  is composited from its layers; a stroke emboss, a bevel's shape contour and
-  its texture are not. Needs ``scipy``; without it they are left out with a
+  is composited from its layers; a stroke emboss and a bevel's shape contour
+  are not. Needs ``scipy``; without it they are left out with a
   warning (#379)
 - [fix] Backwards-incompatible: ``BevelEmboss.altitude`` returns the
   document's global altitude when the effect uses global light (#379)
+- [fix] Bevel textures are drawn: the pattern, tiled from where a pattern
+  overlay's would start, raises bumps that the bevel's light picks out.
+  Every bevel's slopes now use a Sobel operator, so untextured bevels can
+  shift slightly too
+- [api] ``BevelEmboss`` gains ``texture_pattern``, ``texture_depth``,
+  ``texture_scale``, ``texture_inverted``, ``texture_aligned`` and
+  ``texture_phase``
 - [fix] A gradient's ramp spans the line through its box at the gradient's
   angle, so a vertical gradient on a wide layer is no longer a flat band, and
   its offset, stop midpoints, smoothness, hard edges, "align with layer" and
