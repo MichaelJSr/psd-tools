@@ -591,3 +591,25 @@ def test_a_grayscale_preview_is_stored_over_white_like_an_rgb_one() -> None:
     assert after is not None
     partial = (a > 0.1) & (a < 0.9)
     assert np.abs(after - before)[partial].mean() < 0.01
+
+
+@pytest.mark.parametrize(
+    "filename, nearly",
+    [
+        ("colormodes/4x4_8bit_rgb.psd", 1.0 - 0.4 / 255),
+        ("colormodes/4x4_16bit_rgb.psd", 1.0 - 0.4 / 65535),
+        ("colormodes/4x4_32bit_rgb.psd", float(np.nextafter(np.float32(1), 0))),
+    ],
+)
+def test_holds_composite_where_the_alpha_stores_as_opaque(
+    filename: str, nearly: float
+) -> None:
+    psd = PSDImage.open(full_name(filename))
+    assert psd.channels == 3
+    color = np.zeros((psd.height, psd.width, 3), dtype=np.float32)
+    alpha = np.full((psd.height, psd.width, 1), nearly, dtype=np.float32)
+    assert holds_composite(psd, color, alpha) is True
+    alpha[0, 0, 0] = 0.5
+    assert holds_composite(psd, color, alpha) is False
+    assert holds_composite(psd, color, np.ones((1, 1, 1), np.float32)) is False
+    assert holds_composite(psd, color, None) is None

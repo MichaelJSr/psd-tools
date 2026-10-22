@@ -857,14 +857,15 @@ def encode_image_data(
 
 def holds_composite(
     psdimage: "PSDProtocol", color: np.ndarray, alpha: np.ndarray | None
-) -> bool:
+) -> bool | None:
     """Whether the planes :func:`encode_image_data` makes of these arrays are the composite.
 
-    They are not where the document has no transparency slot and *alpha* does
-    not store as opaque, so the colour goes in unmatted with its coverage
-    dropped, nor where an indexed document's short colour table makes it keep
-    the stored planes. ``VersionInfo.has_composite`` must then stay as it is:
-    marked, the reopened document would return that colour for its composite.
+    ``True`` where the document's transparency slot takes or keeps the alpha,
+    or where it has none and *alpha* is opaque everywhere. ``False`` where it
+    has none and *alpha* is not opaque, so the colour goes in unmatted with
+    its coverage dropped, or where an indexed document's short colour table
+    keeps the stored planes. ``None`` where *alpha* is ``None`` and there is no
+    slot: nothing tells the coverage.
     """
     header = psdimage._record.header
     depth = cast(Literal[1, 8, 16, 32], header.depth)
@@ -875,12 +876,18 @@ def holds_composite(
         and len(psdimage._record.color_mode_data.value) < _COLOR_TABLE_SIZE
     ):
         return False
-    if alpha is None or _transparency_slot(psdimage, get_color_channels(psdimage)) >= 0:
+    if _transparency_slot(psdimage, get_color_channels(psdimage)) >= 0:
         return True
-    height, width = header.height, header.width
-    plane = _fit(alpha, height, width, 0.0)[:, :, 0]
-    opaque = np.ones((height, width), dtype=np.float32)
-    return _encode_array(plane, depth, width) == _encode_array(opaque, depth, width)
+    if alpha is None:
+        return None
+    if alpha.shape[0] < header.height or alpha.shape[1] < header.width:
+        # Fitting pads with clear pixels.
+        return False
+    # Opaque when the least alpha stores as the depth's maximum; depth 32 is
+    # held to depth 16's step.
+    scale = {1: 1.0, 8: 255.0}.get(depth, 65535.0)
+    least = float(alpha[: header.height, : header.width].min())
+    return bool(np.rint(min(max(least, 0.0), 1.0) * scale) == scale)
 
 
 def _stored_or_empty(psdimage: "PSDProtocol", indices: Collection[int]) -> list[bytes]:

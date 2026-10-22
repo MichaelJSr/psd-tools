@@ -7,13 +7,13 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 from psd_tools.api import pil_io
 from psd_tools.api.layers import Group
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import get_transparency_index, has_transparency
-from psd_tools.constants import BlendMode, ColorMode, Compression, Tag
+from psd_tools.constants import BlendMode, ColorMode, Compression, Resource, Tag
 from psd_tools.psd.descriptor import Double
 from psd_tools.psd.layer_and_mask import LayerInfo
 from psd_tools.terminology import Key
@@ -983,6 +983,8 @@ def test_save_with_cmyk_preview_keeps_the_transparency_plane(route: str) -> None
         pytest.importorskip("scipy")
         image = psd.composite(apply_icc=False)
     assert image is not None and image.mode == "CMYK"
+    # Another colour, so the readback tells the preview from the stored one.
+    image = ImageChops.invert(image)
     buffer = io.BytesIO()
     psd.save(buffer, preview=image)
     buffer.seek(0)
@@ -1053,6 +1055,90 @@ def test_save_leaves_the_flag_where_the_colour_alone_is_stored(route: str) -> No
     assert np.array_equal(_bands(reopened.composite()), _bands(opaque))
 
 
+def _forge_transparent(filename: str) -> PSDImage:
+    """A document with no transparency channel whose layers leave pixels clear."""
+    psd = PSDImage.open(full_name(filename))
+    list(psd)[0].visible = False
+    version_info = psd.image_resources.get_data(Resource.VERSION_INFO)
+    version_info.has_composite = False
+    buffer = io.BytesIO()
+    psd.save(buffer, update_preview=False)
+    buffer.seek(0)
+    return PSDImage.open(buffer)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["adjustments/invert_cmyk.psd", "adjustments/posterize_16bits_cmyk.psd"],
+)
+def test_save_with_cmyk_preview_leaves_the_flag_over_unknown_coverage(
+    filename: str,
+) -> None:
+    pytest.importorskip("aggdraw")
+    pytest.importorskip("scipy")
+    psd = _forge_transparent(filename)
+    assert psd.channels == 4 and not psd.has_preview()
+    layers = psd.composite()
+    assert layers.mode == "RGBA" and np.asarray(layers)[:, :, 3].min() < 255
+    image = psd.composite(apply_icc=False)
+    assert image.mode == "CMYK"
+    buffer = io.BytesIO()
+    psd.save(buffer, preview=image)
+    buffer.seek(0)
+    reopened = PSDImage.open(buffer)
+    assert not reopened.has_preview()
+    assert np.array_equal(_bands(reopened.composite()), _bands(layers))
+
+    # Photoshop's own flag stays: the image carries no coverage to clear it on.
+    _, holds = pil_io.convert_pil_to_image_data(
+        PSDImage.open(full_name(filename)), image
+    )
+    assert holds is None
+
+
+@pytest.mark.parametrize("route", ["regenerated", "supplied"])
+def test_save_clears_the_flag_where_the_colour_alone_is_stored(route: str) -> None:
+    pytest.importorskip("aggdraw")
+    pytest.importorskip("scipy")
+    psd = PSDImage.open(full_name("colormodes/4x4_8bit_rgb.psd"))
+    assert psd.channels == 3 and psd.has_preview()
+    buffer = io.BytesIO()
+    if route == "regenerated":
+        for layer in psd:
+            layer.visible = False
+        layers = psd.composite()
+        assert np.asarray(layers)[:, :, 3].max() == 0
+        psd.save(buffer)
+    else:
+        layers = psd.composite(ignore_preview=True)
+        preview = Image.new("RGBA", psd.size, (0, 0, 0, 0))
+        preview.putpixel((0, 0), (200, 10, 10, 255))
+        psd.save(buffer, preview=preview)
+    buffer.seek(0)
+    reopened = PSDImage.open(buffer)
+    assert not reopened.has_preview()
+    assert np.array_equal(_bands(reopened.composite()), _bands(layers))
+
+
+def test_save_clears_the_flag_where_spot_channels_take_no_alpha() -> None:
+    pytest.importorskip("aggdraw")
+    pytest.importorskip("scipy")
+    # Three spot channels past CMYK name no transparency slot.
+    psd = PSDImage.open(full_name("cmyk-spot.psd"))
+    assert psd.has_preview()
+    layers = psd.composite(ignore_preview=True)
+    assert np.asarray(layers)[:, :, 3].min() < 255
+    spots = _planes(psd)[4:]
+    psd.mark_updated()
+    buffer = io.BytesIO()
+    psd.save(buffer)
+    buffer.seek(0)
+    reopened = PSDImage.open(buffer)
+    assert not reopened.has_preview()
+    assert _planes(reopened)[4:] == spots
+    assert np.array_equal(_bands(reopened.composite()), _bands(layers))
+
+
 def test_save_with_a_palette_preview_uses_its_transparency() -> None:
     psd = PSDImage.open(full_name("colormodes/4x4_8bit_index_color.psd"))
     image = psd.topil(apply_icc=False)
@@ -1108,7 +1194,6 @@ def test_save_with_preview_respects_the_allocation_budget() -> None:
         "colormodes/4x4_8bit_duotone.psd",
         "colormodes/4x4_8bit_index_color.psd",
         "colormodes/4x4_1bit_bitmap.psd",
-        "cmyk-spot.psd",
     ],
 )
 def test_save_with_the_regenerated_preview_is_byte_identical(filename: str) -> None:
