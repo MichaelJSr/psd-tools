@@ -1880,12 +1880,11 @@ def _unfilter_under_mask(
 ) -> tuple[np.ndarray, np.ndarray | None]:
     """A filtered smart object's pixels with its filter mask applied.
 
-    The layer's channels hold the smart filters' result over the whole
-    object; Photoshop shows that only where the filter mask is white and the
-    stored pre-filter rendering (``FEid``) elsewhere. Blends the two in
-    premultiplied space on ``layer.bbox``. A missing, disabled or all-white
-    mask, a document that is not RGB, or any error reading the block leaves
-    the stored pixels as they are.
+    Blends the stored pixels with
+    :py:meth:`~psd_tools.api.smart_object.SmartObject.filter_source` through
+    the mask, in premultiplied space on ``layer.bbox``. A missing, disabled or
+    all-white mask, a document that is not RGB, or any error reading the
+    block leaves the stored pixels as they are.
     """
     try:
         so = layer.smart_object
@@ -1895,15 +1894,17 @@ def _unfilter_under_mask(
             or not (so.has_enabled_filters and so.filter_mask_enabled)
         ):
             return color, shape
-        mask = so.filter_mask()
+        held = sum(numpy_io._backing_bytes(a) for a in (color, shape) if a is not None)
+        mask = so._filter_mask(held)
         if mask is None:
             return color, shape
         box = layer.bbox
         fill = 255.0 if so.filter_mask_extends_white else 0.0
         weight = paste(box, mask[0], mask[1][..., None], background=fill)
+        del mask
         if weight.min() == 255:
             return color, shape
-        source = so.filter_source()
+        source = so._filter_source(held + numpy_io._backing_bytes(weight))
         if source is None:
             return color, shape
         weight /= 255

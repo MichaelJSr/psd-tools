@@ -438,6 +438,7 @@ class PSDProtocol(GroupMixinProtocol, Protocol):
     # Internal attributes accessed by related classes
     _record: PSD  # psd_tools.psd.PSD
     _max_alloc_bytes: int | Literal["unlimited"] | None  # See PSDImage.max_alloc_bytes.
+    _filter_records: list[LayerRecord]  # See PSDImage.__init__.
 
     @property
     def max_alloc_bytes(self) -> int | Literal["unlimited"] | None:

@@ -12,94 +12,24 @@ import pytest
 
 from psd_tools import PSDImage
 from psd_tools.api.layers import GroupMixin, SmartObjectLayer
+from psd_tools.api.smart_object import SmartObject
 from psd_tools.api.utils import get_color_channels
-from psd_tools.composite.composite import _UNFILTER_PLANES, _blend_unfiltered
-from psd_tools.compression import compress
-from psd_tools.constants import Compression, Tag
-from psd_tools.psd.descriptor import Bool, Descriptor, List
-from psd_tools.psd.filter_effects import (
-    FilterEffect,
-    FilterEffectChannel,
-    FilterEffectExtra,
+from psd_tools.composite.composite import (
+    _UNFILTER_PLANES,
+    _blend_unfiltered,
+    _unfilter_under_mask,
 )
+from psd_tools.psd.descriptor import Bool, Descriptor
+from psd_tools.psd.filter_effects import FilterEffectExtra
 
+from ..smart_filters import enable_filters, feid_item, store_items
 from ..utils import full_name
 
 pytest.importorskip("scipy")
 
-MAX_CHANNELS = 24
-
 # numpy's cast buffers and tracemalloc's own bookkeeping, flat in the pixel
 # count and well under one plane of the blend test.
 _TRACE_SLACK = 64 * 1024
-
-Box = tuple[int, int, int, int]
-
-
-def _plane(array: np.ndarray, version: int = 2) -> FilterEffectChannel:
-    """An RLE plane; *version* 2 writes 4-byte row counts, 1 writes 2-byte ones."""
-    h, w = array.shape
-    data = compress(array.tobytes(), Compression.RLE, w, h, 8, version)
-    return FilterEffectChannel(
-        is_written=1, compression=int(Compression.RLE), data=data
-    )
-
-
-def _item(
-    box: Box,
-    source: np.ndarray,
-    alpha: np.ndarray,
-    mask: np.ndarray,
-    mask_box: Box | None = None,
-    version: int = 2,
-) -> FilterEffect:
-    """An FEid item: *source* and *alpha* on *box*, *mask* on *mask_box* (or *box*)."""
-    x0, y0, x1, y1 = box
-    channels = [_plane(source[..., i], version) for i in range(source.shape[-1])]
-    unwritten = MAX_CHANNELS + 1 - len(channels)
-    channels += [FilterEffectChannel(is_written=0) for _ in range(unwritten)]
-    channels.append(_plane(alpha, version))
-    mx0, my0, mx1, my1 = mask_box or box
-    plane = _plane(mask, version)
-    extra = FilterEffectExtra(
-        is_written=1,
-        rectangle=[my0, mx0, my1, mx1],  # type: ignore[list-item]
-        compression=int(Compression.RLE),
-        data=plane.data,
-    )
-    return FilterEffect(
-        uuid="0",
-        version=1,
-        rectangle=(y0, x0, y1, x1),
-        depth=8,
-        max_channels=MAX_CHANNELS,
-        channels=channels,
-        extra=extra,
-    )
-
-
-def _enable(
-    layer: SmartObjectLayer, mask: bool = True, extends_white: bool = True
-) -> Descriptor:
-    """Give *layer* one enabled smart filter and return its ``filterFX``."""
-    fx = Descriptor(classID=b"null")
-    fx[b"enab"] = Bool(True)
-    fx[b"filterMaskEnable"] = Bool(mask)
-    fx[b"filterMaskExtendWithWhite"] = Bool(extends_white)
-    entry = Descriptor(classID=b"null")
-    entry[b"enab"] = Bool(True)
-    entries = List()
-    entries.append(entry)
-    fx[b"filterFXList"] = entries
-    config = layer.smart_object._config
-    assert config is not None
-    config.data[b"filterFX"] = fx
-    return fx
-
-
-def _store(psd: PSDImage, items: list[FilterEffect]) -> None:
-    assert psd.tagged_blocks is not None
-    psd.tagged_blocks.set_data(Tag.FILTER_EFFECTS2, version=1, items=items)
 
 
 def _smart_objects(psd: PSDImage) -> list[SmartObjectLayer]:
@@ -153,8 +83,8 @@ def _filtered(version: int = 2, alpha: np.ndarray | None = None) -> Filtered:
     mask[:, : w // 2] = 255
     if alpha is None:
         alpha = _bytes(shape[..., 0])
-    fx = _enable(layer)
-    _store(psd, [_item(layer.bbox, source, alpha, mask, version=version)])
+    fx = enable_filters(layer)
+    store_items(psd, [feid_item(layer.bbox, source, alpha, mask, version=version)])
     opaque = shape[..., 0] > 0.999
     return Filtered(psd, layer, stored, source, shape[..., 0], opaque, w // 2, fx)
 
@@ -162,6 +92,18 @@ def _filtered(version: int = 2, alpha: np.ndarray | None = None) -> Filtered:
 @pytest.fixture
 def filtered() -> Filtered:
     return _filtered()
+
+
+def _blend_layer(side: int, budget: int | str = "unlimited") -> SmartObjectLayer:
+    """A stand-in for :py:func:`_blend_unfiltered`'s layer, on ``(0, 0, side, side)``."""
+    return cast(
+        SmartObjectLayer,
+        SimpleNamespace(
+            bbox=(0, 0, side, side),
+            name="blend",
+            _psd=SimpleNamespace(_max_alloc_bytes=budget),
+        ),
+    )
 
 
 def test_the_mask_picks_the_filtered_raster_where_white_and_the_source_where_black(
@@ -217,11 +159,11 @@ def test_layers_with_disjoint_rects_pair_with_their_own_items(
     layers = _smart_objects(psd)[:2]
     items = []
     for layer in layers:
-        _enable(layer)
+        enable_filters(layer)
         h, w = layer.height, layer.width
         zeros = np.zeros((h, w), np.uint8)
-        items.append(_item(layer.bbox, np.zeros((h, w, 3), np.uint8), zeros, zeros))
-    _store(psd, items if in_layer_order else items[::-1])
+        items.append(feid_item(layer.bbox, np.zeros((h, w, 3), np.uint8), zeros, zeros))
+    store_items(psd, items if in_layer_order else items[::-1])
     for layer, item in zip(layers, items, strict=True):
         assert layer.smart_object.filter_effect() is item
 
@@ -230,31 +172,45 @@ def test_an_item_that_does_not_contain_the_bbox_is_not_used() -> None:
     psd = PSDImage.open(full_name("layers/smartobject-layer.psd"))
     layer = _smart_objects(psd)[0]
     stored = _rgba(layer)
-    _enable(layer)
+    enable_filters(layer)
     x0, y0, x1, y1 = layer.bbox
     h, w = y1 - y0, x1 - x0 - 1
     zeros = np.zeros((h, w), np.uint8)
-    item = _item((x0 + 1, y0, x1, y1), np.zeros((h, w, 3), np.uint8), zeros, zeros)
-    _store(psd, [item])
+    item = feid_item((x0 + 1, y0, x1, y1), np.zeros((h, w, 3), np.uint8), zeros, zeros)
+    store_items(psd, [item])
     assert layer.smart_object.filter_effect() is None
     assert np.array_equal(_rgba(layer), stored)
 
 
-def test_the_pairing_follows_the_layer_order_after_an_edit() -> None:
+def _reopened(psd: PSDImage) -> PSDImage:
+    buf = io.BytesIO()
+    psd.save(buf)
+    buf.seek(0)
+    return PSDImage.open(buf)
+
+
+def test_a_layer_keeps_its_item_after_an_earlier_filtered_layer_is_removed() -> None:
+    """Item 0 has a black mask, item 1 a white one; the edit leaves FEid as is."""
     psd = PSDImage.open(full_name("blend-modes/rgb-blend-modes.psd"))
-    first_layer, second_layer = _smart_objects(psd)[:2]
     canvas = (0, 0, psd.width, psd.height)
-    zeros = np.zeros((psd.height, psd.width), np.uint8)
-    source = np.zeros((psd.height, psd.width, 3), np.uint8)
-    items = [_item(canvas, source, zeros, zeros) for _ in range(2)]
-    for layer in (first_layer, second_layer):
-        _enable(layer)
-    _store(psd, items)
-    assert second_layer.smart_object.filter_effect() is items[1]
-    parent = first_layer.parent
+    size = (psd.height, psd.width)
+    source = np.zeros((*size, 3), np.uint8)
+    alpha = np.full(size, 255, np.uint8)
+    items = []
+    for index, layer in enumerate(_smart_objects(psd)[:2]):
+        enable_filters(layer)
+        mask = np.full(size, 255 * index, np.uint8)
+        items.append(feid_item(canvas, source, alpha, mask, uuid=str(index)))
+    store_items(psd, items)
+    psd = _reopened(psd)
+    first, second = _smart_objects(psd)[:2]
+    stored = np.asarray(second.composite(force=True))
+    parent = first.parent
     assert isinstance(parent, GroupMixin)
-    parent.remove(first_layer)
-    assert second_layer.smart_object.filter_effect() is items[0]
+    parent.remove(first)
+    item = second.smart_object.filter_effect()
+    assert item is not None and item.uuid == "1"
+    assert np.array_equal(np.asarray(second.composite(force=True)), stored)
 
 
 @pytest.mark.parametrize("larger", [True, False])
@@ -274,9 +230,9 @@ def test_the_mask_is_placed_by_document_position(larger: bool) -> None:
     mask_box = (x0 - 3, y0 - 2, x1 + 4, y1 + 5) if larger else (x0, y0, split, y1)
     mask = np.zeros((mask_box[3] - mask_box[1], mask_box[2] - mask_box[0]), np.uint8)
     mask[:, : split - mask_box[0]] = 255
-    _enable(layer, extends_white=False)
+    enable_filters(layer, extends_white=False)
     alpha = np.full(stored.shape[:2], 255, np.uint8)
-    _store(psd, [_item(layer.bbox, source, alpha, mask, mask_box=mask_box)])
+    store_items(psd, [feid_item(layer.bbox, source, alpha, mask, mask_box=mask_box)])
     out = _rgba(layer)[..., :3]
     columns = np.arange(x0, x1)[None, :]
     assert np.abs(out - stored)[opaque & (columns < split)].max() == 0
@@ -293,8 +249,8 @@ def test_a_semi_transparent_source_lerps_alpha_and_premultiplied_colour() -> Non
     mask = np.zeros((h, w), np.uint8)
     mask[:, : w // 3] = 255
     mask[:, w // 3 : 2 * w // 3] = 128
-    _enable(layer)
-    _store(psd, [_item(layer.bbox, source, a_u, mask)])
+    enable_filters(layer)
+    store_items(psd, [feid_item(layer.bbox, source, a_u, mask)])
     m = (mask / 255.0)[..., None]
     alpha = m * a_f + (1 - m) * (a_u / 255.0)[..., None]
     premul = m * a_f * stored + (1 - m) * (a_u / 255.0)[..., None] * (source / 255.0)
@@ -318,8 +274,8 @@ def test_a_document_that_is_not_rgb_keeps_the_stored_pixels(
     h, w = layer.height, layer.width
     planes = np.zeros((h, w, get_color_channels(psd)), np.uint8)
     zeros = np.zeros((h, w), np.uint8)
-    _enable(layer)
-    _store(psd, [_item(layer.bbox, planes, zeros, zeros)])
+    enable_filters(layer)
+    store_items(psd, [feid_item(layer.bbox, planes, zeros, zeros)])
     assert layer.smart_object.filter_source() is not None
     with caplog.at_level(logging.WARNING):
         after = np.asarray(layer.composite(force=True))
@@ -350,14 +306,16 @@ def test_a_source_over_the_allocation_budget_keeps_the_stored_pixels(
     psd = PSDImage.open(full_name("layers/smartobject-layer.psd"))
     layer = _smart_objects(psd)[0]
     stored = _rgba(layer)
-    _enable(layer)
+    enable_filters(layer)
     x0, y0, x1, y1 = layer.bbox
     side = 2000
     zeros = np.zeros((side, side), np.uint8)
     mask = np.zeros((y1 - y0, x1 - x0), np.uint8)
-    item = _item((0, 0, side, side), np.zeros((side, side, 3), np.uint8), zeros, zeros)
-    item.extra = _item(layer.bbox, mask[..., None], mask, mask).extra
-    _store(psd, [item])
+    item = feid_item(
+        (0, 0, side, side), np.zeros((side, side, 3), np.uint8), zeros, zeros
+    )
+    item.extra = feid_item(layer.bbox, mask[..., None], mask, mask).extra
+    store_items(psd, [item])
     psd.max_alloc_bytes = 4 * side * side
     with pytest.raises(ValueError, match="budget"):
         layer.smart_object.filter_source()
@@ -368,14 +326,7 @@ def test_a_source_over_the_allocation_budget_keeps_the_stored_pixels(
 
 def test_the_blend_stays_within_its_allocation_estimate() -> None:
     side = 512
-    layer = cast(
-        SmartObjectLayer,
-        SimpleNamespace(
-            bbox=(0, 0, side, side),
-            name="blend",
-            _psd=SimpleNamespace(_max_alloc_bytes="unlimited"),
-        ),
-    )
+    layer = _blend_layer(side)
     rng = np.random.default_rng(0)
     color = rng.random((side, side, 3), dtype=np.float32)
     shape = rng.random((side, side, 1), dtype=np.float32)
@@ -392,3 +343,64 @@ def test_the_blend_stays_within_its_allocation_estimate() -> None:
     finally:
         tracemalloc.stop()
     assert peak <= _UNFILTER_PLANES * side * side * 4 + _TRACE_SLACK
+
+
+def test_a_blend_over_the_allocation_budget_keeps_the_stored_pixels(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The budget covers the plane decodes but not the blend."""
+    psd = PSDImage.open(full_name("layers/smartobject-layer.psd"))
+    layer = _smart_objects(psd)[0]
+    h, w = layer.height, layer.width
+    enable_filters(layer)
+    opaque = np.full((h, w), 255, np.uint8)
+    mask = np.zeros((h, w), np.uint8)
+    store_items(
+        psd, [feid_item(layer.bbox, np.zeros((h, w, 3), np.uint8), opaque, mask)]
+    )
+    color, shape = _pixels(layer)
+    psd.max_alloc_bytes = 40 * h * w
+    assert layer.smart_object.filter_source() is not None
+    with caplog.at_level(logging.WARNING):
+        out = _unfilter_under_mask(layer, color, shape)
+    assert out[0] is color and out[1] is shape
+    assert "budget" in caplog.text
+
+
+def test_the_filtered_pixels_stand_outside_the_stored_source() -> None:
+    side = 8
+    rng = np.random.default_rng(1)
+    color = rng.random((side, side, 3), dtype=np.float32)
+    shape = rng.random((side, side, 1), dtype=np.float32)
+    half = side // 2
+    source = (
+        (0, 0, half, side),
+        np.full((side, half, 3), 200, np.uint8),
+        np.full((side, half), 255, np.uint8),
+    )
+    weight = np.zeros((side, side, 1), np.float32)
+    out, alpha = _blend_unfiltered(_blend_layer(side), color, shape, weight, source)
+    np.testing.assert_allclose(out[:, half:], color[:, half:], atol=1e-6)
+    np.testing.assert_allclose(alpha[:, half:], shape[:, half:], atol=1e-6)
+    np.testing.assert_allclose(out[:, :half], 200 / 255, atol=1e-6)
+    np.testing.assert_allclose(alpha[:, :half], 1, atol=1e-6)
+
+
+def test_an_all_white_mask_does_not_decode_the_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    filtered = _filtered()
+    item = filtered.layer.smart_object.filter_effect()
+    assert item is not None
+    h, w = filtered.stored.shape[:2]
+    white = np.full((h, w), 255, np.uint8)
+    item.extra = feid_item(filtered.layer.bbox, white[..., None], white, white).extra
+    calls: list[int] = []
+
+    def spy(self: SmartObject, held: int = 0) -> None:
+        calls.append(held)
+
+    monkeypatch.setattr(SmartObject, "_filter_source", spy)
+    out = _rgba(filtered.layer)[..., :3]
+    assert calls == []
+    assert np.abs(out - filtered.stored)[filtered.opaque].max() == 0

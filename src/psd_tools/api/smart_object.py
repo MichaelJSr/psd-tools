@@ -4,7 +4,6 @@ import contextlib
 import io
 import logging
 import os
-import weakref
 from collections.abc import Iterator, Sequence
 from typing import IO
 
@@ -22,6 +21,7 @@ from psd_tools.psd.filter_effects import (
     FilterEffectChannel,
     FilterEffectExtra,
 )
+from psd_tools.psd.tagged_blocks import TaggedBlocks
 
 logger = logging.getLogger(__name__)
 
@@ -386,10 +386,11 @@ class SmartObject:
 
         Photoshop keeps, for each smart object carrying smart filters, the
         object rendered *before* the filters and the painted filter mask in the
-        document's ``FEid`` block, one item per filtered layer in layer order;
+        document's ``FEid`` block, one item per filtered layer in file order;
         the layer's own channels hold the filtered result. An item belongs to
         this layer only if its rectangle contains the layer's bbox: the item at
-        the layer's position if it does, else the first one that does.
+        the layer's position among the filtered layers when the document was
+        opened if it does, else the first one that does.
         """
         if self.filters is None:
             return None
@@ -405,7 +406,9 @@ class SmartObject:
         if not items:
             return None
         bbox = self._layer.bbox
-        index = _filter_order(psd).get(id(self._layer))
+        record = self._layer._record
+        records = psd._filter_records
+        index = next((i for i, r in enumerate(records) if r is record), None)
         if index is not None and index < len(items) and _contains(items[index], bbox):
             return items[index]
         return next((item for item in items if _contains(item, bbox)), None)
@@ -422,6 +425,12 @@ class SmartObject:
         :raises ValueError: if the planes are over the allocation budget or a
             plane's RLE row counts do not match its payload.
         """
+        return self._filter_source()
+
+    def _filter_source(
+        self, held: int = 0
+    ) -> tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None:
+        """:py:meth:`filter_source`; *held* bytes stay live across the decode."""
         item = self.filter_effect()
         if (
             item is None
@@ -445,7 +454,7 @@ class SmartObject:
         if not _is_stored(transparency):
             transparency = None
         planes = colour + ([transparency] if transparency is not None else [])
-        _check_planes(psd, width, height, planes, held=width * height * count)
+        _check_planes(psd, width, height, planes, held + width * height * count)
         color = np.empty((height, width, count), dtype=np.uint8)
         for i, channel in enumerate(colour):
             color[..., i] = _decode_plane(channel, width, height)
@@ -461,15 +470,23 @@ class SmartObject:
 
         :raises ValueError: as :py:meth:`filter_source` does.
         """
+        return self._filter_mask()
+
+    def _filter_mask(
+        self, held: int = 0
+    ) -> tuple[tuple[int, int, int, int], np.ndarray] | None:
+        """:py:meth:`filter_mask`; *held* bytes stay live across the decode."""
         item = self.filter_effect()
-        extra = item.extra if item is not None else None
+        if item is None or item.depth != 8:
+            return None
+        extra = item.extra
         if not isinstance(extra, FilterEffectExtra) or not _is_stored(extra):
             return None
         top, left, bottom, right = extra.rectangle
         width, height = right - left, bottom - top
         if width <= 0 or height <= 0:
             return None
-        _check_planes(self._layer._psd, width, height, [extra])
+        _check_planes(self._layer._psd, width, height, [extra], held)
         return (left, top, right, bottom), _decode_plane(extra, width, height)
 
     def save(
@@ -535,28 +552,13 @@ class SmartObject:
         return f"SmartObject({self.filename!r} kind={self.kind!r} type={self.filetype!r} detected={self.detected_filetype!r} size={self.filesize})"
 
 
-# Per document: id(layer) -> index among the filtered smart objects in
-# descendants() order, with the layer record list it was built under, which
-# every tree edit replaces.
-_FILTER_ORDER: weakref.WeakKeyDictionary[PSDProtocol, tuple[object, dict[int, int]]] = (
-    weakref.WeakKeyDictionary()
-)
-
-
-def _filter_order(psd: PSDProtocol) -> dict[int, int]:
-    """Map ``id(layer)`` to its index among the document's filtered smart objects."""
-    info = psd._record._get_layer_info()
-    records = None if info is None else info.layer_records
-    cached = _FILTER_ORDER.get(psd)
-    if cached is not None and cached[0] is records:
-        return cached[1]
-    order: dict[int, int] = {}
-    for layer in psd.descendants():
-        smart_object = getattr(layer, "smart_object", None)
-        if smart_object is not None and smart_object.filters is not None:
-            order[id(layer)] = len(order)
-    _FILTER_ORDER[psd] = (records, order)
-    return order
+def _has_filters(blocks: TaggedBlocks) -> bool:
+    """Whether a layer's smart object data carries smart filters."""
+    for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
+        config = blocks.get_data(key)
+        if config is not None:
+            return isinstance(config.data.get(b"filterFX"), Descriptor)
+    return False
 
 
 def _contains(item: FilterEffect, bbox: tuple[int, int, int, int]) -> bool:
@@ -590,7 +592,7 @@ def _check_planes(
     width: int,
     height: int,
     planes: Sequence[FilterEffectChannel | FilterEffectExtra],
-    held: int = 0,
+    held: int,
 ) -> None:
     """Check decoding *planes* one at a time against the allocation budget.
 
