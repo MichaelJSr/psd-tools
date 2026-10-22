@@ -132,6 +132,74 @@ def test_a_child_keeps_the_channel_of_the_content_it_joins(
     assert np.allclose(color[:, 2:, RED], BACKDROP[RED] / 255.0, atol=1e-6)
 
 
+@pytest.mark.parametrize("coverage", [255, 128])
+def test_a_child_keeps_what_its_styled_group_painted_beneath_it(
+    coverage: int,
+) -> None:
+    psd = _document()
+    group = psd.create_group(name="Group", blend_mode=BlendMode.PASS_THROUGH)
+    _hide_nothing(group)
+    under = (60, 160, 240, 128)
+    group.create_pixel_layer(Image.new("RGBA", (4, 4), under), "Under")
+    _restrict(_white(group, coverage), RED)
+
+    color, _, _ = composite(psd)
+
+    # The group keeps its own red and gains coverage; the backdrop shows
+    # through what the group still leaves uncovered.
+    under_alpha = under[3] / 255.0
+    group_alpha = 1.0 - (1.0 - under_alpha) * (1.0 - coverage / 255.0)
+    expected = (
+        under_alpha * under[RED] / 255.0 + (1.0 - group_alpha) * BACKDROP[RED] / 255.0
+    )
+    assert np.allclose(color[:, :2, RED], expected, atol=1e-6)
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_an_excluded_channel_keeps_a_partly_transparent_backdrop(
+    grouped: bool,
+) -> None:
+    psd = _document(backdrop=False)
+    backdrop_alpha = 128
+    psd.create_pixel_layer(
+        Image.new("RGBA", (4, 4), (*BACKDROP, backdrop_alpha)), "Backdrop"
+    )
+    parent: PSDImage | Group = psd
+    if grouped:
+        parent = psd.create_group(name="Group", blend_mode=BlendMode.PASS_THROUGH)
+    coverage = 128
+    _restrict(_white(parent, coverage), RED)
+
+    color, _, alpha = composite(psd)
+
+    # The backdrop's red keeps its share; the layer only adds coverage.
+    expected_alpha = 1.0 - (1.0 - backdrop_alpha / 255.0) * (1.0 - coverage / 255.0)
+    expected = backdrop_alpha / 255.0 * BACKDROP[RED] / 255.0 / expected_alpha
+    assert np.allclose(alpha[:, :2], expected_alpha, atol=1e-6)
+    assert np.allclose(color[:, :2, RED], expected, atol=1e-6)
+
+
+def test_a_child_of_a_styled_group_is_exact_where_it_paints_nothing() -> None:
+    rng = np.random.default_rng(0)
+    psd = PSDImage.new(mode="RGB", size=(16, 16))
+
+    def noise() -> Image.Image:
+        return Image.fromarray(rng.integers(0, 256, (16, 16, 4), dtype=np.uint8))
+
+    psd.create_pixel_layer(noise(), "Backdrop")
+    group = psd.create_group(name="Group", blend_mode=BlendMode.PASS_THROUGH)
+    _hide_nothing(group)
+    group.create_pixel_layer(noise(), "Under")
+    layer = group.create_pixel_layer(Image.new("RGBA", (2, 16), (255, 255, 255, 255)))
+    plain, _, _ = composite(psd)
+    _restrict(layer, RED)
+
+    color, _, _ = composite(psd)
+
+    np.testing.assert_array_equal(color[:, 2:], plain[:, 2:])
+    np.testing.assert_array_equal(color[..., [GREEN, BLUE]], plain[..., [GREEN, BLUE]])
+
+
 @pytest.mark.parametrize("blend_mode", [BlendMode.PASS_THROUGH, BlendMode.NORMAL])
 def test_a_restricted_group_leaves_the_channels_for_all_it_paints(
     blend_mode: BlendMode,
@@ -151,6 +219,21 @@ def test_a_restricted_group_leaves_the_channels_for_all_it_paints(
 def test_a_clip_layer_keeps_its_base_colour() -> None:
     psd = _document(backdrop=False)
     psd.create_pixel_layer(Image.new("RGBA", (4, 4), (*BACKDROP, 128)), "Base")
+    clipped = _white(psd)
+    clipped.clipping = True
+    _restrict(clipped, RED)
+
+    color, _, alpha = composite(psd)
+
+    assert np.allclose(alpha, 128 / 255.0, atol=1e-6)
+    assert np.allclose(color[:, :2, RED], BACKDROP[RED] / 255.0, atol=1e-6)
+    assert np.allclose(color[:, :2, [GREEN, BLUE]], 1.0)
+
+
+def test_a_clip_layer_keeps_the_colour_of_a_partly_transparent_group() -> None:
+    psd = _document(backdrop=False)
+    group = psd.create_group(name="Base", blend_mode=BlendMode.NORMAL)
+    group.create_pixel_layer(Image.new("RGBA", (4, 4), (*BACKDROP, 128)), "Paint")
     clipped = _white(psd)
     clipped.clipping = True
     _restrict(clipped, RED)

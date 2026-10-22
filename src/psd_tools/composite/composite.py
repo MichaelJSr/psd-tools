@@ -2229,7 +2229,7 @@ class Compositor:
         it joins: the enclosing isolated group's own when adjustments read
         that (see :py:meth:`_apply_adjustment`), the canvas otherwise. Over an
         opaque backdrop the channel stays as it was; where the layer covers
-        transparency it adds coverage and no colour to that channel. A clip
+        transparency it adds coverage and leaves that channel at zero. A clip
         layer keeps its base's colour, since the base's alpha is the result's.
         """
         color = self._color[..., channels]
