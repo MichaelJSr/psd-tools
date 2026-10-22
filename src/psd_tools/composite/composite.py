@@ -284,7 +284,9 @@ def _draw_color_overlay(
     return paint.draw_solid_color_fill(box, layer._psd.color_mode, descriptor)
 
 
-def _tiling_origin(layer: Layer, descriptor: Any, layout: _Box) -> tuple[int, int]:
+def _tiling_origin(
+    layer: Layer, descriptor: Descriptor, layout: _Box
+) -> tuple[int, int]:
     """Where a pattern of ``layer``'s style laid out across ``layout`` starts.
 
     A layer's tiling starts at its reference point, a group's at its layout
@@ -4057,9 +4059,10 @@ class Compositor:
 
         The pattern tiles from where a pattern overlay of the layer would
         (:py:func:`_tiling_origin`), at the texture's scale;
-        :py:func:`texture_height` turns its luminance into height. None, and
-        the bevel goes on untextured, when the pattern is not in the document
-        or cannot be read, or the document is neither RGB nor grayscale.
+        :py:func:`texture_height` turns its luminance into height; the
+        pattern's alpha is not read. None, and the bevel goes on untextured,
+        when the pattern is not in the document or cannot be read, or the
+        document is neither RGB nor grayscale.
         """
         if layer._psd.color_mode not in (ColorMode.RGB, ColorMode.GRAYSCALE):
             logger.debug(
@@ -4077,10 +4080,7 @@ class Compositor:
         except _UNREADABLE as error:
             logger.debug("Cannot read the texture of a bevel of %s: %s", layer, error)
             return None
-        if fill is None:
-            logger.debug(
-                "The texture pattern of a bevel of %s is not in the document", layer
-            )
+        if fill is None:  # draw_pattern_fill has logged the missing pattern
             return None
         if fill.shape[2] == 3:
             luminance = (
