@@ -138,7 +138,7 @@ _PHOTOSHOP_BRIGHTNESS_CONTRAST = [
     (150, -21, 32, 87),
     (150, -21, 96, 210),
 ]
-# The fitted curve's spread around those levels, up to three quarters of the range.
+# The curve is fitted, not exact: inputs up to 192 may be off by this many levels.
 _BRIGHTNESS_CONTRAST_LEVELS = 2
 
 
