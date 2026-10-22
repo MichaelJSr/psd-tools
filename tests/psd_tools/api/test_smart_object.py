@@ -12,7 +12,7 @@ from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.smart_object import SmartObject
 from psd_tools.constants import LinkedLayerType
-from psd_tools.psd.descriptor import Bool
+from psd_tools.psd.descriptor import Bool, String
 from psd_tools.psd.filter_effects import FilterEffect
 
 from ..smart_filters import enable_filters, feid_item, store_items
@@ -142,6 +142,16 @@ def test_smart_filter_accessors_read_the_document_block(version: int) -> None:
     x0, y0, x1, y1 = layer.bbox
     assert painted[0] == (x0, y0 - 1, x1, y1 + 1)
     assert np.array_equal(painted[1], filtered.mask)
+
+
+def test_smart_filter_flags_that_are_not_booleans_read_as_the_defaults() -> None:
+    filtered = _filtered_object()
+    fx = enable_filters(filtered.layer, extends_white=False)
+    fx[b"filterMaskEnable"] = String("on")
+    fx[b"filterMaskExtendWithWhite"] = String("off")
+    so = filtered.layer.smart_object
+    assert so.filter_mask_enabled is False
+    assert so.filter_mask_extends_white is True
 
 
 def test_smart_filter_planes_of_another_depth_are_not_read() -> None:

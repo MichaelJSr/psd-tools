@@ -200,7 +200,8 @@ def _warn_decompress_failure(
         version,
     )
     logger.warning(msg)
-    warnings.warn(msg, PSDDecompressionWarning, stacklevel=3)
+    # Through _decompress() and decompress() to their caller.
+    warnings.warn(msg, PSDDecompressionWarning, stacklevel=4)
 
 
 def _safe_zlib_decompress(data: bytes, max_length: int) -> bytes:
@@ -311,6 +312,29 @@ def decompress(
     :raises ValueError: if *width*, *height*, or *depth* are out of range.
     :raises DecompressionLimitError: if an output or expansion limit is exceeded.
     """
+    return _decompress(
+        data,
+        compression,
+        width,
+        height,
+        depth,
+        version,
+        max_output_bytes=max_output_bytes,
+    )
+
+
+def _decompress(
+    data: bytes,
+    compression: Compression,
+    width: int,
+    height: int,
+    depth: int,
+    version: int = 1,
+    *,
+    max_output_bytes: int | None = None,
+    strict: bool = False,
+) -> bytes:
+    """:py:func:`decompress`; *strict* raises :exc:`ValueError` on a failed decode."""
     _validate_dimensions(width, height, depth)
 
     length = _channel_length(width, height, depth)
@@ -328,12 +352,16 @@ def decompress(
         except (ParseLimitError, DecompressionLimitError):
             raise
         except (ValueError, IndexError, OSError) as e:
+            if strict:
+                raise ValueError(f"RLE decode failed: {e}") from e
             _warn_decompress_failure("RLE", e, width, height, depth, version)
             result = None
     elif compression == Compression.ZIP:
         try:
             result = _safe_zlib_decompress(data, length)
         except (ValueError, zlib.error) as e:
+            if strict:
+                raise ValueError(f"ZIP decode failed: {e}") from e
             _warn_decompress_failure("ZIP", e, width, height, depth, version)
             result = None
     else:
@@ -341,6 +369,8 @@ def decompress(
             decompressed = _safe_zlib_decompress(data, length)
             result = decode_prediction(decompressed, width, height, depth)
         except (ValueError, zlib.error) as e:
+            if strict:
+                raise ValueError(f"ZIP_WITH_PREDICTION decode failed: {e}") from e
             _warn_decompress_failure(
                 "ZIP_WITH_PREDICTION", e, width, height, depth, version
             )

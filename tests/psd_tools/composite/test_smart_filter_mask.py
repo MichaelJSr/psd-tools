@@ -1,8 +1,10 @@
 """A smart object's filter mask blends its filtered raster with the FEid source."""
 
+import importlib
 import io
 import logging
 import tracemalloc
+import warnings
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import cast
@@ -11,14 +13,18 @@ import numpy as np
 import pytest
 
 from psd_tools import PSDImage
-from psd_tools.api.layers import GroupMixin, SmartObjectLayer
+from psd_tools.api.layers import GroupMixin, Layer, SmartObjectLayer
 from psd_tools.api.smart_object import SmartObject
 from psd_tools.api.utils import get_color_channels
 from psd_tools.composite.composite import (
     _UNFILTER_PLANES,
+    Compositor,
     _blend_unfiltered,
     _unfilter_under_mask,
+    composite,
 )
+from psd_tools.compression import PSDDecompressionWarning
+from psd_tools.constants import Compression, Tag
 from psd_tools.psd.descriptor import Bool, Descriptor
 from psd_tools.psd.filter_effects import FilterEffectExtra
 
@@ -26,6 +32,8 @@ from ..smart_filters import enable_filters, feid_item, store_items
 from ..utils import full_name
 
 pytest.importorskip("scipy")
+
+composite_module = importlib.import_module("psd_tools.composite.composite")
 
 # numpy's cast buffers and tracemalloc's own bookkeeping, flat in the pixel
 # count and well under one plane of the blend test.
@@ -213,6 +221,44 @@ def test_a_layer_keeps_its_item_after_an_earlier_filtered_layer_is_removed() -> 
     assert np.array_equal(np.asarray(second.composite(force=True)), stored)
 
 
+def test_the_mask_and_the_source_move_with_the_layer(filtered: Filtered) -> None:
+    """The FEid rects stay where the layer was opened."""
+    layer = filtered.layer
+    layer.left += 3
+    layer.top -= 2
+    so = layer.smart_object
+    source, mask = so.filter_source(), so.filter_mask()
+    assert source is not None and mask is not None
+    assert source[0] == mask[0] == layer.bbox
+    out = _rgba(layer)[..., :3]
+    left, right = filtered.halves()
+    assert np.abs(out - filtered.stored)[left].max() == 0
+    assert np.abs(out - filtered.source)[right].max() <= 1
+
+
+def test_a_duplicate_pairs_as_its_source_does(filtered: Filtered) -> None:
+    copy = filtered.layer.duplicate()
+    item = filtered.layer.smart_object.filter_effect()
+    assert item is not None and copy.smart_object.filter_effect() is item
+    copy.left += 4
+    assert np.array_equal(_rgba(copy), _rgba(filtered.layer))
+
+
+@pytest.mark.parametrize("move", [False, True])
+def test_a_layer_from_another_document_keeps_its_stored_pixels(move: bool) -> None:
+    """The other document's item contains the layer's bbox but is not its own."""
+    origin, target = _filtered(), _filtered()
+    if move:
+        with pytest.warns(DeprecationWarning):
+            target.psd.append(origin.layer)
+        layer = origin.layer
+    else:
+        layer = origin.layer.copy_to(target.psd)
+    assert layer.smart_object.filter_effect() is None
+    out = _rgba(layer)[..., :3]
+    assert np.abs(out - origin.stored)[origin.opaque].max() == 0
+
+
 @pytest.mark.parametrize("larger", [True, False])
 def test_the_mask_is_placed_by_document_position(larger: bool) -> None:
     """White left of ``split``: a rect past the bbox, or one that extends black.
@@ -298,6 +344,52 @@ def test_row_counts_that_fit_neither_width_keep_the_stored_pixels(
         out = _rgba(filtered.layer)[..., :3]
     assert np.abs(out - filtered.stored)[filtered.opaque].max() == 0
     assert "Smart filter mask" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "compression", [Compression.ZIP, Compression.ZIP_WITH_PREDICTION]
+)
+def test_a_plane_that_does_not_decode_keeps_the_stored_pixels(
+    filtered: Filtered, compression: Compression, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Rather than the black plane decompress() puts in its place."""
+    item = filtered.layer.smart_object.filter_effect()
+    assert item is not None and isinstance(item.extra, FilterEffectExtra)
+    item.extra.compression = int(compression)
+    item.extra.data = b"\x78\x9c" + b"\xff" * 20
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with caplog.at_level(logging.WARNING):
+            out = _rgba(filtered.layer)[..., :3]
+    assert np.abs(out - filtered.stored)[filtered.opaque].max() == 0
+    assert "Smart filter mask" in caplog.text
+    assert not [w for w in caught if issubclass(w.category, PSDDecompressionWarning)]
+
+
+def test_the_mask_is_blended_once_for_the_layer_and_its_effects(
+    filtered: Filtered, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    effects = PSDImage.open(full_name("layer_effects.psd"))
+    glow = next(layer for layer in effects.descendants() if layer.name == "Outer Glow")
+    block = glow.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    filtered.layer.tagged_blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, block)
+    reads: list[Layer] = []
+    blends: list[Layer] = []
+    read, blend = Compositor._read_object, _blend_unfiltered
+
+    def counted_read(self: Compositor, layer: Layer) -> tuple:
+        reads.append(layer)
+        return read(self, layer)
+
+    def counted_blend(layer: SmartObjectLayer, *args: object) -> tuple:
+        blends.append(layer)
+        return blend(layer, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Compositor, "_read_object", counted_read)
+    monkeypatch.setattr(composite_module, "_blend_unfiltered", counted_blend)
+    composite(filtered.psd)
+    assert reads.count(filtered.layer) > 1
+    assert blends == [filtered.layer]
 
 
 def test_a_source_over_the_allocation_budget_keeps_the_stored_pixels(

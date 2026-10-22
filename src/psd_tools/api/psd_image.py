@@ -131,9 +131,12 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         # sign, but a count of zero has no sign, so a rebuild that momentarily
         # sees no layers would lose it. See _update_record().
         self._merged_alpha: bool = False
-        # The filtered smart objects' records in file order, as opened: the
-        # order of the document's FEid items, which tree edits do not rewrite.
-        self._filter_records: list[LayerRecord] = []
+        # Every smart object's record as opened, by id, with its index among
+        # the filtered ones in file order -- the order of the document's FEid
+        # items, which tree edits do not rewrite -- and its offset then, where
+        # those items' rectangles stay. The record is held so that its id is
+        # not reused.
+        self._opened_records: dict[int, tuple[LayerRecord, int | None, int, int]] = {}
 
         self._psd = self  # For GroupMixin protocol compatibility.
         self._init()
@@ -984,6 +987,7 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         group_stack: list[layers.Group | PSDImage] = [self]
         records = list(self._record._iter_layers())
         unmatched = self._unmatched_dividers(records)
+        filtered = 0
 
         for index, (record, channels) in enumerate(records):
             current_group = group_stack[-1]
@@ -1045,8 +1049,15 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
                 or Tag.PLACED_LAYER2 in blocks
             ):
                 layer = layers.SmartObjectLayer(current_group, record, channels)
+                position = None
                 if _has_filters(blocks):
-                    self._filter_records.append(record)
+                    position, filtered = filtered, filtered + 1
+                self._opened_records[id(record)] = (
+                    record,
+                    position,
+                    record.left,
+                    record.top,
+                )
             else:
                 for key in adjustments.TYPES.keys():
                     if key in blocks:

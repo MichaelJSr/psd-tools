@@ -10,6 +10,7 @@ import pytest
 from psd_tools.compression import (
     RLE_ROW_BYTES,
     PSDDecompressionWarning,
+    _decompress,
     _safe_zlib_decompress,
     compress,
     decode_prediction,
@@ -382,6 +383,18 @@ def test_decompress_corrupted_zlib_emits_warning(kind: Compression) -> None:
     ]
     assert len(psd_warnings) >= 1
     assert kind.name in str(psd_warnings[0].message)
+    assert psd_warnings[0].filename == __file__
+
+
+@pytest.mark.parametrize("kind", [Compression.ZIP, Compression.ZIP_WITH_PREDICTION])
+def test_strict_decompress_raises_on_a_corrupted_zlib_stream(
+    kind: Compression,
+) -> None:
+    corrupt = b"\x78\x9c" + b"\xff" * 20
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PSDDecompressionWarning)
+        with pytest.raises(ValueError, match=f"{kind.name} decode failed"):
+            _decompress(corrupt, kind, 2, 2, 8, strict=True)
 
 
 def test_decompress_length_mismatch_raises() -> None:

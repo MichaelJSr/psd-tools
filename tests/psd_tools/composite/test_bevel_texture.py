@@ -48,7 +48,7 @@ def _checker(mode: ColorMode = ColorMode.RGB) -> Pattern:
     tile = np.full((_PERIOD, _PERIOD), 255, dtype=np.uint8)
     tile[: _PERIOD // 2, : _PERIOD // 2] = 0
     planes = []
-    for _ in range(3 if mode == ColorMode.RGB else 1):
+    for _ in range(3 if mode in (ColorMode.RGB, ColorMode.LAB) else 1):
         plane = VirtualMemoryArray()
         plane.set_data((_PERIOD, _PERIOD), tile.tobytes(), 8)
         planes.append(plane)
@@ -280,6 +280,18 @@ def test_a_grayscale_pattern_textures_as_an_rgb_one_does(mode: str) -> None:
     psd, layer = _document(mode=mode, pattern_mode=ColorMode.GRAYSCALE)
     bevel = _texture(layer)
     assert _lit(psd, bevel, layer.bbox, (8, 8), axis=0) == ({7, 0}, {3, 4})
+
+
+@pytest.mark.parametrize("pattern_mode", [ColorMode.INDEXED, ColorMode.LAB])
+def test_a_pattern_neither_rgb_nor_grey_draws_the_untextured_bevel(
+    pattern_mode: ColorMode,
+) -> None:
+    """An indexed pattern's plane holds palette indices, a Lab one's L, a, b."""
+    psd, layer = _document(pattern_mode=pattern_mode)
+    bevel = _texture(layer)
+    textured = _rendered(psd)
+    bevel[b"useTexture"] = Bool(False)
+    assert np.array_equal(textured, _rendered(psd))
 
 
 def test_an_inverted_texture_is_one_of_negative_depth() -> None:
