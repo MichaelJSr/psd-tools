@@ -5,25 +5,128 @@ UTF-16 code units, so an astral character takes two of them. Editing never
 renders and needs no optional dependency: the stored pixels stay as they
 are until :py:meth:`TypeLayer.rasterize
 <psd_tools.api.layers.TypeLayer.rasterize>` replaces them.
+
+A layer's text is stored twice: in its own TySh EngineData and in its story
+in the document's Txt2 block (the layer's ``TextIndex`` is the story's
+index). Photoshop reads the story and rewrites TySh from it on save, so the
+edits here change both; :func:`sync_story` brings back a story that an
+older version left behind.
 """
 
 from __future__ import annotations
 
 import copy
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from psd_tools.constants import Tag
 from psd_tools.psd import engine_data
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import TypeLayer
 
-__all__ = ["set_run_style", "set_span_style", "set_text", "utf16_prefix"]
+__all__ = [
+    "set_run_style",
+    "set_span_style",
+    "set_text",
+    "story_text",
+    "sync_story",
+    "utf16_prefix",
+]
 
 Keep = Literal["runs", "single"]
 #: ``(unit start, unit end, run data)``
 Span = tuple[int, int, Any]
+
+
+@dataclass(frozen=True)
+class _Spelling:
+    """Txt2 key names: Photoshop CC numbers them, older versions name them."""
+
+    objects: str
+    stories: str
+    model: str
+    view: str
+    text: str
+    paragraphs: str
+    styles: str
+    runs: str
+    data: str
+    length: str
+    sheet: str
+    features: str
+    rendered: str
+    fonts: tuple[str, ...]
+    font_name: tuple[str, ...]
+    paint: tuple[str, str, str, str]
+    numbered: bool
+
+
+_NUMBERED = _Spelling(
+    objects="1",
+    stories="1",
+    model="0",
+    view="1",
+    text="0",
+    paragraphs="5",
+    styles="6",
+    runs="0",
+    data="0",
+    length="1",
+    sheet="0",
+    features="6",
+    rendered="1",
+    fonts=("0", "1", "0"),
+    font_name=("0", "0", "0"),
+    paint=("99", "0", "0", "1"),
+    numbered=True,
+)
+_NAMED = _Spelling(
+    objects="DocumentObjects",
+    stories="TextObjects",
+    model="Model",
+    view="View",
+    text="Text",
+    paragraphs="ParagraphRun",
+    styles="StyleRun",
+    runs="RunArray",
+    data="RunData",
+    length="Length",
+    sheet="StyleSheet",
+    features="Features",
+    rendered="RenderedData",
+    fonts=("DocumentResources", "FontSet", "Resources"),
+    font_name=("Resource", "Identifier", "Name"),
+    paint=("StreamTag", "Color", "Type", "Values"),
+    numbered=False,
+)
+
+#: StyleSheetData keys a story feature mirrors under the same name, with
+#: Photoshop CC's number for it.
+_FEATURES = {
+    "Font": 0,
+    "FontSize": 1,
+    "FauxBold": 2,
+    "FauxItalic": 3,
+    "AutoLeading": 4,
+    "Leading": 5,
+    "HorizontalScale": 6,
+    "VerticalScale": 7,
+    "Tracking": 8,
+    "BaselineShift": 9,
+    "FontCaps": 12,
+    "FontBaseline": 13,
+    "Ligatures": 18,
+    "BaselineDirection": 35,
+    "Tsume": 36,
+    "StyleRunAlignment": 37,
+    "Language": 38,
+    "NoBreak": 52,
+    "FillColor": 53,
+    "StrokeColor": 54,
+}
 
 
 def utf16_prefix(text: str) -> list[int]:
@@ -45,65 +148,38 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
     paragraphs to the first paragraph. The last paragraph's ``\r`` is
     appended, so a ``text`` ending in one gains an empty paragraph. Setting
     the text the layer already has with ``keep="runs"`` changes nothing.
+
+    The layer's Txt2 story gets the same edit, spliced around what changed
+    from its own text; its kern and alternate-glyph marks are not carried
+    onto new characters.
     """
     old = _editor_text(layer)
     new = text + "\r"
-    if new == old and keep == "runs":
+    story = _story(layer)
+    same = new == old and keep == "runs"
+    if same and (story is None or story.text == new):
         return
-    old_u, new_u = utf16_prefix(old), utf16_prefix(new)
-    n_old, n_new = old_u[-1], new_u[-1]
-    p = 0
-    while p < min(len(old), len(new)) and old[p] == new[p]:
-        p += 1
-    s = 0
-    while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
-        s += 1
-    prefix = old_u[p]
-    suffix = n_old - old_u[len(old) - s]
-    shift = n_new - n_old
 
-    # Both sections are read and checked before either is written, so a
-    # layer the edit cannot handle is left as it was.
-    style = _section(layer, "StyleRun")
-    spans = _spans(style, n_old)
-    paragraphs = _section(layer, "ParagraphRun")
-    pspans = _spans(paragraphs, n_old)
-    if keep == "single":
-        runs = [(0, n_new, spans[0][2])]
-    else:
-        replaced = n_old - prefix - suffix > 0
-        at = _data_at(spans, prefix if replaced or prefix == 0 else prefix - 1)
-        runs = [(u0, min(u1, prefix), d) for u0, u1, d in spans if u0 < prefix]
-        middle = n_new - prefix - suffix
-        if middle > 0:
-            runs.append((prefix, prefix + middle, at))
-        runs += [
-            (max(u0, n_old - suffix) + shift, u1 + shift, d)
-            for u0, u1, d in spans
-            if u1 > n_old - suffix
-        ]
-    _write_spans(style, runs, merge=True)
+    # Both blocks are read and checked before either is written, so a layer
+    # the edit cannot handle is left as it was.
+    writes: list[Callable[[], None]] = []
+    if not same:
+        edit = _Splice(old, new, keep)
+        style = _section(layer, "StyleRun")
+        paragraphs = _section(layer, "ParagraphRun")
+        runs = edit.styles(_spans(style, edit.n_old))
+        pars = edit.paragraphs(_spans(paragraphs, edit.n_old))
 
-    def old_unit(u: int) -> int:
-        if u < prefix:
-            return u
-        if u >= n_new - suffix:
-            return u - shift
-        return prefix
+        def write_tysh() -> None:
+            _write_spans(style, runs, merge=True)
+            _write_spans(paragraphs, pars, merge=False)
+            _set_stored_text(layer, new)
 
-    out: list[Span] = []
-    start = 0
-    for i, c in enumerate(new):
-        if c == "\r":
-            end = new_u[i + 1]
-            data = (
-                pspans[0][2] if keep == "single" else _data_at(pspans, old_unit(start))
-            )
-            out.append((start, end, data))
-            start = end
-    _write_spans(paragraphs, out, merge=False)
-
-    _set_stored_text(layer, new)
+        writes.append(write_tysh)
+    if story is not None:
+        writes.append(story.respan(new, keep))
+    for write in writes:
+        write()
     _touch(layer)
 
 
@@ -122,6 +198,9 @@ def set_span_style(
     a PostScript name already in the layer's ``FontSet``. ``fill`` is an RGB
     triple in 0..1. Runs are split at the ends of the span and equal
     neighbours merged.
+
+    With a Txt2 story the key must have a story feature (``_FEATURES``),
+    else ``ValueError``: Photoshop would undo a TySh-only style.
     """
     text = _editor_text(layer)
     if not 0 <= start <= end <= len(text):
@@ -135,19 +214,13 @@ def set_span_style(
     values = _values(layer, fill, keys)
     if b <= a or not values:
         return
-    out: list[Span] = []
-    for u0, u1, data in spans:
-        for s0, s1 in ((u0, min(u1, a)), (max(u0, a), min(u1, b)), (max(u0, b), u1)):
-            if s1 <= s0:
-                continue
-            part = data
-            if s0 >= a and s1 <= b:
-                part = copy.deepcopy(data)
-                sheet = _sheet(part)
-                for key, value in values.items():
-                    sheet[key] = value
-            out.append((s0, s1, part))
-    _write_spans(style, out, merge=True)
+    story = _story(layer)
+    write_story = (
+        story.restyle(layer, text, a, b, fill, keys) if story is not None else None
+    )
+    _write_spans(style, _restyled(spans, a, b, values, _sheet), merge=True)
+    if write_story is not None:
+        write_story()
     _touch(layer)
 
 
@@ -168,6 +241,312 @@ def set_run_style(
     set_span_style(
         layer, _str_index(units, u0), _str_index(units, u1), fill=fill, **keys
     )
+
+
+def story_text(layer: TypeLayer) -> str | None:
+    r"""Return the text of the layer's Txt2 story, final ``\r`` included, or None."""
+    story = _story(layer)
+    return None if story is None else story.text
+
+
+def sync_story(layer: TypeLayer) -> bool:
+    """Bring the layer's Txt2 story to the layer's text; True when it changed.
+
+    The story's text is replaced and its runs spliced as :func:`set_text`
+    does around what differs; its styles stay its own.
+    """
+    story = _story(layer)
+    text = _editor_text(layer)
+    if story is None or story.text == text:
+        return False
+    story.respan(text, "runs")()
+    _touch(layer)
+    return True
+
+
+class _Splice:
+    """Where ``old`` and ``new`` differ, in UTF-16 units, and the runs after."""
+
+    def __init__(self, old: str, new: str, keep: Keep) -> None:
+        old_u, new_u = utf16_prefix(old), utf16_prefix(new)
+        p = 0
+        while p < min(len(old), len(new)) and old[p] == new[p]:
+            p += 1
+        s = 0
+        while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
+            s += 1
+        self.new, self.new_u, self.keep = new, new_u, keep
+        self.n_old, self.n_new = old_u[-1], new_u[-1]
+        self.prefix = old_u[p]
+        self.suffix = self.n_old - old_u[len(old) - s]
+        self.shift = self.n_new - self.n_old
+
+    def _around(self, spans: Sequence[Span], middle_data: Any) -> list[Span]:
+        """Keep the prefix and suffix runs; give the middle ``middle_data``."""
+        prefix, suffix, n_old = self.prefix, self.suffix, self.n_old
+        runs = [(u0, min(u1, prefix), d) for u0, u1, d in spans if u0 < prefix]
+        middle = self.n_new - prefix - suffix
+        if middle > 0:
+            runs.append((prefix, prefix + middle, middle_data))
+        runs += [
+            (max(u0, n_old - suffix) + self.shift, u1 + self.shift, d)
+            for u0, u1, d in spans
+            if u1 > n_old - suffix
+        ]
+        return runs
+
+    def styles(self, spans: Sequence[Span]) -> list[Span]:
+        if self.keep == "single":
+            return [(0, self.n_new, spans[0][2])]
+        replaced = self.n_old - self.prefix - self.suffix > 0
+        prefix = self.prefix
+        at = _data_at(spans, prefix if replaced or prefix == 0 else prefix - 1)
+        return self._around(spans, at)
+
+    def marks(self, spans: Sequence[Span], empty: Any) -> list[Span]:
+        """Per-character marks (kerns, alternate glyphs): new text has none."""
+        if self.keep == "single":
+            return [(0, self.n_new, empty)]
+        return self._around(spans, empty)
+
+    def paragraphs(self, spans: Sequence[Span]) -> list[Span]:
+        out: list[Span] = []
+        start = 0
+        for i, c in enumerate(self.new):
+            if c == "\r":
+                end = self.new_u[i + 1]
+                data = (
+                    spans[0][2]
+                    if self.keep == "single"
+                    else _data_at(spans, self._old_unit(start))
+                )
+                out.append((start, end, data))
+                start = end
+        return out
+
+    def _old_unit(self, u: int) -> int:
+        if u < self.prefix:
+            return u
+        if u >= self.n_new - self.suffix:
+            return u - self.shift
+        return self.prefix
+
+
+class _Story:
+    """A type layer's story in the document's Txt2 block."""
+
+    def __init__(
+        self, root: engine_data.Dict, story: engine_data.Dict, keys: _Spelling
+    ) -> None:
+        self.root, self.story, self.k = root, story, keys
+        self.model = story[keys.model]
+
+    @property
+    def text(self) -> str:
+        return str(self.model[self.k.text].value)
+
+    def _is_runs(self, section: Any) -> bool:
+        runs = (
+            section.get(self.k.runs) if isinstance(section, engine_data.Dict) else None
+        )
+        return isinstance(runs, engine_data.List) and all(
+            isinstance(run, engine_data.Dict) and self.k.length in run for run in runs
+        )
+
+    def _spans(self, section: engine_data.Dict, total: int) -> list[Span]:
+        out: list[Span] = []
+        unit = 0
+        for run in section[self.k.runs]:
+            n = int(run[self.k.length].value)
+            if n > 0 and unit < total:
+                out.append((unit, min(unit + n, total), run.get(self.k.data)))
+            unit += n
+        if not out:
+            raise ValueError("the layer's Txt2 story has no runs")
+        if out[-1][1] < total:
+            out[-1] = (out[-1][0], total, out[-1][2])
+        return out
+
+    def _write(
+        self, section: engine_data.Dict, spans: Sequence[Span], merge: bool
+    ) -> None:
+        runs: list[Span] = []
+        for u0, u1, data in spans:
+            if u1 <= u0:
+                continue
+            if merge and runs and (runs[-1][2] is data or runs[-1][2] == data):
+                runs[-1] = (runs[-1][0], u1, runs[-1][2])
+            else:
+                runs.append((u0, u1, data))
+        out: list[Any] = []
+        for u0, u1, data in runs:
+            run = engine_data.Dict()
+            run[self.k.data] = data
+            run[self.k.length] = engine_data.Integer(u1 - u0)
+            out.append(run)
+        section[self.k.runs] = engine_data.List(out)
+
+    def respan(self, new: str, keep: Keep) -> Callable[[], None]:
+        """Check the story can take ``new``; return the write that sets it."""
+        k = self.k
+        edit = _Splice(self.text, new, keep)
+        plans: list[tuple[engine_data.Dict, list[Span], bool]] = []
+        for key, section in self.model.items():
+            if not self._is_runs(section):
+                continue
+            spans = self._spans(section, edit.n_old)
+            name = str(key.value)
+            if name == k.styles:
+                plans.append((section, edit.styles(spans), True))
+            elif name == k.paragraphs:
+                plans.append((section, edit.paragraphs(spans), False))
+            else:
+                plans.append((section, edit.marks(spans, engine_data.Dict()), True))
+        for name in (k.styles, k.paragraphs):
+            if not self._is_runs(self.model.get(name)):
+                raise ValueError(f"the layer's Txt2 story has no {name} runs")
+        view = self.story.get(k.view)
+        rendered = view.get(k.rendered) if isinstance(view, engine_data.Dict) else None
+        if isinstance(rendered, engine_data.Dict) and self._is_runs(rendered):
+            # Lines per paragraph: a new paragraph takes the edited one's count.
+            spans = self._spans(rendered, edit.n_old)
+            plans.append((rendered, edit.paragraphs(spans), False))
+
+        def write() -> None:
+            for section, spans, merge in plans:
+                self._write(section, spans, merge)
+            self.model[k.text].value = new
+
+        return write
+
+    def restyle(
+        self,
+        layer: TypeLayer,
+        text: str,
+        a: int,
+        b: int,
+        fill: tuple[float, float, float] | None,
+        keys: Mapping[str, Any],
+    ) -> Callable[[], None]:
+        """Check the story can take the span style; return the write that sets it."""
+        if self.text != text:
+            raise ValueError(
+                "the layer's Txt2 story holds other text: sync_story() first"
+            )
+        k = self.k
+        values: dict[str, Any] = {}
+        for key, value in keys.items():
+            number = _FEATURES.get(key)
+            if number is None:
+                raise ValueError(f"{key} has no Txt2 story feature")
+            if key == "Font":
+                value = self._font_index(layer, value)
+            values[str(number) if k.numbered else key] = _element(value)
+        if fill is not None:
+            values[str(_FEATURES["FillColor"]) if k.numbered else "FillColor"] = (
+                self._paint(fill)
+            )
+        section = self.model[k.styles]
+        spans = self._spans(section, utf16_prefix(text)[-1])
+
+        def features(data: Any) -> engine_data.Dict:
+            sheet = data.get(k.sheet)
+            if not isinstance(sheet, engine_data.Dict):
+                sheet = data[k.sheet] = engine_data.Dict()
+            inner = sheet.get(k.features)
+            if not isinstance(inner, engine_data.Dict):
+                inner = sheet[k.features] = engine_data.Dict()
+            return inner
+
+        out = _restyled(spans, a, b, values, features)
+        return lambda: self._write(section, out, merge=True)
+
+    def _font_index(self, layer: TypeLayer, value: Any) -> int:
+        """Return the story's FontSet index of a ``Font`` name or TySh index."""
+        if isinstance(value, str):
+            name = value
+        else:
+            tysh = [
+                str(f["Name"].value) for f in layer.resource_dict.get("FontSet", [])
+            ]
+            name = tysh[int(value)]
+        node: Any = self.root
+        for key in self.k.fonts:
+            node = node[key]
+        names = []
+        for font in node:
+            for key in self.k.font_name:
+                font = font[key]
+            names.append(str(font.value))
+        if name not in names:
+            raise ValueError(f"font {name!r} is not in the Txt2 FontSet {names}")
+        return names.index(name)
+
+    def _paint(self, fill: tuple[float, float, float]) -> engine_data.Dict:
+        tag, color_key, type_key, values_key = self.k.paint
+        r, g, b = (float(v) for v in fill)
+        color = engine_data.Dict()
+        color[type_key] = engine_data.Integer(1)
+        argb: list[Any] = [engine_data.Float(v) for v in (1.0, r, g, b)]
+        color[values_key] = engine_data.List(argb)
+        paint = engine_data.Dict()
+        paint[tag] = engine_data.Property("SimplePaint")
+        paint[color_key] = color
+        return paint
+
+
+def _story(layer: TypeLayer) -> _Story | None:
+    """Return the layer's Txt2 story; None without Txt2 or a TextIndex."""
+    psd = getattr(layer, "_psd", None)
+    record = getattr(psd, "_record", None)
+    info = getattr(record, "layer_and_mask_information", None)
+    blocks = getattr(info, "tagged_blocks", None)
+    if blocks is None or Tag.TEXT_ENGINE_DATA not in blocks:
+        return None
+    index = layer._data.text_data.get(b"TextIndex")
+    if index is None:
+        return None
+    root = blocks.get_data(Tag.TEXT_ENGINE_DATA)
+    for keys in (_NUMBERED, _NAMED):
+        objects = root.get(keys.objects) if isinstance(root, engine_data.Dict) else None
+        stories = (
+            objects.get(keys.stories) if isinstance(objects, engine_data.Dict) else None
+        )
+        if isinstance(stories, engine_data.List):
+            break
+    else:
+        raise ValueError("the document's Txt2 block has no text objects")
+    i = int(getattr(index, "value", index))
+    if not 0 <= i < len(stories):
+        raise ValueError(f"TextIndex {i} outside the {len(stories)} Txt2 stories")
+    story = stories[i]
+    model = story.get(keys.model) if isinstance(story, engine_data.Dict) else None
+    if not isinstance(model, engine_data.Dict) or keys.text not in model:
+        raise ValueError(f"Txt2 story {i} has no text")
+    return _Story(root, story, keys)
+
+
+def _restyled(
+    spans: Sequence[Span],
+    a: int,
+    b: int,
+    values: Mapping[str, Any],
+    target: Callable[[Any], Any],
+) -> list[Span]:
+    """Split the runs at ``a`` and ``b``; set ``values`` on copies inside."""
+    out: list[Span] = []
+    for u0, u1, data in spans:
+        for s0, s1 in ((u0, min(u1, a)), (max(u0, a), min(u1, b)), (max(u0, b), u1)):
+            if s1 <= s0:
+                continue
+            part = data
+            if s0 >= a and s1 <= b:
+                part = copy.deepcopy(data)
+                sheet = target(part)
+                for key, value in values.items():
+                    sheet[key] = value
+            out.append((s0, s1, part))
+    return out
 
 
 def _editor_text(layer: TypeLayer) -> str:

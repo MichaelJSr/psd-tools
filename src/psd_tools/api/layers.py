@@ -3176,6 +3176,25 @@ class TypeLayer(Layer):
         """:py:meth:`set_span_style` over style run ``index``."""
         text_edit.set_run_style(self, index, fill=fill, **keys)
 
+    @property
+    def story_text(self) -> str | None:
+        r"""
+        Text of the layer's story in the document's Txt2 block.
+
+        The final ``'\r'`` is included; None without a story. Photoshop
+        reads this text, not :py:attr:`text`.
+        """
+        return text_edit.story_text(self)
+
+    def sync_story(self) -> bool:
+        """
+        Bring the layer's Txt2 story to the layer's text.
+
+        The runs are spliced as :py:meth:`set_text` does; True when the story
+        changed.
+        """
+        return text_edit.sync_story(self)
+
     def rasterize(
         self, fonts: "FontMap | None" = None, options: "Options | None" = None
     ) -> "RenderReport":
