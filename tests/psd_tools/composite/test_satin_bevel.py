@@ -832,6 +832,22 @@ def test_a_slope_is_smoothed_across_the_step() -> None:
     assert np.allclose(gx[4, 2], 0.375) and np.allclose(gx[3, 2], 0.125)
 
 
+def test_a_bevel_lights_a_step_through_a_sobel_operator() -> None:
+    """A raised block three columns wide, lit from above.
+
+    Along its top edge the end columns take less light than the middle one,
+    and the columns beside the block some: the slope is smoothed across.
+    """
+    luminance = np.ones((24, 24), dtype=np.float32)
+    luminance[8:16, 10:13] = 0.0
+    texture = effects.texture_height(luminance, size=1.0, depth=100.0, inverted=False)
+    highlight, _ = _bevel(_flat_layer(), size=1.0, texture=texture)
+    edge = highlight[7, :, 0]
+    assert edge[11] > edge[10] > edge[9] > 0.0
+    assert np.isclose(edge[10], edge[12]) and np.isclose(edge[9], edge[13])
+    assert edge[8] == 0.0 and edge[14] == 0.0
+
+
 def test_a_non_finite_texture_raises() -> None:
     texture = np.full((24, 24), np.nan, dtype=np.float32)
     with pytest.raises(ValueError):

@@ -43,18 +43,18 @@ _INSIDE = 6
 Box = tuple[int, int, int, int]
 
 
-def _checker() -> Pattern:
-    """An RGB pattern: an 8 x 8 white tile with a black 4 x 4 block at its origin."""
+def _checker(mode: ColorMode = ColorMode.RGB) -> Pattern:
+    """An 8 x 8 white tile with a black 4 x 4 block at its origin."""
     tile = np.full((_PERIOD, _PERIOD), 255, dtype=np.uint8)
     tile[: _PERIOD // 2, : _PERIOD // 2] = 0
     planes = []
-    for _ in range(3):
+    for _ in range(3 if mode == ColorMode.RGB else 1):
         plane = VirtualMemoryArray()
         plane.set_data((_PERIOD, _PERIOD), tile.tobytes(), 8)
         planes.append(plane)
-    channels = planes + [VirtualMemoryArray() for _ in range(23)]
+    channels = planes + [VirtualMemoryArray() for _ in range(26 - len(planes))]
     return Pattern(
-        image_mode=ColorMode.RGB,
+        image_mode=mode,
         point=(_PERIOD, _PERIOD),
         name="Checker\x00",
         pattern_id=_PATTERN_ID,
@@ -103,13 +103,19 @@ def _texture(
     return bevel
 
 
-def _document(left: int = 8, top: int = 8, mode: str = "RGB") -> tuple[PSDImage, Layer]:
+def _document(
+    left: int = 8,
+    top: int = 8,
+    mode: str = "RGB",
+    pattern_mode: ColorMode = ColorMode.RGB,
+) -> tuple[PSDImage, Layer]:
     psd = PSDImage.new(mode, (48, 48))
     psd._record.layer_and_mask_information.tagged_blocks = TaggedBlocks()
     blocks = psd.tagged_blocks
     assert blocks is not None
     # ``ListElement`` carries an unbound item type, as in ``Patterns.read()``.
-    blocks.set_data(Tag.PATTERNS1, Patterns([_checker()]))  # type: ignore[list-item]
+    patterns = Patterns([_checker(pattern_mode)])  # type: ignore[list-item]
+    blocks.set_data(Tag.PATTERNS1, patterns)
     square = Image.new("RGBA", (_SQUARE, _SQUARE), (128, 128, 128, 255))
     layer = psd.create_pixel_layer(square, top=top, left=left)
     return psd, layer
@@ -267,6 +273,13 @@ def test_a_texture_outside_rgb_draws_the_untextured_bevel(mode: str) -> None:
     plain = _rendered(psd)
     assert np.isfinite(textured).all()
     assert np.array_equal(textured, plain) == (mode == "CMYK")
+
+
+@pytest.mark.parametrize("mode", ["RGB", "L"])
+def test_a_grayscale_pattern_textures_as_an_rgb_one_does(mode: str) -> None:
+    psd, layer = _document(mode=mode, pattern_mode=ColorMode.GRAYSCALE)
+    bevel = _texture(layer)
+    assert _lit(psd, bevel, layer.bbox, (8, 8), axis=0) == ({7, 0}, {3, 4})
 
 
 def test_an_inverted_texture_is_one_of_negative_depth() -> None:
