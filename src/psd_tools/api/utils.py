@@ -140,8 +140,8 @@ GROWTH_FLOOR_PIXELS = 2**24
 def check_growth(pixels: int, reference_pixels: int, factor: int) -> None:
     """Raise :class:`ValueError` when a descriptor-grown canvas is out of proportion.
 
-    A stroke width or pattern scale is the file's, and Photoshop bounds neither
-    in a way that has been verified. ``pixels`` may not exceed ``factor`` times
+    A stroke width is the file's, and Photoshop bounds it in no way that has
+    been verified. ``pixels`` may not exceed ``factor`` times
     ``reference_pixels``, or :data:`GROWTH_FLOOR_PIXELS` if that is more. This
     holds without ``max_alloc_bytes``; the byte budget is checked separately.
     """

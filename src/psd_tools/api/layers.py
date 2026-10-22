@@ -511,6 +511,7 @@ class Layer(LayerProtocol):
             self._psd.mark_updated()
         self._invalidate_bbox()
         w = self.width
+        self._move_reference_point(int(value) - self._record.left, 0)
         self._record.left = int(value)
         self._record.right = int(value) + w
 
@@ -529,8 +530,17 @@ class Layer(LayerProtocol):
             self._psd.mark_updated()
         self._invalidate_bbox()
         h = self.height
+        self._move_reference_point(0, int(value) - self._record.top)
         self._record.top = int(value)
         self._record.bottom = int(value) + h
+
+    def _move_reference_point(self, dx: int, dy: int) -> None:
+        """Carry the ``fxrp`` reference point, which effects anchor to, with the layer."""
+        point = self.tagged_blocks.get_data(Tag.REFERENCE_POINT)
+        if point is not None and (dx or dy):
+            self.tagged_blocks.set_data(
+                Tag.REFERENCE_POINT, [float(point[0]) + dx, float(point[1]) + dy]
+            )
 
     @property
     def right(self) -> int:
