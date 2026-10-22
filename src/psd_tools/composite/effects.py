@@ -1492,15 +1492,10 @@ _SOFTEN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SLOPE_PER_DEPTH = 1.0
 
 # How high a bevel's texture stands at a texture depth of 100%, per pixel of
-# the effect's size: as high as the bevel's own band. Fitted against the one
-# textured bevel in the card corpus (the Royal Eradicator Main Cannon's stat
-# digits, size 2 at 400%), not against a Photoshop preview.
+# the effect's size, and how a slope along one axis is smoothed along the
+# other (a Sobel operator). Fitted against a Photoshop export of a textured
+# bevel, not a preview fixture.
 _TEXTURE_HEIGHT_PER_DEPTH = 1.0
-
-# How a slope across one axis is smoothed along the other before the lighting
-# is taken: a Sobel operator. Photoshop lights a one pixel step over the two
-# pixels beside it and three quarters as much at the step's ends, which a plain
-# central difference does not.
 _SLOPE_ACROSS = (0.25, 0.5, 0.25)
 
 # How wide the gaussian that rounds a chisel soft bevel's faces is, per pixel
@@ -1762,8 +1757,11 @@ def texture_height(
 
 
 def _slopes(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The surface's slope down and across: a central difference along each
-    axis, smoothed by ``_SLOPE_ACROSS`` along the other (a Sobel operator)."""
+    """The surface's slope down and across, as a Sobel operator takes it.
+
+    A central difference along each axis, smoothed by ``_SLOPE_ACROSS``
+    along the other.
+    """
     from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
     step = np.array([-0.5, 0.0, 0.5], dtype=np.float32)
@@ -1802,11 +1800,12 @@ def draw_bevel(
     ``soften`` blurs the lighting before that split, and ``contour`` (the
     gloss contour, read as :py:func:`draw_drop_shadow` reads one) maps the
     lighting first, the flat layer's with it, so a flat face takes neither
-    under any contour.
+    under any contour. The slope is a Sobel operator's, fitted to one
+    Photoshop export: a one pixel step lights the two pixels astride it.
 
-    ``texture`` (from :py:func:`texture_height`, over the whole canvas) is
-    laid on the surface before it is lit, so the bevel's faces and the flat
-    layer alike carry its bumps.
+    ``texture`` (from :py:func:`texture_height`, on ``viewport``) is laid on
+    the surface before it is lit, so the bevel's faces and the flat layer
+    alike carry its bumps.
 
     Both results are ``(height, width, 1)`` over the whole canvas; the caller
     keeps the parts the style paints, inside the silhouette and beside it,

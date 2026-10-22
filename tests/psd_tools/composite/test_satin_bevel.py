@@ -725,10 +725,9 @@ _FITTED = {
     "_BEVEL_SLOPE_PER_DEPTH": 1.0,
 }
 
-# Not fitted: no preview carries a chisel soft bevel. Pinned so that a
-# change to it is a deliberate one. The texture height and the slope's
-# smoothing are fitted against a card's Photoshop export (the one textured
-# bevel in the corpus), not a preview fixture.
+# Not fitted to a preview: none carries a chisel soft bevel or a textured
+# bevel. The texture height and the slope's smoothing are fitted to a
+# Photoshop export instead. Pinned so that a change to them is deliberate.
 _ASSUMED = {
     "_SLOPE_LIMIT_SIGMA_PER_SIZE": 0.125,
     "_TEXTURE_HEIGHT_PER_DEPTH": 1.0,
@@ -772,8 +771,10 @@ def _flat_layer(size: int = 24) -> np.ndarray:
 
 
 def test_a_textures_dark_pixels_stand_as_high_as_the_bevel() -> None:
-    """At 100% a black texture pixel is ``size`` high and a white one flat;
-    the depth scales that and ``inverted`` turns it over."""
+    """At 100% a black texture pixel is ``size`` high and a white one flat.
+
+    The depth scales that, and ``inverted`` or a negative depth turns it over.
+    """
     luminance = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
     height = effects.texture_height(luminance, size=2.0, depth=100.0, inverted=False)
     assert np.allclose(height, [[2.0, 1.0, 0.0]])
@@ -792,10 +793,12 @@ def test_a_textures_dark_pixels_stand_as_high_as_the_bevel() -> None:
 
 
 def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
-    """A dark block in the texture is a raised block: lit from above (angle
-    90) its top edge takes the highlight over the two rows astride the step,
-    its bottom edge the shadow, and its flat top and the flat layer around
-    it take neither."""
+    """A dark block in the texture is a raised block.
+
+    Lit from above (angle 90), its top edge takes the highlight over the two
+    rows astride the step and its bottom edge the shadow; its flat top and
+    the flat layer around it take neither.
+    """
     shape = _flat_layer()
     luminance = np.ones((24, 24), dtype=np.float32)
     luminance[8:16, 4:20] = 0.0
@@ -813,9 +816,11 @@ def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
 
 
 def test_a_slope_is_smoothed_across_the_step() -> None:
-    """A one pixel step lights the two rows astride it equally; the step's
-    end columns carry three quarters of the slope and the columns beside
-    them a quarter, as Photoshop's export shows."""
+    """A one pixel step lights the two rows astride it equally.
+
+    The step's end columns carry three quarters of the slope and the columns
+    beside them a quarter: a Sobel operator.
+    """
     height = np.zeros((9, 9), dtype=np.float32)
     height[4:, 3:6] = 1.0
     gy, gx = effects._slopes(height)

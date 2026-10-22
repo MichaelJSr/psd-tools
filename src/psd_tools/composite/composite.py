@@ -284,12 +284,21 @@ def _draw_color_overlay(
     return paint.draw_solid_color_fill(box, layer._psd.color_mode, descriptor)
 
 
+def _tiling_origin(layer: Layer, descriptor: Any, layout: _Box) -> tuple[int, int]:
+    """Where a pattern of ``layer``'s style laid out across ``layout`` starts.
+
+    A layer's tiling starts at its reference point, a group's at its layout
+    box, which is the document's origin for a pass-through group; see
+    :py:func:`paint.pattern_origin`.
+    """
+    point = None if layer.is_group() else _reference_point(layer)
+    return paint.pattern_origin(descriptor, layout, point)
+
+
 def _draw_pattern_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    # A group's tiling starts at its layout box.
-    point = None if layer.is_group() else _reference_point(layer)
-    origin = paint.pattern_origin(descriptor, layout, point)
+    origin = _tiling_origin(layer, descriptor, layout)
     fill, shape = paint.draw_pattern_fill(
         box, layer._psd, descriptor, layout, origin=origin
     )
@@ -3953,7 +3962,8 @@ class Compositor:
         layer, over everything else inside it; what an outer bevel, an emboss or
         a pillow emboss puts beside it is an outer effect, as an outset
         stroke is. A stroke emboss, which bevels the stroke rather than the
-        layer, a shape contour and a texture are not drawn.
+        layer, and a shape contour are not drawn; a texture is
+        (:py:meth:`_bevel_texture`).
         """
         bevels = _readable(layer, "bevelemboss")
         if not bevels or not self._has_scipy("Bevels"):
@@ -4045,25 +4055,32 @@ class Compositor:
     ) -> np.ndarray | None:
         """A bevel's texture on ``bbox``: its pattern's luminance as a height field.
 
-        The pattern is tiled at the texture's scale from the layer's reference
-        point when the texture is linked with the layer (a group's from its
-        content box), else from the document's origin, and the phase moves it;
+        The pattern tiles from where a pattern overlay of the layer would
+        (:py:func:`_tiling_origin`), at the texture's scale;
         :py:func:`texture_height` turns its luminance into height. None, and
         the bevel goes on untextured, when the pattern is not in the document
         or cannot be read.
         """
         try:
+            _, layout = _overlay_boxes(
+                layer, self._viewport, self._cache.content_bboxes
+            )
+            origin = _tiling_origin(layer, bevel.descriptor, layout)
             fill, _ = paint.draw_pattern_fill(
-                bbox, layer._psd, bevel.descriptor, self._texture_origin(layer, bevel)
+                bbox, layer._psd, bevel.descriptor, origin=origin
             )
         except _UNREADABLE as error:
             logger.debug("Cannot read the texture of a bevel of %s: %s", layer, error)
             return None
         if fill is None:
-            logger.debug("The texture pattern of a bevel of %s is not in the document", layer)
+            logger.debug(
+                "The texture pattern of a bevel of %s is not in the document", layer
+            )
             return None
         if fill.shape[2] >= 3:
-            luminance = fill[:, :, 0] * 0.299 + fill[:, :, 1] * 0.587 + fill[:, :, 2] * 0.114
+            luminance = (
+                fill[:, :, 0] * 0.299 + fill[:, :, 1] * 0.587 + fill[:, :, 2] * 0.114
+            )
         else:
             luminance = fill.mean(axis=2)
         return texture_height(
@@ -4072,28 +4089,6 @@ class Compositor:
             depth=bevel.texture_depth,
             inverted=bevel.texture_inverted,
         )
-
-    def _texture_origin(
-        self, layer: Layer, bevel: BevelEmboss
-    ) -> tuple[int, int, int, int]:
-        """Where a bevel texture's tiling starts, as a box for ``draw_pattern_fill``."""
-        x = y = 0.0
-        if bevel.texture_aligned:
-            point = (
-                None
-                if isinstance(layer, GroupMixin)
-                else layer.tagged_blocks.get_data(Tag.REFERENCE_POINT)
-            )
-            if point is not None:
-                x, y = float(point[0]), float(point[1])
-            else:
-                _, layout = _overlay_boxes(
-                    layer, self._viewport, self._cache.content_bboxes
-                )
-                x, y = float(layout[0]), float(layout[1])
-        dx, dy = bevel.texture_phase
-        ox, oy = int(round(x + dx)), int(round(y + dy))
-        return (ox, oy, ox, oy)
 
     def _add_stroke_effects(
         self,

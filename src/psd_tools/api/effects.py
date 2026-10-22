@@ -647,8 +647,13 @@ class BevelEmboss(_Effect, _AngleMixin):
         return get_scalar(self.descriptor, b"useTexture", bool, False)
 
     @property
+    def texture_pattern(self) -> Descriptor | None:
+        """The texture's pattern, as :py:attr:`PatternOverlay.pattern`."""
+        return self.descriptor.get(b"Ptrn")
+
+    @property
     def texture_depth(self) -> float:
-        """Texture depth in percent (-1000 to 1000), 100 where the descriptor does not say."""
+        """Texture depth in percent (-1000 to 1000)."""
         return get_scalar(self.descriptor, b"textureDepth", float, 100.0)
 
     @property
@@ -663,7 +668,7 @@ class BevelEmboss(_Effect, _AngleMixin):
 
     @property
     def texture_aligned(self) -> bool:
-        """Whether the texture is linked with the layer (tiled from its reference point)."""
+        """Whether the texture is linked with the layer."""
         return get_scalar(self.descriptor, Key.Alignment, bool, True)
 
     @property
@@ -672,7 +677,10 @@ class BevelEmboss(_Effect, _AngleMixin):
         phase = self.descriptor.get(b"phase")
         if phase is None:
             return (0.0, 0.0)
-        return (float(phase.get(Key.Horizontal, 0.0)), float(phase.get(Key.Vertical, 0.0)))
+        return (
+            float(phase.get(Key.Horizontal, 0.0)),
+            float(phase.get(Key.Vertical, 0.0)),
+        )
 
 
 @register(Klass.ChromeFX.value)
