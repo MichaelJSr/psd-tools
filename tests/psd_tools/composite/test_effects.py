@@ -807,8 +807,9 @@ def test_a_stroke_is_measured_in_photoshops_metric(filename: str) -> None:
     edges past antialiased pixels miss Photoshop's by tens of levels.
     """
     psd = PSDImage.open(full_name(filename))
-    reference = psd.numpy()[..., :3]
-    result = composite(psd)[0]
+    reference = psd.numpy()
+    color, _, alpha = composite(psd)
+    result = np.concatenate((color, alpha), axis=2)[..., : reference.shape[2]]
     assert float(np.abs(result - reference).max()) < 1.5 / 255.0
 
 
