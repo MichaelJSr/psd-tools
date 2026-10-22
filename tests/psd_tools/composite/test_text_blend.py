@@ -28,6 +28,8 @@ from psd_tools.composite.text_blend import (
 )
 from psd_tools.composite.widen import make_widen
 from psd_tools.constants import BlendMode, ColorMode, Tag
+from psd_tools.psd.descriptor import Double, Enumerated
+from psd_tools.terminology import Enum, Key
 
 from ..utils import full_name
 
@@ -308,6 +310,60 @@ def test_text_in_a_styled_group_still_meets_its_own_style() -> None:
     grouped = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
     assert grouped == pytest.approx(alone, abs=1 / 255)
     assert np.abs(grouped - straight).mean() > 4 / 255
+
+
+def _rings(layer: Layer, *rings: tuple[float, float, float]) -> None:
+    """Give the layer outset stroke rings of (size, grey, opacity), first on top.
+
+    The list comes from ``double-stroke-effects.psd``'s rectangle, the one
+    fixture whose effects block carries a stroke list.
+    """
+    donor = PSDImage.open(full_name("effects/double-stroke-effects.psd"))
+    rectangle = next(sub for sub in donor.descendants() if sub.name == "Rectangle 1")
+    data = copy.deepcopy(
+        rectangle.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V0)
+    )
+    strokes = data[b"frameFXMulti"]
+    while len(strokes) < len(rings):
+        strokes.append(copy.deepcopy(strokes[0]))
+    for desc in strokes[len(rings) :]:
+        desc[b"enab"] = False
+    for desc, (size, grey, opacity) in zip(strokes[: len(rings)], rings, strict=True):
+        desc[b"enab"] = True
+        desc[b"present"] = True
+        desc[Key.Style] = Enumerated(typeID=b"FStl", enum=Enum.OutsetFrame)
+        desc[Key.SizeKey] = Double(size)
+        desc[b"Opct"] = Double(opacity)
+        for channel in (Key.Red, Key.Green, Key.Blue):
+            desc[Key.Color][channel] = Double(255.0 * grey)
+    layer.tagged_blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V0, data)
+
+
+def test_a_faint_stroke_over_a_wide_one_leaves_the_text_on_the_backdrop() -> None:
+    """A 1 px ring at 0 % listed over a 6 px ring cuts the wide ring back.
+
+    The glyph edge then meets the backdrop, in the gamma, as it does with no
+    style at all, where the wide ring alone would put its grey there. An
+    opaque ring on top reaches the edge as the wide ring alone does.
+    """
+    psd = PSDImage.open(full_name("text.psb"))
+    layer = next(_type_layers(psd))
+    assert not layer.has_effects()
+    rows, columns, edges = _edges(psd, layer)
+    plain = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
+
+    wide = (6.0, 0.5, 100.0)
+    _rings(layer, wide)
+    ringed = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
+    assert np.abs(ringed - plain).max() > 0.1
+
+    _rings(layer, (1.0, 0.0, 0.0), wide)
+    cut = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
+    assert cut == pytest.approx(plain, abs=1 / 255)
+
+    _rings(layer, (1.0, 0.0, 100.0), (6.0, 1.0, 100.0))
+    ringed = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
+    assert np.abs(ringed - plain).mean() > 4 / 255
 
 
 # -- The mix ---------------------------------------------------------------- #

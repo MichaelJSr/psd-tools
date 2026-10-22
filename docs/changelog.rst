@@ -16,6 +16,10 @@ Changelog
   hard, full shadow under any spread of a pixel or more; it grew each
   coverage level on its own, which left such shadows narrow and light. An
   inner shadow's or inner glow's choke shrinks the coverage the same way
+- [fix] A layer's stroke effects are composited as nested rings: each band is cut
+  from under the ones listed above it, so a faint or 0 % stroke shows the
+  backdrop rather than the next stroke down, and a type layer's glyph edge
+  meets what the rings leave of the backdrop in the text blend gamma.
 - [fix] A layer carrying several effects of one kind (strokes, colour or
   gradient overlays, drop or inner shadows) shows the first one listed on
   top, as Photoshop does; they were painted the other way round

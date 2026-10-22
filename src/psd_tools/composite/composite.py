@@ -1398,9 +1398,94 @@ class _OuterEffect(NamedTuple):
     # The effect's own opacity with the layer's already in it. The layer
     # opacity fades a layer's style along with the layer, which the inner
     # effects get from being composited inside the source it scales; an outer
-    # effect is not in that source, so it carries the factor itself.
-    opacity: float
+    # effect is not in that source, so it carries the factor itself. Per
+    # pixel for merged stroke bands painted at different opacities.
+    opacity: float | np.ndarray
     blend_mode: BlendMode
+    # The alpha the layer's outer effects listed above this one paint on the
+    # pixel, which this one is disjoint from -- see
+    # :py:meth:`Compositor._apply_outer_effects`.
+    above: float | np.ndarray = 0.0
+
+
+class _StrokeBand(NamedTuple):
+    """A stroke effect's paint and coverage, measured before any is painted.
+
+    Or several bands as one: adjacent bands of one blend mode are disjoint
+    once each is cut from under the ones above it, so they add, and one
+    source carries their summed coverage, the opacity each pixel is painted
+    at and the colour weighted by it -- see :py:class:`_BandSum`.
+    """
+
+    color: np.ndarray
+    coverage: np.ndarray
+    # The part of ``coverage`` inside the boundary the band was traced from.
+    inside: np.ndarray
+    opacity: float | np.ndarray
+    blend_mode: BlendMode
+
+
+class _StrokeHalves(NamedTuple):
+    """A run of stroke bands split at the layer's region, before it is painted.
+
+    ``share`` is the half inside the region as a share of it, ``beside`` the
+    half outside; ``above_share`` and ``above_beside`` are what the runs
+    listed above take off each.
+    """
+
+    band: _StrokeBand
+    share: np.ndarray
+    beside: np.ndarray
+    above_share: float | np.ndarray
+    above_beside: float | np.ndarray
+
+
+class _BandSum:
+    """Adjacent stroke bands of one blend mode, added as they are measured.
+
+    The bands are disjoint, so one source carrying their sum blends each
+    against the backdrop alone, where painted one over the other the upper
+    would blend against the lower's paint on a pixel the two share. The sums
+    are kept in place of the bands, so the memory held is per run of one
+    blend mode and not per stroke, and a lone band is handed back as it is.
+    """
+
+    def __init__(self, band: _StrokeBand) -> None:
+        self.blend_mode = band.blend_mode
+        self._lone: _StrokeBand | None = band
+        self._coverage = band.coverage
+        self._inside = band.inside
+        self._weight: np.ndarray | None = None
+        self._color: np.ndarray | None = None
+
+    def add(self, band: _StrokeBand) -> None:
+        assert band.blend_mode == self.blend_mode
+        if self._lone is not None:
+            self._weight = self._lone.coverage * self._lone.opacity
+            self._color = self._weight * self._lone.color
+            self._lone = None
+        assert self._weight is not None and self._color is not None
+        weight = band.coverage * band.opacity
+        self._coverage = self._coverage + band.coverage
+        self._inside = self._inside + band.inside
+        self._weight = self._weight + weight
+        self._color = self._color + weight * band.color
+
+    def band(self) -> _StrokeBand:
+        if self._lone is not None:
+            return self._lone
+        assert self._weight is not None and self._color is not None
+        # Bands that overrun a pixel between them are clamped to it, and the
+        # weight with them so the opacity painted stays at most 1.
+        coverage = np.minimum(self._coverage, 1.0)
+        weight = np.minimum(self._weight, coverage)
+        return _StrokeBand(
+            utils.divide(self._color, self._weight, fill=0.0),
+            coverage,
+            np.minimum(self._inside, 1.0),
+            utils.divide(weight, coverage, fill=0.0),
+            self.blend_mode,
+        )
 
 
 class _EffectSink(Protocol):
@@ -1426,12 +1511,20 @@ class _EffectSink(Protocol):
         coverage: np.ndarray,
         color: np.ndarray,
         blend_mode: BlendMode,
-        opacity: float,
+        opacity: float | np.ndarray,
     ) -> None: ...
 
     def replace(
-        self, coverage: np.ndarray, color: np.ndarray, opacity: float
+        self, coverage: np.ndarray, color: np.ndarray, opacity: float | np.ndarray
     ) -> None: ...
+
+    @property
+    def knocks_out(self) -> bool:
+        """Whether :py:meth:`replace` takes all it covers off what is under it.
+
+        Otherwise it takes its opacity's share, as :py:meth:`over` does.
+        """
+        ...
 
 
 class _EffectCanvas:
@@ -1526,7 +1619,7 @@ class _EffectCanvas:
         coverage: np.ndarray,
         color: np.ndarray,
         blend_mode: BlendMode,
-        opacity: float,
+        opacity: float | np.ndarray,
     ) -> None:
         """Paint an effect over the layer, inside its region.
 
@@ -1556,7 +1649,11 @@ class _EffectCanvas:
         # covers, so the shape takes the coverage it was drawn on.
         self._shape = utils.union(self._shape, coverage)
 
-    def replace(self, coverage: np.ndarray, color: np.ndarray, opacity: float) -> None:
+    knocks_out = True
+
+    def replace(
+        self, coverage: np.ndarray, color: np.ndarray, opacity: float | np.ndarray
+    ) -> None:
         """Paint an effect in place of the layer, inside its region.
 
         What ``coverage`` covers of the layer and the effects under this one
@@ -1632,7 +1729,7 @@ class _AdjustmentCanvas:
         coverage: np.ndarray,
         color: np.ndarray,
         blend_mode: BlendMode,
-        opacity: float,
+        opacity: float | np.ndarray,
     ) -> None:
         """Composite an effect onto the canvas, inside the region."""
         if not coverage.any():
@@ -1640,7 +1737,11 @@ class _AdjustmentCanvas:
         shape = self._region * coverage
         self._compositor._apply_source(color, shape, shape * opacity, blend_mode)
 
-    def replace(self, coverage: np.ndarray, color: np.ndarray, opacity: float) -> None:
+    knocks_out = False
+
+    def replace(
+        self, coverage: np.ndarray, color: np.ndarray, opacity: float | np.ndarray
+    ) -> None:
         """As :py:meth:`over` Normal.
 
         The adjustment is already applied to the backdrop under the band and
@@ -2103,7 +2204,9 @@ class Compositor:
         ``t / (1 - covered)``, and the ``union`` the layer composites with
         resolves to ``covered + t`` exactly. ``covered`` is the layer's
         finished alpha, effects inside it included, so it is read after they
-        are composited and not before.
+        are composited and not before. The effects listed above a band are
+        disjoint from it in the same way and go on over it, so what they
+        paint on the pixel, ``effect.above``, comes off the divisor too.
 
         Where the layer is already opaque there is no room beside it and no
         band either, which is the ``fill=0`` below: the quotient is 0/0 there
@@ -2114,8 +2217,11 @@ class Compositor:
         """
         for effect in effects:
             coverage = effect.coverage
+            room: float | np.ndarray = 1.0 - effect.above
             if covered is not None:
-                coverage = utils.clip(utils.divide(coverage, 1.0 - covered, fill=0.0))
+                room = room - covered
+            if isinstance(room, np.ndarray):
+                coverage = utils.clip(utils.divide(coverage, room, fill=0.0))
             self._apply_source(
                 effect.color,
                 coverage,
@@ -3325,11 +3431,14 @@ class Compositor:
         stroke too large to draw cuts nothing. Its paint is not drawn here,
         so a stroke dropped only because its paint will not draw still cuts.
         """
-        knockout = silhouette
         strokes = _readable(layer, "stroke")
         if not strokes:
-            return knockout
+            return silhouette
         traces_mask = self._traces_mask(layer)
+        # The bands are nested intervals on one side of the boundary, as
+        # :py:meth:`_add_stroke_effects` cuts them, so together they claim the
+        # widest of them of a pixel, and that is what adds to the silhouette.
+        outside: np.ndarray | None = None
         for effect in strokes:
             try:
                 bbox = _stroke_box(layer, effect.descriptor, self._cache.content_bboxes)
@@ -3346,8 +3455,11 @@ class Compositor:
                     "Cannot cut a drop shadow under a stroke of %s: %s", layer, error
                 )
                 continue
-            knockout = np.minimum(knockout + paste(viewport, bbox, band - inside), 1.0)
-        return knockout
+            band = paste(viewport, bbox, band - inside)
+            outside = band if outside is None else np.maximum(outside, band)
+        if outside is None:
+            return silhouette
+        return np.minimum(silhouette + outside, 1.0)
 
     def _has_scipy(self, what: str) -> bool:
         """Whether scipy is there to draw the layer's ``what``, warning when it is not.
@@ -3855,7 +3967,19 @@ class Compositor:
         # this effect being unreadable. What is inside the second guard is the
         # drawing as well as the reading, so a stroke whose pattern data will
         # not decode is lost here too, rather than taking the document.
-        for effect in _readable(layer, "stroke"):
+        # Each band is cut from under the ones listed above it, whatever
+        # their opacity: Photoshop shows the backdrop through a faint stroke,
+        # not the next stroke down. So the bands are measured top first, in
+        # file order, and painted bottom first. Every band is measured from
+        # the same boundary, so on either side of it the bands are nested
+        # intervals: what the ones above claim of a pixel is the widest of
+        # them, on each side separately, and a band keeps what exceeds that.
+        runs: list[_BandSum] = []
+        # The topmost band, whole, and the (inside, outside) the bands above
+        # claim, built from it once there is a band to cut.
+        top: _StrokeBand | None = None
+        claimed: tuple[np.ndarray, np.ndarray] | None = None
+        for effect in reversed(_readable(layer, "stroke")):
             try:
                 # Effect must happen at the layer viewport, grown so an outset
                 # or centered stroke has room for the part of itself that
@@ -3879,16 +4003,42 @@ class Compositor:
             color = paste(self._viewport, bbox, color)
             mask = paste(self._viewport, bbox, mask_in_bbox)
             inside = paste(self._viewport, bbox, inside_in_bbox)
+            if top is None:
+                top = _StrokeBand(color, mask, inside, opacity, blend_mode)
+                runs.append(_BandSum(top))
+                continue
+            if claimed is None:
+                claimed = (top.inside, top.coverage - top.inside)
+            claimed_inside, claimed_outside = claimed
+            outside = mask - inside
+            claimed = (
+                np.maximum(claimed_inside, inside),
+                np.maximum(claimed_outside, outside),
+            )
+            inside = np.maximum(inside - claimed_inside, 0.0)
+            mask = inside + np.maximum(outside - claimed_outside, 0.0)
+            band = _StrokeBand(color, mask, inside, opacity, blend_mode)
+            if runs[-1].blend_mode == blend_mode:
+                runs[-1].add(band)
+            else:
+                runs.append(_BandSum(band))
+
+        # The runs are disjoint, so on a pixel two share they add; painted
+        # one over the other, the upper would fade the lower by what it
+        # paints there. So each half of a run goes on at its share of what
+        # the runs above leave of the pixel, as :py:meth:`_apply_outer_effects`
+        # puts a band beside the layer, and the sum comes out exact.
+        halves: list[_StrokeHalves] = []
+        above_share: float | np.ndarray = 0.0
+        above_beside: float | np.ndarray = 0.0
+        for run in runs:
+            band = run.band()
             # The two halves of the band go to different places, and an inset
             # or outset stroke is all of one of them -- only a centered stroke
             # is split. The rest of the band, not ``mask - inside``, so that
             # the two are exactly what was drawn however they divide.
-            overlap = np.minimum(inside, canvas.region)
-            # A Normal stroke replaces the layer under its inner half.
-            if blend_mode is BlendMode.NORMAL:
-                canvas.replace(canvas.within(overlap), color, opacity)
-            else:
-                canvas.over(canvas.within(overlap), color, blend_mode, opacity)
+            overlap = np.minimum(band.inside, canvas.region)
+            share = canvas.within(overlap)
             # ``inside`` is inside the boundary the stroke was traced from,
             # which is the layer's own coverage only while the two are the
             # same shape. A stroke that traces the *mask* -- a fill layer's,
@@ -3899,8 +4049,32 @@ class Compositor:
             # Clamped to what the layer's region leaves of the pixel: the two
             # are disjoint by construction, and a band that overran would
             # otherwise carry the pixel past opaque.
-            beside = np.minimum(mask - overlap, 1.0 - canvas.region)
+            beside = np.minimum(band.coverage - overlap, 1.0 - canvas.region)
+            halves.append(_StrokeHalves(band, share, beside, above_share, above_beside))
+            # A Normal band replaces what is under its inner half, so it
+            # takes all of its share off the bands below, not its opacity's.
+            if band.blend_mode is BlendMode.NORMAL and canvas.knocks_out:
+                above_share = above_share + share
+            else:
+                above_share = above_share + share * band.opacity
+            above_beside = above_beside + beside * band.opacity
+        del runs
+
+        for band, share, beside, above_share, above_beside in reversed(halves):
+            if isinstance(above_share, np.ndarray):
+                share = utils.clip(utils.divide(share, 1.0 - above_share, fill=0.0))
+            # A Normal stroke replaces the layer under its inner half.
+            if band.blend_mode is BlendMode.NORMAL:
+                canvas.replace(share, band.color, band.opacity)
+            else:
+                canvas.over(share, band.color, band.blend_mode, band.opacity)
             if beside.any():
                 outer.append(
-                    _OuterEffect(color, beside, opacity * canvas.opacity, blend_mode)
+                    _OuterEffect(
+                        band.color,
+                        beside,
+                        band.opacity * canvas.opacity,
+                        band.blend_mode,
+                        above_beside,
+                    )
                 )

@@ -25,6 +25,7 @@ pytest.importorskip("scipy")
 
 _RED = (1.0, 0.0, 0.0)
 _BLUE = (0.0, 0.0, 1.0)
+_GREY = (0.5, 0.5, 0.5)
 
 # The rectangle's path spans rows 3-27 and columns 4-27 of a 32x32 canvas.
 _INSIDE = (slice(3, 28), slice(4, 28))
@@ -65,13 +66,15 @@ def _instances(layer: Layer, key: bytes, count: int) -> list[Descriptor]:
 
 
 def _strokes(
-    layer: Layer, *rings: tuple[float, tuple[float, float, float], float]
+    layer: Layer,
+    *rings: tuple[float, tuple[float, float, float], float],
+    style: Enum = Enum.OutsetFrame,
 ) -> None:
-    """Make the layer's strokes outset rings of (size, colour, opacity)."""
+    """Make the layer's strokes rings of (size, colour, opacity), outset by default."""
     for desc, (size, rgb, opacity) in zip(
         _instances(layer, b"frameFXMulti", len(rings)), rings, strict=True
     ):
-        desc[Key.Style] = Enumerated(typeID=b"FStl", enum=Enum.OutsetFrame)
+        desc[Key.Style] = Enumerated(typeID=b"FStl", enum=style)
         desc[Key.SizeKey] = Double(size)
         desc[Key.Color] = _color(rgb)
         desc[b"Opct"] = Double(opacity)
@@ -115,15 +118,100 @@ def test_a_wider_first_listed_stroke_hides_the_one_under_it() -> None:
     np.testing.assert_allclose(_below(psd), [_BLUE] * 3, atol=1e-6)
 
 
-@pytest.mark.parametrize("opacity", [25.0, 50.0, 75.0])
-def test_a_faded_first_listed_stroke_is_composited_over_the_second(
+def _backdrop(psd: PSDImage) -> np.ndarray:
+    """The same rows as :py:func:`_below`, with the rectangle left out."""
+    color = composite(psd, layer_filter=lambda layer: layer.name != "Rectangle 1")[0]
+    return color[_BOTTOM : _BOTTOM + 3, _COLUMN]
+
+
+@pytest.mark.parametrize("opacity", [0.0, 25.0, 50.0, 75.0])
+def test_a_faded_first_listed_stroke_shows_the_backdrop_not_the_second(
     opacity: float,
 ) -> None:
-    """``t * first + (1 - t) * second`` where the two rings overlap."""
+    """The second ring is cut from under the first, whatever the first's opacity.
+
+    So ``t * first + (1 - t) * backdrop`` on the first row, and the second
+    ring only past it. Photoshop shows this at 0 %; the other opacities are
+    the same rule extrapolated, with no Photoshop sample behind them.
+    """
     psd, layer = _rectangle()
+    backdrop = _backdrop(psd)
     _strokes(layer, (1.0, _RED, opacity), (3.0, _BLUE, 100.0))
-    mixed = _over(opacity / 100.0, _RED, _BLUE)
+    mixed = _over(opacity / 100.0, _RED, tuple(backdrop[0]))
     np.testing.assert_allclose(_below(psd), [mixed, _BLUE, _BLUE], atol=1e-6)
+
+
+def test_a_wide_faded_first_listed_stroke_hides_the_narrow_one_under_it() -> None:
+    psd, layer = _rectangle()
+    backdrop = _backdrop(psd)
+    _strokes(layer, (3.0, _RED, 0.0), (1.0, _BLUE, 100.0))
+    np.testing.assert_allclose(_below(psd), backdrop, atol=1e-6)
+
+
+@pytest.mark.parametrize("opacity", [100.0, 50.0])
+def test_rings_that_meet_within_a_pixel_fill_it_between_them(opacity: float) -> None:
+    """A 1.5 px ring over a 3 px one: the second row is half of each.
+
+    The two bands add rather than composite one over the other, so no
+    backdrop shows between them; a faded first ring shows it only through
+    its own half. The 50 % case extrapolates the cut rule to a faded ring,
+    which no Photoshop sample checks.
+    """
+    psd, layer = _rectangle()
+    backdrop = _backdrop(psd)
+    _strokes(layer, (1.5, _RED, opacity), (3.0, _BLUE, 100.0))
+    first = _over(opacity / 100.0, _RED, tuple(backdrop[1]))
+    half = _over(0.5, first, _BLUE)
+    np.testing.assert_allclose(_below(psd)[1], half, atol=1e-6)
+
+
+@pytest.mark.parametrize("opacity", [100.0, 50.0])
+def test_bands_keep_their_stacking_order_across_blend_modes(opacity: float) -> None:
+    """Normal 1.5 px over Multiply 3 px over Normal 5 px: the second row.
+
+    Only adjacent bands in one blend mode are added into one source, so the
+    two Normal bands stay either side of the Multiply one and the first
+    ring's outer half-pixel goes over the Multiply band, not under it. The
+    bands of different modes still add on the pixel they share: half the
+    first ring and half the multiplied backdrop, with the backdrop showing
+    only through the first ring's own half when it is faded.
+    """
+    psd, layer = _rectangle()
+    backdrop = _backdrop(psd)
+    _strokes(layer, (1.5, _RED, opacity), (3.0, _GREY, 100.0), (5.0, _BLUE, 100.0))
+    _instances(layer, b"frameFXMulti", 3)[1][Key.Mode] = Enumerated(
+        typeID=b"BlnM", enum=Enum.Multiply
+    )
+    first = _over(opacity / 100.0, _RED, tuple(backdrop[1]))
+    multiplied = tuple(backdrop[1] * _GREY)
+    np.testing.assert_allclose(_below(psd)[1], _over(0.5, first, multiplied), atol=1e-6)
+
+
+@pytest.mark.parametrize("opacity", [100.0, 50.0])
+def test_a_faded_normal_inset_ring_replaces_the_layer_over_a_screen_one(
+    opacity: float,
+) -> None:
+    """Normal 1.5 px over Screen 3 px, inset: the second row inside.
+
+    Half the pixel is the Normal ring, which replaces the layer, so the
+    backdrop shows through its fade; the other half is the screened layer,
+    with none of the plain layer left between them.
+    """
+    psd, layer = _rectangle()
+    row = _BOTTOM - 2
+    color = composite(psd, layer_filter=lambda sub: sub.name != "Rectangle 1")[0]
+    backdrop = tuple(color[row, _COLUMN])
+    _strokes(layer, (1.5, _RED, opacity), (3.0, _GREY, 100.0), style=Enum.InsetFrame)
+    _instances(layer, b"frameFXMulti", 2)[1][Key.Mode] = Enumerated(
+        typeID=b"BlnM", enum=Enum.Screen
+    )
+    color = composite(psd)[0]
+    paint = color[_INSIDE][12, 12]
+    first = _over(opacity / 100.0, _RED, backdrop)
+    screened = tuple(1.0 - (1.0 - paint) * (1.0 - np.array(_GREY)))
+    np.testing.assert_allclose(
+        color[row, _COLUMN], _over(0.5, first, screened), atol=1e-6
+    )
 
 
 @pytest.mark.parametrize(
