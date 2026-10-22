@@ -162,47 +162,66 @@ def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
 
 
 def _beside_covers(layer: Layer) -> bool:
-    """Whether the drop shadows, outer glows and outer strokes of the layer cover.
+    """Whether what the layer paints beside itself covers.
 
-    Each keeps ``1 - alpha`` of what it lands on in Normal or Dissolve, and
-    as a solid colour its mode paints whatever it lands on: black in
-    Multiply, white in Screen. One at 0% paints nothing, and an inside
-    stroke paints over the layer, not beside it. An effect that cannot be
-    read does not cover.
+    That is its drop shadows, outer glows, outer strokes and the bevels that
+    reach outside it (:py:func:`_beside_paints`). Each keeps ``1 - alpha``
+    of what it lands on in Normal or Dissolve, and as a solid colour its
+    mode paints whatever it lands on: black in Multiply, white in Screen.
+    One at 0% paints nothing. An effect that cannot be read does not cover.
     """
     color_mode = layer._psd.color_mode
-    for name in ("dropshadow", "outerglow", "stroke"):
+    for name in ("dropshadow", "outerglow", "stroke", "bevelemboss"):
         for effect in _readable(layer, name):
             try:
-                if not effect.opacity > 0.0:
-                    continue
-                if name == "stroke":
-                    if cast(Stroke, effect).position == StrokePosition.INSIDE:
+                for blend_mode, opacity, desc in _beside_paints(name, effect):
+                    if not opacity > 0.0 or blend_mode in _COVERS_BENEATH:
                         continue
-                    blend_mode = effect.blend_mode
-                elif name == "dropshadow":
-                    blend_mode = get_blend_mode(
-                        effect.descriptor, Key.Mode, BlendMode.MULTIPLY
-                    )
-                else:
-                    blend_mode = effect.blend_mode
-                if blend_mode in _COVERS_BENEATH:
-                    continue
-                desc = effect.descriptor
-                if (
-                    blend_mode not in _FIXED_POINTS
-                    or Key.Gradient in desc
-                    or Key.Pattern in desc
-                    or any(
-                        value != _FIXED_POINTS[blend_mode]
-                        for value in paint._get_color(color_mode, desc)
-                    )
-                ):
-                    return False
+                    if (
+                        blend_mode not in _FIXED_POINTS
+                        or Key.Gradient in desc
+                        or Key.Pattern in desc
+                        or any(
+                            value != _FIXED_POINTS[blend_mode]
+                            for value in paint._get_color(color_mode, desc)
+                        )
+                    ):
+                        return False
             except _UNREADABLE as error:
                 logger.debug("Cannot read an effect of %s: %s", layer, error)
                 return False
     return True
+
+
+def _beside_paints(
+    name: str, effect: _StyledEffect
+) -> list[tuple[BlendMode, float, Descriptor]]:
+    """The mode, opacity and paint descriptor of each colour an effect puts beside.
+
+    A bevel puts its highlight and its shadow there when its style reaches
+    outside the layer, and an inside stroke or an inner bevel nothing: they
+    paint over the layer.
+    """
+    if name == "bevelemboss":
+        bevel = cast(BevelEmboss, effect)
+        if not bevel_beside(_bevel_style(bevel)):
+            return []
+        halves = []
+        for color, blend_mode, opacity in (
+            (bevel.highlight_color, bevel.highlight_mode, bevel.highlight_opacity),
+            (bevel.shadow_color, bevel.shadow_mode, bevel.shadow_opacity),
+        ):
+            desc = Descriptor()
+            desc[Key.Color] = color
+            halves.append((blend_mode, opacity, desc))
+        return halves
+    if name == "stroke" and cast(Stroke, effect).position == StrokePosition.INSIDE:
+        return []
+    if name == "dropshadow":
+        blend_mode = get_blend_mode(effect.descriptor, Key.Mode, BlendMode.MULTIPLY)
+    else:
+        blend_mode = effect.blend_mode
+    return [(blend_mode, effect.opacity, effect.descriptor)]
 
 
 def _stroke_paint(effect: _StyledEffect) -> float:

@@ -31,7 +31,7 @@ from psd_tools.composite.composite import (
     _effect_reach,
     paste,
 )
-from psd_tools.constants import BlendMode, Resource, Tag
+from psd_tools.constants import BevelStyle, BlendMode, Resource, Tag
 from psd_tools.psd.base import ByteElement
 from psd_tools.psd.descriptor import (
     Bool,
@@ -710,6 +710,61 @@ def test_a_pass_through_group_covers_as_the_effects_beside_its_children_do(
             effect[Key.Color][key] = Double(value)
     if kind != Klass.DropShadow:
         block[Klass.DropShadow][Key.Enabled] = Bool(False)
+    assert _covers_beneath(layer, None)
+    assert _covers_beneath(group, None) is covers
+
+
+@pytest.mark.parametrize(
+    ("style", "values", "covers"),
+    [
+        (BevelStyle.OUTER_BEVEL, {}, True),
+        (BevelStyle.OUTER_BEVEL, {Key.HighlightColor: {Key.Blue: 0.0}}, False),
+        (
+            BevelStyle.OUTER_BEVEL,
+            {Key.HighlightColor: {Key.Blue: 0.0}, Key.HighlightOpacity: 0.0},
+            True,
+        ),
+        (BevelStyle.INNER_BEVEL, {Key.HighlightColor: {Key.Blue: 0.0}}, True),
+        (BevelStyle.EMBOSS, {Key.ShadowColor: {Key.Red: 255.0}}, False),
+        (
+            BevelStyle.PILLOW_EMBOSS,
+            {Key.ShadowColor: {Key.Red: 255.0}, Key.ShadowMode: Enum.Normal},
+            True,
+        ),
+    ],
+    ids=[
+        "outer default",
+        "outer yellow highlight",
+        "outer at 0%",
+        "inner",
+        "emboss red shadow",
+        "pillow normal shadow",
+    ],
+)
+def test_a_pass_through_group_covers_as_the_bevels_beside_its_children_do(
+    style: BevelStyle, values: dict[bytes, Any], covers: bool
+) -> None:
+    """A bevel that reaches outside its layer paints there in its own modes.
+
+    Its Screen highlight and Multiply shadow cover as white and black do,
+    or in Normal; an inner bevel paints over the layer and has no say.
+    """
+    psd, layer = _masks_card()
+    group = psd.create_group([layer])
+    block = layer.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    block[Klass.DropShadow][Key.Enabled] = Bool(False)
+    bevel = block[Klass.BevelEmboss]
+    bevel[Key.Enabled] = Bool(True)
+    bevel[b"present"] = Bool(True)
+    bevel[Key.BevelStyle] = Enumerated(bevel[Key.BevelStyle].typeID, style.value)
+    for key, value in values.items():
+        if isinstance(value, dict):
+            for channel, level in value.items():
+                bevel[key][channel] = Double(level)
+        elif key == Key.ShadowMode:
+            bevel[key] = Enumerated(Type.BlendMode, value)
+        else:
+            bevel[key] = Double(value)
     assert _covers_beneath(layer, None)
     assert _covers_beneath(group, None) is covers
 
