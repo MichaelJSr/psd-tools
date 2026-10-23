@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] Drop and inner shadows are cast a whole number of pixels along each
+  axis, rounded to the nearest, as Photoshop casts them, so a shadow lit from
+  an angle off the axes no longer lands a fraction of a pixel out with a
+  blurred edge. Shadows lit along an axis are unchanged
 - [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
   layer set from a preset does, is read as its own adjustment instead of as a
   Brightness/Contrast at 0/0 that left the image unchanged. Only layers that

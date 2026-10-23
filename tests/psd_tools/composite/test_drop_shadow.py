@@ -11,6 +11,7 @@ with a vector mask) are forged, by editing or copying ``masks.psb``'s.
 
 import copy
 import logging
+import math
 import sys
 from collections.abc import Callable
 from typing import Any, cast
@@ -91,6 +92,73 @@ def test_a_drop_shadow_is_cast_away_from_the_light(
     )
     x, y = _centroid(shadow)
     assert (x - 40.0, y - 40.0) == pytest.approx(expected, abs=1e-3)
+
+
+@pytest.mark.parametrize(
+    ("distance", "angle", "moved"),
+    [
+        (4.0, 125.0, (2, 3)),
+        (10.0, 128.0, (6, 8)),
+        (4.0, -10.0, (-4, -1)),
+        (4.0, 30.0, (-3, 2)),
+        (5.0, 60.0, (-3, 4)),
+        (7.0, 120.0, (4, 6)),
+    ],
+    ids=[
+        "down-right",
+        "rounded-up",
+        "up-left",
+        "a-hair-under-two",
+        "half-left",
+        "half-right",
+    ],
+)
+def test_a_drop_shadow_moves_the_silhouette_by_whole_pixels(
+    distance: float, angle: float, moved: tuple[int, int]
+) -> None:
+    """Photoshop rounds each axis of the offset to the nearest pixel.
+
+    Unblurred, the shadow is the silhouette moved whole, with no edge
+    interpolated across a fraction of a pixel. ``sin(30)`` is a hair under
+    a half, so that case pins rounding against flooring the offset; the
+    last two fall a half pixel off an axis, a hair either side in floating
+    point, and are rounded away from zero.
+    """
+    shape = _disc(41, 8.0)
+    shadow = effects.draw_drop_shadow(
+        (0, 0, 41, 41), shape, distance=distance, angle=angle, size=0.0, spread=0.0
+    )
+    dx, dy = moved
+    assert np.array_equal(shadow, np.roll(shape, (dy, dx), axis=(0, 1)))
+
+
+def test_a_drop_shadow_is_cast_by_whole_pixels_as_photoshops_preview_shows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``layer_params.psb``'s shape casts its shadow 30 px from -170 degrees.
+
+    That is 29.54 px across and 5.21 up. Cast there, or with each axis cut
+    toward zero, the shadow lies further from Photoshop's preview than cast
+    at the nearest whole pixels.
+    """
+
+    def error() -> float:
+        psd = PSDImage.open(full_name("layer_params.psb"))
+        shape = next(x for x in psd.descendants() if x.name.startswith("Фигура"))
+        left, top, right, bottom = shape.bbox
+        return _error(psd, (left - 40, top - 40, right + 40, bottom + 40))
+
+    nearest = error()
+    exact = effects._cast_offset
+    monkeypatch.setattr(effects, "_shadow_offset", exact)
+    assert nearest < error()
+
+    def truncated(distance: float, angle: float) -> tuple[float, float]:
+        dx, dy = exact(distance, angle)
+        return float(math.trunc(dx)), float(math.trunc(dy))
+
+    monkeypatch.setattr(effects, "_shadow_offset", truncated)
+    assert nearest < error()
 
 
 def test_spread_grows_the_silhouette_and_takes_the_blur_it_replaces() -> None:

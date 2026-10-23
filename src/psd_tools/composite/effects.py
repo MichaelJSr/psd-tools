@@ -901,8 +901,8 @@ _CONTOUR_STEPS = 256
 _SPREAD_FLOOR = 1.0 / 255.0
 
 
-def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
-    """How far a shadow is cast, as ``(dx, dy)`` in image coordinates.
+def _cast_offset(distance: float, angle: float) -> tuple[float, float]:
+    """How far ``distance`` along a light from ``angle`` moves, as ``(dx, dy)``.
 
     ``angle`` is where the light comes *from*, counter-clockwise from the
     positive x axis, so the shadow falls the opposite way; image rows run
@@ -920,6 +920,23 @@ def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
     )
 
 
+def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
+    """How far a shadow is cast: :py:func:`_cast_offset` in whole pixels.
+
+    Photoshop moves a shadow's matte by whole pixels, each axis rounded to
+    the nearest and a half away from zero, so a 4 px shadow lit from 125
+    degrees falls 2 px across and 3 down rather than 2.29 and 3.28.
+    """
+    dx, dy = _cast_offset(distance, angle)
+    return _away_from_zero(dx), _away_from_zero(dy)
+
+
+def _away_from_zero(value: float) -> float:
+    """``value`` rounded to the nearest whole number, a half away from zero."""
+    whole = math.floor(abs(value) + 0.5)
+    return float(whole if value >= 0.0 else -whole)
+
+
 def drop_shadow_bbox(
     bbox: tuple[int, int, int, int],
     distance: float,
@@ -932,8 +949,7 @@ def drop_shadow_bbox(
     ``bbox`` grown by the shadow's size on every side and by its offset on
     the side it is cast to. It is the box the silhouette is read on, before
     it is moved, so it has to hold that too. The two pixels added on top are
-    the antialiased fringe spread leaves, and the one the offset's
-    interpolation can spill into.
+    the antialiased fringe spread leaves and a pixel to spare.
 
     An empty ``bbox`` is returned untouched, as :py:func:`stroke_bbox` does:
     there is no silhouette to cast.
@@ -997,10 +1013,10 @@ def _cast_canvas(
 def cast_reach(distance: float, angle: float, size: float, spread: float) -> int | None:
     """How far a cast matte reads from each pixel it covers, in pixels.
 
-    The blur's radius and the offset, each rounded out, with the pixel the
-    offset interpolates across and the fringe the blur's rounding leaves:
-    the silhouette further away than that moves no pixel of the matte, so
-    the matte on a box is the matte on any larger box, cut.
+    The blur's radius rounded out and the offset, with the fringe the
+    blur's rounding leaves and a pixel to spare: the silhouette further away
+    than that moves no pixel of the matte, so the matte on a box is the
+    matte on any larger box, cut.
 
     None when the matte is spread; such a matte is drawn on its whole box.
     A spread of a size-0 matte grows nothing.
@@ -1712,7 +1728,7 @@ def draw_satin(
 
     _finite("Satin", distance=distance, angle=angle, size=size)
     alpha = shape[:, :, 0].astype(np.float32)
-    dx, dy = _shadow_offset(distance, angle)
+    dx, dy = _cast_offset(distance, angle)
     size = max(float(size), 0.0)
     copies = []
     for sign in (1.0, -1.0):
