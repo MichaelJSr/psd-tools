@@ -78,8 +78,6 @@ class Options:
     missing_font: Literal["raise", "skip", "substitute"] = "raise"
     #: Non-diagonal transforms: FreeType matrix, or axis-aligned then resampled.
     general_transform: Literal["matrix", "resample"] = "matrix"
-    #: Draw the glyphs of a colour (``SVG ``) font in colour.
-    color_glyphs: bool = True
     #: A colour glyph not drawn in colour (``color_glyphs`` false, or SVG
     #: the renderer does not cover) is drawn as its outline's silhouette;
     #: when false it is skipped.
@@ -87,6 +85,8 @@ class Options:
     #: Pixels a glyph bitmap or the canvas may not exceed. The document's
     #: allocation budget and the PSD per-axis limit apply as well.
     max_canvas_pixels: int = MAX_CANVAS_PIXELS
+    #: Draw the glyphs of a colour (``SVG ``) font in colour.
+    color_glyphs: bool = True
 
 
 #: Where a glyph origin lands: as computed, on whole pixels, or (Crisp) on
