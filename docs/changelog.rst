@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] An outer glow is cut from under its layer's outside stroke band as
+  well as its silhouette, as a knocked-out drop shadow is, so a Lighten or
+  partly transparent stroke shows the backdrop through itself and not the
+  glow. Layers without a stroke are unchanged
 - [fix] Crisp, Strong and Smooth text is antialiased from a 4 x 4 grid of
   point samples per pixel, as Photoshop stores it, instead of the exact area
   under the outline: every rendered type layer changes slightly.

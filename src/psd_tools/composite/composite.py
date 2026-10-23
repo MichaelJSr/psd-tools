@@ -3638,8 +3638,9 @@ class Compositor:
         on this compositor's viewport, read afresh on a box of the caller's:
         the mask when the stroke follows it, otherwise what the layer paints
         under its mask, with a shape layer's path interior held whole. The
-        drop shadow's knockout reads its stroke bands from this too, so a
-        band is cut from under the shadow exactly where it is drawn.
+        drop shadow's knockout and the outer glow's cut read their stroke
+        bands from this too, so a band is cut from under either exactly where
+        it is drawn.
         """
         x0, y0, x1, y1 = viewport
         # TODO: a group whose stroke traces its mask -- ``force`` with a vector
@@ -3792,6 +3793,9 @@ class Compositor:
         covers: bool = False,
     ) -> np.ndarray:
         """What "layer knocks out drop shadow" cuts the shadow from under.
+
+        An outer glow of a stroked layer is cut by it too, knockout or not
+        (:py:meth:`_apply_outer_glows`).
 
         The silhouette the shadow is cast from, and the bands of the layer's
         stroke effects, whole whatever their opacity: Photoshop cuts under
@@ -4014,6 +4018,12 @@ class Compositor:
         match; any other leaves its glow the plain complement of its
         silhouette.
 
+        A layer with a stroke has its glow cut under the stroke's band too,
+        as a knocked-out shadow is (:py:meth:`_knockout_shape`): a faint or
+        Lighten stroke shows the backdrop through itself, not the glow. That
+        cut replaces ``glow_paint()``'s, which it equals without a stroke, and
+        is read outside the guard as the shadow's is.
+
         The paint is drawn on the glow's own box, since a gradient glow's
         colour follows its falloff, and pasted beside it; where the glow
         covers nothing the colour pasted there is never read.
@@ -4026,6 +4036,7 @@ class Compositor:
             return
         covers = _covers_beneath(layer, self._layer_filter)
         over = fill_opacity * opacity if covers else 0.0
+        banded = bool(_readable(layer, "stroke"))
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         for effect in glows:
             glow = cast(OuterGlow, effect)
@@ -4071,13 +4082,17 @@ class Compositor:
                     bbox,
                     layer._psd.color_mode,
                     glow.descriptor,
-                    silhouette,
+                    np.zeros_like(silhouette) if banded else silhouette,
                     falloff,
-                    over=over,
+                    over=0.0 if banded else over,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an outer glow of %s: %s", layer, error)
                 continue
+            if banded:
+                coverage = coverage * (
+                    1.0 - self._knockout_shape(layer, bbox, silhouette, covers)
+                )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
                 self._apply_source(
