@@ -200,6 +200,10 @@ Changelog
   writable, ``set_text()`` and ``set_span_style()`` edit text and styles, and
   ``rasterize()`` draws them into the layer's pixels with the new ``text``
   extra. ``composite()`` still uses the stored pixels (#25, #317, #468)
+- [api] ``psd_tools.composite.text.text_geometry()`` returns where a type
+  layer's lines and glyphs sit in document pixels, with the slice of the text
+  each one covers, without rendering. ``RenderReport.lines`` entries gain
+  ``start`` and ``end``
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a

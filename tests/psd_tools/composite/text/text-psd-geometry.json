@@ -1,0 +1,41 @@
+{
+ "layer": "Line 1 Line 2 Line 3 and text",
+ "text": "Line 1\rLine 2\rLine 3 and text\r",
+ "bbox": [84, 110, 169, 151],
+ "lines": [
+  {"text": "Line 1", "start": 0, "end": 6, "baseline": [83.81, 119.72, 117.07, 119.72], "box": [83.81, 110.46, 117.07, 123.58], "drawn": true},
+  {"text": "Line 2", "start": 7, "end": 13, "baseline": [83.81, 135.32, 118.65, 135.32], "box": [83.81, 125.81, 118.65, 139.18], "drawn": true},
+  {"text": "Line 3 and text", "start": 14, "end": 29, "baseline": [83.81, 150.92, 177.05, 150.92], "box": [83.81, 141.24, 177.05, 154.78], "drawn": true}
+ ],
+ "glyphs": [
+  {"i": 0, "end": 1, "ch": "L", "line": 0, "run": 0, "font": "LuckiestGuy-Regular", "cell": [83.81, 110.81, 89.69, 123.58], "ink": [84.1, 110.53, 89.72, 119.34]},
+  {"i": 1, "end": 2, "ch": "i", "line": 0, "run": 0, "font": "LuckiestGuy-Regular", "cell": [89.69, 110.81, 93.52, 123.58], "ink": [89.95, 110.79, 93.33, 119.57]},
+  {"i": 2, "end": 3, "ch": "n", "line": 0, "run": 0, "font": "LuckiestGuy-Regular", "cell": [93.52, 110.81, 101.99, 123.58], "ink": [93.7, 110.46, 101.72, 119.53]},
+  {"i": 3, "end": 4, "ch": "e", "line": 0, "run": 0, "font": "LuckiestGuy-Regular", "cell": [101.99, 110.81, 109.49, 123.58], "ink": [102.1, 110.53, 109.4, 119.88]},
+  {"i": 4, "end": 5, "ch": " ", "line": 0, "run": 0, "font": "LuckiestGuy-Regular", "cell": [109.49, 110.81, 112.03, 123.58], "ink": null},
+  {"i": 5, "end": 6, "ch": "1", "line": 0, "run": 0, "font": "LuckiestGuy-Regular", "cell": [112.03, 110.81, 117.07, 123.58], "ink": [111.84, 110.47, 116.79, 119.62]},
+  {"i": 7, "end": 8, "ch": "L", "line": 1, "run": 0, "font": "LuckiestGuy-Regular", "cell": [83.81, 126.41, 89.69, 139.18], "ink": [84.1, 126.13, 89.72, 134.94]},
+  {"i": 8, "end": 9, "ch": "i", "line": 1, "run": 0, "font": "LuckiestGuy-Regular", "cell": [89.69, 126.41, 93.52, 139.18], "ink": [89.95, 126.39, 93.33, 135.17]},
+  {"i": 9, "end": 10, "ch": "n", "line": 1, "run": 0, "font": "LuckiestGuy-Regular", "cell": [93.52, 126.41, 101.99, 139.18], "ink": [93.7, 126.06, 101.72, 135.13]},
+  {"i": 10, "end": 11, "ch": "e", "line": 1, "run": 0, "font": "LuckiestGuy-Regular", "cell": [101.99, 126.41, 109.49, 139.18], "ink": [102.1, 126.13, 109.4, 135.47]},
+  {"i": 11, "end": 12, "ch": " ", "line": 1, "run": 0, "font": "LuckiestGuy-Regular", "cell": [109.49, 126.41, 112.03, 139.18], "ink": null},
+  {"i": 12, "end": 13, "ch": "2", "line": 1, "run": 0, "font": "LuckiestGuy-Regular", "cell": [112.03, 126.41, 118.65, 139.18], "ink": [112.21, 125.81, 118.43, 135.17]},
+  {"i": 14, "end": 15, "ch": "L", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [83.81, 142.01, 89.69, 154.78], "ink": [84.1, 141.73, 89.72, 150.54]},
+  {"i": 15, "end": 16, "ch": "i", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [89.69, 142.01, 93.52, 154.78], "ink": [89.95, 141.99, 93.33, 150.77]},
+  {"i": 16, "end": 17, "ch": "n", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [93.52, 142.01, 101.99, 154.78], "ink": [93.7, 141.66, 101.72, 150.73]},
+  {"i": 17, "end": 18, "ch": "e", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [101.99, 142.01, 109.49, 154.78], "ink": [102.1, 141.73, 109.4, 151.07]},
+  {"i": 18, "end": 19, "ch": " ", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [109.49, 142.01, 112.03, 154.78], "ink": null},
+  {"i": 19, "end": 20, "ch": "3", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [112.03, 142.01, 118.89, 154.78], "ink": [112.14, 141.24, 118.67, 151.02]},
+  {"i": 20, "end": 21, "ch": " ", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [118.89, 142.01, 121.43, 154.78], "ink": null},
+  {"i": 21, "end": 22, "ch": "a", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [121.43, 142.01, 129.57, 154.78], "ink": [121.23, 141.83, 129.76, 150.78]},
+  {"i": 22, "end": 23, "ch": "n", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [129.57, 142.01, 138.04, 154.78], "ink": [129.74, 141.66, 137.77, 150.73]},
+  {"i": 23, "end": 24, "ch": "d", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [138.04, 142.01, 145.63, 154.78], "ink": [138.32, 142.01, 145.56, 150.74]},
+  {"i": 24, "end": 25, "ch": " ", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [145.63, 142.01, 148.17, 154.78], "ink": null},
+  {"i": 25, "end": 26, "ch": "t", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [148.17, 142.01, 155.12, 154.78], "ink": [148.22, 141.97, 155.21, 150.77]},
+  {"i": 26, "end": 27, "ch": "e", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [155.12, 142.01, 162.24, 154.78], "ink": [155.23, 141.73, 162.53, 151.07]},
+  {"i": 27, "end": 28, "ch": "x", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [162.24, 142.01, 169.97, 154.78], "ink": [161.99, 141.92, 170.24, 150.91]},
+  {"i": 28, "end": 29, "ch": "t", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [169.97, 142.01, 177.05, 154.78], "ink": [170.02, 141.97, 177.02, 150.77]}
+ ],
+ "missing_fonts": [],
+ "warnings": []
+}
