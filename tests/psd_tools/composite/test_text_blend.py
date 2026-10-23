@@ -6,17 +6,22 @@ Colors Using Gamma" preference into their preview -- ``text.psb``,
 with each effect. Four carry type layers Photoshop composited straight, as
 stored pixels: ``masks.psb`` (fonts substituted), ``text.psd`` (text data
 without ``bounds``) and the 32-bit ``pen-text.psd`` and ``pen-text.psb``.
-The cases the corpus does not pair with a type layer (a styled group around
-one, a blend mode) are forged.
+``text-kept-raster.psd`` carries one of each with nothing in the file to tell
+them apart. The cases the corpus does not pair with a type layer (a styled
+group around one, a blend mode) are forged.
 """
 
 import copy
+import importlib
+import io
 from collections.abc import Iterator
+from typing import Any
 
 import numpy as np
 import pytest
+from PIL import Image
 
-from psd_tools.api.layers import Group, Layer, TypeLayer
+from psd_tools.api.layers import Group, Layer, PixelLayer, TypeLayer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite
 from psd_tools.composite.blend import get_blend_func
@@ -418,3 +423,129 @@ def test_the_mix_is_by_coverage_in_the_text_space(blend_mode: BlendMode) -> None
     assert pixel == pytest.approx(np.full(3, expected), abs=1e-6)
     straight = 0.5 * 0.3 * (1 if blend_mode == BlendMode.NORMAL else 0.8) + 0.5 * 0.8
     assert abs(expected - straight) > 0.02
+
+
+# -- Layers Photoshop kept as pixels ---------------------------------------- #
+
+# ``text-kept-raster.psd``: a card's name and Ability, each over its own opaque
+# stroke, with the card's preview wherever either has a glyph edge. Photoshop
+# composited the name straight: the session that saved it re-laid the name
+# out without redrawing its raster. The Ability, redrawn, it blended in the
+# gamma. Their records differ in nothing that says so.
+_KEPT_RASTER = "text-kept-raster.psd"
+
+
+def _kept_raster() -> tuple[PSDImage, TypeLayer, TypeLayer]:
+    psd = PSDImage.open(full_name(_KEPT_RASTER))
+    layers = {layer.name: layer for layer in _type_layers(psd)}
+    return psd, layers["Suffocation"], layers["Ability"]
+
+
+def _composite_errors(psd: PSDImage, **kwargs: object) -> list[float]:
+    """Edge errors of the name and the Ability, composited through the API."""
+    color, _, _ = composite(psd, force=True, **kwargs)  # type: ignore[arg-type]
+    _, name, ability = _kept_raster()
+    return [_edge_error(psd, color, layer) for layer in (name, ability)]
+
+
+def test_a_kept_raster_is_read_off_the_preview() -> None:
+    psd, _, _ = _kept_raster()
+    name, ability = _composite_errors(psd)
+    assert name <= _EDGE_BOUND and ability <= _EDGE_BOUND
+    name, ability = _composite_errors(psd, text_preview=False)
+    assert name > 5.0
+    assert ability <= _EDGE_BOUND
+
+
+def test_a_layer_can_be_pinned_by_id() -> None:
+    """A pin overrides ``text_gamma`` and the preview alike."""
+    psd, name, ability = _kept_raster()
+    straight = {name.layer_id: None}
+    assert (
+        max(_composite_errors(psd, text_preview=False, layer_text_gamma=straight))
+        <= _EDGE_BOUND
+    )
+    pinned = _composite_errors(psd, layer_text_gamma={name.layer_id: TEXT_BLEND_GAMMA})
+    assert pinned[0] > 5.0
+    spoiled = _composite_errors(psd, layer_text_gamma={ability.layer_id: None})
+    assert spoiled[0] <= _EDGE_BOUND and spoiled[1] > 5.0
+    assert _composite_errors(
+        psd, text_gamma=None, layer_text_gamma={ability.layer_id: TEXT_BLEND_GAMMA}
+    ) == pytest.approx(_composite_errors(psd))
+
+
+def _with_preview(psd: PSDImage, preview: np.ndarray) -> PSDImage:
+    """The document saved and reopened with ``preview`` as its stored composite."""
+    buffer = io.BytesIO()
+    image = Image.fromarray(np.round(preview * 255).astype(np.uint8), "RGB")
+    psd.save(buffer, preview=image)
+    buffer.seek(0)
+    return PSDImage.open(buffer)
+
+
+def test_a_preview_that_shows_neither_mix_keeps_the_gamma() -> None:
+    """Straight must fit the preview, not merely miss it by less."""
+    psd, _, _ = _kept_raster()
+    gamma, _, _ = composite(psd, force=True, text_preview=False)
+    darker = _with_preview(psd, np.clip(gamma[..., :3] - 24 / 255, 0.0, 1.0))
+    expected, _, _ = composite(darker, force=True, text_preview=False)
+    color, _, _ = composite(darker, force=True)
+    assert np.array_equal(color, expected)
+
+
+def test_a_viewport_reads_the_preview_where_it_stands() -> None:
+    """A region rendered alone, as an edit is, finds the same choice."""
+    psd, name, _ = _kept_raster()
+    left, top, right, bottom = name.bbox
+    region = (left - 8, top - 8, right + 8, bottom + 8)
+    whole = np.asarray(psd.composite(force=True, apply_icc=False))
+    alone = np.asarray(psd.composite(viewport=region, force=True, apply_icc=False))
+    assert np.array_equal(alone, whole[top - 8 : bottom + 8, left - 8 : right + 8])
+    default = psd.composite(
+        viewport=region, force=True, apply_icc=False, text_preview=False
+    )
+    assert not np.array_equal(alone, np.asarray(default))
+
+
+def test_a_layers_composite_reads_no_preview() -> None:
+    """The preview is the document's; a layer composited alone is not it."""
+    psd, name, _ = _kept_raster()
+    alone = name.composite(force=True)
+    assert alone is not None
+    color, _, _ = composite(name, force=True, text_preview=False)
+    expected, _, _ = composite(name, force=True)
+    assert np.array_equal(color, expected)
+
+
+def test_an_edge_painted_over_is_settled_on_the_finished_canvas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A veil over the name changes its edge after it goes on.
+
+    Where the name goes on, the edge only leans straight; the composite with
+    it straight is what the preview shows once the veil is on too.
+    """
+    psd, name, _ = _kept_raster()
+    left, top, right, bottom = name.bbox
+    veil = Image.new("RGBA", (right - left, bottom - top), (128, 128, 128, 96))
+    psd.append(PixelLayer.frompil(veil, psd, "veil", top, left))
+    straight, _, _ = composite(
+        psd, force=True, text_preview=False, layer_text_gamma={name.layer_id: None}
+    )
+    veiled = _with_preview(psd, straight[..., :3])
+
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    settled: list[bool] = []
+    settles = compositing._settles_straight
+
+    def counting(*args: Any) -> bool:
+        settled.append(settles(*args))
+        return settled[-1]
+
+    monkeypatch.setattr(compositing, "_settles_straight", counting)
+    color, _, _ = composite(veiled, force=True)
+    expected, _, _ = composite(
+        veiled, force=True, text_preview=False, layer_text_gamma={name.layer_id: None}
+    )
+    assert settled == [True]
+    assert np.array_equal(color, expected)

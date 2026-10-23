@@ -4,6 +4,13 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A document's composite reads off its stored preview which type layers
+  Photoshop blended straight rather than in the text gamma: it does that for a
+  layer whose raster it kept as pixels through a session, and nothing in the
+  file records it. A layer whose preview edge fits the straight mix, and not
+  the gamma one, is blended straight. ``text_preview=False`` keeps the gamma
+  for every layer, and ``layer_text_gamma`` pins layers by ID
+  (``PSDImage.composite()`` and ``psd_tools.composite.composite()``)
 - [fix] Crisp, Strong and Smooth text is antialiased from a 4 x 4 grid of
   point samples per pixel, as Photoshop stores it, instead of the exact area
   under the outline: every rendered type layer changes slightly.

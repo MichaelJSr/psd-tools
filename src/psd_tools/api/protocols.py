@@ -16,7 +16,7 @@ documented so that those links land somewhere. These are interfaces; user
 code works with the classes that implement them.
 """
 
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
@@ -582,6 +582,8 @@ class PSDProtocol(GroupMixinProtocol, Protocol):
         ignore_preview: bool = False,
         apply_icc: bool = True,
         text_gamma: float | None = TEXT_BLEND_GAMMA,
+        layer_text_gamma: Mapping[int, float | None] | None = None,
+        text_preview: bool = True,
     ) -> Image.Image:
         """
         Composite the PSD document.
@@ -594,6 +596,8 @@ class PSDProtocol(GroupMixinProtocol, Protocol):
         :param ignore_preview: Whether to skip using pre-composed preview.
         :param apply_icc: Whether to apply ICC profile conversion.
         :param text_gamma: Gamma a type layer's edges blend in; None for straight.
+        :param layer_text_gamma: Per layer ID, a gamma or None that overrides it.
+        :param text_preview: Read off the stored preview which type layers blend straight.
         :return: PIL Image.
         """
         ...
