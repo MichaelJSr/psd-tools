@@ -143,6 +143,24 @@ _COVERS_BENEATH = frozenset({BlendMode.NORMAL, BlendMode.DISSOLVE})
 _FIXED_POINTS = {BlendMode.MULTIPLY: 0.0, BlendMode.SCREEN: 1.0}
 
 
+# The levels of an 8-bit document's alpha.
+_LEVELS_8 = 255.0
+
+
+def _held(alpha: np.ndarray, depth: int) -> np.ndarray:
+    """``alpha`` rounded to the levels of a ``depth``-bit document.
+
+    Photoshop composites a group into a buffer of the document's depth before
+    the group's style reads it, so a child's effect that trails off below
+    half a level, such as a soft shadow's tail, is not there to be traced:
+    on the float canvas it states a boundary (``_signed_distance()``) and
+    moves a stroke out by up to a pixel. Only 8-bit documents are rounded.
+    """
+    if depth != 8:
+        return alpha
+    return (np.floor(alpha * _LEVELS_8 + 0.5) / _LEVELS_8).astype(np.float32)
+
+
 def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
     """Whether compositing the layer keeps ``1 - alpha`` of what lies beneath.
 
@@ -4037,7 +4055,8 @@ class Compositor:
         The coverage :py:meth:`_compose_effects` hands :py:meth:`_add_stroke_effects`
         on this compositor's viewport, read afresh on a box of the caller's:
         the mask when the stroke follows it, otherwise what the layer paints
-        under its mask, with a shape layer's path interior held whole. The
+        under its mask, with a shape layer's path interior held whole and a
+        group's alpha held at the document's depth (:py:func:`_held`). The
         drop shadow's knockout and the outer glow's cut read their stroke
         bands from this too, so a band is cut from under either exactly where
         it is drawn.
@@ -4057,7 +4076,9 @@ class Compositor:
             # the only route to its alpha is to composite its contents again
             # on the box asked for.
             if isinstance(layer, GroupMixin):
-                traced = self._get_group_alpha(layer, viewport) * mask
+                traced = _held(
+                    self._get_group_alpha(layer, viewport) * mask, layer._psd.depth
+                )
             else:
                 traced = self._get_object_coverage(layer, viewport)
             if _is_shape_layer(layer):
@@ -4160,8 +4181,9 @@ class Compositor:
 
         How opaque the layer is, before its opacity and fill opacity, and
         under its mask: an object's own alpha as it is painted
-        (:py:meth:`_get_object_coverage`), and a group's composited alpha, so
-        a child faded to nothing casts nothing. Not the outline of a vector
+        (:py:meth:`_get_object_coverage`), and a group's composited alpha
+        held at the document's depth, as its stroke traces it (:py:func:`_held`),
+        so a child faded to nothing casts nothing. Not the outline of a vector
         mask, which a stroke follows under ``force``: on a pixel layer that
         would cast a shadow from the mask's empty margin.
 
@@ -4182,7 +4204,8 @@ class Compositor:
             return self._adjustment_shape(layer, viewport)
         if isinstance(layer, GroupMixin):
             alpha = self._get_group_alpha(layer, viewport)
-            return utils.clip(alpha * self._get_mask(layer, viewport))
+            masked = utils.clip(alpha * self._get_mask(layer, viewport))
+            return _held(masked, layer._psd.depth)
         return utils.clip(self._get_object_coverage(layer, viewport, alpha=True))
 
     def _knockout_shape(

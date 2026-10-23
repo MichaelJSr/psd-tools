@@ -1318,8 +1318,8 @@ def _shadow_matte(
     The blur is :py:func:`_tent_blur` of what the spread leaves of the size,
     so the matte ends within that size of the silhouette. Its end matters
     where a group's stroke traces it: every partial pixel states a boundary
-    (:py:func:`_signed_distance`), so a faint tail moves the stroke out by up
-    to a pixel, whatever its level.
+    (:py:func:`_signed_distance`), so a tail that holds half a level of the
+    document's alpha moves the stroke out by up to a pixel.
     """
     alpha, radius = _spread_matte(alpha, size, spread)
     return _tent_blur(alpha, radius, outside)

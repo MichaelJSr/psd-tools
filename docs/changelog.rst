@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A group's stroke, drop shadow and outer glow read the group's alpha
+  rounded to whole levels in an 8-bit document, as Photoshop composites it, so
+  the faint tail of a child's soft shadow, below half a level, no longer
+  carries the group's stroke up to a pixel further out
 - [fix] A document's composite reads off its stored preview which type layers
   Photoshop blended straight, not in the text gamma, as it does for a raster
   kept through a session; nothing else in the file records it. An export from
