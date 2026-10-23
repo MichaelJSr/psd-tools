@@ -1091,13 +1091,6 @@ def _paint_rgba(
     return out.astype(np.float32)
 
 
-#: An axis-aligned image is drawn into whole pixels, as Photoshop draws it:
-#: its left and top edges move to ``floor(edge + bias)``, its size rounds
-#: up, and source pixel ``i`` is sampled at ``i`` rather than ``i + 1/2``.
-IMAGE_SNAP_LEFT = 0.25
-IMAGE_SNAP_TOP = 0.1
-
-
 def _area_weights(n_out: int, n_in: int, scale: float, offset: float) -> np.ndarray:
     """``(n_out, n_in)`` share of each source pixel in each output pixel.
 
@@ -1114,11 +1107,17 @@ def _area_weights(n_out: int, n_in: int, scale: float, offset: float) -> np.ndar
 def _snapped(
     full: Affine, iw: int, ih: int
 ) -> tuple[Affine, tuple[int, int, int, int]]:
-    """The placement of an axis-aligned image snapped to whole pixels, and its rect."""
+    """The placement of an axis-aligned image snapped to whole pixels, and its rect.
+
+    As Photoshop draws it: the size rounds up, the rect keeps the image's
+    centre with its corner rounded to the nearest pixel, and source pixel
+    ``i`` is sampled at ``i`` rather than ``i + 1/2``.
+    """
     a, _, _, d, e, f = full
-    left, top = math.floor(e + IMAGE_SNAP_LEFT), math.floor(f + IMAGE_SNAP_TOP)
     w = max(1, math.ceil(a * iw - 1e-6))
     h = max(1, math.ceil(d * ih - 1e-6))
+    left = math.floor(e + (a * iw - w) / 2 + 0.5)
+    top = math.floor(f + (d * ih - h) / 2 + 0.5)
     sx, sy = w / iw, h / ih
     return (sx, 0.0, 0.0, sy, left - sx / 2, top - sy / 2), (
         left,

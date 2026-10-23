@@ -495,7 +495,7 @@ def test_gradient_in_object_bounding_box_units() -> None:
 
 
 def test_image_snaps_to_whole_pixels() -> None:
-    """An image fills ``ceil(size)`` whole pixels from ``floor(left + bias)``."""
+    """An image fills ``ceil(size)`` whole pixels about its rounded centre."""
     m: svg.Affine = (0.01, 0.0, 0.0, 0.01, 10.3, 20.0)
     drawing = _table({1: IMAGE.format(gid=1)}).drawing(1)
     assert drawing is not None
@@ -511,6 +511,27 @@ def test_image_snaps_to_whole_pixels() -> None:
     # darkens the edge pixel's colour to half its blue.
     edge = rgba[2, 0]
     assert edge[2] / edge[3] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    "x, size, left",
+    [
+        (10.8, 5.2, 10),
+        (10.6, 5.2, 10),
+        (10.95, 5.2, 11),
+        (10.2, 6.0, 10),
+        (10.5, 6.0, 11),
+    ],
+)
+def test_image_keeps_its_centre(x: float, size: float, left: int) -> None:
+    """``ceil(size)`` pixels whose corner is the centred corner rounded."""
+    drawing = _table({1: IMAGE.format(gid=1)}).drawing(1)
+    assert drawing is not None
+    s = size / 600
+    m: svg.Affine = (s, 0.0, 0.0, s, x, 20.0 + 600 * s)
+    box = svg.device_bbox(drawing, m)
+    assert box is not None and box[0] == left and box[2] - box[0] == 6
+    assert box[1] == round(20.0 + (size - 6) / 2) and box[3] - box[1] == 6
 
 
 # -- in the text engine ----------------------------------------------------
