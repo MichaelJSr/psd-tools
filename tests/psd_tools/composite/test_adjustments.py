@@ -15,6 +15,7 @@ from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import paint
 from psd_tools.composite.adjustments import (
+    _apply_lut,
     _brightness_curve,
     _huesaturation,
     _lut_domain,
@@ -1405,3 +1406,24 @@ def test_negative_vibrance_keeps_a_bright_pale_pixel_bright() -> None:
 def test_vibrance_at_rest_leaves_the_image_alone() -> None:
     image = np.array([[_DEEP_BLUE]], dtype=np.float32)
     assert apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 0)) is image
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("lut_size", [256, 65536])
+def test_a_lut_is_read_at_each_level(dtype: type, lut_size: int) -> None:
+    """A table per level, then a gather: what an interp per pixel at its level gives."""
+    rng = np.random.default_rng(lut_size)
+    depth = lut_size - 1
+    lut = np.cumsum(rng.random(lut_size)).astype(np.float32)
+    lut /= lut[-1]
+    values: np.ndarray = rng.uniform(-0.2, 1.2, (64, 64)).astype(dtype)
+    values[0, :3] = (0.0, 1.0, 0.5)
+    expected = np.interp(
+        np.floor(values * depth) / depth, _lut_domain(lut_size), lut
+    ).astype(np.float32)
+    assert np.array_equal(_apply_lut(values, lut), expected)
+    values[1, 1] = np.nan
+    got = _apply_lut(values, lut)
+    assert np.isnan(got[1, 1])
+    got[1, 1] = expected[1, 1]
+    assert np.array_equal(got, expected)

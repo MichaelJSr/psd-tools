@@ -197,7 +197,7 @@ def _apply_lut(values: np.ndarray, lut: np.ndarray) -> NDArray[np.float32]:
         levels = np.floor(values * depth)
         if not np.isnan(levels).any():
             table = np.interp(
-                np.arange(lut_size, dtype=np.float32) / depth, xp, lut
+                np.arange(lut_size, dtype=levels.dtype) / depth, xp, lut
             ).astype(np.float32)
             np.clip(levels, 0, depth, out=levels)
             return table[levels.astype(np.intp)]
