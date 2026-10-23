@@ -95,12 +95,15 @@ changed are drawn, and a reflow redraws every line it moves::
     report = layer.rasterize(fonts=fonts, keep=before)
     print(report.splice.kept, report.splice.redrawn, report.splice.zone)
 
-``unit="glyph"`` draws only the changed glyphs of a changed line. When
-nothing changed the stored channels stay byte for byte. The whole layer is
+``unit="glyph"`` draws only the changed glyphs of a changed line. When no
+inked glyph changed (a trailing space, say) the stored channels stay byte
+for byte and the TySh bounds as Photoshop wrote them. The whole layer is
 drawn instead, with ``report.splice.fallback`` saying why, when the stored
 ink falls outside the layout's glyph boxes, the transform or anti-aliasing
-changed, or the document is not RGB. The render is stored at the document's depth for RGB
-documents and converted through PIL, at 8 bits, for the other colour modes.
+changed, the document is not RGB, or the layer had no stored pixels.
+
+The render is stored at the document's depth for RGB documents and
+converted through PIL, at 8 bits, for the other colour modes.
 
 Fonts are looked up by PostScript name in the ``FontMap``'s directories,
 then ``PSD_TOOLS_FONT_DIRS`` and the platform font directories, each with

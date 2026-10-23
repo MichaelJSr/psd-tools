@@ -3216,9 +3216,10 @@ class TypeLayer(Layer):
 
         With ``keep``, :py:func:`~psd_tools.composite.text.capture` of the
         layer before the edit, only the changed lines (``unit="line"``) or
-        glyphs (``"glyph"``) are drawn and the stored pixels stay elsewhere;
-        when nothing changed the channels are left as they are.
-        ``report.splice`` says what was kept.
+        glyphs (``"glyph"``) are drawn and the stored pixels stay elsewhere.
+        When no inked glyph changed (a trailing space, say) the channels and
+        the TySh bounds are left as they are. ``report.splice`` says what was
+        kept.
 
         :param fonts: :py:class:`~psd_tools.composite.text.FontMap`; the
             default scans ``PSD_TOOLS_FONT_DIRS`` and the platform fonts.

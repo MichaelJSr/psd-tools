@@ -215,9 +215,10 @@ def splice(
     ``pad``, of the changed glyphs old and new, and the stored ones stay
     everywhere else. The whole layer is rendered instead (``fallback`` says
     why) when the transform or anti-aliasing changed, the document is not
-    RGB, or stored ink lies outside those boxes and the unchanged glyphs'
-    (the layout does not place Photoshop's glyphs). Nothing changed: the
-    stored raster comes back as it is, ``zone`` ``None``.
+    RGB, the layer has no stored raster, or stored ink lies outside those
+    boxes and the unchanged glyphs' (the layout does not place Photoshop's
+    glyphs). Nothing changed: the stored raster comes back as it is, ``zone``
+    ``None``.
     """
     from psd_tools.composite.text import _render  # noqa: PLC0415
 

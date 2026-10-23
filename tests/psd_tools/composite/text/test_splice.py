@@ -241,3 +241,64 @@ def test_a_moved_layer_renders_the_whole_layer(fonts: FontMap) -> None:
     report = layer.rasterize(fonts=fonts, keep=replace(before, model=moved))
     assert report.splice is not None
     assert report.splice.fallback == "the transform changed"
+
+
+def test_a_document_not_in_rgb_renders_the_whole_layer(fonts: FontMap) -> None:
+    # A CMYK raster read as RGB and stored again would not round-trip.
+    source = type_layer("text.psd")
+    layers = [source.copy_to(PSDImage.new("CMYK", source._psd.size)) for _ in "ab"]
+    before = capture(layers[0], fonts)
+    assert not before.rgb
+    for layer in layers:
+        layer.set_text("Line 1\rLine 7\rLine 3 and text")
+    report = layers[0].rasterize(fonts=fonts, keep=before)
+    layers[1].rasterize(fonts=fonts)
+    assert report.splice is not None
+    assert report.splice.fallback == "not an RGB document"
+    assert report.splice.kept == () and report.splice.redrawn == (0, 1, 2)
+    assert channels(layers[0]) == channels(layers[1])
+    assert tuple(layers[0].bbox) == tuple(layers[1].bbox)
+
+
+def test_a_change_to_a_layer_without_stored_pixels_renders_it_whole(
+    fonts: FontMap,
+) -> None:
+    layer = type_layer("text.psd")
+    layer.set_text("")
+    layer.rasterize(fonts=fonts)
+    before = capture(layer, fonts)
+    assert before.rgba is None and before.bbox is None
+    layer.set_text("Line 1\rLine 2")
+    report = layer.rasterize(fonts=fonts, keep=before)
+    assert report.splice is not None
+    assert report.splice.fallback == "no stored raster"
+    assert report.splice.kept == () and report.splice.zone == tuple(layer.bbox)
+    canvas = canvas_of(tuple(layer.bbox))
+    np.testing.assert_array_equal(placed(layer, canvas), rendered(layer, fonts, canvas))
+
+
+def bounds(layer: TypeLayer) -> list[float]:
+    data = layer._data.text_data
+    return [
+        float(data.get(name).get(key).value)
+        for name in (b"bounds", b"boundingBox")
+        for key in (b"Left", b"Top ", b"Rght", b"Btom")
+    ]
+
+
+def test_an_edit_that_inks_nothing_new_keeps_channels_and_bounds(
+    fonts: FontMap,
+) -> None:
+    # A trailing space moves no glyph: Photoshop's raster and bounds stay,
+    # where a whole render would write the engine's.
+    layer = type_layer("text-story.psd", "Ability")
+    before_channels, rect, old = channels(layer), tuple(layer.bbox), bounds(layer)
+    before = capture(layer, fonts)
+    layer.set_text(layer.text.replace("Frozen.", "Frozen. "))
+    report = layer.rasterize(fonts=fonts, keep=before)
+    assert report.splice is not None
+    assert report.splice.zone is None and report.splice.fallback is None
+    assert channels(layer) == before_channels and tuple(layer.bbox) == rect
+    assert bounds(layer) == old
+    layer.rasterize(fonts=fonts)
+    assert bounds(layer) != old
