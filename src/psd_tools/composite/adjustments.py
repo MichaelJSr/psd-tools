@@ -1079,8 +1079,11 @@ def _vibrance_space(layer: Layer) -> NDArray[np.float64] | None:
     resources = layer._psd.image_resources
     if Resource.ICC_PROFILE not in resources:
         return None
-    tags = _icc_tags(resources.get_data(Resource.ICC_PROFILE))
-    if tags is None or tags.get(b"version") != 2 or b"chad" not in tags:
+    profile = _icc_tags(resources.get_data(Resource.ICC_PROFILE))
+    if profile is None:
+        return None
+    version, tags = profile
+    if version != 2 or b"chad" not in tags:
         return None
     try:
         white = np.array(_icc_xyz(tags[b"wtpt"]))
@@ -1099,23 +1102,21 @@ def _vibrance_space(layer: Layer) -> NDArray[np.float64] | None:
     return np.linalg.solve(colorants, moved)
 
 
-def _icc_tags(data: bytes) -> dict[bytes, bytes | int] | None:
-    """An ICC profile's tags by signature, and its major version, or None."""
+def _icc_tags(data: bytes) -> tuple[int, dict[bytes, bytes]] | None:
+    """An ICC profile's major version and tags by signature, or None."""
     try:
         (count,) = struct.unpack_from(">I", data, 128)
-        tags: dict[bytes, bytes | int] = {b"version": data[8]}
+        tags = {}
         for index in range(count):
             name, start, size = struct.unpack_from(">4sII", data, 132 + 12 * index)
             tags[name] = data[start : start + size]
-    except (struct.error, IndexError):
+    except struct.error:
         return None
-    return tags
+    return data[8], tags
 
 
-def _icc_xyz(tag: bytes | int) -> tuple[float, float, float]:
+def _icc_xyz(tag: bytes) -> tuple[float, float, float]:
     """The first value of an ICC ``XYZ `` tag."""
-    if not isinstance(tag, bytes):
-        raise KeyError(tag)
     x, y, z = struct.unpack_from(">3i", tag, 8)
     return (x / 65536, y / 65536, z / 65536)
 
