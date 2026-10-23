@@ -11,7 +11,13 @@ Changelog
   within each pixel. **Rendering change** for small or shallow smooth bevels
 - [fix] Levels gammas above 1 start from black on Photoshop's straight toe
   instead of the power curve's vertical slope, input levels round to the
-  document's own, and a master gamma folds into each channel's
+  document's own, and a master gamma alone folds into the gamma of each
+  channel that keeps its full output range
+- [fix] Levels, Curves, Exposure and Color Balance read their curves at the
+  level nearest each value, not the one below, as Photoshop reads its
+  whole-level backdrop and chains a channel's curve into the master's. A
+  Photoshop fixture of per-channel Levels goes from 59% to 99% exact.
+  **Rendering change**: their input rises half a level on average
 - [fix] A document's composite reads off its stored preview which type layers
   Photoshop blended straight, not in the text gamma, as it does for a raster
   kept through a session; nothing else in the file records it. An export from
