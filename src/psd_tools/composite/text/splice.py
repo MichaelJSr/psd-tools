@@ -189,11 +189,8 @@ def _place(rgba: np.ndarray | None, bbox: Bbox | None, canvas: Bbox) -> np.ndarr
     return out
 
 
-def _refusal(before: Before, model: TextModel) -> str | None:
-    if not before.rgb:
-        return "not an RGB document"
-    if before.rgba is None or before.bbox is None:
-        return "no stored raster"
+def _incomparable(before: Before, model: TextModel) -> str | None:
+    """Why the two layouts' glyphs cannot be matched, if they cannot."""
     if model.transform != before.model.transform:
         return "the transform changed"
     if model.antialias != before.model.antialias:
@@ -242,10 +239,9 @@ def splice(
         info = Splice(kept, redrawn, zone, fallback)
         return RenderResult(rgba, bbox, replace(result.report, splice=info))
 
-    why = _refusal(before, model)
+    why = _incomparable(before, model)
     if why is not None:
         return done((), result.bbox, why)
-    assert before.rgba is not None and before.bbox is not None
     t = model.transform
     keep_old, keep_new = _kept(before.layout, lay, unit)
     old_rules = {_rule_key(r) for r in before.layout.rules}
@@ -269,7 +265,14 @@ def splice(
     kept = tuple(j for j in lines if j not in moved)
     boxes = [b for b in changed if b is not None]
     if not boxes:
+        if before.rgba is None or before.bbox is None:
+            x, y = result.bbox[0], result.bbox[1]
+            return done(kept, None, None, result.rgba[:0, :0], (x, y, x, y))
         return done(kept, None, None, before.rgba, before.bbox)
+    if not before.rgb:
+        return done((), result.bbox, "not an RGB document")
+    if before.rgba is None or before.bbox is None:
+        return done((), result.bbox, "no stored raster")
 
     canvas = _union([before.bbox, result.bbox])
     zone = _mask(boxes, canvas)

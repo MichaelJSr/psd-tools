@@ -94,6 +94,18 @@ def test_unchanged_text_keeps_the_stored_channels(fonts: FontMap) -> None:
     assert tuple(layer.bbox) == rect
 
 
+def test_unchanged_empty_layer_stays_empty(fonts: FontMap) -> None:
+    layer = type_layer("text.psd")
+    layer.set_text("")
+    layer.rasterize(fonts=fonts)
+    assert not layer.has_pixels()
+    before_channels, rect = channels(layer), tuple(layer.bbox)
+    report = layer.rasterize(fonts=fonts, keep=capture(layer, fonts))
+    assert report.splice is not None
+    assert report.splice.zone is None and report.splice.fallback is None
+    assert channels(layer) == before_channels and tuple(layer.bbox) == rect
+
+
 def test_one_line_edit_keeps_the_other_lines(fonts: FontMap) -> None:
     layer = type_layer("text.psd")
     layer.rasterize(fonts=fonts)
