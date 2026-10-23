@@ -18,6 +18,20 @@ Changelog
   rounded to whole levels in an 8-bit document, as Photoshop composites it, so
   the faint tail of a child's soft shadow, below half a level, no longer
   carries the group's stroke up to a pixel further out
+- [fix] Smooth bevels follow Photoshop's renders: a band of 1 px draws as 2,
+  and the bevel stands at least a pixel high however shallow, so size 0
+  lights the edge pixels. An inner bevel's shape contour (``useShape``) is
+  applied, its range steepening the bevel and anti-aliasing lighting it
+  within each pixel. **Rendering change** for small or shallow smooth bevels
+- [fix] Levels gammas above 1 start from black on Photoshop's straight toe
+  instead of the power curve's vertical slope, input levels round to the
+  document's own, and a master gamma alone folds into the gamma of each
+  channel that keeps its full output range
+- [fix] Levels, Curves, Exposure and Color Balance read their curves at the
+  level nearest each value, not the one below, as Photoshop reads its
+  whole-level backdrop and chains a channel's curve into the master's. A
+  Photoshop fixture of per-channel Levels goes from 59% to 99% exact.
+  **Rendering change**: their input rises half a level on average
 - [fix] A document's composite reads off its stored preview which type layers
   Photoshop blended straight, not in the text gamma, as it does for a raster
   kept through a session; nothing else in the file records it. An export from

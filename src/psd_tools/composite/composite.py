@@ -49,10 +49,12 @@ from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
 from psd_tools.composite.blend import fade_source, get_blend_func, normal
 from psd_tools.composite.effects import (
+    BevelShape,
     bevel_beside,
     bevel_geometry,
     bevel_inside,
     bevel_reach,
+    bevel_smooth_inner,
     cast_reach,
     contour_table,
     draw_bevel,
@@ -4921,8 +4923,8 @@ class Compositor:
         layer, over everything else inside it; what an outer bevel, an emboss or
         a pillow emboss puts beside it is an outer effect, as an outset
         stroke is. A stroke emboss, which bevels the stroke rather than the
-        layer, and a shape contour are not drawn; a texture is
-        (:py:meth:`_bevel_texture`).
+        layer, is not drawn, nor is a shape contour but a smooth inner
+        bevel's; a texture is (:py:meth:`_bevel_texture`).
         """
         bevels = _readable(layer, "bevelemboss")
         if not bevels or not self._has_scipy("Bevels"):
@@ -4964,8 +4966,23 @@ class Compositor:
                 continue
             if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
+            bevel_shape = None
             if bevel.use_shape:
-                logger.debug("The shape contour of a bevel of %s is not applied", layer)
+                if bevel_smooth_inner(style, technique):
+                    try:
+                        bevel_shape = BevelShape(
+                            contour_table(bevel.descriptor.get(Key.MappingShape)),
+                            float(bevel.descriptor.get(Key.InputRange, 50.0)),
+                            bool(bevel.descriptor.get(Key.AntiAlias, False)),
+                        )
+                    except _UNREADABLE as error:
+                        logger.debug(
+                            "Cannot read a bevel's shape of %s: %s", layer, error
+                        )
+                else:
+                    logger.debug(
+                        "The shape contour of a bevel of %s is not applied", layer
+                    )
             texture = None
             if bevel.use_texture:
                 texture = self._bevel_texture(layer, bevel, bbox, size)
@@ -4985,6 +5002,7 @@ class Compositor:
                     contour=contour,
                     anti_aliased=anti_aliased,
                     texture=texture,
+                    bevel_shape=bevel_shape,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a bevel of %s: %s", layer, error)

@@ -13,10 +13,12 @@ from PIL import Image
 from psd_tools.api import adjustments
 from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import paint
+from psd_tools.composite import composite, paint
 from psd_tools.composite.adjustments import (
+    _apply_lut,
     _brightness_curve,
     _huesaturation,
+    _levels_gamma,
     _lut_domain,
     _rows_from_rgb,
     _vibrance_space,
@@ -38,10 +40,11 @@ from psd_tools.composite.paint import _from_rgb
 from psd_tools.constants import BlendMode, ColorMode, Tag
 from psd_tools.psd.adjustments import ChannelMixer as ChannelMixerData
 from psd_tools.psd.adjustments import ColorBalance as ColorBalanceData
-from psd_tools.psd.adjustments import ColorStop, TransparencyStop
+from psd_tools.psd.adjustments import ColorStop, LevelRecord, TransparencyStop
 from psd_tools.psd.adjustments import Curves as CurvesData
 from psd_tools.psd.adjustments import GradientMap as GradientMapData
 from psd_tools.psd.adjustments import HueSaturation as HueSaturationData
+from psd_tools.psd.adjustments import Levels as LevelsData
 from psd_tools.psd.descriptor import Descriptor, Integer
 
 from ..utils import full_name
@@ -216,6 +219,90 @@ def test_levels_composite_icc(name: str, colormode: str) -> None:
 def test_levels_composite_error(name: str, colormode: str) -> None:
     filename = f"adjustments/{name}_{colormode}.psd"
     check_composite_quality(filename, levels_tests[name], False)
+
+
+# Photoshop 2023 documents: a gray ramp, two rows to each Levels layer
+# clipped to them. levels_gamma_rgb: gammas 0.6 to 9.99, one channel each,
+# then input and output ranges, a master gamma alone and one over a
+# channel's. levels_gamma_16bit_rgb: a 16-bit ramp over the darkest eighth,
+# master gammas 1.5 to 7.
+def test_levels_gamma_matches_photoshop() -> None:
+    psd = PSDImage.open(full_name("adjustments/levels_gamma_rgb.psd"))
+    reference = np.rint(psd.numpy()[..., :3] * 255)
+    result = psd.composite(force=True, apply_icc=False)
+    diff = np.abs(np.asarray(result, np.float64)[..., :3] - reference)
+    assert diff.max() <= 1
+    assert (diff == 0).mean() > 0.99
+
+
+def test_levels_gamma_matches_photoshop_in_16_bits() -> None:
+    psd = PSDImage.open(full_name("adjustments/levels_gamma_16bit_rgb.psd"))
+    color, _, _ = composite(psd, force=True)
+    assert np.abs(color[..., :3] - psd.numpy()[..., :3]).max() <= 1.0 / 255
+
+
+@pytest.mark.parametrize("gamma", [1.5, 2.0, 3.59, 5.0, 7.0])
+def test_levels_gamma_leaves_black_at_two_to_the_gamma(gamma: float) -> None:
+    """A straight start, then the power curve from where the toe joins it."""
+    values = np.linspace(0.0, 0.5, 65536, dtype=np.float32)
+    curve = _levels_gamma(values, gamma, 65536)
+    step = float(values[1])
+    assert float(curve[1]) / step == pytest.approx(2.0**gamma, rel=1e-3)
+    join = 2.0 ** -(gamma + 1.0 / (gamma - 1.0))
+    past = values >= join + step
+    assert np.allclose(curve[past], values[past] ** (1.0 / gamma), atol=1e-6)
+    assert (curve[~past] <= values[~past] ** (1.0 / gamma) + 1e-6).all()
+    assert (np.diff(curve) >= 0).all()
+
+
+@pytest.mark.parametrize(("gamma", "lut_size"), [(0.5, 256), (1.0, 256), (1.1, 256)])
+def test_levels_gamma_without_a_toe_is_a_power(gamma: float, lut_size: int) -> None:
+    """At or below gamma 1, and where the toe ends inside the first level."""
+    values = _lut_domain(lut_size)
+    expected = np.power(values, np.float32(1.0 / gamma))
+    assert np.array_equal(_levels_gamma(values, gamma, lut_size), expected)
+
+
+def _levels(*records: tuple[int, int, int, int, int]) -> LevelsData:
+    """Levels records, master first, the rest at their defaults."""
+    rows = [*records, *[(0, 255, 0, 255, 100)] * (29 - len(records))]
+    data = LevelsData(version=2)
+    data.extend(LevelRecord(*row) for row in rows)
+    return data
+
+
+def test_default_levels_leave_an_8_bit_ramp_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[5]
+    assert isinstance(layer, adjustments.Levels)
+    monkeypatch.setattr(layer, "_data", _levels())
+    ramp = np.arange(256, dtype=np.float32) / np.float32(255)
+    image = np.repeat(ramp[None, :, None], 3, axis=2)
+    result = apply_levels(image, ColorMode.RGB, layer)
+    assert np.array_equal(np.rint(result * 255), np.rint(image * 255))
+
+
+def test_a_lut_reads_the_nearest_level() -> None:
+    """As Photoshop reads its backdrop, in whole levels rounded."""
+    lut = _lut_domain(256) ** 2
+    values = np.array([0.4, 0.6, 127.49, 127.51, 254.6], dtype=np.float32) / 255
+    assert _apply_lut(values, lut).tolist() == lut[[0, 1, 127, 128, 255]].tolist()
+
+
+def test_a_master_gamma_follows_a_channel_output_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not folded into a channel that sets its own output range."""
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[5]
+    assert isinstance(layer, adjustments.Levels)
+    monkeypatch.setattr(
+        layer, "_data", _levels((0, 255, 0, 255, 200), (0, 255, 0, 128, 100))
+    )
+    white = np.ones((1, 1, 3), dtype=np.float32)
+    result = apply_levels(white, ColorMode.RGB, layer)[0, 0]
+    assert result[0] == pytest.approx((128 / 255) ** 0.5, abs=1e-6)
+    assert result[1:].tolist() == [1.0, 1.0]
 
 
 # Curves
