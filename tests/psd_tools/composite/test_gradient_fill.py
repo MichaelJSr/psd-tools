@@ -8,6 +8,7 @@ rendered grey is the ramp position itself, on boxes whose aspect tells the
 width from the height.
 """
 
+import functools
 import itertools
 import math
 from collections.abc import Callable
@@ -1117,6 +1118,44 @@ def test_a_type_layers_overlay_is_laid_out_on_its_over_half_opaque_pixels(
     expected, _ = paint.draw_gradient_fill(text.bbox, psd.color_mode, desc, opaque)
     assert color is not None and expected is not None
     assert np.array_equal(color, expected)
+
+
+# effects/type-gradient-overlay-lines.psd: on white, four type layers (40 pt
+# on 48 pt leading) under a reversed, scale-150, red-green-blue gradient
+# overlay at 90 degrees: "plain", two lines with descenders in the last;
+# "lead_empty", the same after an empty paragraph; "badge", a stoogedings
+# badge opening line 1; "pod06", an empty paragraph, a badge and a descender.
+# The composite was saved after reopening the file: a session that edits a
+# styled layer's text by script keeps its overlay on the old box until then.
+_LINES_FIXTURE = "effects/type-gradient-overlay-lines.psd"
+
+
+@functools.cache
+def _lines_errors() -> dict[str, float]:
+    """Per layer, its largest difference from Photoshop's composite, in levels."""
+    psd = PSDImage.open(full_name(_LINES_FIXTURE))
+    color, _, _ = composite(psd)
+    diff = np.abs(color[..., :3] - psd.numpy()[..., :3]).max(axis=2) * 255
+    errors: dict[str, float] = {}
+    for layer in psd:
+        if layer.kind == "type":
+            left, top, right, bottom = layer.bbox
+            errors[layer.name] = float(
+                diff[top - 2 : bottom + 2, left - 2 : right + 2].max()
+            )
+    return errors
+
+
+@pytest.mark.parametrize("name", ["plain", "lead_empty", "pod06"])
+def test_a_type_layers_overlay_spans_its_ink_over_several_lines(name: str) -> None:
+    assert _lines_errors()[name] <= 1
+
+
+@pytest.mark.xfail(
+    strict=True, reason="Photoshop's box ends a row above the ink: law unknown"
+)
+def test_a_badge_opening_line_1_leaves_the_box_on_the_ink() -> None:
+    assert _lines_errors()["badge"] <= 1
 
 
 def test_an_overlay_keeps_its_layout_when_its_pixels_cannot_be_read(
