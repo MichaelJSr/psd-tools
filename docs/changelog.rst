@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A Hue/Saturation adjustment no longer turns some near-white pixels
+  black and some near-black ones bright: a pixel whose lightness rounds to 0
+  or 1 reads as unsaturated instead of infinitely saturated. Only documents
+  with a Hue/Saturation layer change
 - [fix] Type layer text and style edits (``TypeLayer.text``, ``set_text()``,
   ``set_span_style()``, ``set_run_style()``) also write the layer's story in
   the document's ``Txt2`` block, which Photoshop reads, so a Photoshop save no
