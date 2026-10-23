@@ -182,7 +182,8 @@ def test_a_painted_stroke_reads_its_whole_box(paint: bytes) -> None:
 def test_a_cast_mattes_reach_is_its_blur_and_its_offset() -> None:
     assert effects.cast_reach(0.0, 0.0, 2.0, 0.0) == 5
     assert effects.cast_reach(4.0, 90.0, 2.0, 0.0) == 9
-    assert effects.cast_reach(3.0, 45.0, 0.5, 0.0) == 7
+    # 2.12 px along each axis, cast 2 px.
+    assert effects.cast_reach(3.0, 45.0, 0.5, 0.0) == 6
 
 
 def test_a_spread_matte_reads_its_whole_box() -> None:
