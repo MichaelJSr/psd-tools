@@ -10,6 +10,7 @@ and serializing PSD file structures.
 """
 
 import array
+import functools
 import io
 import logging
 import re
@@ -98,9 +99,9 @@ def pack(fmt: str, *args: Any) -> bytes:
 
 def unpack(fmt: str, data: bytes) -> tuple[Any, ...]:
     """Unpack big-endian binary data."""
-    fmt = str(">" + fmt)
-    consume_objects(_format_objects(fmt))
-    return struct.unpack(fmt, data)
+    packer, _, objects = _format(fmt)
+    consume_objects(objects)
+    return packer.unpack(data)
 
 
 def _format_objects(fmt: str) -> int:
@@ -110,23 +111,37 @@ def _format_objects(fmt: str) -> int:
     )
 
 
+@functools.lru_cache(maxsize=4096)
+def _format(fmt: str) -> tuple[struct.Struct, int, int]:
+    """The big-endian packer of ``fmt``, its size and its object count."""
+    packer = struct.Struct(">" + fmt)
+    return packer, packer.size, _format_objects(">" + fmt)
+
+
 def read_fmt(fmt: str, fp: IO[bytes]) -> tuple[Any, ...]:
     """Read data from ``fp`` according to ``fmt``."""
-    fmt = str(">" + fmt)
-    fmt_size = struct.calcsize(fmt)
-    if fmt_size > _remaining_bytes(fp):
-        raise OSError(
-            "Failed to read data section: read=%d, expected=%d. "
-            "Likely the file is corrupted." % (_remaining_bytes(fp), fmt_size)
-        )
-    consume_objects(_format_objects(fmt))
+    packer, fmt_size, objects = _format(fmt)
+    # _remaining_bytes() inlined: this is the parser's hottest call.
     position = fp.tell()
     try:
-        data = read_exact(fp, fmt_size)
-    except OSError:
+        remaining = fp.seek(0, 2) - position
+    finally:
         fp.seek(position)
-        raise
-    return struct.unpack(fmt, data)
+    if fmt_size > remaining:
+        raise OSError(
+            "Failed to read data section: read=%d, expected=%d. "
+            "Likely the file is corrupted." % (remaining, fmt_size)
+        )
+    consume_objects(objects)
+    consume_bytes(fmt_size)
+    data = fp.read(fmt_size)
+    if len(data) != fmt_size:
+        fp.seek(position)
+        raise OSError(
+            "Failed to read data section: read=%d, expected=%d."
+            % (len(data), fmt_size)
+        )
+    return packer.unpack(data)
 
 
 def write_fmt(fp: IO[bytes], fmt: str, *args: Any) -> int:
