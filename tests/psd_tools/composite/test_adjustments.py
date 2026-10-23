@@ -1331,14 +1331,15 @@ def test_saturation_scales_chroma_about_photoshops_gray() -> None:
 # The fitted vibrance model, with its constants. Fitted on Photoshop renders
 # of the layer over the same art; a changed constant fails this test.
 _SATURATION_GRAY = np.array([0.288, 0.712, 0.0])
-_BOOST_AMOUNT_CURVE, _BOOST_MID, _BOOST_PALE_DARK = 1.16, 1.27, 1.98
-_BOOST_DARK_FROM, _BOOST_DARK_TO, _BOOST_GRAY, _BOOST_GRAY_SLOPE = (
-    0.03,
-    0.3,
-    0.99,
-    -0.28,
+_BOOST_AMOUNT_CURVE, _BOOST_MID, _BOOST_MID_CURVE = 1.27, 1.274, 1.045
+_BOOST_PALE_DARK, _BOOST_PALE_CURVE, _BOOST_DARK_CURVE = 2.908, 1.842, 1.045
+_BOOST_BLACK_FROM, _BOOST_BLACK_TO, _BOOST_GRAY, _BOOST_GRAY_DARK = (
+    0.038,
+    0.292,
+    0.861,
+    -0.272,
 )
-_SKIN_HUES, _SKIN, _SKIN_CURVE = (-0.176, 0.0, 0.096, 0.136), 1.04, 0.84
+_SKIN_HUES, _SKIN, _SKIN_CURVE = (-0.175, 0.0, 0.096, 0.139), 1.022, 0.829
 _LOSS, _LOSS_PALE, _LOSS_PALE2, _REGAIN_PALE, _REGAIN_PALE2 = (
     0.25,
     1.5,
@@ -1359,16 +1360,16 @@ def _fitted_vibrance(
     chroma = high - low
     if vibrance > 0:
         sat = chroma / high
-        pale = 1 - sat
-        boost = _BOOST_MID * sat * pale + _BOOST_PALE_DARK * pale**2 * (
-            1 - encoded.max()
+        pale, value = 1 - sat, encoded.max()
+        boost = _BOOST_MID * sat * pale**_BOOST_MID_CURVE
+        boost += (
+            _BOOST_PALE_DARK
+            * pale**_BOOST_PALE_CURVE
+            * (1 - value) ** _BOOST_DARK_CURVE
         )
-        dark = np.clip(
-            (encoded.max() - _BOOST_DARK_FROM) / (_BOOST_DARK_TO - _BOOST_DARK_FROM),
-            0,
-            1,
-        )
-        boost *= dark * dark * (3 - 2 * dark)
+        black = (value - _BOOST_BLACK_FROM) / (_BOOST_BLACK_TO - _BOOST_BLACK_FROM)
+        black = np.clip(black, 0, 1)
+        boost *= black * black * (3 - 2 * black)
         rise_from, core_from, core_to, fall_to = _SKIN_HUES
         hue = hue - 1 if hue > 0.5 else hue
         skin = min(
@@ -1376,7 +1377,8 @@ def _fitted_vibrance(
             np.clip((fall_to - hue) / (fall_to - core_to), 0, 1),
         )
         boost *= 1 - skin * _SKIN * pale**_SKIN_CURVE
-        gray = low + (_BOOST_GRAY + _BOOST_GRAY_SLOPE * sat) * chroma
+        position = np.clip(_BOOST_GRAY + _BOOST_GRAY_DARK * (1 - value), 0, 1)
+        gray = low + position * chroma
         scale = 1 + vibrance**_BOOST_AMOUNT_CURVE * boost
         linear = gray + scale * (linear - gray)
     elif vibrance < 0:
