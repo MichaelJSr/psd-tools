@@ -4718,8 +4718,8 @@ class Compositor:
         layer, over everything else inside it; what an outer bevel, an emboss or
         a pillow emboss puts beside it is an outer effect, as an outset
         stroke is. A stroke emboss, which bevels the stroke rather than the
-        layer, and a shape contour are not drawn; a texture is
-        (:py:meth:`_bevel_texture`).
+        layer, is not drawn, nor is a shape contour but a smooth inner
+        bevel's; a texture is (:py:meth:`_bevel_texture`).
         """
         bevels = _readable(layer, "bevelemboss")
         if not bevels or not self._has_scipy("Bevels"):

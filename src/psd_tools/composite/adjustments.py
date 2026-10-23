@@ -307,8 +307,9 @@ def apply_levels(
         )
         out = (t - in_black) / scale
         np.clip(out, _0, _1, out=out)
+        # Read off the grid itself: a quotient can fall an ulp under a level.
         steps = np.float32(lut_size - 1)
-        out = np.floor(out * steps + np.float32(0.5)) / steps
+        out = t[np.floor(out * steps + np.float32(0.5)).astype(np.intp)]
 
         # gamma midtone adjustment
         out = _levels_gamma(out, float(gamma), lut_size)
@@ -329,17 +330,21 @@ def _record_gamma(record: LevelRecord) -> float:
 def _master_gamma(records: LevelsData, colormode: ColorMode) -> float:
     """The gamma of a master record that sets nothing else, else 1.
 
-    Only where every colour channel has its own record to carry it.
+    Only where every colour channel has its own record to carry it, with
+    its output left at 0 to 255: the master's power then follows the
+    channel's directly. The product is not held to 9.99; no fixture says
+    Photoshop holds it.
     """
-    if colormode == ColorMode.GRAYSCALE or len(records) <= ColorMode.channels(
-        colormode
+    channels = ColorMode.channels(colormode)
+    if colormode == ColorMode.GRAYSCALE or len(records) <= channels:
+        return 1.0
+    if any(
+        (record.output_floor, record.output_ceiling) != (0, 255)
+        for record in records[: channels + 1]
     ):
         return 1.0
     master = records[0]
-    if (master.input_floor, master.input_ceiling) != (0, 255) or (
-        master.output_floor,
-        master.output_ceiling,
-    ) != (0, 255):
+    if (master.input_floor, master.input_ceiling) != (0, 255):
         return 1.0
     return _record_gamma(master)
 

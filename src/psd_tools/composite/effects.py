@@ -2078,9 +2078,10 @@ def draw_bevel(
 ) -> tuple[np.ndarray, np.ndarray]:
     """How much highlight and how much shadow a bevel paints, on ``viewport``.
 
-    The surface from :py:func:`_bevel_height`, its slope scaled by ``depth``
-    and turned over when not ``up``, lit from ``angle`` (where the light comes
-    from, as a drop shadow's) and ``altitude`` above the horizon. A face lit
+    The surface (a chisel bevel's from :py:func:`_bevel_height`, a smooth
+    one's as below), its slope scaled by ``depth`` and turned over when not
+    ``up``, lit from ``angle`` (where the light comes from, as a drop
+    shadow's) and ``altitude`` above the horizon. A face lit
     more than the flat layer is takes the highlight, in proportion to how far
     it is from the flat toward full light, and one lit less the shadow, in
     proportion to how far toward none; the flat layer takes neither.

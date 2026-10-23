@@ -39,10 +39,11 @@ from psd_tools.composite.paint import _from_rgb
 from psd_tools.constants import BlendMode, ColorMode, Tag
 from psd_tools.psd.adjustments import ChannelMixer as ChannelMixerData
 from psd_tools.psd.adjustments import ColorBalance as ColorBalanceData
-from psd_tools.psd.adjustments import ColorStop, TransparencyStop
+from psd_tools.psd.adjustments import ColorStop, LevelRecord, TransparencyStop
 from psd_tools.psd.adjustments import Curves as CurvesData
 from psd_tools.psd.adjustments import GradientMap as GradientMapData
 from psd_tools.psd.adjustments import HueSaturation as HueSaturationData
+from psd_tools.psd.adjustments import Levels as LevelsData
 from psd_tools.psd.descriptor import Descriptor, Integer
 
 from ..utils import full_name
@@ -257,6 +258,37 @@ def test_levels_gamma_without_a_toe_is_a_power(gamma: float, lut_size: int) -> N
     values = _lut_domain(lut_size)
     expected = np.power(values, np.float32(1.0 / gamma))
     assert np.array_equal(_levels_gamma(values, gamma, lut_size), expected)
+
+
+def _levels(*records: tuple[int, int, int, int, int]) -> LevelsData:
+    """Levels records, master first, the rest at their defaults."""
+    rows = [*records, *[(0, 255, 0, 255, 100)] * (29 - len(records))]
+    return LevelsData(items=[LevelRecord(*row) for row in rows], version=2)
+
+
+def test_default_levels_leave_an_8_bit_ramp_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[5]
+    monkeypatch.setattr(layer, "_data", _levels())
+    ramp = np.arange(256, dtype=np.float32) / np.float32(255)
+    image = np.repeat(ramp[None, :, None], 3, axis=2)
+    result = apply_levels(image, ColorMode.RGB, layer)
+    assert np.array_equal(np.rint(result * 255), np.rint(image * 255))
+
+
+def test_a_master_gamma_follows_a_channel_output_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not folded into a channel that sets its own output range."""
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[5]
+    monkeypatch.setattr(
+        layer, "_data", _levels((0, 255, 0, 255, 200), (0, 255, 0, 128, 100))
+    )
+    white = np.ones((1, 1, 3), dtype=np.float32)
+    result = apply_levels(white, ColorMode.RGB, layer)[0, 0]
+    assert result[0] == pytest.approx((128 / 255) ** 0.5, abs=1e-6)
+    assert result[1:].tolist() == [1.0, 1.0]
 
 
 # Curves
