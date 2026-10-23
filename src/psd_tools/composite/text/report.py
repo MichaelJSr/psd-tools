@@ -14,17 +14,33 @@ from psd_tools.composite.text.raster import Bbox
 
 
 @dataclass(frozen=True)
+class Splice:
+    """What a spliced render kept from the stored raster and redrew.
+
+    ``kept`` and ``redrawn`` index the new layout's lines; ``zone`` bounds
+    the pixels the engine drew, ``None`` when it drew none. ``fallback``
+    says why the whole layer was rendered instead, ``None`` when spliced.
+    """
+
+    kept: tuple[int, ...]
+    redrawn: tuple[int, ...]
+    zone: Bbox | None
+    fallback: str | None = None
+
+
+@dataclass(frozen=True)
 class RenderReport:
     """Fonts, lines, warnings and timing of one render.
 
     ``lines`` lists every composed line; one an overflowing box did not draw
-    has ``drawn`` false.
+    has ``drawn`` false. ``splice`` is set by a spliced render.
     """
 
     fonts: Mapping[str, tuple[How, str | None]]  #: name -> (how, path)
     lines: tuple[LineInfo, ...]
     warnings: tuple[str, ...]
     ms: float
+    splice: Splice | None = None
 
 
 @dataclass(frozen=True, eq=False)

@@ -214,6 +214,13 @@ def _apply_lut(values: np.ndarray, lut: np.ndarray) -> NDArray[np.float32]:
     """
     lut_size = int(lut.shape[0])
     if lut_size <= 2**16:
+        nan = np.isnan(values)
+        if nan.any():
+            # NaN has no level: it reads as NaN.
+            out = lut[_level_index(np.where(nan, 0.0, values), lut_size)]
+            out = out.astype(np.float32)
+            out[nan] = np.nan
+            return out
         return lut[_level_index(values, lut_size)].astype(np.float32, copy=False)
     xp = _lut_domain(lut_size)
     return np.interp(values, xp, lut).astype(np.float32, copy=False)

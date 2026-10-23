@@ -1624,3 +1624,23 @@ def test_saturation_keeps_photoshops_gray_unless_a_profile_moves_it() -> None:
         layer._data = data
         out = _applied(apply_vibrance(blue, ColorMode.RGB, layer))
         assert _linear(out[0, 0, 0]) == pytest.approx(gray, abs=1 / 255)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("lut_size", [256, 65536])
+def test_a_lut_is_read_at_each_level(dtype: type, lut_size: int) -> None:
+    """A gather at each value's nearest level; NaN reads as NaN."""
+    rng = np.random.default_rng(lut_size)
+    depth = lut_size - 1
+    lut = np.cumsum(rng.random(lut_size)).astype(np.float32)
+    lut /= lut[-1]
+    values: np.ndarray = rng.uniform(-0.2, 1.2, (64, 64)).astype(dtype)
+    values[0, :3] = (0.0, 1.0, 0.5)
+    nearest = np.clip(np.floor(values * depth + 0.5), 0, depth).astype(np.intp)
+    expected = lut[nearest]
+    assert np.array_equal(_apply_lut(values, lut), expected)
+    values[1, 1] = np.nan
+    got = _apply_lut(values, lut)
+    assert np.isnan(got[1, 1])
+    got[1, 1] = expected[1, 1]
+    assert np.array_equal(got, expected)

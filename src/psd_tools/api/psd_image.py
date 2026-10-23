@@ -251,12 +251,20 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         fp: IO[bytes] | str | bytes | os.PathLike,
         max_alloc_bytes: AllocBudget | None = None,
         parse_limits: ParseLimits | None = None,
+        lazy: bool = False,
         **kwargs: Any,
     ) -> Self:
         """
         Open a PSD document.
 
         :param fp: filename or file-like object.
+        :param lazy: read the layers' channel data, the merged image data and
+            the embedded smart object and smart filter blocks from ``fp`` only
+            when something uses them (:py:mod:`psd_tools.psd.lazy`). ``fp``
+            must be a file-like object kept open while the document is used,
+            e.g. a :py:class:`~psd_tools.range_reader.RangeReader`. A payload
+            is checked when it is read, so a document whose unread payloads
+            are corrupt opens.
         :param parse_limits: structural read and object limits; ``None`` uses
             :py:class:`~psd_tools.ParseLimits` defaults. Exceeding a limit
             raises :py:class:`~psd_tools.ParseLimitError` before the allocation.
@@ -293,10 +301,12 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         if parse_limits is not None and not isinstance(parse_limits, ParseLimits):
             raise TypeError("parse_limits must be a ParseLimits instance or None")
         if isinstance(fp, (str, bytes, os.PathLike)):
+            if lazy:
+                raise ValueError("lazy reads need a file-like object kept open")
             with open(fp, "rb") as f:
                 self = cls(PSD.read(f, parse_limits=parse_limits, **kwargs))
         else:
-            self = cls(PSD.read(fp, parse_limits=parse_limits, **kwargs))
+            self = cls(PSD.read(fp, parse_limits=parse_limits, lazy=lazy, **kwargs))
         self._max_alloc_bytes = max_alloc_bytes
         return self
 

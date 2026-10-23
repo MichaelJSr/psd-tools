@@ -91,6 +91,7 @@ from psd_tools.psd.bin_utils import (
     write_padding,
     write_pascal_string,
 )
+from psd_tools.psd.lazy import LazyPayload, Span, defer
 from psd_tools.psd.parse_limits import parse_container, parse_context
 from psd_tools.psd.tagged_blocks import TaggedBlocks, register
 from psd_tools.validators import in_, range_
@@ -1193,8 +1194,8 @@ class ChannelDataList(ListElement):
         return [item._length for item in self]
 
 
-@define(repr=False)
-class ChannelData(BaseElement):
+@define(repr=False, eq=False)
+class ChannelData(LazyPayload, BaseElement):
     """
     Channel data.
 
@@ -1205,19 +1206,22 @@ class ChannelData(BaseElement):
     .. py:attribute:: data
 
         Data.
+
+    A lazy read (:py:mod:`psd_tools.psd.lazy`) reads both from the file on
+    first access.
     """
 
-    compression: Compression = field(
+    _compression: Compression = field(
         default=Compression.RAW,
         converter=Compression,
         validator=in_(tuple(Compression)),
     )
-    data: bytes = b""
+    _data: bytes = b""
+    _span: Span | None = field(default=None, init=False)
 
     @classmethod
     def read(cls, fp: IO[bytes], length: int = 0, **kwargs: Any) -> Self:
         """Read the structure from a file-like object."""
-        compression = Compression(read_fmt("H", fp)[0])
         # length is c.length - 2 (the 2-byte compression header is excluded).
         # A negative value here indicates an upstream logic error; warn and
         # clamp to 0 rather than letting fp.read(negative) consume until EOF.
@@ -1226,6 +1230,12 @@ class ChannelData(BaseElement):
                 "ChannelData.read: negative length %d, clamping to 0", length
             )
             length = 0
+        span = defer(fp, 2 + length)
+        if span is not None:
+            self = cls()
+            self._span = span
+            return self
+        compression = Compression(read_fmt("H", fp)[0])
         data = read_exact(fp, length)
         return cls(compression=compression, data=data)
 
@@ -1282,8 +1292,8 @@ class ChannelData(BaseElement):
 
     @property
     def _length(self) -> int:
-        """Length of channel data block."""
-        return 2 + len(self.data)
+        """Length of channel data block (a lazy one stays unread)."""
+        return 2 + self._data_length
 
 
 @define(repr=False)

@@ -78,6 +78,36 @@ Changelog
   tail ran a pixel further: a group's outside stroke traced round a child's
   soft shadow no longer reaches a pixel too far. Soft shadows' falloffs move
   slightly; outer glows are unchanged
+- [api] ``psd_tools.composite.rcache.RenderCache``: inside ``with
+  RenderCache():`` composite passes share their intermediates, so a render
+  after an edit resumes below the edited layer and a reopened file renders
+  from the cache. ``PSD_RCACHE_VERIFY=1`` checks every cached pass against an
+  uncached one. A pass that reads the preview for its type layers' blend
+  (``text_preview``) resumes no further than the first of them. Renders
+  without it are unchanged
+- [refactor] Compositing and opening are faster: a layer is composited on the
+  box it can change instead of the whole canvas, stroke distance fields use
+  the new compiled ``psd_tools.composite._distance`` (numpy where it is not
+  built; both refuse a mask that is not 2-D), and engine data and binary
+  fields parse with less overhead. Renders are unchanged but for a level here
+  and there where rounding on the smaller box differs
+- [api] ``PSDImage.open(fp, lazy=True)`` leaves the layers' channel data, the
+  merged image data and the embedded smart object and smart filter blocks in
+  ``fp`` until something reads them; ``fp`` must stay open. Opening a card
+  then reads its header, resources and layer records, about 1% of its bytes.
+  ``Layer.has_pixels()`` no longer reads the channel data. A payload is
+  checked when it is read, not at the open
+- [api] ``psd_tools.range_reader.RangeReader`` is a seekable file over byte
+  ranges fetched on demand, e.g. HTTP Range requests
+  (``RangeReader.from_url``): with a lazy open a PSD on a web server costs
+  what is read, not the whole file
+- [api] ``psd_tools.composite.text.text_geometry()`` returns where a type
+  layer's lines and glyphs sit in document pixels, with the slice of the text
+  each one covers, without rendering. ``RenderReport.lines`` entries gain
+  ``start`` and ``end``
+- [api] ``TypeLayer.rasterize(keep=capture(layer))`` draws only the lines an
+  edit changed (or, with ``unit="glyph"``, the glyphs) and keeps Photoshop's
+  stored raster everywhere else; ``RenderReport.splice`` says what was kept
 - [fix] A Hue/Saturation adjustment no longer turns some near-white pixels
   black and some near-black ones bright: a pixel whose lightness rounds to 0
   or 1 reads as unsaturated instead of infinitely saturated. Only documents
@@ -90,6 +120,21 @@ Changelog
   story another layer shares raise ``ValueError``, leaving the layer as it was
 - [api] ``TypeLayer.story_text`` reads the layer's ``Txt2`` story and
   ``TypeLayer.sync_story()`` brings a stale one back to the layer's text
+- [api] ``Layer.copy_effects_from()`` replaces a layer's effects with a copy
+  of another layer's, from any document, patterns included;
+  ``Layer.clear_effects()`` removes them.
+- [api] ``Mask.offset``, ``Mask.left`` and ``Mask.top`` are writable: setting
+  them moves a pixel mask without moving its layer. A layer with a vector
+  mask, shape layers included, raises ``ValueError``.
+- [api] ``TypeLayer.add_font()`` adds a face to the layer's ``FontSet``, and
+  to the document's ``Txt2`` font set, for ``set_span_style(Font=...)``.
+- [api] ``TypeLayer.fit_text()`` and ``psd_tools.composite.text.fit_text()``
+  shrink point text until its widest line fits a width, refusing below a
+  minimum scale. Requires the ``text`` extra.
+- [fix] A type layer copied by ``duplicate()`` or ``copy_to()``, or moved into
+  another document, gets its own ``Txt2`` story under a new ``TextIndex``
+  instead of sharing, or pointing at another layer's, story. Copying a type
+  layer between a Photoshop CC file and an older one raises ``ValueError``.
 - [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
   layer set from a preset does, is read as its own adjustment instead of as a
   Brightness/Contrast at 0/0 that left the image unchanged. Only layers that

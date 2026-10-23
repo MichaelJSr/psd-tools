@@ -59,6 +59,10 @@ GLYPH_CACHE_SIZE = 8192
 GLYPH_CACHE_BYTES = 64 * 1024 * 1024
 FACE_CACHE_SIZE = 64
 
+# A splice treats the pixels this far around a glyph's outline box as the
+# glyph's own: anti-aliasing, the Strong embolden and Photoshop's placement.
+SPLICE_PAD = 2
+
 # Fidelity metrics, shared with the scoring harness: alpha above IOU_COVER
 # counts as ink for the IoU; a pixel is bad when its premultiplied channel
 # difference exceeds BAD_DIFF where either alpha exceeds ANY_ALPHA.

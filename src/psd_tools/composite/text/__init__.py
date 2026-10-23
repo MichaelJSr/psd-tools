@@ -6,7 +6,9 @@ Requires the ``text`` extra (``uharfbuzz``, ``freetype-py``). Importing
 
 from __future__ import annotations
 
+import math
 import time
+from dataclasses import replace
 
 import numpy as np
 
@@ -18,6 +20,7 @@ from psd_tools.composite.text.fonts import (
     Policy,
     TextRenderError,
 )
+from psd_tools.composite.text.geometry import text_geometry
 from psd_tools.composite.text.layout import Layout
 from psd_tools.composite.text.model import TextModel, Transform
 from psd_tools.composite.text.raster import (
@@ -27,21 +30,32 @@ from psd_tools.composite.text.raster import (
     raster_warnings,
     rasterize,
 )
-from psd_tools.composite.text.report import Fidelity, RenderReport, RenderResult
+from psd_tools.composite.text.report import (
+    Fidelity,
+    RenderReport,
+    RenderResult,
+    Splice,
+)
+from psd_tools.composite.text.splice import Before, capture
 from psd_tools.composite.text.verify import fidelity, stored_raster
 
 __all__ = [
+    "Before",
     "Fidelity",
     "FontMap",
     "MissingFontError",
     "Options",
     "RenderReport",
     "RenderResult",
+    "Splice",
     "TextRenderError",
+    "capture",
     "default_font_map",
+    "fit_text",
     "font_names",
     "render",
     "render_type_layer",
+    "text_geometry",
     "verify",
 ]
 
@@ -100,6 +114,16 @@ def render(
     ``raise`` font policy; under ``skip`` the runs of a missing font draw
     nothing and the report lists the font as ``"missing"``.
     """
+    return _render(layer, fonts, options, breaks)[0]
+
+
+def _render(
+    layer: TypeLayer,
+    fonts: FontMap | None,
+    options: Options | None,
+    breaks: list[int] | None = None,
+) -> tuple[RenderResult, Layout, TextModel]:
+    """:func:`render`, the layout it drew and the model it read."""
     t0 = time.perf_counter()
     options = options or Options()
     fonts = fonts or default_font_map(options.missing_font)
@@ -115,7 +139,7 @@ def render(
         _GLYPH_CACHE,
         max_alloc_bytes=layer._psd._max_alloc_bytes,
     )
-    return RenderResult(rgba, bbox, _report(lay, transform, options, t0))
+    return RenderResult(rgba, bbox, _report(lay, transform, options, t0)), lay, model
 
 
 def render_type_layer(
@@ -156,3 +180,70 @@ def verify(
     if any(how == "missing" for how, _ in result.report.fonts.values()):
         return fidelity(*stored, None, None, "missing", max_alloc_bytes=budget)
     return fidelity(*stored, result.rgba, result.bbox, max_alloc_bytes=budget)
+
+
+def fit_text(
+    layer: TypeLayer,
+    max_width: float,
+    min_scale: float,
+    *,
+    fonts: FontMap | None = None,
+) -> float:
+    """Shrink ``layer``'s type until its widest line fits ``max_width``.
+
+    A line's width is the layout's measure, its advance width in document
+    pixels along the baseline. Every run's ``FontSize`` is scaled by one
+    factor, rounded down to a hundredth of a point, with
+    :py:meth:`~psd_tools.api.layers.TypeLayer.set_span_style`, so the
+    layer's Txt2 story follows; leading is left as it is. Returns the
+    factor, ``1.0`` when the text fits already and the layer is left as it
+    was. The stored pixels are untouched until
+    :py:meth:`~psd_tools.api.layers.TypeLayer.rasterize`.
+
+    :raises ValueError: if the text needs a factor below ``min_scale``,
+        leaving the layer as it was, or the layer is box text, which wraps
+        to its box.
+    :raises MissingFontError: if a font does not resolve.
+    """
+    fonts = fonts or default_font_map()
+    model = TextModel.from_layer(layer)
+    if model.box is not None:
+        raise ValueError("fit_text() measures point text; box text wraps to its box")
+    px = math.hypot(*model.transform[:2])
+
+    def width(sized: TextModel) -> float:
+        lay = _layout.layout(sized, fonts)
+        missing = [name for name, r in lay.fonts.items() if r.how == "missing"]
+        if missing:
+            raise MissingFontError(missing)
+        return max((line.width for line in lay.lines), default=0.0) * px
+
+    natural = width(model)
+    if natural <= max_width:
+        return 1.0
+    scale = max_width / natural
+    while scale >= min_scale and width(_scaled(model, scale)) > max_width:
+        scale *= 0.995  # the rounding can leave a hair over
+    if scale < min_scale:
+        raise ValueError(
+            f"{layer.name!r} fits {max_width} px at {max_width / natural:.3f} "
+            f"of its size, below min_scale {min_scale}"
+        )
+    for run in _scaled(model, scale).runs:
+        if run.end > run.start:
+            layer.set_span_style(run.start, run.end, FontSize=run.style.size)
+    return scale
+
+
+def _scaled(model: TextModel, scale: float) -> TextModel:
+    """``model`` with every run's size scaled and rounded down to 0.01 pt."""
+    runs = tuple(
+        replace(
+            run,
+            style=replace(
+                run.style, size=math.floor(run.style.size * scale * 100) / 100
+            ),
+        )
+        for run in model.runs
+    )
+    return replace(model, runs=runs)

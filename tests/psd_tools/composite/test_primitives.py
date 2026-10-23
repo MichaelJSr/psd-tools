@@ -152,6 +152,28 @@ def test_divide_defaults_to_one_where_the_divisor_is_zero() -> None:
     assert np.array_equal(utils.divide(gray(0.0), gray(0.0)), gray(1.0))
 
 
+@pytest.mark.parametrize(
+    "a_shape, b_shape",
+    [((4, 5, 3), (4, 5, 3)), ((4, 5, 1), (4, 5, 3)), ((), (4, 5, 1)), ((4, 5, 3), ())],
+)
+@pytest.mark.parametrize("zero", [False, True], ids=["positive", "with-zero"])
+def test_divide_matches_the_masked_quotient(
+    a_shape: tuple[int, ...], b_shape: tuple[int, ...], zero: bool
+) -> None:
+    """Every divisor positive or not, the quotient is the masked one, fill included."""
+    rng = np.random.default_rng(len(a_shape) * 10 + len(b_shape))
+    a = rng.random(a_shape).astype(np.float32)
+    b = (rng.random(b_shape) + 0.01).astype(np.float32)
+    if zero and b.ndim:
+        b.flat[0] = 0.0
+    shape = np.broadcast_shapes(a.shape, b.shape)
+    expected = np.full(shape, 0.25, dtype=np.float32)
+    np.divide(a, b, out=expected, where=b > 0)
+    got = utils.divide(a, b, fill=0.25)
+    assert got.shape == shape and got.dtype == expected.dtype
+    assert np.array_equal(got, expected)
+
+
 def test_divide_substitutes_the_callers_fill() -> None:
     assert np.array_equal(utils.divide(gray(1.0), gray(0.0), fill=0.25), gray(0.25))
 
