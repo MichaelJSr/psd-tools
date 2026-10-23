@@ -10,6 +10,10 @@ Changelog
   another session than the preview's may disagree. ``text_preview=False``
   keeps the gamma for every layer, and ``layer_text_gamma`` pins layers by ID
   (``PSDImage.composite()`` and ``psd_tools.composite.composite()``)
+- [fix] An outer glow is cut from under its layer's outside stroke band as
+  well as its silhouette, as a knocked-out drop shadow is, so a Lighten or
+  partly transparent stroke shows the backdrop through itself and not the
+  glow. Layers without a stroke are unchanged
 - [fix] Crisp, Strong and Smooth text is antialiased from a 4 x 4 grid of
   point samples per pixel, as Photoshop stores it, instead of the exact area
   under the outline: every rendered type layer changes slightly.

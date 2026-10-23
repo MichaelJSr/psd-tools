@@ -18,6 +18,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from psd_tools.api.effects import OuterGlow
 from psd_tools.api.layers import Layer
@@ -38,7 +39,7 @@ from psd_tools.constants import (
     Tag,
 )
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
+from psd_tools.psd.descriptor import Bool, Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
@@ -912,6 +913,114 @@ def test_a_glow_goes_over_the_drop_shadow_of_the_same_layer() -> None:
     viewport = _around(layer)
     y, x = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1], 16 - 2
     assert np.allclose(_over_grey(layer, viewport)[y, x], 1.0, atol=1e-6)
+
+
+def _stroked_square(
+    mode: bytes, opacity: float, grouped: bool = False
+) -> tuple[Layer, Descriptor, Descriptor]:
+    """A white 20 px square with a hard blue glow and a black 6 px outset stroke.
+
+    The glow is Normal and spread to a hard band of 12 px, so it is opaque
+    under the whole stroke band and past it. The stroke is the donor's,
+    switched on and moved outside, blended in ``mode`` at ``opacity``. With
+    ``grouped`` both go on a pass-through group holding the square. Returns
+    the layer carrying them, the glow's descriptor and the stroke's.
+    """
+    psd = PSDImage.new("RGB", (60, 60))
+    square = Image.new("RGBA", (20, 20), (255, 255, 255, 255))
+    target: Layer = psd.create_pixel_layer(square, top=20, left=20)
+    if grouped:
+        target = psd.create_group([target])
+        assert target.blend_mode == BlendMode.PASS_THROUGH
+    glow = _hard_glow(target, size=12.0)
+    _blue(glow)
+    glow[Key.Mode].enum = Enum.Normal
+    block = target.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    stroke = block[b"frameFXMulti"][0]
+    stroke[Key.Enabled] = Bool(True)
+    stroke[b"present"] = Bool(True)
+    stroke[Key.Style] = Enumerated(Type.FrameFill, Enum.OutsetFrame)
+    stroke[Key.Mode] = Enumerated(Type.BlendMode, mode)
+    stroke[Key.Opacity] = Double(opacity)
+    assert [effect.name for effect in target.effects] == ["OuterGlow", "Stroke"]
+    return target, glow, stroke
+
+
+# The 20 px square's row through its middle, the stroke band left of it, and
+# a stretch past the band that only the glow reaches.
+_ROW, _BAND, _PAST = 30, slice(14, 20), slice(9, 13)
+
+
+@pytest.mark.parametrize("grouped", [False, True], ids=["layer", "group"])
+def test_a_lighten_stroke_shows_the_backdrop_under_its_band_not_the_glow(
+    grouped: bool,
+) -> None:
+    """The glow is cut from under the stroke's band as a knocked-out shadow is.
+
+    A black Lighten stroke over grey leaves the grey: under the band the
+    composite is the one without the glow, while past the band the glow is
+    whole. Left under the band, the glow would show there in blue.
+    """
+    layer, glow, _ = _stroked_square(Enum.Lighten, 100.0, grouped)
+    viewport = layer._psd.viewbox
+    glowing = _over_grey(layer, viewport)
+    glow[Key.Enabled] = False
+    bare = _over_grey(layer, viewport)
+
+    assert np.allclose(bare[_ROW, _BAND], 0.5, atol=1e-6)
+    assert np.allclose(glowing[_ROW, _BAND], bare[_ROW, _BAND], atol=1e-6)
+    assert np.allclose(glowing[_ROW, _PAST], (0.0, 0.0, 1.0), atol=1e-6)
+
+
+def test_a_faint_stroke_shows_the_backdrop_through_itself_not_the_glow() -> None:
+    """A Normal stroke at 71% hides 71% of what lies under its band, not all of it.
+
+    Through the rest shows the backdrop: over nothing the band's alpha is
+    the stroke's opacity rather than whole, and over grey it comes out as it
+    does with the glow off.
+    """
+    layer, glow, _ = _stroked_square(Enum.Normal, 71.0)
+    viewport = layer._psd.viewbox
+    alpha = _alone(layer, viewport)
+    glowing = _over_grey(layer, viewport)
+    glow[Key.Enabled] = False
+    bare = _over_grey(layer, viewport)
+
+    assert np.allclose(alpha[_ROW, _BAND, 0], 0.71, atol=1e-6)
+    assert np.allclose(alpha[_ROW, _PAST, 0], 1.0, atol=1e-6)
+    assert np.allclose(glowing[_ROW, _BAND], bare[_ROW, _BAND], atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("mode", "opacity"),
+    [(Enum.Normal, 100.0), (Enum.Normal, 71.0), (Enum.Lighten, 100.0)],
+    ids=["normal", "normal at 71%", "lighten"],
+)
+def test_a_strokes_antialiased_rim_hides_the_glow_at_its_opacity(
+    mode: bytes, opacity: float
+) -> None:
+    """Round the square's corners the stroke alone claims ``b`` of a pixel.
+
+    A Normal stroke at opacity ``o`` hides ``o * b`` of the glow once on, so
+    the cut leaves the glow at ``(1 - b) / (1 - o * b)`` and it shows at
+    ``1 - b``; a Lighten stroke hides none of it and the cut takes ``b``. An
+    opaque Normal stroke leaves the glow showing nowhere under its band.
+    """
+    layer, glow, _ = _stroked_square(mode, opacity)
+    viewport = layer._psd.viewbox
+    alpha = _alone(layer, viewport)[:, :, 0]
+    glow[Key.Enabled] = False
+    o = opacity / 100.0
+    band = _alone(layer, viewport)[:, :, 0] / o
+    beside = np.ones(band.shape, dtype=bool)
+    beside[20:40, 20:40] = False
+    rim = beside & (band > 0.0) & (band < 1.0)
+    assert rim.any(), "no antialiased rim"
+
+    b = band[rim]
+    p = o if mode == Enum.Normal else 0.0
+    expected = o * b + (1.0 - o * b) * (1.0 - b) / (1.0 - p * b)
+    assert np.allclose(alpha[rim], expected, atol=1e-5), alpha[rim]
 
 
 def test_a_glow_reaches_a_viewport_its_layer_misses() -> None:
