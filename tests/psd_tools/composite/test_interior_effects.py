@@ -125,6 +125,25 @@ def test_a_normal_layer_at_full_fill_composites_as_before() -> None:
     assert np.allclose(color[0, 0], _faded(full, 128 / 255.0)[0, 0], atol=1e-5)
 
 
+@pytest.mark.parametrize("blend_mode", [BlendMode.MULTIPLY, BlendMode.SCREEN])
+def test_a_groups_overlay_goes_on_over_the_group_in_its_mode(
+    blend_mode: BlendMode,
+) -> None:
+    """A group composited as one layer takes the same law as a layer.
+
+    A Normal overlay at full opacity covers what the group's mode made of
+    its contents, so the group renders as a Normal one does.
+    """
+    renders = {}
+    for mode in (BlendMode.NORMAL, blend_mode):
+        psd, layer = _document(BlendMode.NORMAL)
+        group = psd.create_group([layer], name="group", blend_mode=mode)
+        _overlay(group, b"normal", _OVERLAY)
+        renders[mode], _, _ = composite(psd)
+    assert np.allclose(renders[BlendMode.NORMAL][0, 0], _rgb(_OVERLAY)[0, 0])
+    assert np.allclose(renders[blend_mode], renders[BlendMode.NORMAL], atol=1e-6)
+
+
 # -- A type layer ----------------------------------------------------------- #
 
 
