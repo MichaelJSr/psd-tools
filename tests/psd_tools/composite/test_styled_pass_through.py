@@ -12,9 +12,10 @@ from typing import Any
 import numpy as np
 import pytest
 
-from psd_tools.api.layers import Layer
+from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite
+from psd_tools.constants import Knockout, Tag
 
 from ..utils import full_name
 
@@ -172,6 +173,17 @@ def test_which_groups_mix(name: str, mixes: bool) -> None:
     assert composite_module._mixes_isolated(group, None) is mixes
 
 
+def test_a_group_holding_a_knockout_does_not_mix() -> None:
+    """No Photoshop render of one has been read: it keeps its pass-through one."""
+    psd = PSDImage.open(full_name(_FIXTURE))
+    group = next(layer for layer in psd if layer.name == "screen")
+    assert isinstance(group, Group)
+    assert composite_module._mixes_isolated(group, None) is True
+    child = group[0]
+    child.tagged_blocks.set_data(Tag.KNOCKOUT_SETTING, int(Knockout.SHALLOW))
+    assert composite_module._mixes_isolated(group, None) is False
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="Photoshop mixes a fill-faded child by its fill; such a group is "
@@ -188,3 +200,76 @@ def test_a_fill_faded_child_mixes_by_its_fill() -> None:
 )
 def test_overlapping_children_mix_as_photoshop_mixes_them() -> None:
     assert _errors()["overlap"] <= _BOUND
+
+
+# effects/styled-pass-through-nested.psd: over the same stripes, a blue square
+# at 50% in Screen per cell, under groups named for their nesting from the
+# outside in: "pt" pass-through, "normal" Normal, "screen group" Screen,
+# "styled" a pass-through group with a 0% outside stroke, "op99" a group at 99%
+# opacity. Photoshop 2023's composite is the reference.
+_NESTED = "effects/styled-pass-through-nested.psd"
+
+_NESTED_MATCH = (
+    "group pt>normal",
+    "group normal>normal",
+    "group styled>normal styled",
+    "group normal",
+    "group pt",
+    "group styled",
+    "group pt>normal op99",
+    "group normal>pt",
+)
+# Left as it passes through; Photoshop lands near that, not on the mix.
+_NESTED_KEPT = "group styled>screen group"
+_NESTED_KEPT_BOUND = 10.0
+
+
+def _nested_errors(psd: PSDImage | None = None) -> dict[str, float]:
+    """Per group of the nested fixture, its largest difference, in levels."""
+    psd = psd or PSDImage.open(full_name(_NESTED))
+    color, _, _ = composite(psd)
+    diff = np.abs(color[..., :3] - psd.numpy()[..., :3]).max(axis=2) * 255.0
+    errors = {}
+    for layer in psd:
+        if layer.is_group():
+            left, top, right, bottom = layer.bbox
+            cell = diff[top - 20 : bottom + 20, left - 20 : right + 20]
+            errors[layer.name] = float(cell.max())
+    return errors
+
+
+def test_nested_groups_render_to_photoshops_composite() -> None:
+    errors = _nested_errors()
+    for name in _NESTED_MATCH:
+        assert errors[name] <= _BOUND, (name, errors[name])
+    assert errors[_NESTED_KEPT] <= _NESTED_KEPT_BOUND
+
+
+def test_a_group_child_in_a_mode_of_its_own_passes_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A styled group over a Screen group does not mix; mixed, it strays."""
+    psd = PSDImage.open(full_name(_NESTED))
+    group = next(layer for layer in psd if layer.name == _NESTED_KEPT)
+    assert composite_module._mixes_isolated(group, None) is False
+
+    mixes = composite_module._mixes_isolated
+
+    def forced(layer: Layer, shown: Any) -> bool:
+        return layer.name == _NESTED_KEPT or mixes(layer, shown)
+
+    monkeypatch.setattr(composite_module, "_mixes_isolated", forced)
+    assert _nested_errors(PSDImage.open(full_name(_NESTED)))[_NESTED_KEPT] > 20.0
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Photoshop passes a Normal group inside a styled pass-through group "
+    "through, at 99% opacity too, and mixes its children with the group's",
+)
+@pytest.mark.parametrize(
+    "name",
+    ["group styled>normal", "group styled>normal op99", "group styled>pt>normal"],
+)
+def test_a_normal_group_child_mixes_as_a_layer_would(name: str) -> None:
+    assert _nested_errors()[name] <= _BOUND

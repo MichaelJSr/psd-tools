@@ -338,14 +338,14 @@ def _blends_through(layer: Layer, color_mode: ColorMode) -> tuple[bool, bool]:
     """Whether the layer's own paint and effects blend with what lies beneath.
 
     The pair is (in a mode the isolated render changes, in one it does not):
-    a type layer's own paint and anything in a mode Photoshop fades by fill
-    opacity land as they would pass through. Normal, Dissolve and a solid
-    colour its mode blends to itself (:py:data:`_FIXED_POINTS`) blend alike
-    either way.
+    a type layer's own paint, a group in a mode of its own and anything in a
+    mode Photoshop fades by fill opacity land as they would pass through.
+    Normal, Dissolve and a solid colour its mode blends to itself
+    (:py:data:`_FIXED_POINTS`) blend alike either way.
     """
     mixes = keeps = False
     if layer.blend_mode not in _COVERS_BENEATH | {BlendMode.PASS_THROUGH}:
-        if layer.kind == "type" or layer.blend_mode in _FILL_FADED:
+        if layer.kind == "type" or layer.is_group() or layer.blend_mode in _FILL_FADED:
             keeps = True
         else:
             mixes = True
@@ -384,11 +384,12 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     (:py:meth:`Compositor._mix_isolated`). Only content that blends with the
     backdrop tells the two apart: a child in a mode other than Normal, or an
     effect in one. Photoshop keeps a type layer's own paint in such a mode,
-    and a mode faded by fill opacity, as they pass through, so a group holding
-    either keeps its pass-through render whole. A clipping child blends with
-    its base, not the backdrop; a group that is not pass-through blends its
-    contents on its own. Only a group at full fill and opacity mixes: no
-    Photoshop render of a faded one has been read.
+    a group in one, and a mode faded by fill opacity, as they pass through,
+    so a group holding any keeps its pass-through render whole. A clipping
+    child blends with its base, not the backdrop; a group that is not
+    pass-through blends its contents on its own. Only a group at full fill and
+    opacity, holding no knockout, mixes: no Photoshop render of a faded group
+    or of a knockout inside one has been read.
     """
     if layer.blend_mode != BlendMode.PASS_THROUGH or not layer.is_group():
         return False
@@ -408,6 +409,8 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     ]
     while stack:
         child = stack.pop()
+        if _read_knockout(child) != Knockout.NONE:
+            return False
         if isinstance(child, AdjustmentLayer):
             continue
         child_mixes, keeps = _blends_through(child, color_mode)
@@ -3981,6 +3984,7 @@ class Compositor:
             color_mode=self._color_mode,
             cache=self._cache,
             text_gamma=None,
+            mixing=self._mixing,
         )
         scratch._apply_source(source.color, paint, paint, layer.blend_mode)
         outer = scratch._paint_effects(
@@ -4939,6 +4943,8 @@ class Compositor:
                 cache=self._cache,
                 # Only the alpha is read, which text gamma leaves.
                 text_gamma=None,
+                # As :py:meth:`_get_group` renders the children.
+                mixing=self._mixing or self._mixes_isolated(layer),
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
