@@ -262,7 +262,9 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             the embedded smart object and smart filter blocks from ``fp`` only
             when something uses them (:py:mod:`psd_tools.psd.lazy`). ``fp``
             must be a file-like object kept open while the document is used,
-            e.g. a :py:class:`~psd_tools.range_reader.RangeReader`.
+            e.g. a :py:class:`~psd_tools.range_reader.RangeReader`. A payload
+            is checked when it is read, so a document whose unread payloads
+            are corrupt opens.
         :param parse_limits: structural read and object limits; ``None`` uses
             :py:class:`~psd_tools.ParseLimits` defaults. Exceeding a limit
             raises :py:class:`~psd_tools.ParseLimitError` before the allocation.

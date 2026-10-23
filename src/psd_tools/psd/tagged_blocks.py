@@ -294,12 +294,15 @@ class TaggedBlock(BaseElement):
     _data: Any = field(default=b"", repr=True)
     _span: "tuple[Span, int] | None" = field(default=None, init=False)
 
-    @property
-    def data(self) -> Any:
-        """The parsed block, or its bytes."""
+    def _load(self) -> None:
         if self._span is not None:
             span, version = self._span
             self._data, self._span = self._parse(self.key, span.read(), version), None
+
+    @property
+    def data(self) -> Any:
+        """The parsed block, or its bytes."""
+        self._load()
         return self._data
 
     @data.setter

@@ -13,6 +13,7 @@ from psd_tools.constants import Tag
 from psd_tools.psd.base import DictElement, ListElement
 from psd_tools.psd.descriptor import String
 from psd_tools.psd.layer_and_mask import LayerRecord
+from psd_tools.psd.lazy import load
 from psd_tools.psd.tagged_blocks import TaggedBlocks
 from psd_tools.terminology import Enum, Key
 
@@ -48,6 +49,7 @@ def _descriptors(node: Any) -> Iterator[DictElement]:
         elif isinstance(node, (list, tuple)):
             stack.extend(node)
         elif attrs.has(type(node)):
+            load(node)
             stack.extend(getattr(node, f.name) for f in attrs.fields(type(node)))
 
 

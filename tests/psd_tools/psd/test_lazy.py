@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from psd_tools import PSDImage
+from psd_tools.api._resources import _descriptors
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.constants import Tag
 from psd_tools.psd import PSD
@@ -158,3 +159,37 @@ def test_lazy_blocks_in_a_block_copy_stay_eager() -> None:
     assert all(
         c._span is None for channels in info.channel_image_data for c in channels
     )
+
+
+def test_lazy_walkers_read_the_payloads() -> None:
+    """Field walkers (``_find``, the resource transfer's) see what an eager read has."""
+    eager, _ = _read(full_name("layers/smartobject-layer.psd"), lazy=False)
+    lazy, _ = _read(full_name("layers/smartobject-layer.psd"), lazy=True)
+    assert _payloads(lazy)
+    found = [list(psd._find(lambda e: isinstance(e, bytes))) for psd in (eager, lazy)]
+    assert found[1] == found[0]
+    assert list(_descriptors(lazy)) == list(_descriptors(eager))
+    assert not _payloads(lazy)
+
+
+def test_lazy_payload_is_checked_when_read() -> None:
+    """A corrupt channel compression fails an eager open, and a lazy one only when read."""
+    lazy, data = _read(full_name("layers/pixel-layer.psd"), lazy=True)
+    span = next(
+        c._span
+        for _, channels in lazy._iter_layers()
+        for c in channels
+        if c._span is not None
+    )
+    bad = data[: span.offset] + b"\xff\xff" + data[span.offset + 2 :]
+    with pytest.raises(ValueError):
+        PSD.read(io.BytesIO(bad))
+    lazy = PSD.read(io.BytesIO(bad), lazy=True)
+    channel = next(
+        c
+        for _, channels in lazy._iter_layers()
+        for c in channels
+        if c._span is not None and c._span.offset == span.offset
+    )
+    with pytest.raises(ValueError):
+        channel.data

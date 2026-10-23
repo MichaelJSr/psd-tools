@@ -13,6 +13,13 @@ then fetches its layer records, not its pixels.
 
 Payloads inside tagged blocks (``Lr16``/``Lr32`` in 16- and 32-bit files) are
 parsed from a copy of the block and stay eager.
+
+A payload is checked when it is read: a bad compression value in a channel, or
+a smart object block over the parse limits, raises then, not at the open, and
+not at all when nothing reads it.
+
+Code that walks fields (``attrs.fields``) instead of reading ``data`` calls
+:py:func:`load` on each node first.
 """
 
 import struct
@@ -105,6 +112,12 @@ def defer(fp: IO[bytes], length: int) -> Span | None:
     offset = fp.tell()
     fp.seek(length, 1)
     return Span(source, offset, length)
+
+
+def load(node: Any) -> None:
+    """Read ``node``'s deferred payload now, if it has one."""
+    if getattr(node, "_span", None) is not None:
+        node._load()
 
 
 class LazyPayload:

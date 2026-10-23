@@ -30,6 +30,7 @@ from psd_tools.psd.bin_utils import (
     write_fmt,
     write_unicode_string,
 )
+from psd_tools.psd.lazy import load
 from psd_tools.psd.parse_limits import (
     ParseLimits,
     consume_bytes,
@@ -150,6 +151,7 @@ class BaseElement:
                 for _ in BaseElement._traverse(child, condition):
                     yield _
         elif has(element.__class__):
+            load(element)
             for field_item in fields(element.__class__):
                 child = getattr(element, field_item.name)
                 for _ in BaseElement._traverse(child, condition):
