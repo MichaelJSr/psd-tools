@@ -70,7 +70,13 @@ Photoshop to redo; a style key with no story feature raises
 ``ValueError``. :py:attr:`~psd_tools.api.layers.TypeLayer.story_text`
 reads the story and :py:meth:`~psd_tools.api.layers.TypeLayer.sync_story`
 brings a stale one (a file edited by an older version) back to the
-layer's text.
+layer's text. A type layer that
+:py:meth:`~psd_tools.api.layers.Layer.duplicate` or
+:py:meth:`~psd_tools.api.layers.Layer.copy_to` copies, or that moves into
+another document, gets a copy of its story and text frame under a new
+``TextIndex``; across documents the fonts and style sheets it names are
+matched by name or added. A story cannot go between a Photoshop CC file
+and an older one, whose ``Txt2`` keys are spelled differently.
 
 Rendering
 ---------

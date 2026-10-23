@@ -1358,8 +1358,8 @@ class Layer(LayerProtocol):
         Deep-copy this layer, including a group's descendants, in its document.
 
         The copy retains its layer type, channels, masks and layer metadata,
-        with fresh layer IDs. Document resources such as smart-object contents
-        remain shared. No cached API wrappers are copied. An artboard's copy
+        with fresh layer IDs. A type layer's copy gets its own ``Txt2`` story.
+        Document resources such as smart-object contents remain shared. No cached API wrappers are copied. An artboard's copy
         keeps its rectangle and so overlaps the source.
 
         :param parent: Destination group or document. Defaults to this layer's
@@ -1412,6 +1412,7 @@ class Layer(LayerProtocol):
         copies: list[Layer] = [duplicate]
         if isinstance(duplicate, Group):
             copies.extend(duplicate.descendants())
+        stories = _carry_stories(copies, self._psd, self._psd)
         sources = [*self._psd.descendants(), *originals]
         seed_resource = _issue_layer_ids(self._psd, sources, copies)
         # A copy pairs with its source's FEid item (SmartObject.filter_effect()).
@@ -1427,6 +1428,8 @@ class Layer(LayerProtocol):
             if parent is self.parent and index == parent.index(self) + 1
             else []
         )
+        for write in stories:
+            write()
         parent.insert(index, duplicate)
         self._psd.image_resources[Resource.IDS_SEED_NUMBER] = seed_resource
         for layer in clip_layers:
@@ -1442,9 +1445,10 @@ class Layer(LayerProtocol):
         converted to the destination's colour mode, depth and file version;
         narrowing a 32-bit layer tone-maps as Photoshop does. The patterns and
         linked smart objects it uses are copied into the destination document,
-        patterns unconverted to its colour mode. Clipping is positional: the
-        layers clipped to this one are not copied, and a copy keeps its own
-        clipping flag.
+        patterns unconverted to its colour mode, and a type layer's ``Txt2``
+        story comes as the copy's own. Clipping is positional: the layers
+        clipped to this one are not copied, and a copy keeps its own clipping
+        flag.
 
         :param group: The destination :py:class:`~psd_tools.api.layers.Group` or
             document.
@@ -1456,8 +1460,9 @@ class Layer(LayerProtocol):
         :raises ValueError: If ``group`` is a removed group or in a Bitmap,
             Indexed or Multichannel document, which cannot hold layers; an
             :py:class:`~psd_tools.api.layers.Artboard` is not going to the
-            document root; or the layer cannot be converted to the
-            destination's colour mode.
+            document root; the layer cannot be converted to the
+            destination's colour mode; or a type layer's story cannot go
+            between a Photoshop CC file's ``Txt2`` and an older one's.
         :raises IndexError: If ``index`` is out of range.
         :return: The inserted copy.
         """
@@ -1483,6 +1488,7 @@ class Layer(LayerProtocol):
         if isinstance(self, Group) and isinstance(copy_, Group):
             sources.extend(self.descendants())
             copies.extend(copy_.descendants())
+        stories = _carry_stories(copies, self._psd, group._psd)
         for source, target in zip(sources, copies, strict=False):
             if (converted := source._reencode(group)) is not None:
                 target._apply_reencoded(converted)
@@ -1490,6 +1496,8 @@ class Layer(LayerProtocol):
         transfer = ResourceTransfer(group._psd)
         for node in copies:
             transfer.add(self._psd, _layer_records(node))
+        for write in stories:
+            write()
         group.insert(position, copy_)
         group._psd.image_resources[Resource.IDS_SEED_NUMBER] = seed_resource
         return copy_
@@ -1667,6 +1675,22 @@ def _issue_layer_ids(
         key=Resource.IDS_SEED_NUMBER,
         data=Integer(seed if seed < 0x80000000 else seed - 0x100000000),  # type: ignore[arg-type]
     )
+
+
+def _carry_stories(
+    layers: Iterable[LayerProtocol], source: PSDProtocol, dest: PSDProtocol
+) -> list[Callable[[], None]]:
+    """Check that each type layer's Txt2 story can go along; return the writes.
+
+    ``layers`` still hold the ``TextIndex`` of their story in ``source``.
+    """
+    writes = []
+    for layer in layers:
+        if isinstance(layer, TypeLayer) and layer._type_data is not None:
+            write = text_edit.carry_story(layer, source, dest)
+            if write is not None:
+                writes.append(write)
+    return writes
 
 
 def _layer_records(layer: LayerProtocol) -> Iterator[LayerRecord]:
@@ -2188,6 +2212,7 @@ class GroupMixin(GroupMixinProtocol, Protocol):
                     result = node._reencode(self)
                     if result is not None:
                         converted[id(node)] = result
+                    _carry_stories([node], node._psd, self._psd)
         return converted
 
     def _update_children(
@@ -2205,6 +2230,8 @@ class GroupMixin(GroupMixinProtocol, Protocol):
             if layer._psd != self._psd:
                 if id(layer) in converted:
                     layer._apply_reencoded(converted[id(layer)])
+                for write in _carry_stories([layer], layer._psd, self._psd):
+                    write()
                 transfer.add(layer._psd, _layer_records(layer))
                 layer.__dict__.pop("_smart_object", None)
                 layer._psd = self._psd

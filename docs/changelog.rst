@@ -12,6 +12,10 @@ Changelog
   mask, shape layers included, raises ``ValueError``.
 - [api] ``TypeLayer.add_font()`` adds a face to the layer's ``FontSet``, and
   to the document's ``Txt2`` font set, for ``set_span_style(Font=...)``.
+- [fix] A type layer copied by ``duplicate()`` or ``copy_to()``, or moved into
+  another document, gets its own ``Txt2`` story under a new ``TextIndex``
+  instead of sharing, or pointing at another layer's, story. Copying a type
+  layer between a Photoshop CC file and an older one raises ``ValueError``.
 - [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
   layer set from a preset does, is read as its own adjustment instead of as a
   Brightness/Contrast at 0/0 that left the image unchanged. Only layers that
