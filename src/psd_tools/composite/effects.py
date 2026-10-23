@@ -144,11 +144,11 @@ _GRID_BYTES = 48
 # while a filled shape's boundary band fills enough of it that it does.
 _DENSE_EROSION_DENSITY = 0.15
 
-# The lengths of a diagonal and a knight's move, which with an axis move are
-# the steps :py:func:`_chamfer_length` measures in.
 # The largest radius the compiled disk marking takes; past it the transform is cheaper.
 _DISK_REACH_MAX = 64.0
 
+# The lengths of a diagonal and a knight's move, which with an axis move are
+# the steps :py:func:`_chamfer_length` measures in.
 _DIAGONAL = math.sqrt(2.0)
 _KNIGHT = math.sqrt(5.0)
 

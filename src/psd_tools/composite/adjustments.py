@@ -192,8 +192,8 @@ def _apply_lut(values: np.ndarray, lut: np.ndarray) -> NDArray[np.float32]:
     xp = _lut_domain(lut_size)
     if lut_size <= 2**16:
         depth = lut_size - 1
-        # PROTO(speed): one interp per level, then a gather; bit-equal to
-        # interp of floor(v * depth) / depth per pixel.
+        # One interp per level, then a gather: the same values as an interp of
+        # floor(v * depth) / depth per pixel.
         levels = np.floor(values * depth)
         if not np.isnan(levels).any():
             table = np.interp(

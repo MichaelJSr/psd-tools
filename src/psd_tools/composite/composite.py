@@ -806,6 +806,11 @@ class _PassCache:
     :py:func:`_unfilter_under_mask` blended, with the result: each effect cast
     from the layer reads it again, and the blend decodes the document's
     ``FEid`` planes. It holds the layer itself, and one layer's pixels.
+
+    ``stroke_bands`` carries a stroke's band from the drop shadow's knockout to
+    the stroke drawn after it (:py:func:`effects.stroke_band`).
+    ``change_bboxes`` and ``box_safe`` hold :py:func:`_change_bbox` and
+    :py:func:`_box_safe` per layer.
     """
 
     content_bboxes: _ContentBBoxes = field(default_factory=dict)
@@ -813,6 +818,8 @@ class _PassCache:
     scipy_warned: bool = False
     unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
     stroke_bands: dict = field(default_factory=dict)
+    change_bboxes: _ContentBBoxes = field(default_factory=dict)
+    box_safe: dict[int, bool] = field(default_factory=dict)
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -879,7 +886,7 @@ def _box_safe(layer: Layer, cache: "_PassCache") -> bool:
 
     A knockout reads a backdrop; a group holding one is composited whole.
     """
-    memo = cache.__dict__.setdefault("box_safe", {})
+    memo = cache.box_safe
     known = memo.get(id(layer))
     if known is not None:
         return known
@@ -900,7 +907,7 @@ def _change_bbox(layer: Layer, cache: "_PassCache") -> tuple[int, int, int, int]
     adjustments are pointwise), and for a pass-through group the boxes its
     children change, since an adjustment in it reaches the canvas beneath.
     """
-    memo = cache.__dict__.setdefault("change_bbox", {})
+    memo = cache.change_bboxes
     known = memo.get(id(layer))
     if known is not None:
         return known
@@ -2317,7 +2324,6 @@ class Compositor:
         self._apply_layer(layer)
         self._restore_channels(held)
 
-    # PROTO(speed): composite a layer on the box it can paint, not the viewport.
     def _local_box(self, layer: Layer) -> tuple[int, int, int, int] | None:
         """The box ``layer`` paints within, when compositing it there is safe."""
         if not _box_safe(layer, self._cache):
