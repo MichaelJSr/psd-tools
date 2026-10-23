@@ -4,6 +4,16 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A layer effect in Color Dodge, Linear Dodge, Color Burn, Linear Burn,
+  Vivid Light, Linear Light or Difference fades its colour towards the mode's
+  neutral one by its coverage and opacity, as Photoshop does, instead of
+  mixing the full blend in by them. **Rendering change** for effects in those
+  modes: shadows, glows, satins, bevels and overlays with transparency
+- [fix] Outer glows follow Photoshop's renders: the softer technique blurs by
+  the drop shadow's tent, the range is read in 8-bit steps, a size-0 glow
+  draws the silhouette, a spread grows a faint layer from where its coverage
+  ends, and a gradient glow's coverage does not follow its range.
+  **Rendering change** for outer glows
 - [fix] Clip layers blend with their base's colour as if the base were
   opaque, and the base's transparency then masks the group, so a thin edge no
   longer shows the clip layer's own colour. A shape layer's vector stroke is

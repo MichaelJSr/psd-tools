@@ -844,24 +844,6 @@ _MIN_BOX_WIDTH = 2.0
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
 
-# The spread, in pixels, from which an outer glow is cast from the layer's
-# coverage rather than its opacity: half a pixel, the least that rounds to a
-# whole one. And what the opacity is scaled by, held to one, to read as
-# coverage. Both fitted against Photoshop's renders of soft-edged layers;
-# the tests pin the values.
-_GLOW_SPREAD_PIXELS = 0.5
-_GLOW_COVERAGE_GAIN = 20.0
-
-# How far below one a coverage still counts as opaque when the coverage
-# reading looks for an antialiased edge: one 8-bit step, so a layer painted
-# a step short of solid, or a 32-bit one a rounding short, still has edges.
-_OPAQUE_STEP = 1.0 / 255.0
-
-# How far, in pixels along the axes, a partial pixel may lie from an opaque
-# one and from a clear one and still read as the shape's antialiased edge:
-# two, the width of the band a resampled edge is antialiased over.
-_GLOW_EDGE_REACH = 2
-
 # The steps an outer glow's range is held in: Photoshop reads the percentage
 # as a byte, so a 1% range squeezes the falloff by 255 / 3 and not 100.
 _GLOW_RANGE_STEPS = 255
@@ -1022,23 +1004,15 @@ def cast_reach(distance: float, angle: float, size: float, spread: float) -> int
     return math.ceil(max(size, 0.0)) + math.ceil(max(abs(dx), abs(dy))) + 3
 
 
-def glow_reach(
-    size: float, spread: float, precise: bool, *, outer: bool = True
-) -> int | None:
+def glow_reach(size: float, spread: float, precise: bool) -> int | None:
     """How far a glow's falloff reads from each pixel, as :py:func:`cast_reach`.
 
     A precise glow reads the silhouette no further than its size and a
-    pixel or two, so it is bounded whatever its spread; when an ``outer``
-    glow's spread reads the coverage (:py:func:`_glow_coverage`), each pixel
-    of the silhouette also reads :data:`_GLOW_EDGE_REACH` around it. An inner
-    glow's choke does not read it.
+    pixel or two, so it is bounded whatever its spread.
     """
     if not precise and size > 0.0 and spread > 0.0:
         return None
-    reach = math.ceil(max(size, 0.0)) + 3
-    if outer and _reads_coverage(size, spread):
-        reach += _GLOW_EDGE_REACH
-    return reach
+    return math.ceil(max(size, 0.0)) + 3
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
@@ -1403,38 +1377,6 @@ def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
 
 
-def _reads_coverage(size: float, spread: float) -> bool:
-    """Whether a glow of ``size`` and ``spread`` is cast from the coverage."""
-    grow = max(float(size), 0.0) * min(max(float(spread), 0.0), 100.0) / 100.0
-    return grow >= _GLOW_SPREAD_PIXELS
-
-
-def _glow_coverage(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
-    """What a glow of ``size`` and ``spread`` is cast from.
-
-    A glow with no spread is cast from the layer's opacity. One spread by
-    half a pixel or more (:data:`_GLOW_SPREAD_PIXELS`) is cast from its
-    coverage: the opacity scaled by :data:`_GLOW_COVERAGE_GAIN` and held to
-    one, so a soft-edged or faint layer glows as the shape it fades out to
-    and only its faintest pixels cast less than a solid one. A partial pixel
-    within :data:`_GLOW_EDGE_REACH` of both a clear pixel and an opaque one
-    is a hard shape's antialiased edge and keeps its opacity, so text and a
-    resampled shape cast from exactly where their edges lie; the neighbours
-    are read along the axes, as :py:func:`_signed_distance` reads a hard
-    step. Photoshop's renders of such layers split the same way.
-    """
-    alpha = alpha.astype(np.float32)
-    if not _reads_coverage(size, spread):
-        return alpha
-    covered = alpha > 0.0
-    near_clear, near_opaque = ~covered, alpha >= 1.0 - _OPAQUE_STEP
-    for _ in range(_GLOW_EDGE_REACH):
-        near_clear, near_opaque = _grow(near_clear), _grow(near_opaque)
-    edge = covered & near_clear & near_opaque
-    coverage = np.clip(alpha * _GLOW_COVERAGE_GAIN, 0.0, 1.0)
-    return np.where(edge, alpha, coverage).astype(np.float32)
-
-
 def glow_matte(
     shape: np.ndarray, *, size: float, spread: float, precise: bool = False
 ) -> np.ndarray:
@@ -1443,11 +1385,9 @@ def glow_matte(
     ``shape`` is the layer's silhouette on the canvas
     :py:func:`outer_glow_bbox` sizes; the result is ``(height, width)`` on
     it, one at the silhouette's edge and dying away over ``size`` pixels: a
-    shadow's matte cast nowhere (:py:func:`_shadow_matte`). A glow spread by
-    half a pixel or more is cast from the silhouette's coverage rather than
-    its opacity, so a soft edge glows as the shape it fades out to, while a
-    hard shape's antialiased edge keeps its opacity. It is not cut under the
-    silhouette.
+    shadow's matte cast nowhere (:py:func:`_shadow_matte`), from the layer's
+    opacity, so a spread grows a faint layer from where its coverage ends as
+    :py:func:`_spread` grows a shadow's. It is not cut under the silhouette.
 
     ``precise`` ramps the matte by its distance from the silhouette instead
     of blurring it (:py:func:`_precise_matte`). A glow of size zero is the
@@ -1461,7 +1401,7 @@ def glow_matte(
         raise ValueError(
             "Outer glow parameters must be finite: size=%r spread=%r" % (size, spread)
         )
-    alpha = _glow_coverage(shape[:, :, 0], size, spread)
+    alpha = shape[:, :, 0].astype(np.float32)
     if not alpha.any():
         return np.zeros(alpha.shape, dtype=np.float32)
     if size <= 0.0:

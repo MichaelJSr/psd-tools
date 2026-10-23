@@ -178,162 +178,56 @@ def _soft_disc(size: int, radius: float, hard_radius: float) -> np.ndarray:
     """A disc fading from opaque at ``hard_radius`` to faint at ``radius``.
 
     Every pixel of the hard disc of ``radius`` keeps some coverage, so the
-    two discs have the same extent, and none fades below what the coverage
-    gain reads as whole.
+    two discs have the same extent.
     """
     centre = size // 2
     yy, xx = np.mgrid[0:size, 0:size]
     distance = np.hypot(xx - centre, yy - centre)
     ramp = np.clip((radius + 1.0 - distance) / (radius + 1.0 - hard_radius), 0.0, 1.0)
     soft = (_disc(size, radius)[:, :, 0] * ramp).astype(np.float32)[:, :, None]
-    assert float(soft[soft > 0.0].min()) >= 1.0 / _FITTED_COVERAGE_GAIN
+    assert float(soft[soft > 0.0].min()) > 0.0
     return soft
 
 
-# What a glow is cast from, fitted on Photoshop's renders of layers carrying
-# glows: with no spread the blur of the opacity; spread, the blur of the
-# opacity scaled by the gain and held to one, which reads the layer's
-# coverage, with a hard shape's antialiased edge, up to the reach wide, kept
-# as it is. The switch is the half pixel, where the spread rounds to a whole
-# one.
-_FITTED_COVERAGE_GAIN = 20.0
-_FITTED_SPREAD_PIXELS = 0.5
-_FITTED_EDGE_REACH = 2
 _COVERAGE_SIZE = 32.0
 _COVERAGE_SPREAD = 10.0
 
 
-def test_the_coverage_switch_and_gain_are_the_fitted_constants() -> None:
-    """A fit, so a change to either is a measured change.
+@pytest.mark.parametrize("spread", [0.0, _COVERAGE_SPREAD])
+def test_a_glow_on_a_soft_edged_disc_is_cast_from_its_opacity(spread: float) -> None:
+    """The soft disc glows by its opacity, and so fainter than the hard one.
 
-    Just under the half pixel the opacity is cast as it is; at it, scaled by
-    the gain and held to one. The probed pixels lie beyond the edge reach of
-    the one opaque pixel, so none of them reads as an edge.
-    """
-    alpha = np.zeros((1, 8), dtype=np.float32)
-    alpha[0, 1:4] = [0.5 / _FITTED_COVERAGE_GAIN, 1.0 / _FITTED_COVERAGE_GAIN, 0.3]
-    alpha[0, 7] = 1.0
-    under = 100.0 * (_FITTED_SPREAD_PIXELS - 1e-3) / 100.0
-    assert np.array_equal(effects._glow_coverage(alpha, 100.0, under), alpha)
-    at = effects._glow_coverage(alpha, 100.0, _FITTED_SPREAD_PIXELS)
-    assert np.allclose(at, [[0.0, 0.5, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]])
-    assert np.array_equal(
-        effects._glow_coverage(alpha, 1.0, 100.0 * _FITTED_SPREAD_PIXELS), at
-    )
-
-
-@pytest.mark.parametrize("precise", [False, True], ids=["soft", "precise"])
-def test_a_spread_glow_on_a_soft_edged_disc_is_the_hard_discs(precise: bool) -> None:
-    """A spread glow is cast from the silhouette's coverage, not its opacity.
-
-    Outside the ramp the soft disc's glow is the hard disc's, pixel for
-    pixel; over the ramp it is the hard disc's falloff cut by what the ramp
-    leaves. Cast from the opacity it is fainter, since the spread grows the
-    faint rim from where its partial pixels end.
-    """
-    hard = _disc(121, _RADIUS)
-    soft = _soft_disc(121, _RADIUS, 4.0)
-    partial = (soft > 0.0) & (soft < 1.0)
-    assert partial.sum() > 0.8 * (hard > 0.0).sum(), "the disc is not soft"
-
-    falloff = effects.glow_falloff(
-        hard,
-        size=_COVERAGE_SIZE,
-        spread=_COVERAGE_SPREAD,
-        range_=100.0,
-        precise=precise,
-    )
-    glow = _glow(soft, size=_COVERAGE_SIZE, spread=_COVERAGE_SPREAD, precise=precise)
-    assert np.allclose(glow, falloff[:, :, None] * (1.0 - soft), atol=1e-6)
-    outside = hard[:, :, 0] == 0.0
-    hard_glow = _glow(
-        hard, size=_COVERAGE_SIZE, spread=_COVERAGE_SPREAD, precise=precise
-    )
-    assert np.array_equal(glow[outside], hard_glow[outside])
-    if not precise:
-        from_opacity = effects._shadow_matte(
-            soft[:, :, 0], _COVERAGE_SIZE, _COVERAGE_SPREAD
-        )
-        assert float(glow[outside].max()) > float(from_opacity[outside].max())
-
-
-def test_a_glow_with_no_spread_on_a_soft_edged_disc_is_cast_from_its_opacity() -> None:
-    """Without a spread the soft disc glows by its opacity, and so fainter.
-
-    The same holds of a spread that rounds to no pixel at all. The precise
-    technique is left out: it ramps from the silhouette's outline whatever
-    the opacity.
+    Spread or not: a spread grows the faint rim from where its coverage ends,
+    as a drop shadow's does.
     """
     hard = _disc(81, _RADIUS)
     soft = _soft_disc(81, _RADIUS, 4.0)
     outside = hard[:, :, 0] == 0.0
-    for spread in (0.0, 100.0 * (_FITTED_SPREAD_PIXELS - 1e-3) / _COVERAGE_SIZE):
-        faint = _glow(soft, size=_COVERAGE_SIZE, spread=spread)[outside]
-        bright = _glow(hard, size=_COVERAGE_SIZE, spread=spread)[outside]
-        assert np.all(faint <= bright + 1e-6)
-        assert float((bright - faint).max()) > 0.05
-        matte = effects._shadow_matte(soft[:, :, 0], _COVERAGE_SIZE, spread)
-        assert np.allclose(faint, effects._beside(matte, soft)[outside], atol=1e-6)
+    faint = _glow(soft, size=_COVERAGE_SIZE, spread=spread)[outside]
+    bright = _glow(hard, size=_COVERAGE_SIZE, spread=spread)[outside]
+    assert np.all(faint <= bright + 1e-6)
+    assert float((bright - faint).max()) > 0.03
+    matte = effects._shadow_matte(soft[:, :, 0], _COVERAGE_SIZE, spread)
+    assert np.allclose(faint, effects._beside(matte, soft)[outside], atol=1e-6)
 
 
-def test_the_coverage_keeps_an_antialiased_edge_and_gains_the_rest() -> None:
-    """A partial pixel between clear and opaque keeps its value; any other is gained.
+# effects/outer-glow-faint.psd: on white, squares at 5, 40 and 100% opacity
+# with black Normal glows of size 12 at range 100, spread 20 and 70%, in both
+# techniques, and a feathered star spread 30%. Photoshop 2023's composite is
+# the reference: a faint layer's spread grows it from where its coverage ends,
+# not from a gained coverage.
+_FAINT_FIXTURE = "effects/outer-glow-faint.psd"
 
-    A hard shape's antialiased edge is left where it lies, so its glow
-    starts where the edge does, whether the edge is a pixel wide or the two
-    a resampled shape's is, and so is the edge of a shape painted a step
-    short of solid. A feather's pixels border other partial pixels and a
-    faint patch borders nothing opaque: those cast whole above the gain's
-    reach and in proportion below it.
-    """
-    alpha = np.zeros((9, 9), dtype=np.float32)
-    alpha[:, :4] = 1.0
-    alpha[:, 4] = 0.3  # an antialiased edge: opaque on one side, clear on the other
-    alpha[1, 7] = 0.5 / _FITTED_COVERAGE_GAIN  # a faint, isolated pixel
-    alpha[6:8, 6:9] = 0.1  # a faint patch with no opaque neighbour
-    coverage = effects._glow_coverage(alpha, _COVERAGE_SIZE, _COVERAGE_SPREAD)
-    assert np.all(coverage[:, :4] == 1.0)
-    assert np.allclose(coverage[:, 4], 0.3)
-    assert coverage[1, 7] == pytest.approx(0.5)
-    assert np.all(coverage[6:8, 6:9] == 1.0)
-    assert np.all(coverage[alpha == 0.0] == 0.0)
-
-    short = alpha.copy()
-    short[:, :4] = 254.0 / 255.0
-    assert np.allclose(
-        effects._glow_coverage(short, _COVERAGE_SIZE, _COVERAGE_SPREAD)[:, 4], 0.3
-    )
-
-    feather = np.zeros((5, 12), dtype=np.float32)
-    feather[:, :6] = np.linspace(1.0, 0.1, 6)[None, :]
-    assert np.all(
-        effects._glow_coverage(feather, _COVERAGE_SIZE, _COVERAGE_SPREAD)[:, :6] == 1.0
-    )
-    assert np.array_equal(effects._glow_coverage(feather, _COVERAGE_SIZE, 0.0), feather)
+# Levels a cell may stray from Photoshop's: a 70% spread leaves the tent a
+# radius of 4 px, which rounds its rim a little differently.
+_FAINT_BOUND = 9.0
 
 
-def test_an_antialiased_edge_is_kept_as_far_as_the_fitted_reach() -> None:
-    """A band of partial pixels two wide is an edge; one three wide is not.
-
-    A resampled shape's edge is antialiased over two pixels, and both keep
-    their value. Of a band one wider, only the middle pixel lies within the
-    reach of both the clear side and the opaque one; the outer two are
-    gained like any other.
-    """
-    reach = _FITTED_EDGE_REACH
-    band = np.zeros((3, 12), dtype=np.float32)
-    band[:, :4] = 1.0
-    band[:, 4 : 4 + reach] = np.linspace(0.8, 0.2, reach)[None, :]
-    coverage = effects._glow_coverage(band, _COVERAGE_SIZE, _COVERAGE_SPREAD)
-    assert np.allclose(coverage[:, 4 : 4 + reach], band[:, 4 : 4 + reach])
-
-    wide = np.zeros((3, 12), dtype=np.float32)
-    wide[:, :4] = 1.0
-    wide[:, 4 : 5 + reach] = np.linspace(0.8, 0.2, reach + 1)[None, :]
-    coverage = effects._glow_coverage(wide, _COVERAGE_SIZE, _COVERAGE_SPREAD)
-    assert np.all(coverage[:, 4] == 1.0)
-    assert np.allclose(coverage[:, 5], wide[:, 5])
-    assert np.all(coverage[:, 6] == 1.0)
+def test_glows_from_faint_layers_render_to_photoshops_composite() -> None:
+    errors = _laws_errors(PSDImage.open(full_name(_FAINT_FIXTURE)))
+    assert len(errors) == 14
+    for name, error in errors.items():
+        assert error <= _FAINT_BOUND, (name, error)
 
 
 def _squeeze(range_: float) -> float:

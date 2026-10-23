@@ -4904,9 +4904,7 @@ class Compositor:
         center = glow.glow_source == GlowSource.CENTER
         precise = glow.glow_type == GlowTechnique.PRECISE_MATTE
         glow_range = float(desc.get(Key.InputRange, 50.0))
-        bbox = _within_reach(
-            bbox, self._viewport, glow_reach(size, choke, precise, outer=False)
-        )
+        bbox = _within_reach(bbox, self._viewport, glow_reach(size, choke, precise))
 
         def draw_glow(box: tuple[int, int, int, int], shape: np.ndarray) -> np.ndarray:
             return draw_inner_glow(
