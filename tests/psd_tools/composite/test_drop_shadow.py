@@ -161,6 +161,21 @@ def test_a_drop_shadow_is_cast_by_whole_pixels_as_photoshops_preview_shows(
     assert nearest < error()
 
 
+@pytest.mark.parametrize("outside", [0.0, 1.0])
+def test_a_matte_moved_by_whole_pixels_is_a_spline_shift_by_them(
+    outside: float,
+) -> None:
+    """Moved past the canvas too, where ``outside`` fills what is left behind."""
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    alpha = np.random.default_rng(0).random((12, 9)).astype(np.float32)
+    for dx, dy in ((2, 3), (-4, 1), (0, -11), (9, 0), (-20, 30)):
+        expected = ndimage.shift(
+            alpha, (dy, dx), order=1, mode="constant", cval=outside
+        )
+        assert np.array_equal(effects._moved(alpha, dx, dy, outside), expected)
+
+
 def test_spread_grows_the_silhouette_and_takes_the_blur_it_replaces() -> None:
     """Spread is Photoshop's "expands the matte before blurring".
 

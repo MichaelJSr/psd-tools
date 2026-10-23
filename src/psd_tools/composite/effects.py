@@ -1232,8 +1232,6 @@ def _cast_matte(
     silhouette, 1 for one drawn from its complement. Raises ``ValueError``
     for a parameter that is not finite, naming ``what``.
     """
-    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
-
     if not all(math.isfinite(value) for value in (distance, angle, size, spread)):
         raise ValueError(
             "%s parameters must be finite: distance=%r angle=%r size=%r spread=%r"
@@ -1242,8 +1240,19 @@ def _cast_matte(
     alpha = _soft_matte(alpha, size, spread, _SHADOW_SIGMA_PER_SIZE, outside=outside)
     dx, dy = _shadow_offset(distance, angle)
     if dx or dy:
-        alpha = ndimage.shift(alpha, (dy, dx), order=1, mode="constant", cval=outside)
+        alpha = _moved(alpha, int(dx), int(dy), outside)
     return np.clip(alpha, 0.0, 1.0)
+
+
+def _moved(alpha: np.ndarray, dx: int, dy: int, outside: float) -> np.ndarray:
+    """``alpha`` moved ``dx`` pixels across and ``dy`` down, ``outside`` behind it."""
+    height, width = alpha.shape
+    moved = np.full_like(alpha, outside)
+    if abs(dx) < width and abs(dy) < height:
+        moved[max(dy, 0) : height + min(dy, 0), max(dx, 0) : width + min(dx, 0)] = (
+            alpha[max(-dy, 0) : height + min(-dy, 0), max(-dx, 0) : width + min(-dx, 0)]
+        )
+    return moved
 
 
 def draw_inner_shadow(
