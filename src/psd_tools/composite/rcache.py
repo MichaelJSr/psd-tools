@@ -58,6 +58,8 @@ def suspended() -> Token[RenderCache | None]:
 class RenderCache:
     """LRU of compositor intermediates, bounded in bytes.
 
+    Not thread-safe: give each thread its own.
+
     :param max_bytes: The size the stored arrays are kept within.
     :param verify: Check every cached pass against an uncached one; by
         default whether ``PSD_RCACHE_VERIFY`` is ``1``.
