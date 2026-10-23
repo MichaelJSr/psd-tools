@@ -95,6 +95,11 @@ from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key
 
+try:  # Compiled loops, bit-identical to the numpy ones below.
+    from . import _distance as _cdistance  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    _cdistance = None
+
 if TYPE_CHECKING:
     from psd_tools.api.protocols import PSDProtocol
 
@@ -141,6 +146,9 @@ _DENSE_EROSION_DENSITY = 0.15
 
 # The lengths of a diagonal and a knight's move, which with an axis move are
 # the steps :py:func:`_chamfer_length` measures in.
+# The largest radius the compiled disk marking takes; past it the transform is cheaper.
+_DISK_REACH_MAX = 64.0
+
 _DIAGONAL = math.sqrt(2.0)
 _KNIGHT = math.sqrt(5.0)
 
@@ -371,6 +379,17 @@ def _prune_offsets(
     bigger than the stroke. It still runs every offset within ``span`` for a
     pixel that never resolves, so this does not change the loop's worst case.
     """
+    if _cdistance is not None and near_pad.dtype == np.float32:
+        return _cdistance.prune_min(
+            np.ascontiguousarray(rows, dtype=np.intp),
+            np.ascontiguousarray(cols, dtype=np.intp),
+            span,
+            np.ascontiguousarray(offsets, dtype=np.intp),
+            np.ascontiguousarray(lengths, dtype=np.float32),
+            np.ascontiguousarray(stating_pad).view(np.uint8),
+            np.ascontiguousarray(near_pad),
+            outward,
+        )
     prows, pcols = rows + span, cols + span
     result = np.empty(rows.shape, dtype=np.float32)
     order = np.arange(rows.size)
@@ -430,6 +449,8 @@ def _chamfer_transform(mask: np.ndarray) -> np.ndarray:
     second pass, run bottom to top, every one that never turns back down;
     the shortest path to a pixel is one or the other.
     """
+    if _cdistance is not None:
+        return _cdistance.chamfer_transform(mask, _DIAGONAL, _KNIGHT)
     height, width = mask.shape
     field = np.where(mask, np.inf, 0.0)
     cols = np.arange(width, dtype=np.float64)
@@ -514,20 +535,33 @@ def _nearest_boundary(
     field = np.where(stating, near, np.where(alpha >= 1, -np.inf, np.inf)).astype(
         np.float32
     )
-    active = (distance_transform_edt(~stating) <= radius) & ~stating
-    if not active.any():
-        return field
-
     height, width = alpha.shape
     # An offset past the canvas's longest side reaches no pixel.
     span = math.ceil(min(radius, max(height, width) - 1))
     rows_p, cols_p = np.nonzero(stating)
+    if not rows_p.size:
+        return field
     r0, r1 = max(rows_p.min() - span, 0), min(rows_p.max() + span + 1, height)
     c0, c1 = max(cols_p.min() - span, 0), min(cols_p.max() + span + 1, width)
     crop = (slice(r0, r1), slice(c0, c1))
+    # Every stating pixel is inside the crop and every pixel outside it is
+    # further than ``span`` from all of them, so the transform on the crop is
+    # the transform on the canvas wherever ``active`` can be set.
+    active = np.zeros_like(stating)
+    if _cdistance is not None and radius <= _DISK_REACH_MAX:
+        near_any = _cdistance.disk_reach(
+            np.ascontiguousarray(stating[crop]).view(np.uint8), float(radius)
+        )
+    else:
+        near_any = distance_transform_edt(~stating[crop]) <= radius
+    active[crop] = near_any & ~stating[crop]
+    if not active.any():
+        return field
     density = active.sum() / ((r1 - r0) * (c1 - c0))
 
-    if density >= _DENSE_EROSION_DENSITY:
+    if density >= _DENSE_EROSION_DENSITY and (
+        _cdistance is None or near.dtype != np.float32
+    ):
         sub_stating, sub_near, sub_alpha, sub_active = (
             stating[crop],
             near[crop],
@@ -727,6 +761,7 @@ def draw_stroke_effect_split(
     shape: np.ndarray,
     desc: Descriptor,
     psd: "PSDProtocol",
+    memo: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """:py:func:`draw_stroke_effect`, with the coverage split at the boundary.
 
@@ -768,7 +803,7 @@ def draw_stroke_effect_split(
         logger.warning("No fill specification found.")
         color = np.ones((height, width, 1))
 
-    coverage, inside = stroke_band(viewport, shape, desc)
+    coverage, inside = stroke_band(viewport, shape, desc, memo)
     return color, coverage, inside
 
 
@@ -776,13 +811,43 @@ def stroke_band(
     viewport: tuple[int, int, int, int],
     shape: float | np.ndarray,
     desc: Descriptor,
+    memo: dict | None = None,
+    keep: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The coverage of a stroke effect, split at the boundary, without its paint.
 
     What :py:func:`draw_stroke_effect_split` returns after the colour, drawn
     on its own for a caller that only needs where the stroke lies: the
     drop shadow's knockout cuts under the band, whatever it is painted with.
+
+    ``memo`` carries a band from the knockout (``keep``) to the stroke drawn
+    after it, keyed by the descriptor and box and checked against the shape,
+    so the band is drawn once. Callers only read the arrays.
     """
+    if memo is None or not isinstance(shape, np.ndarray):
+        return _stroke_band(viewport, shape, desc)
+    key = (id(desc), tuple(viewport))
+    known = memo.get(key)
+    if (
+        known is not None
+        and known[0].shape == shape.shape
+        and known[0].dtype == shape.dtype
+        and np.array_equal(known[0], shape)
+    ):
+        if not keep:
+            del memo[key]
+        return known[1]
+    band = _stroke_band(viewport, shape, desc)
+    if keep:
+        memo[key] = (shape.copy(), band)
+    return band
+
+
+def _stroke_band(
+    viewport: tuple[int, int, int, int],
+    shape: float | np.ndarray,
+    desc: Descriptor,
+) -> tuple[np.ndarray, np.ndarray]:
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
     if not isinstance(shape, np.ndarray):
         shape = np.full((height, width, 1), shape, dtype=np.float32)
