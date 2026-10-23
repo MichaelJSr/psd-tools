@@ -229,7 +229,9 @@ def test_levels_gamma_matches_photoshop() -> None:
     psd = PSDImage.open(full_name("adjustments/levels_gamma_rgb.psd"))
     reference = np.rint(psd.numpy()[..., :3] * 255)
     result = psd.composite(force=True, apply_icc=False)
-    assert np.abs(np.asarray(result, np.float64)[..., :3] - reference).max() <= 1
+    diff = np.abs(np.asarray(result, np.float64)[..., :3] - reference)
+    assert diff.max() <= 1
+    assert (diff == 0).mean() > 0.99
 
 
 def test_levels_gamma_matches_photoshop_in_16_bits() -> None:

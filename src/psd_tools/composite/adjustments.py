@@ -184,15 +184,26 @@ def _apply_luts(
     channels = range(1, n_channels + 1)
 
     # individual adjustments get applied independently of each other, then the master lut its applied if exists
+    master = luts.get(0) if colormode != ColorMode.GRAYSCALE else None
     for channel_id in channels:
         if channel_id in luts:
-            lut = luts[channel_id]
-            out[:, :, channel_id - 1] = _apply_lut(img[:, :, channel_id - 1], lut)
+            value = _apply_lut(img[:, :, channel_id - 1], luts[channel_id])
+            if master is not None:
+                # Photoshop chains the curves on whole levels: the master
+                # reads a channel's output at its nearest, not below it.
+                value = _nearest_level(value, int(master.shape[0]))
+            out[:, :, channel_id - 1] = value
 
-    if colormode != ColorMode.GRAYSCALE and 0 in luts:
-        out = _apply_lut(out, luts[0])
+    if master is not None:
+        out = _apply_lut(out, master)
 
     return out
+
+
+def _nearest_level(values: np.ndarray, lut_size: int) -> NDArray[np.float32]:
+    """``values`` (0 to 1) moved to the nearest of the LUT's levels."""
+    index = np.floor(values * np.float32(lut_size - 1) + np.float32(0.5))
+    return _lut_domain(lut_size)[np.clip(index, 0, lut_size - 1).astype(np.intp)]
 
 
 def _apply_lut(values: np.ndarray, lut: np.ndarray) -> NDArray[np.float32]:
@@ -306,10 +317,7 @@ def apply_levels(
             (in_white - in_black) if abs(in_white - in_black) > _FLOAT_EPSILON else _1
         )
         out = (t - in_black) / scale
-        np.clip(out, _0, _1, out=out)
-        # Read off the grid itself: a quotient can fall an ulp under a level.
-        steps = np.float32(lut_size - 1)
-        out = t[np.floor(out * steps + np.float32(0.5)).astype(np.intp)]
+        out = _nearest_level(out, lut_size)
 
         # gamma midtone adjustment
         out = _levels_gamma(out, float(gamma), lut_size)
