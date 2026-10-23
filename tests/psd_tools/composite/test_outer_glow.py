@@ -685,7 +685,7 @@ def test_a_dissolve_layers_glow_is_a_normal_ones() -> None:
 
 
 @pytest.mark.parametrize(
-    "blend_mode", [BlendMode.NORMAL, BlendMode.SCREEN, BlendMode.SOFT_LIGHT]
+    "blend_mode", [BlendMode.NORMAL, BlendMode.LINEAR_DODGE, BlendMode.DIFFERENCE]
 )
 def test_a_pass_through_groups_glow_is_cut_as_its_childs_would_be(
     blend_mode: BlendMode,
@@ -694,7 +694,9 @@ def test_a_pass_through_groups_glow_is_cut_as_its_childs_would_be(
 
     Its children go onto the backdrop in their own modes, so a group holding
     one square, the square's own effects off, glows over mid-grey as the
-    square does when the glow is its own.
+    square does when the glow is its own. In Normal, or a mode faded by fill
+    opacity, the group does not mix in its isolated render; one that does
+    goes on as one layer (``test_styled_pass_through.py``).
     """
 
     def render(grouped: bool) -> np.ndarray:

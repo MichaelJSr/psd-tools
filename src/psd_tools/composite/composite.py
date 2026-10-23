@@ -151,6 +151,35 @@ _COVERS_BENEATH = frozenset({BlendMode.NORMAL, BlendMode.DISSOLVE})
 # The channel value each mode blends to itself whatever lies beneath.
 _FIXED_POINTS = {BlendMode.MULTIPLY: 0.0, BlendMode.SCREEN: 1.0}
 
+# The modes Photoshop fades by fill opacity, which inside a styled pass-through
+# group keep their pass-through blend (:py:func:`_mixes_isolated`).
+_FILL_FADED = frozenset(
+    {
+        BlendMode.COLOR_DODGE,
+        BlendMode.LINEAR_DODGE,
+        BlendMode.COLOR_BURN,
+        BlendMode.LINEAR_BURN,
+        BlendMode.VIVID_LIGHT,
+        BlendMode.LINEAR_LIGHT,
+        BlendMode.HARD_MIX,
+        BlendMode.DIFFERENCE,
+    }
+)
+
+# Every effect kind ``Effects.find()`` names.
+_EFFECT_KINDS = (
+    "dropshadow",
+    "innershadow",
+    "outerglow",
+    "innerglow",
+    "bevelemboss",
+    "satin",
+    "coloroverlay",
+    "gradientoverlay",
+    "patternoverlay",
+    "stroke",
+)
+
 
 # The levels of an 8-bit document's alpha.
 _LEVELS_8 = 255.0
@@ -257,6 +286,144 @@ def _beside_paints(
     else:
         blend_mode = effect.blend_mode
     return [(blend_mode, effect.opacity, effect.descriptor)]
+
+
+def _effect_paints(
+    name: str, effect: _StyledEffect
+) -> list[tuple[BlendMode, float, Descriptor]]:
+    """The mode, opacity and paint descriptor of each colour an effect draws.
+
+    As :py:func:`_beside_paints`, wherever the effect draws: a bevel's two
+    halves, a stroke on any side.
+    """
+    if name == "bevelemboss":
+        bevel = cast(BevelEmboss, effect)
+        halves = []
+        for color, blend_mode, opacity in (
+            (bevel.highlight_color, bevel.highlight_mode, bevel.highlight_opacity),
+            (bevel.shadow_color, bevel.shadow_mode, bevel.shadow_opacity),
+        ):
+            desc = Descriptor()
+            desc[Key.Color] = color
+            halves.append((blend_mode, opacity, desc))
+        return halves
+    if name == "dropshadow":
+        blend_mode = get_blend_mode(effect.descriptor, Key.Mode, BlendMode.MULTIPLY)
+    else:
+        blend_mode = effect.blend_mode
+    return [(blend_mode, effect.opacity, effect.descriptor)]
+
+
+def _style_draws(layer: Layer) -> bool:
+    """Whether the layer's style draws anything, as Photoshop decides it.
+
+    An effect at 0% draws nothing, except a stroke reaching outside the
+    layer, which Photoshop counts at any opacity.
+    """
+    for name in _EFFECT_KINDS:
+        for effect in _readable(layer, name):
+            try:
+                if name == "stroke" and (
+                    cast(Stroke, effect).position != StrokePosition.INSIDE
+                ):
+                    return True
+                if any(op > 0.0 for _, op, _ in _effect_paints(name, effect)):
+                    return True
+            except _UNREADABLE as error:
+                logger.debug("Cannot read an effect of %s: %s", layer, error)
+    return False
+
+
+def _blends_through(layer: Layer, color_mode: ColorMode) -> tuple[bool, bool]:
+    """Whether the layer's own paint and effects blend with what lies beneath.
+
+    The pair is (in a mode the isolated render changes, in one it does not):
+    a type layer's own paint, a group in a mode of its own and anything in a
+    mode Photoshop fades by fill opacity land as they would pass through.
+    Normal, Dissolve and a solid colour its mode blends to itself
+    (:py:data:`_FIXED_POINTS`) blend alike either way.
+    """
+    mixes = keeps = False
+    if layer.blend_mode not in _COVERS_BENEATH | {BlendMode.PASS_THROUGH}:
+        if layer.kind == "type" or layer.is_group() or layer.blend_mode in _FILL_FADED:
+            keeps = True
+        else:
+            mixes = True
+    if not _has_enabled_effects(layer):
+        return mixes, keeps
+    for name in _EFFECT_KINDS:
+        for effect in _readable(layer, name):
+            try:
+                for blend_mode, opacity, desc in _effect_paints(name, effect):
+                    if not opacity > 0.0 or blend_mode in _COVERS_BENEATH:
+                        continue
+                    if blend_mode in _FILL_FADED:
+                        keeps = True
+                    elif (
+                        blend_mode not in _FIXED_POINTS
+                        or Key.Gradient in desc
+                        or Key.Pattern in desc
+                        or any(
+                            value != _FIXED_POINTS[blend_mode]
+                            for value in paint._get_color(color_mode, desc)
+                        )
+                    ):
+                        mixes = True
+            except _UNREADABLE as error:
+                logger.debug("Cannot read an effect of %s: %s", layer, error)
+                keeps = True
+    return mixes, keeps
+
+
+def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
+    """Whether a styled pass-through group mixes in its isolated render.
+
+    Photoshop renders a pass-through group whose style draws
+    (:py:func:`_style_draws`) between its children blended through to the
+    backdrop and the group composited on its own
+    (:py:meth:`Compositor._mix_isolated`). Only content that blends with the
+    backdrop tells the two apart: a child in a mode other than Normal, or an
+    effect in one. Photoshop keeps a type layer's own paint in such a mode,
+    a group in one, and a mode faded by fill opacity, as they pass through,
+    so a group holding any keeps its pass-through render whole. A clipping
+    child blends with its base, not the backdrop; a group that is not
+    pass-through blends its contents on its own. Only a group at full fill and
+    opacity, holding no knockout, mixes: no Photoshop render of a faded group
+    or of a knockout inside one has been read.
+    """
+    if layer.blend_mode != BlendMode.PASS_THROUGH or not layer.is_group():
+        return False
+    if (
+        layer.opacity < 255
+        or layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) < 255
+    ):
+        return False
+    if not (_has_enabled_effects(layer) and _style_draws(layer)):
+        return False
+    color_mode = layer._psd.color_mode
+    mixes = False
+    stack = [
+        child
+        for child in cast(GroupMixin, layer)
+        if (shown is None or shown(child)) and not child.clipping
+    ]
+    while stack:
+        child = stack.pop()
+        if _read_knockout(child) != Knockout.NONE:
+            return False
+        if isinstance(child, AdjustmentLayer):
+            continue
+        child_mixes, keeps = _blends_through(child, color_mode)
+        if keeps:
+            return False
+        mixes = mixes or child_mixes
+        if child.is_group() and child.blend_mode == BlendMode.PASS_THROUGH:
+            stack.extend(
+                grandchild
+                for grandchild in cast(GroupMixin, child)
+                if (shown is None or shown(grandchild)) and not grandchild.clipping
+            )
+    return mixes
 
 
 def _stroke_paint(effect: _StyledEffect) -> float:
@@ -891,6 +1058,7 @@ class _PassCache:
     stroke_bands: dict = field(default_factory=dict)
     change_bboxes: _ContentBBoxes = field(default_factory=dict)
     box_safe: dict[int, bool] = field(default_factory=dict)
+    mixes_isolated: dict[int, bool] = field(default_factory=dict)
     rc: rcache.RenderCache | None = None
     doc_key: bytes = b""
     layer_keys: dict[int, bytes] = field(default_factory=dict)
@@ -2876,8 +3044,13 @@ class Compositor:
         cache: _PassCache | None = None,
         text_gamma: float | None = TEXT_BLEND_GAMMA,
         text_isolated: bool = False,
+        mixing: bool = False,
     ):
         self._viewport = viewport
+        # Whether this compositor renders inside a group that mixes in its
+        # isolated render (:py:meth:`_mix_isolated`): Photoshop mixes once, at
+        # the outermost such group.
+        self._mixing = mixing
         self._layer_filter = layer_filter
         self._force = force
         # The space a type layer's edge blends in, or None for the document's
@@ -3045,9 +3218,15 @@ class Compositor:
         # its shadow and glow are part of that canvas. A pass-through group
         # that knocks out loses their colour the way it loses that of every
         # layer beneath it, because it is resolved over its knockout backdrop
-        # and re-applied against this canvas (#707).
-        self._apply_beneath_effects(layer)
-        source = self._resolve_source(layer)
+        # and re-applied against this canvas (#707). A group that mixes in its
+        # isolated render goes on as one layer: its children blend with the
+        # canvas as it stood before its own shadow and glow.
+        if layer.is_group() and self._mixes_isolated(layer):
+            source = self._resolve_source(layer)
+            self._apply_beneath_effects(layer)
+        else:
+            self._apply_beneath_effects(layer)
+            source = self._resolve_source(layer)
         if _blends_interior_apart(layer, source):
             self._apply_apart(layer, source)
             return
@@ -3805,6 +3984,7 @@ class Compositor:
             color_mode=self._color_mode,
             cache=self._cache,
             text_gamma=None,
+            mixing=self._mixing,
         )
         scratch._apply_source(source.color, paint, paint, layer.blend_mode)
         outer = scratch._paint_effects(
@@ -3970,6 +4150,7 @@ class Compositor:
             or layer.has_clip_layers()
             or (is_passthrough and _has_enabled_effects(layer))
         )
+        mixes = isolate_adjustments and self._mixes_isolated(layer)
 
         # A pass-through group is not an isolation boundary, so deep knockout
         # inside it still reaches the document backdrop; an isolated group is,
@@ -4026,6 +4207,7 @@ class Compositor:
             # A group composited as an ordinary source is rendered as one
             # layer, and so is every group inside it.
             text_isolated=self._text_isolated or isolate_adjustments,
+            mixing=self._mixing or mixes,
         )
 
         for sublayer in cast(GroupMixin, layer):
@@ -4043,12 +4225,74 @@ class Compositor:
             color = group_compositor.result_over_backdrop()
         shape = group_compositor.shape
         alpha = group_compositor.alpha
+        if mixes:
+            color = self._mix_isolated(layer, viewport, color, alpha, color_b)
 
         color = paste(self._viewport, viewport, color, 1.0)
         shape = paste(self._viewport, viewport, shape)
         alpha = paste(self._viewport, viewport, alpha)
 
         return color, shape, alpha, isolate_adjustments
+
+    def _mixes_isolated(self, layer: Layer) -> bool:
+        """:py:func:`_mixes_isolated` for this pass, once per group.
+
+        False inside a group that already mixes.
+        """
+        if self._mixing:
+            return False
+        memo = self._cache.mixes_isolated
+        key = id(layer)
+        if key not in memo:
+            memo[key] = _mixes_isolated(layer, self._layer_filter)
+        return memo[key]
+
+    def _covers_beneath(self, layer: Layer) -> bool:
+        """:py:func:`_covers_beneath`, for a group that mixes too.
+
+        A group that mixes in its isolated render goes on as one layer in
+        Normal, so it covers whatever its children's modes.
+        """
+        if layer.is_group() and self._mixes_isolated(layer):
+            return True
+        return _covers_beneath(layer, self._layer_filter)
+
+    def _mix_isolated(
+        self,
+        layer: Layer,
+        viewport: tuple[int, int, int, int],
+        color: np.ndarray,
+        alpha: np.ndarray,
+        color_b: np.ndarray,
+    ) -> np.ndarray:
+        """A styled pass-through group's content, its isolated render mixed in.
+
+        ``color`` is the group's content with its children blended through
+        to the backdrop. Photoshop lands between that and the group composited
+        on its own, in Normal: where the group's alpha is ``a`` it mixes the
+        two contents by ``(1 - a) / (2 - a)``, so an opaque pixel keeps its
+        pass-through blend and a faint one goes halfway.
+        """
+        h, w = viewport[3] - viewport[1], viewport[2] - viewport[0]
+        isolated = Compositor(
+            viewport,
+            color=paste(viewport, self._viewport, color_b, 1.0),
+            alpha=np.zeros((h, w, 1), dtype=np.float32),
+            layer_filter=self._layer_filter,
+            force=self._force,
+            adjustment_isolated=True,
+            widen=self._widen,
+            color_mode=self._color_mode,
+            cache=self._cache,
+            text_gamma=self._text_gamma,
+            text_isolated=True,
+            mixing=True,
+        )
+        for sublayer in cast(GroupMixin, layer):
+            isolated.apply(sublayer)
+        a = np.clip(alpha, 0.0, 1.0)
+        share = (1.0 - a) / (2.0 - a)
+        return color + share * (isolated.result_isolated() - color)
 
     def _read_object(self, layer: Layer) -> tuple[np.ndarray | None, np.ndarray | None]:
         """The layer's own color and coverage, on ``layer.bbox`` and unpasted.
@@ -4268,6 +4512,7 @@ class Compositor:
             color_mode=self._color_mode,
             cache=self._cache,
             text_gamma=self._text_gamma,
+            mixing=self._mixing,
         )
         for clip_layer in layer.clip_layers:
             compositor.apply(clip_layer, clip_compositing=True)
@@ -4698,6 +4943,8 @@ class Compositor:
                 cache=self._cache,
                 # Only the alpha is read, which text gamma leaves.
                 text_gamma=None,
+                # As :py:meth:`_get_group` renders the children.
+                mixing=self._mixing or self._mixes_isolated(layer),
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
@@ -4952,7 +5199,7 @@ class Compositor:
                 continue
             if knocks_out:
                 if covers is None:
-                    covers = _covers_beneath(layer, self._layer_filter)
+                    covers = self._covers_beneath(layer)
                 coverage = coverage * (
                     1.0 - self._knockout_shape(layer, bbox, silhouette, covers)
                 )
@@ -4992,7 +5239,7 @@ class Compositor:
         fill_opacity, opacity = self._get_const(layer)
         if opacity <= 0.0:
             return
-        covers = _covers_beneath(layer, self._layer_filter)
+        covers = self._covers_beneath(layer)
         over = fill_opacity * opacity if covers else 0.0
         banded = bool(_readable(layer, "stroke"))
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)

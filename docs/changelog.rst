@@ -8,6 +8,11 @@ Changelog
   noise, from Photoshop's own field: the same at each document pixel in every
   document, so a noisy effect renders as Photoshop's does rather than smooth.
   **Rendering change** for effects with noise above 0%
+- [fix] A pass-through group whose layer style draws lands between its
+  children blended through and the group composited on its own, as Photoshop
+  does, and goes on over its own shadow and glow as one layer. **Rendering
+  change** for styled pass-through groups over children or effects in blend
+  modes other than Normal, such as Screen glows
 - [fix] A gradient stroke's ramp is laid out on the layer's pixels over half
   opaque, grown by the whole pixels the band reaches past them and by one at
   least, as Photoshop lays it, instead of on the layer's box with its soft
