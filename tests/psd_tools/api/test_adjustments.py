@@ -11,7 +11,7 @@ from psd_tools.constants import Tag
 from psd_tools.psd.adjustments import Curves as CurvesData
 from psd_tools.psd.adjustments import CurvesExtraMarker
 from psd_tools.psd.adjustments import Levels as LevelsData
-from psd_tools.psd.descriptor import Descriptor, Integer, String
+from psd_tools.psd.descriptor import Bool, Descriptor, Integer, String
 from psd_tools.psd.document import PSD
 
 from ..utils import full_name
@@ -52,6 +52,18 @@ def test_brightness_contrast(psd: PSDImage) -> None:
     assert layer.mean == 127
     assert layer.use_legacy is False
     assert layer.automatic is False
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_brightness_contrast_reads_the_auto_flag(
+    psd: PSDImage, monkeypatch: pytest.MonkeyPatch, flag: bool
+) -> None:
+    layer = psd[4]
+    assert isinstance(layer, adjustments.BrightnessContrast)
+    assert b"Auto" in layer._data  # Photoshop's spelling
+    data = Descriptor(items={b"Auto": Bool(flag)})  # type: ignore[arg-type]
+    monkeypatch.setattr(layer, "_data", data)
+    assert layer.automatic is flag
 
 
 def test_levels(psd: PSDImage) -> None:
