@@ -35,12 +35,16 @@ def divide(
     quotient only to overwrite it -- the divisor is never negative here, so
     ``b > 0`` and "b is nonzero" are the same test.
     """
-    out = np.full(
-        np.broadcast_shapes(np.shape(a), np.shape(b)),
-        fill,
-        dtype=np.result_type(a, b),
-    )
-    return np.divide(a, b, out=out, where=np.asarray(b) > 0)
+    shape = np.broadcast_shapes(np.shape(a), np.shape(b))
+    dtype = np.result_type(a, b)
+    positive = np.asarray(b) > 0
+    if shape and positive.all():
+        # Every quotient is wanted: a plain divide, without the masked loop.
+        if np.shape(a) == shape:
+            return np.divide(a, b, dtype=dtype)
+        return np.divide(np.broadcast_to(a, shape), b, dtype=dtype)
+    out = np.full(shape, fill, dtype=dtype)
+    return np.divide(a, b, out=out, where=positive)
 
 
 def intersect(
