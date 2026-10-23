@@ -213,7 +213,7 @@ def test_widened_grey_survives_the_icc_round_trip() -> None:
 # nothing.
 _COMPOSITOR_CALLERS = frozenset(
     {
-        "composite",
+        "_composite",
         "_get_group",
         "_get_object",
         "_apply_clip_layers",
