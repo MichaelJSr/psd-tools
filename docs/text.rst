@@ -114,8 +114,29 @@ and ``save()`` show it::
 
 ``report.lines`` lists every composed line with its position and its
 ``start`` and ``end`` in the text; a line an overflowing box did not draw
-has ``drawn`` false. The render is stored at the document's depth for RGB
-documents and converted through PIL, at 8 bits, for the other colour modes.
+has ``drawn`` false.
+
+An edit can keep Photoshop's raster where the text did not change.
+:py:func:`~psd_tools.composite.text.capture` the layer before editing it and
+pass that to ``rasterize``; only the lines whose glyphs, styles or positions
+changed are drawn, and a reflow redraws every line it moves::
+
+    from psd_tools.composite.text import capture
+
+    before = capture(layer, fonts)
+    layer.set_text("Deal 7 damage.\rDraw a card.")
+    report = layer.rasterize(fonts=fonts, keep=before)
+    print(report.splice.kept, report.splice.redrawn, report.splice.zone)
+
+``unit="glyph"`` draws only the changed glyphs of a changed line. When no
+inked glyph changed (a trailing space, say) the stored channels stay byte
+for byte and the TySh bounds as Photoshop wrote them. The whole layer is
+drawn instead, with ``report.splice.fallback`` saying why, when the stored
+ink falls outside the layout's glyph boxes, the transform or anti-aliasing
+changed, the document is not RGB, or the layer had no stored pixels.
+
+The render is stored at the document's depth for RGB documents and
+converted through PIL, at 8 bits, for the other colour modes.
 
 Fonts are looked up by PostScript name in the ``FontMap``'s directories,
 then ``PSD_TOOLS_FONT_DIRS`` and the platform font directories, each with

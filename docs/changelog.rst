@@ -219,6 +219,9 @@ Changelog
   layer's lines and glyphs sit in document pixels, with the slice of the text
   each one covers, without rendering. ``RenderReport.lines`` entries gain
   ``start`` and ``end``
+- [api] ``TypeLayer.rasterize(keep=capture(layer))`` draws only the lines an
+  edit changed (or, with ``unit="glyph"``, the glyphs) and keeps Photoshop's
+  stored raster everywhere else; ``RenderReport.splice`` says what was kept
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a
