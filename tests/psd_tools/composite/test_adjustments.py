@@ -1538,6 +1538,8 @@ def test_saturation_keeps_photoshops_gray_unless_a_profile_moves_it() -> None:
         layer._data = data
         out = _applied(apply_vibrance(blue, ColorMode.RGB, layer))
         assert _linear(out[0, 0, 0]) == pytest.approx(gray, abs=1 / 255)
+
+
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 @pytest.mark.parametrize("lut_size", [256, 65536])
 def test_a_lut_is_read_at_each_level(dtype: type, lut_size: int) -> None:
