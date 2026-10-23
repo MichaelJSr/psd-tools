@@ -30,6 +30,11 @@ Finally, run tests::
 
     uv run pytest
 
+The Cython extensions build in place with ``python setup.py build_ext
+--inplace`` (Cython and setuptools on the path). Without
+``psd_tools.composite._distance`` the NumPy code runs instead;
+``test_the_compiled_loops_match_numpy`` checks the two agree bit for bit.
+
 Things to know when writing compositor tests:
 
 - ``check_composite_quality()`` defaults to ``force=False``. A regression in

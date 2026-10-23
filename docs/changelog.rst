@@ -50,6 +50,12 @@ Changelog
   tail ran a pixel further: a group's outside stroke traced round a child's
   soft shadow no longer reaches a pixel too far. Soft shadows' falloffs move
   slightly; outer glows are unchanged
+- [refactor] Compositing and opening are faster: a layer is composited on the
+  box it can change instead of the whole canvas, stroke distance fields use
+  the new compiled ``psd_tools.composite._distance`` (numpy where it is not
+  built), and engine data and binary fields parse with less overhead. Renders
+  are unchanged but for a level here and there where rounding on the smaller
+  box differs
 - [fix] A Hue/Saturation adjustment no longer turns some near-white pixels
   black and some near-black ones bright: a pixel whose lightness rounds to 0
   or 1 reads as unsaturated instead of infinitely saturated. Only documents

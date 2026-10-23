@@ -189,11 +189,20 @@ def _apply_luts(
 def _apply_lut(values: np.ndarray, lut: np.ndarray) -> NDArray[np.float32]:
     lut_size = int(lut.shape[0])
 
+    xp = _lut_domain(lut_size)
     if lut_size <= 2**16:
         depth = lut_size - 1
-        values = np.floor(values * depth) / depth
+        # One interp per level, then a gather: the same values as an interp of
+        # floor(v * depth) / depth per pixel.
+        levels = np.floor(values * depth)
+        if not np.isnan(levels).any():
+            table = np.interp(
+                np.arange(lut_size, dtype=levels.dtype) / depth, xp, lut
+            ).astype(np.float32)
+            np.clip(levels, 0, depth, out=levels)
+            return table[levels.astype(np.intp)]
+        values = levels / depth
 
-    xp = _lut_domain(lut_size)
     return np.interp(values, xp, lut).astype(np.float32, copy=False)
 
 

@@ -1262,6 +1262,8 @@ def _erosion_calls(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         return cast(np.ndarray, real_grey_erosion(*args, **kwargs))
 
     monkeypatch.setattr(scipy.ndimage, "grey_erosion", spy)
+    # The paths under test are the numpy ones the compiled loops stand in for.
+    monkeypatch.setattr(effects, "_cdistance", None)
     return calls
 
 
@@ -1279,6 +1281,7 @@ def test_a_hard_step_is_not_eroded(monkeypatch: pytest.MonkeyPatch) -> None:
         return cast(np.ndarray, real_grey_erosion(image, *args, **kwargs))
 
     monkeypatch.setattr(scipy.ndimage, "grey_erosion", spy)
+    monkeypatch.setattr(effects, "_cdistance", None)
     alpha = np.zeros((200, 300), dtype=np.float32)
     alpha[20:180, 20:280] = 1.0
     alpha[20, 150] = 0.5
@@ -2032,3 +2035,70 @@ def test_a_dodging_overlay_on_a_layer_clipped_to_a_group_fades_its_colour(
 def test_a_dodging_overlay_at_full_opacity_is_unfaded() -> None:
     pixels = _dodged_clip(BlendMode.PASS_THROUGH, 1.0)
     assert np.allclose(pixels[16, 16], 1.0)
+
+
+@pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
+@pytest.mark.parametrize(
+    "alpha, reach",
+    [
+        (_antialiased_disc(120, 45.0), 20.0),
+        (_antialiased_disc(400, 190.0), 6.0),
+        (np.pad(np.full((30, 40), 0.5, dtype=np.float32), 12), 9.0),
+    ],
+)
+def test_the_compiled_loops_match_numpy(
+    monkeypatch: pytest.MonkeyPatch, alpha: np.ndarray, reach: float
+) -> None:
+    """The compiled pruned minimum and chamfer transform are bit-identical."""
+    compiled = _signed_distance(alpha, reach)
+    monkeypatch.setattr(effects, "_cdistance", None)
+    assert compiled.tobytes() == _signed_distance(alpha, reach).tobytes()
+
+
+@pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
+@pytest.mark.parametrize("radius", [0.5, 1.0, 2.5, 7.0, 40.0])
+def test_the_compiled_disk_marking_is_the_distance_transform(radius: float) -> None:
+    rng = np.random.default_rng(int(radius * 10))
+    stating = rng.random((60, 80)) < 0.01
+    stating[0, 0] = stating[59, 79] = True
+    marked = effects._cdistance.disk_reach(stating.view(np.uint8), radius)
+    expected = scipy.ndimage.distance_transform_edt(~stating) <= radius
+    assert np.array_equal(marked, expected)
+
+
+@pytest.mark.parametrize(
+    "style", [Enum.OutsetFrame, Enum.InsetFrame, Enum.CenteredFrame]
+)
+def test_a_kept_stroke_band_is_drawn_once(style: bytes) -> None:
+    """The knockout keeps the band it draws, and the stroke after it takes it."""
+    shape = np.zeros((20, 20, 1), dtype=np.float32)
+    shape[5:15, 5:15] = 1.0
+    shape[5, 5:15] = 0.5
+    viewport = (0, 0, 20, 20)
+    desc = _stroke_descriptor(style, 3.0)
+    unshared = effects.stroke_band(viewport, shape, desc)
+
+    memo: dict = {}
+    kept = effects.stroke_band(viewport, shape, desc, memo, keep=True)
+    assert len(memo) == 1
+    taken = effects.stroke_band(viewport, shape, desc, memo)
+    assert not memo
+    assert taken[0] is kept[0] and taken[1] is kept[1]
+    for got, expected in zip(taken, unshared, strict=True):
+        assert np.array_equal(got, expected)
+
+
+def test_a_kept_stroke_band_is_redrawn_for_another_shape() -> None:
+    shape = np.zeros((20, 20, 1), dtype=np.float32)
+    shape[5:15, 5:15] = 1.0
+    other = shape.copy()
+    other[5:15, 5] = 0.0
+    viewport = (0, 0, 20, 20)
+    desc = _stroke_descriptor(Enum.OutsetFrame, 2.0)
+    memo: dict = {}
+    effects.stroke_band(viewport, shape, desc, memo, keep=True)
+    redrawn = effects.stroke_band(viewport, other, desc, memo)
+    for got, expected in zip(
+        redrawn, effects.stroke_band(viewport, other, desc), strict=True
+    ):
+        assert np.array_equal(got, expected)

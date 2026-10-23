@@ -7,6 +7,7 @@ import pytest
 from psd_tools.psd.bin_utils import (
     be_array_to_bytes,
     pack,
+    read_fmt,
     read_length_block,
     read_pascal_string,
     read_unicode_string,
@@ -174,3 +175,19 @@ def test_unicode_stringrw(fixture: bytes, padding: int) -> None:
         write_unicode_string(f, data, padding=padding)
         output = f.getvalue()
         assert fixture == output
+
+
+def test_read_fmt_reads_big_endian_and_advances() -> None:
+    stream = io.BytesIO(b"\x12\x34\x00\x00\x00\x05tail")
+    assert read_fmt("HI", stream) == (0x1234, 5)
+    assert read_fmt("H", stream) == (0x7461,)  # "ta"
+    assert stream.tell() == 8
+
+
+@pytest.mark.parametrize("fmt", ["I", "2H", "8s"])
+def test_read_fmt_past_the_end_raises_and_stays_put(fmt: str) -> None:
+    stream = io.BytesIO(b"\x00\x01\x02")
+    stream.seek(1)
+    with pytest.raises(OSError, match="Failed to read data section"):
+        read_fmt(fmt, stream)
+    assert stream.tell() == 1

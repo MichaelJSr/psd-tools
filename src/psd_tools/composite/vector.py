@@ -226,6 +226,37 @@ def _path_box(layer: "Layer") -> np.ndarray | None:
     return np.stack([points.min(axis=0), points.max(axis=0)])
 
 
+# How far a pen reaches past the path it follows, in pen widths: agg cuts a
+# miter join at four half-widths.
+_PEN_REACH = 2.0
+# How far Align Edges can move a point of the path, in pixels, with room to spare.
+_ALIGN_REACH = 2.0
+
+
+def drawn_bbox(layer: "Layer") -> tuple[int, int, int, int] | None:
+    """Every pixel :py:func:`draw_vector_mask` and :py:func:`draw_stroke` can cover.
+
+    The path's box out to whole pixels, grown by the pen of an enabled stroke.
+    ``layer.bbox`` rounds the path's box instead, so a pixel the path covers
+    in part can lie outside it. ``None`` when the layer has no path.
+    """
+    if layer.vector_mask is None:
+        return None
+    box = _path_box(layer)
+    if box is None:
+        return None
+    reach = _ALIGN_REACH
+    stroke = layer.stroke
+    if stroke is not None and stroke.enabled:
+        width = float(stroke.line_width)
+        if stroke.line_alignment in _SIDED:
+            width *= 2.0
+        reach += _PEN_REACH * width
+    left, top = np.floor(box[0] - reach)
+    right, bottom = np.ceil(box[1] + reach)
+    return int(left), int(top), int(right), int(bottom)
+
+
 def can_bury_arcs(layer: "Layer") -> bool:
     """Whether a stroke of ``layer`` is gated: one closed subpath has no other to bury it."""
     assert layer.vector_mask is not None

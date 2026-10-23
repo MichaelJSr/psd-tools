@@ -136,11 +136,57 @@ class Tokenizer:
                 if token == b"":
                     return self.__next__()
 
-        for token_type in EngineToken:
-            if token_type.value.search(token):
+        for token_type, pattern in _TOKEN_CANDIDATES.get(token[:1], _TOKEN_PATTERNS):
+            if pattern.search(token):
                 return token, token_type
 
         raise ValueError(f"Unknown token: {token!r}")
+
+
+# In declaration order: the first pattern that matches names the token.
+_TOKEN_PATTERNS = tuple((token_type, token_type.value) for token_type in EngineToken)
+
+
+def _token_candidates() -> dict[
+    bytes, tuple[tuple[EngineToken, re.Pattern[bytes]], ...]
+]:
+    """Map each first byte to the patterns a token can then match, in declaration order.
+
+    Every pattern is anchored at its first byte, so the others cannot match.
+    """
+    first: dict[EngineToken, bytes] = {
+        EngineToken.ARRAY_END: b"]",
+        EngineToken.ARRAY_START: b"[",
+        EngineToken.BOOLEAN: b"tf",
+        EngineToken.DICT_END: b">",
+        EngineToken.DICT_START: b"<",
+        EngineToken.NOOP: b"\n",  # ``$`` also matches before a final newline
+        EngineToken.NUMBER: b"-0123456789",
+        EngineToken.NUMBER_WITH_DECIMAL: b"-.0123456789",
+        EngineToken.PROPERTY: b"/",
+        EngineToken.STRING: b"(",
+        EngineToken.UNKNOWN_TAG: b"(",
+        EngineToken.UNKNOWN_TAG2: b"-",
+    }
+    assert set(first) == set(EngineToken)
+    table: dict[bytes, tuple[tuple[EngineToken, re.Pattern[bytes]], ...]] = {}
+    for byte in range(256):
+        key = bytes([byte])
+        table[key] = tuple(
+            (token_type, pattern)
+            for token_type, pattern in _TOKEN_PATTERNS
+            if key
+            in [first[token_type][i : i + 1] for i in range(len(first[token_type]))]
+        )
+    table[b""] = tuple(
+        (token_type, pattern)
+        for token_type, pattern in _TOKEN_PATTERNS
+        if token_type is EngineToken.NOOP
+    )
+    return table
+
+
+_TOKEN_CANDIDATES = _token_candidates()
 
 
 @register(EngineToken.DICT_START)
