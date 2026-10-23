@@ -1384,7 +1384,10 @@ def _apply_cached(
     cache = compositor._cache
     rc = cache.rc
     assert rc is not None
-    chain = hashlib.blake2b(b"".join(seed), digest_size=16).digest()
+    digest = hashlib.blake2b(digest_size=16)
+    for part in seed:
+        digest.update(b"%d:" % len(part) + part)
+    chain = digest.digest()
     keys = []
     for layer in layers:
         chain = hashlib.blake2b(
