@@ -1024,27 +1024,26 @@ def apply_vibrance(
 
 
 # In linear light each pixel is scaled away from or toward a gray on the line
-# through its darkest and brightest channel, which keeps its hue.
-# A positive amount is a fit: it boosts low-saturation pixels most, and spares
-# bright, very dark and reddish (skin) ones; its saturation is measured on the
-# encoded values, and its gray sits at a position in units of the difference.
-# A negative amount is fitted to Photoshop renders of every pair of darkest and
-# brightest levels, which alone decide it: it lowers the linear HSV saturation
-# of a pale pixel furthest and of a pure one by a quarter of the amount, more
-# below an encoded value of about a quarter, and dims mid-saturated pixels away
-# from white.
+# through its darkest and brightest channel, which keeps its hue. Both amounts
+# are fitted to Photoshop renders of probes: every pair of darkest and
+# brightest levels, hue against saturation and value, saturation against value.
+# A positive amount raises chroma about a gray near the brightest channel, most
+# for pale pixels and dark ones, from nothing near black up to an encoded value
+# of 0.3; a pale reddish (skin) hue gets less.
+# A negative amount lowers the linear HSV saturation of a pale pixel furthest
+# and of a pure one by a quarter of the amount, more below an encoded value of
+# about a quarter, and dims mid-saturated pixels away from white.
 # The saturation slider then scales chroma about 0.288 R + 0.712 G,
 # Photoshop's gray for it: blue has no say. Only that result is clipped.
-_VIBRANCE_BOOST = 2.44
-_VIBRANCE_BOOST_CURVE = 2.6
-_VIBRANCE_BOOST_TAIL = 0.25
-_VIBRANCE_BOOST_AMOUNT_CURVE = 1.33
-_VIBRANCE_BOOST_BRIGHT = 0.73
-_VIBRANCE_BOOST_DARK = 0.023
-_VIBRANCE_BOOST_GRAY = 0.79
-_VIBRANCE_BOOST_GRAY_SLOPE = -0.29
-_VIBRANCE_SKIN_WIDTH = 0.058
-_VIBRANCE_SKIN_CURVE = 1.8
+_VIBRANCE_BOOST_AMOUNT_CURVE = 1.16
+_VIBRANCE_BOOST_MID = 1.27
+_VIBRANCE_BOOST_PALE_DARK = 1.98
+_VIBRANCE_BOOST_DARK = (0.03, 0.3)
+_VIBRANCE_BOOST_GRAY = 0.99
+_VIBRANCE_BOOST_GRAY_SLOPE = -0.28
+_VIBRANCE_SKIN_HUES = (-0.176, 0.0, 0.096, 0.136)
+_VIBRANCE_SKIN = 1.04
+_VIBRANCE_SKIN_CURVE = 0.84
 _VIBRANCE_LOSS = 0.25
 _VIBRANCE_LOSS_PALE = 1.5
 _VIBRANCE_LOSS_PALE2 = -0.5
@@ -1170,24 +1169,27 @@ def _raise_vibrance(
     low: np.ndarray,
     vibrance: float,
 ) -> np.ndarray:
-    """Scale chroma up, most for pale, mid-bright pixels away from red.
+    """Scale chroma up, most for pale and dark pixels, less for skin tones.
 
-    ``high`` and ``low`` are the per-pixel extremes of ``linear``.
+    ``img`` is ``linear`` encoded; ``high`` and ``low`` are its per-pixel
+    extremes.
     """
-    encoded_high = img.max(axis=2, keepdims=True)
-    sat = (encoded_high - img.min(axis=2, keepdims=True)) / np.maximum(
-        encoded_high, _FLOAT_EPSILON
-    )
-    sat = np.clip(sat, _0, _1)
+    sat = np.clip((high - low) / np.maximum(high, _FLOAT_EPSILON), _0, _1)
     pale = _1 - sat
+    encoded_high = np.clip(img.max(axis=2, keepdims=True), _0, _1)
+    boost = _VIBRANCE_BOOST_MID * sat * pale
+    boost = boost + _VIBRANCE_BOOST_PALE_DARK * pale**2 * (_1 - encoded_high)
+    start, end = _VIBRANCE_BOOST_DARK
+    dark = np.clip((encoded_high - start) / (end - start), _0, _1)
+    boost = boost * dark * dark * (3 - 2 * dark)
     hue = rgb2hsl(np.clip(img, _0, _1))[..., 0:1]
-    from_red = np.minimum(hue, _1 - hue) / _VIBRANCE_SKIN_WIDTH
-    skin = np.exp(-0.5 * from_red**2) * pale**_VIBRANCE_SKIN_CURVE
-    boost = _VIBRANCE_BOOST * (
-        pale**_VIBRANCE_BOOST_CURVE + _VIBRANCE_BOOST_TAIL * sat * pale
+    hue = np.where(hue > 0.5, hue - _1, hue)
+    rise_from, core_from, core_to, fall_to = _VIBRANCE_SKIN_HUES
+    skin = np.minimum(
+        np.clip((hue - rise_from) / (core_from - rise_from), _0, _1),
+        np.clip((fall_to - hue) / (fall_to - core_to), _0, _1),
     )
-    boost = boost * (_1 - _VIBRANCE_BOOST_BRIGHT * encoded_high)
-    boost = boost * (_1 - np.exp(-high / _VIBRANCE_BOOST_DARK)) * (_1 - skin)
+    boost = boost * (_1 - skin * _VIBRANCE_SKIN * pale**_VIBRANCE_SKIN_CURVE)
     scale = _1 + vibrance**_VIBRANCE_BOOST_AMOUNT_CURVE * boost
     position = _VIBRANCE_BOOST_GRAY + _VIBRANCE_BOOST_GRAY_SLOPE * sat
     gray = low + position * (high - low)
