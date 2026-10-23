@@ -4,6 +4,12 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] The text engine draws OpenType-SVG colour glyphs (emoji, icon fonts)
+  in colour as Photoshop does: paths and shapes with solid or gradient fills,
+  stroked rectangles and embedded PNG or JPEG images. A glyph whose SVG uses
+  anything else is still drawn as a silhouette and reported as
+  ``monochrome_emoji``; ``Options(color_glyphs=False)`` restores the
+  silhouettes
 - [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
   layer set from a preset does, is read as its own adjustment instead of as a
   Brightness/Contrast at 0/0 that left the image unchanged. Only layers that

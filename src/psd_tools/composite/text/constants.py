@@ -35,6 +35,10 @@ STRONG_EMBOLDEN_26_6 = 19
 # AntA None keeps a pixel whose coverage exceeds 0.5 ** (1 / 1.25).
 NONE_THRESHOLD = 0.574
 
+# A colour glyph's alpha is sampled on this many points a side per pixel
+# under AntA Crisp, Strong and Smooth; its colours keep the exact coverage.
+COLOR_ALPHA_GRID = 4
+
 # AntA Crisp snaps glyph origins to whole pixels in y and, in x, to a grid
 # that gets finer for smaller text: ``(pixel-size bound, positions per
 # pixel)`` for sizes below each bound, one position from the last bound up.
