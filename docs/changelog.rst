@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] With "Blend Interior Effects as Group" off, Photoshop's default, a
+  layer's overlays, satins and inner glows and shadows go on over the layer
+  composited in its blend mode, in their own modes, instead of through it.
+  Only a layer in another mode than Normal, or at a fill below 100%, changes (#846)
 - [fix] A document's composite reads off its stored preview which type layers
   Photoshop blended straight, not in the text gamma, as it does for a raster
   kept through a session; nothing else in the file records it. An export from
