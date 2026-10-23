@@ -115,16 +115,37 @@ def test_spread_at_full_makes_a_hard_band_of_the_size(precise: bool) -> None:
 
 
 def test_the_precise_technique_ramps_straight_with_the_distance() -> None:
-    """Precise is a straight ramp from the edge to nothing at the size.
+    """Precise is a straight ramp to nothing at the size, centred on the edge.
 
-    The pixel centres sit half a pixel past the disc's last covered pixel,
-    so the ramp reads one minus that distance over the size.
+    With no spread it is a pixel more than the size wide on either side of
+    the edge, so it starts at about half strength. The pixel centres sit half
+    a pixel past the disc's last covered pixel.
     """
     glow = _glow(_disc(81, _RADIUS), size=6.0, precise=True)
     row = _ring(glow)[int(_RADIUS) + 1 :]
-    expected = [1.0 - (step + 0.5) / 6.0 for step in range(6)]
+    expected = [(6.0 - step) / 14.0 for step in range(6)]
     assert np.allclose(row[:6], expected, atol=1e-6), row[:6]
     assert np.all(row[6:] == 0.0)
+
+
+@pytest.mark.parametrize(
+    ("spread", "width"),
+    [(33.0, 14.0), (50.0, 10.0), (67.0, 8.0)],
+    ids=["33", "half-pixel", "67"],
+)
+def test_a_precise_spread_steepens_the_ramp_about_the_grown_edge(
+    spread: float, width: float
+) -> None:
+    """The spread grows the silhouette by whole pixels, a half rounding up.
+
+    What is left of the size, plus a pixel, is the ramp's reach on either
+    side of the grown edge; the end of the ramp stays at the size.
+    """
+    edge = np.zeros((1, 16), dtype=np.float32)
+    edge[0, :4] = 1.0
+    matte = effects._precise_matte(edge, 9.0, spread)[0, 4:]
+    expected = np.clip([(9.0 - step) / width for step in range(12)], 0.0, 1.0)
+    assert np.allclose(matte, expected, atol=1e-6), matte
 
 
 def test_a_soft_glow_spreads_as_a_drop_shadow_does() -> None:
@@ -1222,3 +1243,71 @@ def test_outer_glows_render_to_photoshops_preview(
     assert floor >= without, "the region has no glow"
     assert error <= bound
     assert error * _IMPROVEMENT < floor
+
+
+# effects/precise-glow-spread.psd: on white, a 16 px black square and a disc
+# beside it on each layer, with a black Normal precise outer glow at 100%,
+# a Linear contour and a range of 100%. The sizes, 5, 9 and 20, run down the
+# rows and the spreads, 0, 33, 50, 67 and 100, along them. Photoshop's
+# composite is the reference.
+_PRECISE_FIXTURE = "effects/precise-glow-spread.psd"
+_PRECISE_SQUARE = 16
+
+# A spread of 100% grows a hard band; Photoshop antialiases its outer edge
+# by a little more than the render does.
+_PRECISE_BOUND = 2.5e-4
+
+
+def _precise_glow_layers() -> list[str]:
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    return [layer.name for layer in psd if any(layer.effects.find("outerglow"))]
+
+
+@pytest.fixture(scope="module")
+def precise_fixture() -> tuple[PSDImage, np.ndarray, np.ndarray]:
+    """The fixture, Photoshop's composite of it and the render."""
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    color, _, _ = composite(psd)
+    return psd, psd.numpy(), color
+
+
+@pytest.mark.parametrize(
+    "name", [name for name in _precise_glow_layers() if not name.endswith(" 100")]
+)
+def test_a_precise_glow_falls_off_beside_a_straight_edge_as_photoshops(
+    precise_fixture: tuple[PSDImage, np.ndarray, np.ndarray], name: str
+) -> None:
+    """Along the row through the middle of the square, out from its left side.
+
+    Every spread that leaves some of the size to the ramp, to the 8-bit
+    step of Photoshop's composite.
+    """
+    psd, reference, color = precise_fixture
+    layer = next(layer for layer in psd if layer.name == name)
+    glow = cast(OuterGlow, next(iter(layer.effects.find("outerglow"))))
+    reach = int(glow.size) + 2
+    left, top = layer.bbox[0], layer.bbox[1]
+    row = top + _PRECISE_SQUARE // 2
+    expected = reference[row, left - reach : left, 0]
+    rendered = color[row, left - reach : left, 0]
+    assert expected.min() < 1.0, "the row has no glow"
+    assert np.allclose(rendered, expected, atol=1.0 / 255 + 1e-6), (
+        rendered,
+        expected,
+    )
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_precise_glows_render_to_photoshops_preview(force: bool) -> None:
+    """Every layer of the fixture, against Photoshop's composite of it."""
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    reference = psd.numpy()
+    color, _, _ = composite(psd, force=force)
+    error = float(_mse(reference, color))
+
+    for layer in psd.descendants():
+        for effect in list(layer.effects.find("outerglow")):
+            effect.descriptor[Key.Enabled] = False
+    unglowed, _, _ = composite(psd, force=force)
+    assert error <= _PRECISE_BOUND
+    assert error * _IMPROVEMENT < float(_mse(reference, unglowed))
