@@ -23,6 +23,18 @@ Changelog
   tail ran a pixel further: a group's outside stroke traced round a child's
   soft shadow no longer reaches a pixel too far. Soft shadows' falloffs move
   slightly; outer glows are unchanged
+- [fix] A Hue/Saturation adjustment no longer turns some near-white pixels
+  black and some near-black ones bright: a pixel whose lightness rounds to 0
+  or 1 reads as unsaturated instead of infinitely saturated. Only documents
+  with a Hue/Saturation layer change
+- [fix] Type layer text and style edits (``TypeLayer.text``, ``set_text()``,
+  ``set_span_style()``, ``set_run_style()``) also write the layer's story in
+  the document's ``Txt2`` block, which Photoshop reads, so a Photoshop save no
+  longer reverts them; paragraph runs also end at forced line breaks. A style
+  key with no story feature, a style edit on a stale story and any edit of a
+  story another layer shares raise ``ValueError``, leaving the layer as it was
+- [api] ``TypeLayer.story_text`` reads the layer's ``Txt2`` story and
+  ``TypeLayer.sync_story()`` brings a stale one back to the layer's text
 - [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
   layer set from a preset does, is read as its own adjustment instead of as a
   Brightness/Contrast at 0/0 that left the image unchanged. Only layers that

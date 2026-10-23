@@ -16,6 +16,7 @@ from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import paint
 from psd_tools.composite.adjustments import (
     _brightness_curve,
+    _huesaturation,
     _lut_domain,
     _rows_from_rgb,
     apply_blackandwhite,
@@ -31,6 +32,7 @@ from psd_tools.composite.adjustments import (
     apply_threshold,
     apply_vibrance,
 )
+from psd_tools.composite.blend import rgb2hsl
 from psd_tools.composite.paint import _from_rgb
 from psd_tools.constants import BlendMode, ColorMode, Tag
 from psd_tools.psd.adjustments import ChannelMixer as ChannelMixerData
@@ -416,6 +418,15 @@ def test_huesaturation_composite_icc(name: str, colormode: str) -> None:
 def test_huesaturation_composite_error(name: str, colormode: str) -> None:
     filename = f"adjustments/{name}_{colormode}.psd"
     check_composite_quality(filename, huesaturation_tests[name], False)
+
+
+def test_huesaturation_near_white_stays_white() -> None:
+    # One step below 1 in a channel rounds L to 1 while the channels differ.
+    below_one = np.nextafter(np.float32(1), np.float32(0))
+    img = np.array([[[1.0, 1.0, below_one]]], dtype=np.float32)
+    assert rgb2hsl(img)[0, 0, 1] == 0
+    master = (np.float32(0.1), np.float32(0.2), np.float32(0))
+    np.testing.assert_allclose(_huesaturation(img, [], master), 1.0, atol=1e-6)
 
 
 # Invert

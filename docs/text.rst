@@ -58,8 +58,10 @@ A layer's text is also stored in its story in the document's ``Txt2``
 block (the layer's ``TextIndex`` is the story's index), and that story is
 what Photoshop reads: it rebuilds the layer's own EngineData from it on
 save. Every edit above writes the story too, its glyph layout left for
-Photoshop to redo; a style key with no story feature raises
-``ValueError``. :py:attr:`~psd_tools.api.layers.TypeLayer.story_text`
+Photoshop to redo. A style key with no story feature, a style edit on a
+stale story and any edit of a story another layer shares raise
+``ValueError`` and leave the layer as it was.
+:py:attr:`~psd_tools.api.layers.TypeLayer.story_text`
 reads the story and :py:meth:`~psd_tools.api.layers.TypeLayer.sync_story`
 brings a stale one (a file edited by an older version) back to the
 layer's text.

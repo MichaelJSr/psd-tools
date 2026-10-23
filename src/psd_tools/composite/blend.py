@@ -557,10 +557,12 @@ def rgb2hsl(img: np.ndarray) -> np.ndarray:
     # Lightness
     L[:] = _HALF * total
 
-    # Saturation
+    # Saturation. A near-white or near-black pixel can round L to 1 or 0
+    # with a channel still apart: it stays achromatic rather than infinite.
     S[:] = _0
     den = _1 - np.abs(_2 * L - _1)
-    S[non_zero] = delta[non_zero] / den[non_zero]
+    chroma = non_zero & (den > _FLOAT_EPSILON)
+    S[chroma] = delta[chroma] / den[chroma]
 
     # Hue
     R, G, B = img[..., 0], img[..., 1], img[..., 2]
