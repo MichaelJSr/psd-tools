@@ -69,9 +69,10 @@ from psd_tools.composite.effects import (
     draw_satin,
     draw_stroke_effect_split,
     drop_shadow_bbox,
-    glow_falloff,
     glow_geometry,
+    glow_matte,
     glow_paint,
+    glow_ranged,
     glow_reach,
     inner_bbox,
     outer_glow_bbox,
@@ -4687,14 +4688,11 @@ class Compositor:
                 logger.debug("The jitter of an outer glow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
             try:
-                falloff = glow_falloff(
-                    silhouette,
-                    size=size,
-                    spread=spread,
-                    range_=range_,
-                    precise=precise,
-                    contour=contour,
-                    anti_aliased=anti_aliased,
+                matte = glow_matte(
+                    silhouette, size=size, spread=spread, precise=precise
+                )
+                falloff = glow_ranged(
+                    matte, range_=range_, contour=contour, anti_aliased=anti_aliased
                 )
                 color, coverage = glow_paint(
                     bbox,
@@ -4703,6 +4701,7 @@ class Compositor:
                     np.zeros_like(silhouette) if banded else silhouette,
                     falloff,
                     over=0.0 if banded else over,
+                    matte=matte,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an outer glow of %s: %s", layer, error)

@@ -46,7 +46,7 @@ from ..utils import full_name
 from .test_composite import _feathered_stroke_layer, _mse
 from .test_drop_shadow import _alone, _around, _contour, _disc, _masks_card
 
-pytest.importorskip("scipy")
+scipy_ndimage = pytest.importorskip("scipy.ndimage")
 
 logger = logging.getLogger(__name__)
 
@@ -92,12 +92,20 @@ def test_an_outer_glow_never_lies_under_its_silhouette(
 
 
 @pytest.mark.parametrize("precise", [False, True], ids=["soft", "precise"])
-def test_a_glow_of_size_zero_draws_nothing(precise: bool) -> None:
-    """A size of zero is no glow at all, whatever the spread and range say."""
-    glow = _glow(
-        _disc(81, _RADIUS), size=0.0, spread=100.0, range_=1.0, precise=precise
-    )
-    assert not glow.any()
+@pytest.mark.parametrize("spread", [0.0, 20.0, 100.0])
+def test_a_glow_of_size_zero_is_the_silhouette_ranged(
+    precise: bool, spread: float
+) -> None:
+    """A size of zero glows by the silhouette itself, squeezed by the range.
+
+    Beside a hard disc that is nothing; beside a faint one it is every pixel
+    the layer leaves uncovered, whatever the spread.
+    """
+    assert not _glow(_disc(81, _RADIUS), size=0.0, spread=spread, precise=precise).any()
+    faint = _disc(81, _RADIUS) * 0.2
+    glow = _glow(faint, size=0.0, spread=spread, range_=50.0, precise=precise)
+    expected = np.clip(faint * 255.0 / 128.0, 0.0, 1.0) * (1.0 - faint)
+    assert np.allclose(glow, expected, atol=1e-6)
 
 
 @pytest.mark.parametrize("precise", [False, True], ids=["soft", "precise"])
@@ -149,23 +157,21 @@ def test_a_precise_spread_steepens_the_ramp_about_the_grown_edge(
     assert np.allclose(matte, expected, atol=1e-6), matte
 
 
-def test_a_soft_glow_spreads_as_a_drop_shadow_does() -> None:
-    """Beside the silhouette the soft matte is the drop shadow's spread, blurred.
+def test_a_soft_glow_is_a_drop_shadow_cast_nowhere() -> None:
+    """Beside the silhouette the soft matte is the drop shadow's.
 
-    The two share their spread; the shadow blurs it with a tent and the
-    glow with its fitted gaussian. What else differs is what the glow cuts
-    away under the silhouette and what the range does to the rest; at 100%
-    the range does nothing.
+    Spread, then blurred by the tent of two box passes. What differs is what
+    the glow cuts away under the silhouette and what the range does to the
+    rest; at 100% the range does nothing.
     """
     disc = _disc(81, _RADIUS)
     glow = _glow(disc, size=6.0, spread=30.0)
-    spread, radius = effects._spread_matte(disc[:, :, 0], 6.0, 30.0)
     shadow = effects.draw_drop_shadow(
         _CANVAS, disc, distance=0.0, angle=0.0, size=6.0, spread=30.0
     )
-    assert np.allclose(shadow[:, :, 0], effects._tent_blur(spread, radius, 0.0))
-    soft = effects._soft_matte(disc[:, :, 0], 6.0, 30.0, effects._GLOW_SIGMA_PER_SIZE)
-    assert np.allclose(glow[:, :, 0], soft * (1.0 - disc[:, :, 0]), atol=1e-6)
+    assert np.allclose(
+        glow[:, :, 0], shadow[:, :, 0] * (1.0 - disc[:, :, 0]), atol=1e-6
+    )
 
 
 def _soft_disc(size: int, radius: float, hard_radius: float) -> np.ndarray:
@@ -245,8 +251,8 @@ def test_a_spread_glow_on_a_soft_edged_disc_is_the_hard_discs(precise: bool) -> 
     )
     assert np.array_equal(glow[outside], hard_glow[outside])
     if not precise:
-        from_opacity = effects._soft_matte(
-            soft[:, :, 0], _COVERAGE_SIZE, _COVERAGE_SPREAD, 0.45
+        from_opacity = effects._shadow_matte(
+            soft[:, :, 0], _COVERAGE_SIZE, _COVERAGE_SPREAD
         )
         assert float(glow[outside].max()) > float(from_opacity[outside].max())
 
@@ -266,7 +272,7 @@ def test_a_glow_with_no_spread_on_a_soft_edged_disc_is_cast_from_its_opacity() -
         bright = _glow(hard, size=_COVERAGE_SIZE, spread=spread)[outside]
         assert np.all(faint <= bright + 1e-6)
         assert float((bright - faint).max()) > 0.05
-        matte = effects._soft_matte(soft[:, :, 0], _COVERAGE_SIZE, spread, 0.45)
+        matte = effects._shadow_matte(soft[:, :, 0], _COVERAGE_SIZE, spread)
         assert np.allclose(faint, effects._beside(matte, soft)[outside], atol=1e-6)
 
 
@@ -330,30 +336,21 @@ def test_an_antialiased_edge_is_kept_as_far_as_the_fitted_reach() -> None:
     assert np.all(coverage[:, 6] == 1.0)
 
 
-# The width of the gaussian that stands in for Photoshop's blur, per pixel of
-# size, and the floor the range is held above, both fitted on Photoshop's own
-# renders of soft glows: the fixture previews below for the blur, and for the
-# floor a corpus of documents with glows at ranges from 1% to 100%, since no
-# fixture carries a range far from 100%.
-_FITTED_SIGMA_PER_SIZE = 0.45
-_FITTED_RANGE_FLOOR = 15.0
-
-
-def test_the_blur_width_and_the_range_floor_are_the_fitted_constants() -> None:
-    """Both are fits, so a change to either is a measured change.
-
-    The fidelity cases below hold the blur to Photoshop's previews; this
-    pins the numbers themselves so they are not retuned on one fixture, and
-    is all that holds the range floor, which the fixtures cannot measure.
-    """
-    assert effects._GLOW_SIGMA_PER_SIZE == _FITTED_SIGMA_PER_SIZE
-    assert effects._GLOW_RANGE_FLOOR == _FITTED_RANGE_FLOOR
-
-
 def _squeeze(range_: float) -> float:
-    """What the range scales the matte by: the inverse of the range and floor together."""
-    return math.hypot(100.0, _FITTED_RANGE_FLOOR) / math.hypot(
-        range_, _FITTED_RANGE_FLOOR
+    """What the range scales the matte by: the inverse of the range read as a byte."""
+    return 255.0 / max(math.floor(range_ * 2.55 + 0.5 + 1e-9), 1)
+
+
+@pytest.mark.parametrize(
+    ("range_", "scale"),
+    [(100.0, 1.0), (75.0, 255.0 / 191.0), (50.0, 255.0 / 128.0), (1.0, 255.0 / 3.0)],
+)
+def test_the_range_is_read_as_a_byte(range_: float, scale: float) -> None:
+    """The matte is scaled by 255 over the range in 8-bit steps, a half rounding up."""
+    matte = np.linspace(0.0, 0.004, 9, dtype=np.float32)
+    assert _squeeze(range_) == pytest.approx(scale)
+    assert np.allclose(
+        effects._ranged(matte, range_), np.clip(matte * scale, 0.0, 1.0), atol=1e-7
     )
 
 
@@ -361,10 +358,10 @@ def _squeeze(range_: float) -> float:
 def test_the_range_squeezes_the_falloff_toward_the_silhouette(precise: bool) -> None:
     """A range below 100% scales the matte up and holds it to one.
 
-    At 100% the matte is painted as it is. At 50% it is scaled by a little
-    under two, so the part of the falloff nearest the silhouette is painted
-    full and the rest at nearly twice its coverage. The disc is hard, so the
-    cut under it changes nothing and the two renders are related exactly.
+    At 100% the matte is painted as it is. At 50% it is scaled by 255/128,
+    so the part of the falloff nearest the silhouette is painted full and the
+    rest at nearly twice its coverage. The disc is hard, so the cut under it
+    changes nothing and the two renders are related exactly.
     """
     disc = _disc(81, _RADIUS)
     whole = _glow(disc, range_=100.0, precise=precise)
@@ -374,21 +371,17 @@ def test_the_range_squeezes_the_falloff_toward_the_silhouette(precise: bool) -> 
     assert float((half - whole).max()) > 0.1
 
 
-def test_a_small_range_draws_a_soft_halo_not_a_hard_band() -> None:
-    """The floor keeps a 1% range from squeezing the falloff to a step.
+def test_a_small_range_paints_a_band_that_fades_only_at_its_end() -> None:
+    """A 1% range squeezes the falloff by 85.
 
-    Read as the inverse of the slider alone, 1% would scale the matte a
-    hundredfold and paint a hard band out to where the blur dies away;
-    Photoshop paints a halo that still fades. The floor bounds the scale, so
-    the far half of the falloff keeps coverages strictly between the two.
+    Full out to the last pixels of the blur, then a fade over the two or
+    three where the matte dies away.
     """
     glow = _glow(_disc(81, 12.0), size=12.0, range_=1.0)
-    tail = _ring(glow)[int(_RADIUS) + 1 + 6 : int(_RADIUS) + 1 + 12]
-    assert np.all((tail > 0.0) & (tail < 1.0)), tail
-    assert np.all(np.diff(tail) < 0.0), tail
-    assert _squeeze(1.0) == pytest.approx(
-        math.hypot(100.0, 15.0) / math.hypot(1.0, 15.0)
-    )
+    ring = _ring(glow)[int(_RADIUS) + 1 :]
+    assert np.all(ring[:9] == 1.0), ring
+    assert np.all((ring[9:11] > 0.0) & (ring[9:11] < 1.0)), ring
+    assert not ring[12:].any(), ring
 
 
 def test_the_range_is_held_to_the_dialogs_percentages() -> None:
@@ -1420,3 +1413,103 @@ def test_precise_glows_render_to_photoshops_preview(force: bool) -> None:
     unglowed, _, _ = composite(psd, force=force)
     assert error <= _PRECISE_BOUND
     assert error * _IMPROVEMENT < float(_mse(reference, unglowed))
+
+
+def test_a_gradient_glow_covers_its_matte_eightfold_whatever_its_range() -> None:
+    """Given the matte, an opaque gradient covers eight times it at every range.
+
+    Its colour still runs along the ranged falloff.
+    """
+    desc, _, _ = _gradient_glow()
+    for stop in desc[Key.Gradient][Key.Transparency]:
+        stop[Key.Opacity] = Double(100.0)
+    disc = _disc(81, _RADIUS)
+    matte = effects.glow_matte(disc, size=12.0, spread=0.0)
+    expected = np.clip(matte * effects._GRADIENT_GLOW_GAIN, 0.0, 1.0)
+    colors = []
+    for range_ in (1.0, 50.0, 100.0):
+        falloff = effects.glow_ranged(matte, range_=range_)
+        color, coverage = effects.glow_paint(
+            (0, 0, 81, 81), ColorMode.RGB, desc, disc, falloff, matte=matte
+        )
+        assert np.allclose(coverage[:, :, 0], expected * (1.0 - disc[:, :, 0]))
+        colors.append(color)
+    assert not np.allclose(colors[0], colors[2], atol=1e-3)
+
+
+# effects/outer-glow-laws.psd: on a dark backdrop, white Normal soft glows
+# round a 70 x 30 bar at sizes 5 (no spread) and 21 (spread 9%) and ranges 100,
+# 50, 5 and 1%; size-0 glows on a feathered star; and gradient glows round the
+# bar at size 21: a peach-to-cream gradient in Screen at 1% and 50%, black to
+# white at 100%, and blue to magenta fading to clear at 50%. Photoshop 2023's
+# composite is the reference.
+_LAWS_FIXTURE = "effects/outer-glow-laws.psd"
+
+# Levels a cell may stray from Photoshop's: the solid glows land within a
+# level, a gradient's colour lookup within a few.
+_LAWS_SOLID = 1.5
+_LAWS_GRADIENT = 12.0
+
+
+def _laws_errors(psd: PSDImage) -> dict[str, float]:
+    """Per glowing layer, its largest difference from Photoshop's, in levels."""
+    color, _, _ = composite(psd)
+    diff = np.abs(color[..., :3] - psd.numpy()[..., :3]).max(axis=2) * 255.0
+    errors = {}
+    for layer in psd:
+        glow = next(iter(layer.effects.find("outerglow")), None)
+        if glow is None:
+            continue
+        reach = int(cast(OuterGlow, glow).size) + 4
+        left, top, right, bottom = layer.bbox
+        errors[layer.name] = float(
+            diff[top - reach : bottom + reach, left - reach : right + reach].max()
+        )
+    return errors
+
+
+def test_outer_glows_render_to_photoshops_composite() -> None:
+    """The tent, the range read as a byte, the size-0 glow and the gradient's coverage."""
+    errors = _laws_errors(PSDImage.open(full_name(_LAWS_FIXTURE)))
+    assert len(errors) == 14
+    for name, error in errors.items():
+        bound = _LAWS_GRADIENT if name.startswith("gradient") else _LAWS_SOLID
+        assert error <= bound, (name, error)
+
+
+@pytest.mark.parametrize(
+    ("undo", "names"),
+    [
+        (lambda m: setattr(effects, "_GLOW_RANGE_STEPS", 100), ("glow s21 r1",)),
+        (lambda m: setattr(effects, "_GRADIENT_GLOW_GAIN", 1.0), ("gradient glow bw",)),
+        (
+            lambda m: setattr(
+                effects, "_shadow_matte", lambda a, s, p, outside=0.0: m(a, s, p)
+            ),
+            ("glow s21 r100", "glow s5 r100"),
+        ),
+    ],
+    ids=["range-steps", "gradient-gain", "tent"],
+)
+def test_each_glow_law_is_read_off_the_fixture(
+    monkeypatch: pytest.MonkeyPatch, undo: Callable[[Any], None], names: tuple[str, ...]
+) -> None:
+    """Undoing a law puts the cells it governs past their bound."""
+
+    def gaussian(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
+        grown, radius = effects._spread_matte(alpha, size, spread)
+        if radius <= 0.0:
+            return grown
+        return scipy_ndimage.gaussian_filter(
+            grown, radius * 0.45, mode="constant", cval=0.0, truncate=1.0 / 0.45
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(effects, "_GLOW_RANGE_STEPS", effects._GLOW_RANGE_STEPS)
+        patch.setattr(effects, "_GRADIENT_GLOW_GAIN", effects._GRADIENT_GLOW_GAIN)
+        patch.setattr(effects, "_shadow_matte", effects._shadow_matte)
+        undo(gaussian)
+        errors = _laws_errors(PSDImage.open(full_name(_LAWS_FIXTURE)))
+    for name in names:
+        matched = [error for layer, error in errors.items() if layer.startswith(name)]
+        assert matched and max(matched) > _LAWS_SOLID * 2, (name, matched)
