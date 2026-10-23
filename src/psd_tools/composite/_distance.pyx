@@ -1,24 +1,22 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True, language_level=3
-"""C loops for effects._nearest_boundary's pruned minimum and effects._chamfer_transform.
+"""C loops behind effects._nearest_boundary and effects._chamfer_transform.
 
-Same float32 (pruned minimum) and float64 (chamfer) operations as the numpy
-code, in the same order, so the results are bit-identical.
+The numpy code's float32 (pruned minimum) and float64 (chamfer) operations in
+the same order, so the results are bit-identical. Memoryviews only, so the
+module builds against the Limited API without numpy headers.
 """
 import numpy as np
-cimport numpy as cnp
-from libc.math cimport INFINITY
-
-cnp.import_array()
+from libc.math cimport INFINITY, sqrt
 
 
 def prune_min(
-    cnp.intp_t[::1] rows,
-    cnp.intp_t[::1] cols,
+    const Py_ssize_t[::1] rows,
+    const Py_ssize_t[::1] cols,
     Py_ssize_t span,
-    cnp.intp_t[:, ::1] offsets,
-    float[::1] lengths,
-    cnp.uint8_t[:, ::1] stating_pad,
-    float[:, ::1] near_pad,
+    const Py_ssize_t[:, ::1] offsets,
+    const float[::1] lengths,
+    const unsigned char[:, ::1] stating_pad,
+    const float[:, ::1] near_pad,
     bint outward,
 ):
     cdef Py_ssize_t n = rows.shape[0], m = lengths.shape[0], i, k, r, c
@@ -77,9 +75,9 @@ cdef inline void _relax(double[:, ::1] f, Py_ssize_t row, Py_ssize_t before, Py_
 
 
 def chamfer_transform(mask, double diag, double knight):
-    cdef cnp.ndarray[cnp.uint8_t, ndim=2, cast=True] m = np.ascontiguousarray(mask)
-    cdef Py_ssize_t height = m.shape[0], width = m.shape[1]
-    out = np.where(m, np.inf, 0.0)
+    mask = np.ascontiguousarray(mask, dtype=bool)
+    cdef Py_ssize_t height = mask.shape[0], width = mask.shape[1]
+    out = np.where(mask, np.inf, 0.0)
     cdef double[:, ::1] f = out
     cdef double[::1] tmp = np.empty(max(width, 1), dtype=np.float64)
     cdef Py_ssize_t passno, idx, row, step, before, j
@@ -122,10 +120,7 @@ def chamfer_transform(mask, double diag, double knight):
     return out.astype(np.float32)
 
 
-from libc.math cimport sqrt
-
-
-def disk_reach(cnp.uint8_t[:, ::1] stating, double radius):
+def disk_reach(const unsigned char[:, ::1] stating, double radius):
     """Pixels whose Euclidean distance to a stating pixel is at most ``radius``.
 
     ``distance_transform_edt(~stating) <= radius`` without the transform: the
@@ -142,7 +137,7 @@ def disk_reach(cnp.uint8_t[:, ::1] stating, double radius):
             dx += 1
         reach[dy + r] = dx
     # Each row: +1 where a covered run starts, -1 past its end.
-    cdef cnp.int32_t[:, ::1] runs = np.zeros((h, w + 1), dtype=np.int32)
+    cdef int[:, ::1] runs = np.zeros((h, w + 1), dtype=np.intc)
     with nogil:
         for y in range(h):
             for x in range(w):
@@ -161,8 +156,8 @@ def disk_reach(cnp.uint8_t[:, ::1] stating, double radius):
                     runs[yy, x0] += 1
                     runs[yy, x1] -= 1
     out = np.empty((h, w), dtype=bool)
-    cdef cnp.uint8_t[:, ::1] o = out.view(np.uint8)
-    cdef cnp.int32_t acc
+    cdef unsigned char[:, ::1] o = out.view(np.uint8)
+    cdef int acc
     with nogil:
         for y in range(h):
             acc = 0
