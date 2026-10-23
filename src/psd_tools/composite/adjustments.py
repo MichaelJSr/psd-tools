@@ -34,7 +34,7 @@ from psd_tools.composite.blend import (
     hsv2hsl,
     rgb2hsl,
 )
-from psd_tools.constants import ColorMode
+from psd_tools.constants import ColorMode, Resource
 
 logger = logging.getLogger(__name__)
 
@@ -947,12 +947,15 @@ def apply_colorbalance(
     # A midtone amount is a per-channel gamma. A shadow or highlight amount
     # adds up to that many levels, weighted toward its own end of the range and
     # zero at black and white; that weight is a shape choice, not a fit.
-    # Preserve Luminosity centres each range's three amounts on their mean, so
-    # that a shift toward one primary darkens the other two instead of
-    # brightening the pixel.
+    # Preserve Luminosity keeps every channel a curve of its own: Photoshop
+    # takes the midrange of the three midtone amounts off each, so that a shift
+    # toward one primary darkens the other two. Shadows and highlights lose
+    # their mean, a stand-in.
     amounts = np.array([shadows, midtones, highlights], dtype=np.float32)
     if layer.luminosity:
-        amounts -= amounts.mean(axis=1, keepdims=True)
+        centre = amounts.mean(axis=1)
+        centre[1] = (amounts[1].max() + amounts[1].min()) / 2
+        amounts -= centre[:, None]
     lows, gammas, highs = amounts[0] / _255, amounts[1] / _100, amounts[2] / _255
     level = _lut_domain(_get_lut_size(layer))
     luts: dict[int, NDArray[np.float32]] = {}
@@ -964,18 +967,34 @@ def apply_colorbalance(
         if highs[channel]:
             weight = _colorbalance_shadows(_1 - value)
             value = np.clip(value + highs[channel] * weight, _0, _1)
-        value = value ** np.exp2(-gammas[channel])
+        value = _colorbalance_midtones(value, float(gammas[channel]))
         luts[channel + 1] = value.astype(np.float32, copy=False)
     return _apply_luts(luts, img, colormode)
 
 
 # ``t * (1 - t) ** 2`` peaks at t = 1/3 with 4/27.
 _COLORBALANCE_PEAK = np.float32(27 / 4)
+# A brightening midtone gamma leaves black on a parabola instead of the power
+# curve's vertical tangent, and joins the curve where its slope falls to this.
+_COLORBALANCE_TOE_SLOPE = 1.4
 
 
 def _colorbalance_shadows(level: np.ndarray) -> np.ndarray:
     """How much of a shadow shift reaches a level; a highlight shift mirrors it."""
     return _COLORBALANCE_PEAK * level * (_1 - level) ** 2
+
+
+def _colorbalance_midtones(level: np.ndarray, amount: float) -> np.ndarray:
+    """``level ** 2 ** -amount``; a brightening one starts from black on a parabola."""
+    exponent = 2.0**-amount
+    out = level**exponent
+    if exponent >= 1:
+        return out
+    slope = _COLORBALANCE_TOE_SLOPE
+    join = (slope / exponent) ** (1 / (exponent - 1))
+    bend = (slope * join - join**exponent) / join**2
+    toe = (slope - 2 * bend * join + bend * level) * level
+    return np.where(level < join, toe, out)
 
 
 @_preserve_alpha
@@ -992,70 +1011,160 @@ def apply_vibrance(
     saturation = layer.saturation / 100.0
     if vibrance == 0 and saturation == 0:
         return img
-    out = _vibrance(img, vibrance, saturation)
+    linear = paint._srgb_to_linear(img)
+    space = _vibrance_space(layer)
+    if space is None:
+        out = _vibrance(img, linear, vibrance, saturation)
+    else:
+        linear = linear @ space.T
+        encoded = np.sign(linear) * paint._linear_to_srgb(np.abs(linear))
+        out = _vibrance(encoded, linear, vibrance, saturation)
+        out = np.clip(out @ np.linalg.inv(space).T, _0, _1)
     return paint._linear_to_srgb(out).astype(np.float32, copy=False)
 
 
-# Vibrance is a fit, not Photoshop's formula. In linear light each pixel is
-# scaled away from or toward a gray on the line through its darkest and
-# brightest channel, which keeps its hue; the gray sits at a position in units
-# of their difference. A positive amount boosts low-saturation pixels most, and
-# spares bright, very dark and reddish (skin) ones; its saturation is measured
-# on the encoded values. A negative amount pulls pale pixels furthest; its gray
-# climbs with saturation and brightness, and toward the brightest channel in
-# near-black pixels. The saturation slider then scales chroma about the
-# luminance.
-_VIBRANCE_BOOST = 2.44
-_VIBRANCE_BOOST_CURVE = 2.6
-_VIBRANCE_BOOST_TAIL = 0.25
-_VIBRANCE_BOOST_AMOUNT_CURVE = 1.33
-_VIBRANCE_BOOST_BRIGHT = 0.73
-_VIBRANCE_BOOST_DARK = 0.023
-_VIBRANCE_BOOST_GRAY = 0.79
-_VIBRANCE_BOOST_GRAY_SLOPE = -0.29
-_VIBRANCE_SKIN_WIDTH = 0.058
-_VIBRANCE_SKIN_CURVE = 1.8
-_VIBRANCE_WEIGHT_PALE = 1.01
-_VIBRANCE_WEIGHT_DROP = 0.67
-_VIBRANCE_WEIGHT_CURVE = 2.04
-_VIBRANCE_AMOUNT_CURVE = 1.03
-_VIBRANCE_GRAY_PALE = -0.82
-_VIBRANCE_GRAY_RISE = 1.58
-_VIBRANCE_GRAY_BRIGHT = 1.86
-_VIBRANCE_GRAY_DARK = 1.59
-_VIBRANCE_GRAY_DARK_SCALE = 0.015
-_LINEAR_LUMINANCE = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+# In linear light each pixel is scaled away from or toward a gray on the line
+# through its darkest and brightest channel, which keeps its hue. Both amounts
+# are fitted to Photoshop renders of probes: every pair of darkest and
+# brightest levels, hue against saturation and value, saturation against value.
+# A positive amount raises chroma about a gray near the brightest channel, most
+# for pale pixels and dark ones, from nothing near black up to an encoded value
+# of 0.3; a pale reddish (skin) hue gets less. Its fit weighs every saturation
+# and value alike.
+# A negative amount lowers the linear HSV saturation of a pale pixel furthest
+# and of a pure one by a quarter of the amount, more below an encoded value of
+# about a quarter, and dims mid-saturated pixels away from white.
+# The saturation slider then scales chroma about 0.288 R + 0.712 G,
+# Photoshop's gray for it: blue has no say. Only that result is clipped.
+_VIBRANCE_BOOST_AMOUNT_CURVE = 1.27
+_VIBRANCE_BOOST_MID = 1.274
+_VIBRANCE_BOOST_MID_CURVE = 1.045
+_VIBRANCE_BOOST_PALE_DARK = 2.908
+_VIBRANCE_BOOST_PALE_CURVE = 1.842
+_VIBRANCE_BOOST_DARK_CURVE = 1.045
+_VIBRANCE_BOOST_BLACK = (0.038, 0.292)
+_VIBRANCE_BOOST_GRAY = 0.861
+_VIBRANCE_BOOST_GRAY_DARK = -0.272
+_VIBRANCE_SKIN_HUES = (-0.175, 0.0, 0.096, 0.139)
+_VIBRANCE_SKIN = 1.022
+_VIBRANCE_SKIN_CURVE = 0.829
+_VIBRANCE_LOSS = 0.25
+_VIBRANCE_LOSS_PALE = 1.5
+_VIBRANCE_LOSS_PALE2 = -0.5
+_VIBRANCE_REGAIN_PALE = 0.38
+_VIBRANCE_REGAIN_PALE2 = -0.14
+_VIBRANCE_DARK = 1.18
+_VIBRANCE_DARK_LEVEL = 0.26
+_VIBRANCE_DARK_CURVE = 1.14
+_VIBRANCE_DIM = 1.79
+_VIBRANCE_DIM_DARK_SCALE = 0.02
+_VIBRANCE_GRAY_WEIGHTS = np.array([0.288, 0.712, 0.0], dtype=np.float32)
+_ICC_D50 = np.array([0.9642, 1.0, 0.8249])
+_ICC_SRGB_COLORANTS = np.array(
+    [[0.4361, 0.3851, 0.1431], [0.2225, 0.7169, 0.0606], [0.0139, 0.0971, 0.7141]]
+)
+_BRADFORD = np.array(
+    [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]]
+)
 
 
-def _vibrance(img: np.ndarray, vibrance: float, saturation: float) -> np.ndarray:
-    """Linear-light result of the vibrance and saturation sliders."""
-    linear = paint._srgb_to_linear(img)
+def _vibrance_space(layer: Layer) -> NDArray[np.float64] | None:
+    """The linear RGB Photoshop runs vibrance in, from the document's, or None.
+
+    It is the document's own unless its profile is version 2 with a chromatic
+    adaptation tag, a white other than D50 and primaries other than sRGB's.
+    Photoshop then reads the primaries as adapted from D50 to that white by
+    Bradford and back by scaling XYZ, which moves them a little.
+    """
+    resources = layer._psd.image_resources
+    if Resource.ICC_PROFILE not in resources:
+        return None
+    profile = _icc_tags(resources.get_data(Resource.ICC_PROFILE))
+    if profile is None:
+        return None
+    version, tags = profile
+    if version != 2 or b"chad" not in tags:
+        return None
+    try:
+        white = np.array(_icc_xyz(tags[b"wtpt"]))
+        colorants = np.array(
+            [_icc_xyz(tags[key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
+        ).T
+    except (KeyError, struct.error):
+        return None
+    if np.allclose(white, _ICC_D50, atol=2e-3) or np.allclose(
+        colorants, _ICC_SRGB_COLORANTS, atol=2e-3
+    ):
+        return None
+    cone = _BRADFORD @ white / (_BRADFORD @ _ICC_D50)
+    adapt = np.linalg.solve(_BRADFORD, cone[:, None] * _BRADFORD)
+    moved = (_ICC_D50 / white)[:, None] * adapt @ colorants
+    return np.linalg.solve(colorants, moved)
+
+
+def _icc_tags(data: bytes) -> tuple[int, dict[bytes, bytes]] | None:
+    """An ICC profile's major version and tags by signature, or None."""
+    try:
+        (count,) = struct.unpack_from(">I", data, 128)
+        tags = {}
+        for index in range(count):
+            name, start, size = struct.unpack_from(">4sII", data, 132 + 12 * index)
+            tags[name] = data[start : start + size]
+    except struct.error:
+        return None
+    return data[8], tags
+
+
+def _icc_xyz(tag: bytes) -> tuple[float, float, float]:
+    """The first value of an ICC ``XYZ `` tag."""
+    x, y, z = struct.unpack_from(">3i", tag, 8)
+    return (x / 65536, y / 65536, z / 65536)
+
+
+def _vibrance(
+    img: np.ndarray, linear: np.ndarray, vibrance: float, saturation: float
+) -> np.ndarray:
+    """Linear-light result of the vibrance and saturation sliders.
+
+    ``img`` is ``linear`` encoded.
+    """
     high = linear.max(axis=2, keepdims=True)
     low = linear.min(axis=2, keepdims=True)
-    chroma = high - low
     out = linear
     if vibrance > 0:
         out = _raise_vibrance(img, linear, high, low, vibrance)
     elif vibrance < 0:
-        sat = chroma / np.maximum(high, _FLOAT_EPSILON)
-        weight = (
-            _VIBRANCE_WEIGHT_PALE - _VIBRANCE_WEIGHT_DROP * sat**_VIBRANCE_WEIGHT_CURVE
-        )
-        weight = weight * (-vibrance) ** _VIBRANCE_AMOUNT_CURVE
-        position = (
-            _VIBRANCE_GRAY_PALE
-            + _VIBRANCE_GRAY_RISE * sat
-            + _VIBRANCE_GRAY_BRIGHT * high * (_1 - sat)
-            + _VIBRANCE_GRAY_DARK * np.exp(-high / _VIBRANCE_GRAY_DARK_SCALE)
-        )
-        gray = low + np.minimum(position, _1) * chroma
-        out = out + weight * (gray - out)
-    out = np.clip(out, _0, _1)
+        encoded_high = img.max(axis=2, keepdims=True)
+        out = _lower_vibrance(linear, high, low, encoded_high, -vibrance)
     if saturation:
-        luminance = out @ _LINEAR_LUMINANCE
-        out = luminance[..., None] + (out - luminance[..., None]) * (_1 + saturation)
-        out = np.clip(out, _0, _1)
-    return out
+        gray = out @ _VIBRANCE_GRAY_WEIGHTS
+        out = gray[..., None] + (out - gray[..., None]) * (_1 + saturation)
+    return np.clip(out, _0, _1)
+
+
+def _lower_vibrance(
+    linear: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    encoded_high: np.ndarray,
+    amount: float,
+) -> np.ndarray:
+    """Lower the linear HSV saturation and value of ``linear``, hue kept.
+
+    ``high`` and ``low`` are its per-pixel extremes, ``encoded_high`` the
+    brightest encoded channel; ``amount`` is in (0, 1].
+    """
+    sat = (high - low) / np.maximum(high, _FLOAT_EPSILON)
+    pale = _1 - sat
+    loss = _VIBRANCE_LOSS + (_VIBRANCE_LOSS_PALE + _VIBRANCE_LOSS_PALE2 * pale) * pale
+    regain = (_VIBRANCE_REGAIN_PALE + _VIBRANCE_REGAIN_PALE2 * pale) * pale
+    dark = np.clip(_1 - encoded_high / _VIBRANCE_DARK_LEVEL, _0, _1)
+    dark = _1 - amount * _VIBRANCE_DARK * dark**_VIBRANCE_DARK_CURVE
+    new_sat = np.clip(sat * (_1 - amount * loss + amount**2 * regain) * dark, _0, sat)
+    dim = _1 - np.exp(-high / _VIBRANCE_DIM_DARK_SCALE)
+    value = high * (_1 - amount * _VIBRANCE_DIM * (_1 - high) * dim * sat * pale)
+    scale = value * new_sat / np.maximum(high * sat, _FLOAT_EPSILON)
+    return value - scale * (high - linear)
 
 
 def _raise_vibrance(
@@ -1065,26 +1174,35 @@ def _raise_vibrance(
     low: np.ndarray,
     vibrance: float,
 ) -> np.ndarray:
-    """Scale chroma up, most for pale, mid-bright pixels away from red.
+    """Scale chroma up, most for pale and dark pixels, less for skin tones.
 
-    ``high`` and ``low`` are the per-pixel extremes of ``linear``.
+    ``img`` is ``linear`` encoded; ``high`` and ``low`` are its per-pixel
+    extremes.
     """
-    encoded_high = img.max(axis=2, keepdims=True)
-    sat = (encoded_high - img.min(axis=2, keepdims=True)) / np.maximum(
-        encoded_high, _FLOAT_EPSILON
-    )
+    sat = np.clip((high - low) / np.maximum(high, _FLOAT_EPSILON), _0, _1)
     pale = _1 - sat
-    hue = rgb2hsl(img)[..., 0:1]
-    from_red = np.minimum(hue, _1 - hue) / _VIBRANCE_SKIN_WIDTH
-    skin = np.exp(-0.5 * from_red**2) * pale**_VIBRANCE_SKIN_CURVE
-    boost = _VIBRANCE_BOOST * (
-        pale**_VIBRANCE_BOOST_CURVE + _VIBRANCE_BOOST_TAIL * sat * pale
+    encoded_high = np.clip(img.max(axis=2, keepdims=True), _0, _1)
+    boost = _VIBRANCE_BOOST_MID * sat * pale**_VIBRANCE_BOOST_MID_CURVE
+    boost = (
+        boost
+        + _VIBRANCE_BOOST_PALE_DARK
+        * pale**_VIBRANCE_BOOST_PALE_CURVE
+        * (_1 - encoded_high) ** _VIBRANCE_BOOST_DARK_CURVE
     )
-    boost = boost * (_1 - _VIBRANCE_BOOST_BRIGHT * encoded_high)
-    boost = boost * (_1 - np.exp(-high / _VIBRANCE_BOOST_DARK)) * (_1 - skin)
+    start, end = _VIBRANCE_BOOST_BLACK
+    black = np.clip((encoded_high - start) / (end - start), _0, _1)
+    boost = boost * black * black * (3 - 2 * black)
+    hue = rgb2hsl(np.clip(img, _0, _1))[..., 0:1]
+    hue = np.where(hue > 0.5, hue - _1, hue)
+    rise_from, core_from, core_to, fall_to = _VIBRANCE_SKIN_HUES
+    skin = np.minimum(
+        np.clip((hue - rise_from) / (core_from - rise_from), _0, _1),
+        np.clip((fall_to - hue) / (fall_to - core_to), _0, _1),
+    )
+    boost = boost * (_1 - skin * _VIBRANCE_SKIN * pale**_VIBRANCE_SKIN_CURVE)
     scale = _1 + vibrance**_VIBRANCE_BOOST_AMOUNT_CURVE * boost
-    position = _VIBRANCE_BOOST_GRAY + _VIBRANCE_BOOST_GRAY_SLOPE * sat
-    gray = low + position * (high - low)
+    position = _VIBRANCE_BOOST_GRAY + _VIBRANCE_BOOST_GRAY_DARK * (_1 - encoded_high)
+    gray = low + np.clip(position, _0, _1) * (high - low)
     return gray + scale * (linear - gray)
 
 

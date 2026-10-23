@@ -21,6 +21,15 @@ Changelog
   strength, and a spread steepens the ramp instead of holding it full out to
   the spread. Softer glows, and precise ones spread over their whole size,
   are unchanged
+- [fix] Colour balance and vibrance adjustments follow Photoshop's renders:
+  Preserve Luminosity takes the midrange of the three midtone amounts off each
+  one instead of their mean, a brightening midtone starts from black on a
+  parabola, the saturation slider scales chroma about 0.288 R + 0.712 G, and
+  both vibrance amounts are refitted to Photoshop probes. In a document whose
+  version 2 profile carries a chromatic adaptation tag and a white other than
+  D50, such as Apple's "Display" profiles, vibrance runs in the slightly moved
+  RGB Photoshop reads the profile as. **Rendering change** for documents with
+  these adjustments
 - [fix] Crisp, Strong and Smooth text is antialiased from a 4 x 4 grid of
   point samples per pixel, as Photoshop stores it, instead of the exact area
   under the outline: every rendered type layer changes slightly.
