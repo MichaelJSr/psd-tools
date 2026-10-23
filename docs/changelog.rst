@@ -4,6 +4,11 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] Clip layers blend with their base's colour as if the base were
+  opaque, and the base's transparency then masks the group, so a thin edge no
+  longer shows the clip layer's own colour. A shape layer's vector stroke is
+  drawn over its clip layers. **Rendering change** for clipping groups whose
+  base is partly transparent
 - [fix] A document's composite reads off its stored preview which type layers
   Photoshop blended straight, not in the text gamma, as it does for a raster
   kept through a session; nothing else in the file records it. An export from

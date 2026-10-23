@@ -424,7 +424,7 @@ def test_clip_layers_sub_compositor_uses_the_document_width() -> None:
     """
     compositor = Compositor((0, 0, 2, 2), rgb(WHITE), gray(0.0))
     stub = cast(Any, _ClipStub())
-    result = compositor._apply_clip_layers(stub, gray(0.5), gray(1.0))
+    result = compositor._apply_clip_layers(stub, gray(0.5))
     assert result.shape == (2, 2, 3)
     assert np.array_equal(result, rgb((0.5, 0.5, 0.5)))
 
