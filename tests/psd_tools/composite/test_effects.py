@@ -1262,6 +1262,8 @@ def _erosion_calls(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         return cast(np.ndarray, real_grey_erosion(*args, **kwargs))
 
     monkeypatch.setattr(scipy.ndimage, "grey_erosion", spy)
+    # The paths under test are the numpy ones the compiled loops stand in for.
+    monkeypatch.setattr(effects, "_cdistance", None)
     return calls
 
 
@@ -1279,6 +1281,7 @@ def test_a_hard_step_is_not_eroded(monkeypatch: pytest.MonkeyPatch) -> None:
         return cast(np.ndarray, real_grey_erosion(image, *args, **kwargs))
 
     monkeypatch.setattr(scipy.ndimage, "grey_erosion", spy)
+    monkeypatch.setattr(effects, "_cdistance", None)
     alpha = np.zeros((200, 300), dtype=np.float32)
     alpha[20:180, 20:280] = 1.0
     alpha[20, 150] = 0.5
@@ -2032,3 +2035,21 @@ def test_a_dodging_overlay_on_a_layer_clipped_to_a_group_fades_its_colour(
 def test_a_dodging_overlay_at_full_opacity_is_unfaded() -> None:
     pixels = _dodged_clip(BlendMode.PASS_THROUGH, 1.0)
     assert np.allclose(pixels[16, 16], 1.0)
+
+
+@pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
+@pytest.mark.parametrize(
+    "alpha, reach",
+    [
+        (_antialiased_disc(120, 45.0), 20.0),
+        (_antialiased_disc(400, 190.0), 6.0),
+        (np.pad(np.full((30, 40), 0.5, dtype=np.float32), 12), 9.0),
+    ],
+)
+def test_the_compiled_loops_match_numpy(
+    monkeypatch: pytest.MonkeyPatch, alpha: np.ndarray, reach: float
+) -> None:
+    """The compiled pruned minimum and chamfer transform are bit-identical."""
+    compiled = _signed_distance(alpha, reach)
+    monkeypatch.setattr(effects, "_cdistance", None)
+    assert compiled.tobytes() == _signed_distance(alpha, reach).tobytes()

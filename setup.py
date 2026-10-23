@@ -28,7 +28,15 @@ extensions = [
         extra_compile_args=["/d2FH4-"] if sys.platform == "win32" else [],
         define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
         py_limited_api=use_limited_api,
-    )
+    ),
+    # Bit-identical to the numpy code only without FMA contraction.
+    Extension(
+        "psd_tools.composite._distance",
+        ["src/psd_tools/composite/_distance.pyx"],
+        extra_compile_args=[] if sys.platform == "win32" else ["-ffp-contract=off"],
+        define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
+        py_limited_api=use_limited_api,
+    ),
 ]
 
 

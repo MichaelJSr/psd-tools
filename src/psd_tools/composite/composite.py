@@ -812,6 +812,7 @@ class _PassCache:
     group_alphas: _GroupAlphas = field(default_factory=dict)
     scipy_warned: bool = False
     unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
+    stroke_bands: dict = field(default_factory=dict)
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -864,6 +865,57 @@ def _content_bbox(
             continue
         bbox = utils.union_bbox(bbox, _paint_bbox(child, memo))
     memo[id(group)] = bbox
+    return bbox
+
+
+# Whether a layer is composited on the box it changes rather than the whole
+# viewport, and the largest share of the viewport such a box may cover.
+_LOCAL_BOXES = True
+_LOCAL_SHARE = 0.6
+
+
+def _box_safe(layer: Layer, cache: "_PassCache") -> bool:
+    """Whether everything ``layer`` changes stays inside :py:func:`_change_bbox`.
+
+    A knockout reads a backdrop; a group holding one is composited whole.
+    """
+    memo = cache.__dict__.setdefault("box_safe", {})
+    known = memo.get(id(layer))
+    if known is not None:
+        return known
+    if _read_knockout(layer):
+        safe = False
+    elif layer.is_group():
+        safe = all(_box_safe(child, cache) for child in cast(GroupMixin, layer))
+    else:
+        safe = True
+    memo[id(layer)] = safe
+    return safe
+
+
+def _change_bbox(layer: Layer, cache: "_PassCache") -> tuple[int, int, int, int]:
+    """Every box ``layer`` can change the canvas in.
+
+    Its paint box, plus for an adjustment the box its mask reveals (the
+    adjustments are pointwise), and for a pass-through group the boxes its
+    children change, since an adjustment in it reaches the canvas beneath.
+    """
+    memo = cache.__dict__.setdefault("change_bbox", {})
+    known = memo.get(id(layer))
+    if known is not None:
+        return known
+    # _paint_bbox() spelled out: the content box is the pass's memo, so no
+    # layer is measured twice.
+    bbox = _effect_reach(layer, cache.content_bboxes)
+    if isinstance(layer, GroupMixin):
+        bbox = utils.union_bbox(bbox, _content_bbox(layer, cache.content_bboxes))
+    if isinstance(layer, AdjustmentLayer):
+        bbox = utils.union_bbox(bbox, _style_bbox(layer))
+    elif layer.is_group() and layer.blend_mode == BlendMode.PASS_THROUGH:
+        for child in cast(GroupMixin, layer):
+            if isinstance(child, AdjustmentLayer) or child.is_group():
+                bbox = utils.union_bbox(bbox, _change_bbox(child, cache))
+    memo[id(layer)] = bbox
     return bbox
 
 
@@ -2255,11 +2307,72 @@ class Compositor:
             return
         excluded = _excluded_channels(layer, self._channels)
         if not excluded:
+            box = self._local_box(layer) if _LOCAL_BOXES else None
+            if box is not None:
+                self._apply_in_box(layer, box)
+                return
             self._apply_layer(layer)
             return
         held = self._hold_channels(excluded, clip_compositing)
         self._apply_layer(layer)
         self._restore_channels(held)
+
+    # PROTO(speed): composite a layer on the box it can paint, not the viewport.
+    def _local_box(self, layer: Layer) -> tuple[int, int, int, int] | None:
+        """The box ``layer`` paints within, when compositing it there is safe."""
+        if not _box_safe(layer, self._cache):
+            return None
+        box = utils.intersect(self._viewport, _change_bbox(layer, self._cache))
+        if box == (0, 0, 0, 0):
+            return None
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        if area > _LOCAL_SHARE * self.width * self.height:
+            return None
+        return box
+
+    def _apply_in_box(self, layer: Layer, box: tuple[int, int, int, int]) -> None:
+        """:py:meth:`_apply_layer` on ``box``; the canvases outside it stay as they are."""
+        x0, y0 = self._viewport[0], self._viewport[1]
+        sl = (slice(box[1] - y0, box[3] - y0), slice(box[0] - x0, box[2] - x0))
+        sub = object.__new__(Compositor)
+        sub.__dict__.update(self.__dict__)
+        sub._viewport = box
+        for name in (
+            "_color_0",
+            "_alpha_0",
+            "_color",
+            "_alpha",
+            "_alpha_g",
+            "_shape_g",
+        ):
+            setattr(sub, name, getattr(self, name)[sl])
+        if self._enclosing is not None:
+            sub._enclosing = _Isolation(
+                alpha=self._enclosing.alpha[sl],
+                backdrop_color=self._enclosing.backdrop_color[sl],
+                backdrop_alpha=self._enclosing.backdrop_alpha[sl],
+            )
+        parent_resolve = self._resolve_document_backdrop
+
+        def document_backdrop() -> tuple[np.ndarray, np.ndarray] | None:
+            resolved = parent_resolve()
+            return None if resolved is None else (resolved[0][sl], resolved[1][sl])
+
+        sub._document_backdrop_fn = document_backdrop
+        sub._document_backdrop_resolved = False
+        sub._document_backdrop = None
+        before = {
+            name: getattr(sub, name)
+            for name in ("_color", "_alpha", "_alpha_g", "_shape_g")
+        }
+        sub._apply_layer(layer)
+        for name, old in before.items():
+            new = getattr(sub, name)
+            if new is old:
+                continue
+            canvas = getattr(self, name).copy()
+            canvas[sl] = new
+            setattr(self, name, canvas)
 
     def _apply_layer(self, layer: Layer) -> None:
         """Composite an accepted layer, its effects and its clip layers."""
@@ -3844,7 +3957,9 @@ class Compositor:
                 continue
             traced = self._read_traced(layer, bbox, traces_mask)
             try:
-                band, inside = stroke_band(bbox, traced, effect.descriptor)
+                band, inside = stroke_band(
+                    bbox, traced, effect.descriptor, self._cache.stroke_bands, keep=True
+                )
             except _UNREADABLE as error:
                 logger.debug(
                     "Cannot cut a drop shadow under a stroke of %s: %s", layer, error
@@ -4495,7 +4610,11 @@ class Compositor:
             shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
             try:
                 color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
-                    bbox, shape_in_bbox, effect.descriptor, layer._psd
+                    bbox,
+                    shape_in_bbox,
+                    effect.descriptor,
+                    layer._psd,
+                    self._cache.stroke_bands,
                 )
                 opacity = effect.opacity / 100.0
                 blend_mode = effect.blend_mode
