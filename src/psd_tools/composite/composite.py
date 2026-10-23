@@ -812,6 +812,7 @@ class _PassCache:
     group_alphas: _GroupAlphas = field(default_factory=dict)
     scipy_warned: bool = False
     unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
+    stroke_bands: dict = field(default_factory=dict)
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -3925,7 +3926,9 @@ class Compositor:
                 continue
             traced = self._read_traced(layer, bbox, traces_mask)
             try:
-                band, inside = stroke_band(bbox, traced, effect.descriptor)
+                band, inside = stroke_band(
+                    bbox, traced, effect.descriptor, self._cache.stroke_bands, keep=True
+                )
             except _UNREADABLE as error:
                 logger.debug(
                     "Cannot cut a drop shadow under a stroke of %s: %s", layer, error
@@ -4576,7 +4579,11 @@ class Compositor:
             shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
             try:
                 color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
-                    bbox, shape_in_bbox, effect.descriptor, layer._psd
+                    bbox,
+                    shape_in_bbox,
+                    effect.descriptor,
+                    layer._psd,
+                    self._cache.stroke_bands,
                 )
                 opacity = effect.opacity / 100.0
                 blend_mode = effect.blend_mode
