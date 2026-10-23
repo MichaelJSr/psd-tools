@@ -228,9 +228,18 @@ def _feathered_disc(size: int, radius: float, feather: float) -> np.ndarray:
     return (_disc(size, radius) * quantised[:, :, None]).astype(np.float32)
 
 
-def _grown_and_blurred(
-    shape: np.ndarray, pixels: int, size: float, sigma_per_size: float
-) -> np.ndarray:
+def _box_passes(matte: np.ndarray, width: int, outside: float = 0.0) -> np.ndarray:
+    """``matte`` blurred by two box passes ``width`` pixels wide along each axis."""
+    from scipy.ndimage import convolve1d  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    box = np.ones(width) / width
+    kernel = np.convolve(box, box)
+    for axis in range(2):
+        matte = convolve1d(matte, kernel, axis=axis, mode="constant", cval=outside)
+    return matte
+
+
+def _grown_and_blurred(shape: np.ndarray, pixels: int, size: int) -> np.ndarray:
     """The closed form of a spread shadow cast nowhere.
 
     The covered pixels, grown by ``pixels`` from where their coverage ends
@@ -238,18 +247,14 @@ def _grown_and_blurred(
     full one ends half a pixel past its centre), and then blurred by what
     is left of ``size``.
     """
-    from scipy.ndimage import distance_transform_edt, gaussian_filter  # type: ignore[import-untyped]  # noqa: PLC0415
+    from scipy.ndimage import distance_transform_edt  # type: ignore[import-untyped]  # noqa: PLC0415
 
     alpha = shape[:, :, 0]
     covered = alpha >= effects._SPREAD_FLOOR
     outside, nearest = distance_transform_edt(~covered, return_indices=True)
     rim = alpha[nearest[0], nearest[1]]
     matte = np.where(covered, 1.0, np.clip(pixels + rim - outside, 0.0, 1.0))
-    radius = size - pixels
-    sigma = radius * sigma_per_size
-    return gaussian_filter(
-        matte.astype(np.float32), sigma, mode="constant", truncate=radius / sigma
-    )
+    return _box_passes(matte.astype(np.float64), size - pixels)
 
 
 def test_a_feathered_disc_spread_casts_the_shadow_of_a_hard_one() -> None:
@@ -275,7 +280,7 @@ def test_a_feathered_disc_spread_casts_the_shadow_of_a_hard_one() -> None:
     shadow = effects.draw_drop_shadow((0, 0, 81, 81), soft, **settings)
     pixels = effects._spread_pixels(10.0, 60.0)
     assert pixels == 6
-    expected = _grown_and_blurred(soft, pixels, 10.0, effects._SHADOW_SIGMA_PER_SIZE)
+    expected = _grown_and_blurred(soft, pixels, 10)
     assert np.allclose(shadow[:, :, 0], expected, atol=1e-6)
     # Opaque over the feather and past the rim, and ending where the hard
     # disc's shadow ends, to within the rim pixels' own coverage.
@@ -971,7 +976,7 @@ def test_a_groups_stroke_follows_the_shadow_its_child_casts_past_it(
     stroke = block[Klass.FrameFX]
     stroke[Key.Opacity] = Double(100.0)
     stroke[Key.SizeKey] = Double(4.0)
-    stroke[Key.Style] = Enumerated(Type.FrameFill, Enum.OutsetFrame)
+    stroke[Key.Style] = Enumerated(typeID=Type.FrameStyle, enum=Enum.OutsetFrame)
 
     viewport = (0, 0, 640, 200)
     stroke[Key.Enabled] = False
@@ -1736,20 +1741,50 @@ def test_drop_shadows_render_to_photoshops_preview_when_forced() -> None:
     assert _error(PSDImage.open(full_name("masks.psb")), None, force=True) <= 1.5e-5
 
 
-# The gaussian width per pixel of size that best matches Photoshop's previews,
-# fitted on the shadows the fixtures above cast. A shadow a few pixels wide
-# cannot tell widths apart; the fit is set by the wide ones.
-_FITTED_SIGMA_PER_SIZE = 0.45
+@pytest.mark.parametrize("size", [2, 3, 4, 7, 10])
+def test_a_shadow_blurs_by_two_box_passes_as_wide_as_its_size(size: int) -> None:
+    """The blur is two box passes, a tent that ends a pixel short of ``size``.
 
-
-def test_the_blur_width_is_the_fitted_constant() -> None:
-    """The blur's width is a fit, so a change to it is a measured change.
-
-    Photoshop's blur is not a plain gaussian; a gaussian of this width stands
-    in for it. The fidelity cases above hold the fit to Photoshop's previews;
-    this pins the number itself so that it is not retuned on one fixture.
+    The fidelity cases above hold it to Photoshop's previews, where the wide
+    shadows fix its width; the narrow ones fix where it ends, which only a
+    stroke traced round the shadow shows (the test below).
     """
-    assert effects._SHADOW_SIGMA_PER_SIZE == _FITTED_SIGMA_PER_SIZE
+    shape = _disc(81, 20.0)
+    settings: dict[str, Any] = {"distance": 0.0, "angle": 0.0, "spread": 0.0}
+    shadow = effects.draw_drop_shadow((0, 0, 81, 81), shape, size=size, **settings)
+    expected = _box_passes(shape[:, :, 0].astype(np.float64), size)
+    assert np.allclose(shadow[:, :, 0], expected, atol=1e-6)
+    # Nothing past the tent's reach: the disc's rim is 20 px from its centre.
+    assert float(shadow[40, 40 + 20 + size, 0]) == 0.0
+    assert float(shadow[40, 40 + 20 + size - 1, 0]) > 0.0
+
+
+def test_a_size_two_shadow_ends_where_photoshop_strokes_round_it() -> None:
+    """A stroke traced round a soft shadow starts where the shadow ends.
+
+    The card corpus's text groups carry a 7 px outside stroke round text with
+    its own 2 px shadow cast 4 px down. Below a hard-edged glyph Photoshop's
+    export shows the stroke's last pixel at a quarter coverage, which is the
+    band read off a shadow two pixels deep at three quarters and a quarter. A
+    gaussian's faint third pixel states a boundary of its own and carries the
+    stroke out to fill that pixel.
+    """
+    glyph = np.zeros((40, 9, 1), dtype=np.float32)
+    glyph[:10] = 1.0
+    shadow = effects.draw_drop_shadow(
+        (0, 0, 9, 40), glyph, distance=4.0, angle=90.0, size=2.0, spread=0.0
+    )
+    # The glyph ends between rows 9 and 10 and its shadow between 13 and 14.
+    assert shadow[12:16, 4, 0].tolist() == pytest.approx([1.0, 0.75, 0.25, 0.0])
+    traced = np.maximum(glyph, shadow)
+    stroke = Descriptor()
+    stroke[Key.Style] = Enumerated(typeID=Type.FrameStyle, enum=Enum.OutsetFrame)
+    stroke[Key.SizeKey] = Double(7.0)
+    band, _ = effects.stroke_band((0, 0, 9, 40), traced, stroke)
+    photoshop_last_pixel = 0.25
+    assert float(band[21, 4, 0]) == pytest.approx(photoshop_last_pixel, abs=0.02)
+    assert float(band[20, 4, 0]) == 1.0
+    assert float(band[22, 4, 0]) == 0.0
 
 
 # -- Contour, noise, global light and the allocation guard ------------------ #
