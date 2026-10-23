@@ -18,6 +18,7 @@ from psd_tools.composite.text.fonts import (
     Policy,
     TextRenderError,
 )
+from psd_tools.composite.text.geometry import text_geometry
 from psd_tools.composite.text.layout import Layout
 from psd_tools.composite.text.model import TextModel, Transform
 from psd_tools.composite.text.raster import (
@@ -42,6 +43,7 @@ __all__ = [
     "font_names",
     "render",
     "render_type_layer",
+    "text_geometry",
     "verify",
 ]
 
