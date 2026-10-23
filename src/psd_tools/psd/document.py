@@ -7,6 +7,7 @@ binary structure of a PSD/PSB file.
 
 import logging
 from collections.abc import Generator
+from contextlib import nullcontext
 from typing import IO, Any, Self
 
 from attrs import define, field
@@ -22,6 +23,7 @@ from .layer_and_mask import (
     LayerAndMaskInformation,
     LayerInfo,
 )
+from .lazy import lazy_reads
 from .parse_limits import ParseLimits, parse_context
 
 logger = logging.getLogger(__name__)
@@ -80,10 +82,15 @@ class PSD(BaseElement):
         fp: IO[bytes],
         encoding: str = "macroman",
         parse_limits: ParseLimits | None = None,
+        lazy: bool = False,
         **kwargs: Any,
     ) -> Self:
-        """Read a document with shared structural parsing limits."""
-        with parse_context(parse_limits):
+        """Read a document with shared structural parsing limits.
+
+        :param lazy: leave the channel and image data in ``fp`` until they are
+            used (:py:mod:`psd_tools.psd.lazy`); ``fp`` must stay open.
+        """
+        with parse_context(parse_limits), lazy_reads(fp) if lazy else nullcontext():
             header = FileHeader.read(fp)
             logger.debug(f"read {header}")
             return cls(

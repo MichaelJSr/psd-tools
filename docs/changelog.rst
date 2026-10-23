@@ -63,6 +63,16 @@ Changelog
   built), and engine data and binary fields parse with less overhead. Renders
   are unchanged but for a level here and there where rounding on the smaller
   box differs
+- [api] ``PSDImage.open(fp, lazy=True)`` leaves the layers' channel data, the
+  merged image data and the embedded smart object and smart filter blocks in
+  ``fp`` until something reads them; ``fp`` must stay open. Opening a card
+  then reads its header, resources and layer records, about 1% of its bytes.
+  ``Layer.has_pixels()`` no longer reads the channel data. A payload is
+  checked when it is read, not at the open
+- [api] ``psd_tools.range_reader.RangeReader`` is a seekable file over byte
+  ranges fetched on demand, e.g. HTTP Range requests
+  (``RangeReader.from_url``): with a lazy open a PSD on a web server costs
+  what is read, not the whole file
 - [fix] A Hue/Saturation adjustment no longer turns some near-white pixels
   black and some near-black ones bright: a pixel whose lightness rounds to 0
   or 1 reads as unsaturated instead of infinitely saturated. Only documents
