@@ -1335,7 +1335,9 @@ def _composite(
                 _array_bytes(alpha),
             ]
             if not isinstance(group, PSDImage):
+                # Deep knockout reads the document's bottom layer.
                 seed.append(rcache.layer_key(group, cache.layer_keys))
+                seed.append(rcache.layer_key(cast(Layer, _psd[0]), cache.layer_keys))
                 seed.append(b"%d" % group.is_visible())
 
     compositor = Compositor(

@@ -106,6 +106,20 @@ def test_a_layer_that_starts_clipping_is_not_served_stale() -> None:
     assert np.array_equal(_render(psd, cache), _render(psd, None))
 
 
+def test_a_group_pass_follows_the_background() -> None:
+    # Deep knockout inside a group knocks out to the document's Background.
+    psd = PSDImage.open(full_name("effects/group-clips-child-stroke.psd"))
+    group = psd[1]
+    cache = RenderCache()
+    with cache:
+        composite(group)
+    assert cache.misses["prefix"] == 1
+    psd[0].visible = False
+    with cache:
+        composite(group)
+    assert cache.misses["prefix"] == 2
+
+
 def test_regions_share_group_alphas() -> None:
     path = "effects/group-stroke-off-canvas.psd"
     cache = RenderCache()
