@@ -79,6 +79,7 @@ from psd_tools.composite.text_blend import (
     to_text_space,
 )
 from psd_tools.composite.widen import make_widen
+from psd_tools.compression import PSDDecompressionWarning
 from psd_tools.constants import (
     BevelDirection,
     BevelStyle,
@@ -1391,13 +1392,27 @@ def _excluded_channels(layer: Layer, channels: int) -> list[int]:
 
 
 def _text_reference(psd: PSDImage) -> np.ndarray | None:
-    """The document's stored preview on its canvas, or None without one."""
+    """The document's stored preview, 8-bit, or None without one to read.
+
+    A side read: a preview that does not decode, or that the document's
+    allocation budget does not allow, is not read, and says nothing.
+    """
     if psd.color_mode != ColorMode.RGB or psd.depth == 32 or not psd.has_preview():
         return None
-    preview = psd.numpy()
-    if preview.shape[:2] != (psd.height, psd.width):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            preview = psd.topil(apply_icc=False)
+        except ValueError:
+            return None
+    if preview is None or any(
+        issubclass(warning.category, PSDDecompressionWarning) for warning in caught
+    ):
         return None
-    return preview
+    array = np.asarray(preview)
+    if array.ndim != 3 or array.shape[:2] != (psd.height, psd.width):
+        return None
+    return array
 
 
 def _document_backdrop(
@@ -1716,10 +1731,13 @@ def _edge_evidence(
     if top >= bottom or left >= right:
         return None
     on = (slice(top, bottom), slice(left, right))
-    seen = reference[
-        top + viewport[1] : bottom + viewport[1],
-        left + viewport[0] : right + viewport[0],
-    ]
+    seen = (
+        reference[
+            top + viewport[1] : bottom + viewport[1],
+            left + viewport[0] : right + viewport[0],
+        ]
+        / 255.0
+    )
     channels = canvas.shape[2]
     edge = (alpha[on][..., 0] > 0.0) & (alpha[on][..., 0] < 1.0)
     edge &= alpha_new[on][..., 0] > 0.99
@@ -1771,7 +1789,7 @@ def _settles_straight(
     )
     rows, columns = rows[inside], columns[inside]
     channels = first.shape[2]
-    seen = reference[rows + viewport[1], columns + viewport[0]]
+    seen = reference[rows + viewport[1], columns + viewport[0]] / 255.0
     gamma, straight = first[rows, columns], second[rows, columns]
     read = (alpha[rows, columns, 0] > 0.99) & (
         np.abs(gamma - straight).max(axis=1) > _TEXT_DECISIVE
