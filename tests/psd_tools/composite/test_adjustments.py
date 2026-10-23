@@ -265,13 +265,16 @@ def test_levels_gamma_without_a_toe_is_a_power(gamma: float, lut_size: int) -> N
 def _levels(*records: tuple[int, int, int, int, int]) -> LevelsData:
     """Levels records, master first, the rest at their defaults."""
     rows = [*records, *[(0, 255, 0, 255, 100)] * (29 - len(records))]
-    return LevelsData(items=[LevelRecord(*row) for row in rows], version=2)
+    data = LevelsData(version=2)
+    data.extend(LevelRecord(*row) for row in rows)
+    return data
 
 
 def test_default_levels_leave_an_8_bit_ramp_alone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layer = PSDImage.open(full_name("fill_adjustments.psd"))[5]
+    assert isinstance(layer, adjustments.Levels)
     monkeypatch.setattr(layer, "_data", _levels())
     ramp = np.arange(256, dtype=np.float32) / np.float32(255)
     image = np.repeat(ramp[None, :, None], 3, axis=2)
@@ -284,6 +287,7 @@ def test_a_master_gamma_follows_a_channel_output_range(
 ) -> None:
     """Not folded into a channel that sets its own output range."""
     layer = PSDImage.open(full_name("fill_adjustments.psd"))[5]
+    assert isinstance(layer, adjustments.Levels)
     monkeypatch.setattr(
         layer, "_data", _levels((0, 255, 0, 255, 200), (0, 255, 0, 128, 100))
     )
