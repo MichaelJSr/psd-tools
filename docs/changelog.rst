@@ -4,6 +4,12 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A gradient stroke's ramp is laid out on the layer's pixels over half
+  opaque, grown by the whole pixels the band reaches past them and by one at
+  least, as Photoshop lays it, instead of on the layer's box with its soft
+  tails and a pixel of margin. A group's is laid out on the document, grown
+  the same way. **Rendering change** for gradient strokes on soft-edged
+  layers, inset strokes and groups
 - [fix] Clip layers blend with their base's colour as if the base were
   opaque, and the base's transparency then masks the group, so a thin edge no
   longer shows the clip layer's own colour. A shape layer's vector stroke is

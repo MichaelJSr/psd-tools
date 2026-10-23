@@ -304,6 +304,39 @@ def stroke_bbox(
     return grown
 
 
+def stroke_gradient_box(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    desc: Descriptor,
+    extent: tuple[int, int, int, int] | None = None,
+) -> tuple[int, int, int, int] | None:
+    """The box a stroke's gradient is laid out on, in document coordinates.
+
+    Photoshop lays the ramp on ``extent`` grown by the whole pixels the band
+    reaches past it, and by one at least, which an inset band gets too.
+    ``extent`` defaults to the box of ``shape``'s pixels over half opaque, as
+    a gradient overlay's, so a soft edge's faint tail does not stretch the
+    ramp; ``shape`` is the silhouette on ``viewport``. None, which keeps
+    ``viewport``, when no pixel is that opaque.
+    """
+    if extent is None:
+        opaque = shape[:, :, 0] > 0.5
+        rows = np.flatnonzero(opaque.any(axis=1))
+        if not rows.size:
+            return None
+        columns = np.flatnonzero(opaque.any(axis=0))
+        left, top = viewport[0], viewport[1]
+        extent = (
+            left + int(columns[0]),
+            top + int(rows[0]),
+            left + int(columns[-1]) + 1,
+            top + int(rows[-1]) + 1,
+        )
+    limits = _BANDS.get(_enum(desc, Key.Style), _UNRECOGNISED)
+    grow = max(math.ceil(limits[1] * _stroke_size(desc)), 1)
+    return (extent[0] - grow, extent[1] - grow, extent[2] + grow, extent[3] + grow)
+
+
 def stroke_reach(desc: Descriptor) -> int | None:
     """How far a stroke's band reads from each pixel it covers, in pixels.
 
@@ -727,6 +760,7 @@ def draw_stroke_effect_split(
     shape: np.ndarray,
     desc: Descriptor,
     psd: "PSDProtocol",
+    extent: tuple[int, int, int, int] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """:py:func:`draw_stroke_effect`, with the coverage split at the boundary.
 
@@ -745,6 +779,9 @@ def draw_stroke_effect_split(
 
     The two can be views of one array, since an inset band is the whole of the
     coverage; both are read and neither is written to.
+
+    A gradient is laid out as :py:func:`stroke_gradient_box` lays it, on
+    ``extent`` when given.
     """
     logger.debug("Stroke effect has limited support")
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
@@ -759,8 +796,9 @@ def draw_stroke_effect_split(
         if color is None:
             color = np.ones((height, width, 1))
     elif paint_type == Enum.GradientFill:
+        anchor = stroke_gradient_box(viewport, shape, desc, extent)
         color, _ = paint.draw_gradient_fill(
-            viewport, psd.color_mode, desc, paint.gradient_anchor(psd, desc)
+            viewport, psd.color_mode, desc, paint.gradient_anchor(psd, desc, anchor)
         )
         if color is None:
             color = np.ones((height, width, 1))
