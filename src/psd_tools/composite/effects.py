@@ -146,6 +146,9 @@ _DENSE_EROSION_DENSITY = 0.15
 
 # The lengths of a diagonal and a knight's move, which with an axis move are
 # the steps :py:func:`_chamfer_length` measures in.
+# The largest radius the compiled disk marking takes; past it the transform is cheaper.
+_DISK_REACH_MAX = 64.0
+
 _DIAGONAL = math.sqrt(2.0)
 _KNIGHT = math.sqrt(5.0)
 
@@ -545,7 +548,13 @@ def _nearest_boundary(
     # further than ``span`` from all of them, so the transform on the crop is
     # the transform on the canvas wherever ``active`` can be set.
     active = np.zeros_like(stating)
-    active[crop] = (distance_transform_edt(~stating[crop]) <= radius) & ~stating[crop]
+    if _cdistance is not None and radius <= _DISK_REACH_MAX:
+        near_any = _cdistance.disk_reach(
+            np.ascontiguousarray(stating[crop]).view(np.uint8), float(radius)
+        )
+    else:
+        near_any = distance_transform_edt(~stating[crop]) <= radius
+    active[crop] = near_any & ~stating[crop]
     if not active.any():
         return field
     density = active.sum() / ((r1 - r0) * (c1 - c0))

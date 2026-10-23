@@ -120,3 +120,53 @@ def chamfer_transform(mask, double diag, double knight):
                     if tmp[j] < f[row, j]:
                         f[row, j] = tmp[j]
     return out.astype(np.float32)
+
+
+from libc.math cimport sqrt
+
+
+def disk_reach(cnp.uint8_t[:, ::1] stating, double radius):
+    """Pixels whose Euclidean distance to a stating pixel is at most ``radius``.
+
+    ``distance_transform_edt(~stating) <= radius`` without the transform: the
+    distance is ``sqrt(dy * dy + dx * dx)`` in double either way, so marking
+    each stating pixel's disk is exact.
+    """
+    cdef Py_ssize_t h = stating.shape[0], w = stating.shape[1], y, x, dy, x0, x1, yy, j
+    cdef Py_ssize_t r = <Py_ssize_t>radius + 1
+    cdef Py_ssize_t[::1] reach = np.full(2 * r + 1, -1, dtype=np.intp)
+    cdef Py_ssize_t dx
+    for dy in range(-r, r + 1):
+        dx = -1
+        while sqrt(<double>(dy * dy + (dx + 1) * (dx + 1))) <= radius:
+            dx += 1
+        reach[dy + r] = dx
+    # Each row: +1 where a covered run starts, -1 past its end.
+    cdef cnp.int32_t[:, ::1] runs = np.zeros((h, w + 1), dtype=np.int32)
+    with nogil:
+        for y in range(h):
+            for x in range(w):
+                if not stating[y, x]:
+                    continue
+                for dy in range(-r, r + 1):
+                    yy = y + dy
+                    if yy < 0 or yy >= h or reach[dy + r] < 0:
+                        continue
+                    x0 = x - reach[dy + r]
+                    x1 = x + reach[dy + r] + 1
+                    if x0 < 0:
+                        x0 = 0
+                    if x1 > w:
+                        x1 = w
+                    runs[yy, x0] += 1
+                    runs[yy, x1] -= 1
+    out = np.empty((h, w), dtype=bool)
+    cdef cnp.uint8_t[:, ::1] o = out.view(np.uint8)
+    cdef cnp.int32_t acc
+    with nogil:
+        for y in range(h):
+            acc = 0
+            for j in range(w):
+                acc = acc + runs[y, j]
+                o[y, j] = acc > 0
+    return out
