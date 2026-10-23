@@ -134,6 +134,24 @@ def test_a_subpath_inside_another_cuts_a_hole_whichever_way_it_winds() -> None:
     assert deeper[8, 8] == 1.0
 
 
+def test_the_nonzero_rule_fills_a_subpath_wound_alike() -> None:
+    """SVG's default: only a subpath wound against its neighbour is a hole."""
+    outer = _rectangle(2, 2, 14, 14)
+    inner = _rectangle(5, 5, 11, 11)
+    alike = scanline.fill_coverage([outer, inner], 16, 16, nonzero=True)
+    assert alike.sum() == 144.0
+    against = scanline.fill_coverage(
+        [outer, list(reversed(inner))], 16, 16, nonzero=True
+    )
+    assert against.sum() == 144.0 - 36.0
+    # Partial pixels match the even-odd answer where nothing overlaps.
+    shifted = _rectangle(2.25, 2.5, 13.75, 13.5)
+    assert np.array_equal(
+        scanline.fill_coverage([shifted], 16, 16, nonzero=True),
+        scanline.fill_coverage([shifted], 16, 16),
+    )
+
+
 @pytest.mark.parametrize(
     ("polyline", "area"),
     [
