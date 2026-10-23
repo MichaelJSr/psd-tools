@@ -1,0 +1,10 @@
+Creatures/Other/5 Stars/Bobberlington.psd
+Creatures/Isaac/4 Stars/Dogma.psd
+Creatures/FTL/5 Stars/Royal_Eradicator_Main_Cannon.psd
+Creatures/Kirby/5 Stars/HR-D3.psd
+Creatures/Kirby/5 Stars/Zero_Override.psd
+Auxiliary/Minions/Mini_Doomer.psd
+Creatures/World Of Warcraft/5 Stars/The_Lich_King.psd
+Creatures/Undertale/4 Stars/Jevil.psd
+Items/Active/3 Stars/Star_Cannon.psd
+Items/Heal/3 Stars/Hadal_Stew.psd

@@ -26,14 +26,17 @@ def main():
                 jobs.append((r, i, c, s))
 
     def one(job):
-        r, i, c, s = job
-        name = os.path.basename(s.rstrip("/"))
+        r, i, c, spec = job
+        s, _, envs = spec.partition("@")   # tree@K=V;K2=V2: env for this tree only
+        extra = dict(kv.split("=", 1) for kv in envs.split(";") if kv)
+        name = os.path.basename(s.rstrip("/")) + ("@" + envs if envs else "")
         cmd = [PY, os.path.join(B, "bench_one.py"), mode, c]
         if "--prof" in a:
-            cmd += ["--prof", os.path.join(OUT, tag, f"{name}_{i}_{r}.prof")]
+            cmd += ["--prof", os.path.join(OUT, tag, f"{name.replace(';', '_')}_{i}_{r}.prof")]
         if "--save" in a:
             cmd += ["--save", os.path.join(OUT, tag, f"{name}_{i}.npz")]
-        env = dict(os.environ, PYTHONPATH=os.path.join(s, "src"), PYTHONDONTWRITEBYTECODE="1")
+        path = os.path.join(s, "src") + (":" + os.environ["SPEED_EXTRA_PATH"] if os.environ.get("SPEED_EXTRA_PATH") else "")
+        env = dict(os.environ, PYTHONPATH=path, PYTHONDONTWRITEBYTECODE="1", **extra)
         p = subprocess.run(cmd, env=env, capture_output=True, text=True)
         line = p.stdout.strip().splitlines()[-1] if p.stdout.strip() else json.dumps({"card": c, "error": p.stderr[-400:]})
         d = json.loads(line)

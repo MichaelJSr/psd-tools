@@ -1,5 +1,5 @@
 import sys, time, numpy as np
-sys.path.insert(0, "/Users/michaelsrouji/Documents/Tools/wt/research-speed/_bench/cy")
+sys.path.insert(0, "/Users/michaelsrouji/Documents/Tools/wt/feat-speed/_bench/cy")
 from psd_tools.composite import effects as E
 import _chamfer
 rng = np.random.default_rng(0)

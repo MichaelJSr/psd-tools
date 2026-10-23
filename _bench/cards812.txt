@@ -1,0 +1,812 @@
+Auxiliary/Creatures/Azamoth_the_Possessed_Vessel.psd
+Auxiliary/Creatures/Igor_Roballtowski.psd
+Auxiliary/Creatures/Mettaton_EX.psd
+Auxiliary/Creatures/Mettaton_NEO.psd
+Auxiliary/Creatures/Militron_(No_Armor).psd
+Auxiliary/Creatures/Morpho_Knight.psd
+Auxiliary/Creatures/Shadow_Queen.psd
+Auxiliary/Items/Air_Totem.psd
+Auxiliary/Items/Autopsy_Report.psd
+Auxiliary/Items/Battle_Helmet.psd
+Auxiliary/Items/Battle_Spear.psd
+Auxiliary/Items/Cabbage.psd
+Auxiliary/Items/Crystal_Bits.psd
+Auxiliary/Items/Delicate_Flower.psd
+Auxiliary/Items/Dragon_Mount.psd
+Auxiliary/Items/Dreamshield.psd
+Auxiliary/Items/Dull_Knife.psd
+Auxiliary/Items/Earth_Totem.psd
+Auxiliary/Items/Evil_Cookie.psd
+Auxiliary/Items/Fire_Totem.psd
+Auxiliary/Items/Flame_Bomb.psd
+Auxiliary/Items/Frostmourne.psd
+Auxiliary/Items/Hero_Cap.psd
+Auxiliary/Items/Humphrey's_Belly.psd
+Auxiliary/Items/Inconspicuous_Cake.psd
+Auxiliary/Items/Indoctrination.psd
+Auxiliary/Items/Ingredient_Wondertart.psd
+Auxiliary/Items/Inkhole.psd
+Auxiliary/Items/Joy.psd
+Auxiliary/Items/Krabby_Patty.psd
+Auxiliary/Items/Lit_Bob-omb.psd
+Auxiliary/Items/Love.psd
+Auxiliary/Items/Machine_Gun.psd
+Auxiliary/Items/Magnum_Opus.psd
+Auxiliary/Items/Motivation.psd
+Auxiliary/Items/Nasty_Patty.psd
+Auxiliary/Items/Paint_Bomb.psd
+Auxiliary/Items/Papa's_Cookie.psd
+Auxiliary/Items/Party!.psd
+Auxiliary/Items/Polar_Star.psd
+Auxiliary/Items/Poorly_Drawn_Cabbage.psd
+Auxiliary/Items/Red_Knife.psd
+Auxiliary/Items/Regenerative_Shield.psd
+Auxiliary/Items/Regret.psd
+Auxiliary/Items/Rusty_Knife.psd
+Auxiliary/Items/Salt.psd
+Auxiliary/Items/Shell_Shield.psd
+Auxiliary/Items/Snake.psd
+Auxiliary/Items/Spaghetti.psd
+Auxiliary/Items/Spur.psd
+Auxiliary/Items/Sting_Shard.psd
+Auxiliary/Items/The_Temple_of_Ahn'Qiraj.psd
+Auxiliary/Items/Unbreakable_Strength.psd
+Auxiliary/Items/Unbreakable_heart.psd
+Auxiliary/Items/Water_Totem.psd
+Auxiliary/Minions/Abigail.psd
+Auxiliary/Minions/Abyss_Watcher.psd
+Auxiliary/Minions/Anubisath_Guardian.psd
+Auxiliary/Minions/Armored_Squit.psd
+Auxiliary/Minions/Artemis_Missiles.psd
+Auxiliary/Minions/Astr_Mionion.psd
+Auxiliary/Minions/Blooper_Tentacle.psd
+Auxiliary/Minions/Bugzzy.psd
+Auxiliary/Minions/Bulborb Larva.psd
+Auxiliary/Minions/Burst_Laser_II.psd
+Auxiliary/Minions/Cat.psd
+Auxiliary/Minions/Chomp.psd
+Auxiliary/Minions/Claw.psd
+Auxiliary/Minions/Clot_Black.psd
+Auxiliary/Minions/Clot_Blood.psd
+Auxiliary/Minions/Clot_Bone.psd
+Auxiliary/Minions/Clot_Gold.psd
+Auxiliary/Minions/Clot_White.psd
+Auxiliary/Minions/Corruptor.psd
+Auxiliary/Minions/Dark_Esau.psd
+Auxiliary/Minions/Dark_Tentacle.psd
+Auxiliary/Minions/Delta.psd
+Auxiliary/Minions/Drone.psd
+Auxiliary/Minions/Electro_Probe.psd
+Auxiliary/Minions/Felhunter.psd
+Auxiliary/Minions/Fool_Eater.psd
+Auxiliary/Minions/Fuzzy_Horde.psd
+Auxiliary/Minions/Galacta_Warrior.psd
+Auxiliary/Minions/God_Tamer.psd
+Auxiliary/Minions/Godskin_Apostle.psd
+Auxiliary/Minions/Grimmchild.psd
+Auxiliary/Minions/Grodus_X.psd
+Auxiliary/Minions/Gulka.psd
+Auxiliary/Minions/Hawk.psd
+Auxiliary/Minions/Heavy_Ion.psd
+Auxiliary/Minions/Hook.psd
+Auxiliary/Minions/Ice_Dragon.psd
+Auxiliary/Minions/Imp.psd
+Auxiliary/Minions/Ipsilon.psd
+Auxiliary/Minions/Jack-In-The-Box_Zombie.psd
+Auxiliary/Minions/Jetpack.psd
+Auxiliary/Minions/Lil_Spood.psd
+Auxiliary/Minions/Living_Bread.psd
+Auxiliary/Minions/Lorian.psd
+Auxiliary/Minions/Masher.psd
+Auxiliary/Minions/Massive_Moss_Charger.psd
+Auxiliary/Minions/Matterling.psd
+Auxiliary/Minions/Miasma.psd
+Auxiliary/Minions/Mini_Auto_Croissant.psd
+Auxiliary/Minions/Mini_Bee.psd
+Auxiliary/Minions/Mini_Doomer.psd
+Auxiliary/Minions/Mini_Drill.psd
+Auxiliary/Minions/Mosling.psd
+Auxiliary/Minions/Moss_Charger.psd
+Auxiliary/Minions/Paint_Warrior.psd
+Auxiliary/Minions/Pike_Beam.psd
+Auxiliary/Minions/PoD01Red_Bloon.psd
+Auxiliary/Minions/PoD02Black_Bloon.psd
+Auxiliary/Minions/PoD03White_Bloon.psd
+Auxiliary/Minions/PoD04Zebra_Bloon.psd
+Auxiliary/Minions/PoD05Lead_Bloon.psd
+Auxiliary/Minions/PoD06Rainbow_Bloon.psd
+Auxiliary/Minions/PoD07Ceramic_Bloon.psd
+Auxiliary/Minions/PoD08MOAB.psd
+Auxiliary/Minions/PoD09DDT.psd
+Auxiliary/Minions/PoD10BFB.psd
+Auxiliary/Minions/PoD11ZOMG.psd
+Auxiliary/Minions/PoD12BAD.psd
+Auxiliary/Minions/Polevaulter_Zombie.psd
+Auxiliary/Minions/Primal_Aspid.psd
+Auxiliary/Minions/Qiraji_Soldier.psd
+Auxiliary/Minions/Rapier.psd
+Auxiliary/Minions/Sabre.psd
+Auxiliary/Minions/Shadow_Chopper.psd
+Auxiliary/Minions/Shadow_Duelist.psd
+Auxiliary/Minions/Shadow_Miner.psd
+Auxiliary/Minions/Sharp_Baldur.psd
+Auxiliary/Minions/Sigma.psd
+Auxiliary/Minions/Silithid.psd
+Auxiliary/Minions/Skeleton_Mate.psd
+Auxiliary/Minions/Spawn_of_the_Forbidden_One.psd
+Auxiliary/Minions/Springtrap.psd
+Auxiliary/Minions/Sword.psd
+Auxiliary/Minions/Sword_Knight.psd
+Auxiliary/Minions/Tentacle.psd
+Auxiliary/Minions/Turtle.psd
+Auxiliary/Minions/Voidwalker.psd
+Auxiliary/Minions/Warrior_Dee.psd
+Auxiliary/Minions/Whelp.psd
+Auxiliary/Minions/Wolf.psd
+Auxiliary/Minions/X_Fists.psd
+Auxiliary/Rulebook/0000_Cover.psd
+Auxiliary/Rulebook/0000_Cover_Book.psd
+Auxiliary/Rulebook/00_Table_of_Contents.psd
+Auxiliary/Rulebook/01_Getting_Started.psd
+Auxiliary/Rulebook/02_Abbreviations.psd
+Auxiliary/Rulebook/03_Setting_Up.psd
+Auxiliary/Rulebook/04_Table.psd
+Auxiliary/Rulebook/04_Table2.psd
+Auxiliary/Rulebook/04_Table3.psd
+Auxiliary/Rulebook/04_Table4.psd
+Auxiliary/Rulebook/04_Table5.psd
+Auxiliary/Rulebook/05_Shops.psd
+Auxiliary/Rulebook/06_Reading_Cards.psd
+Auxiliary/Rulebook/06_Reading_Cards2.psd
+Auxiliary/Rulebook/07_Stats1.psd
+Auxiliary/Rulebook/07_Stats2.psd
+Auxiliary/Rulebook/07_Stats3.psd
+Auxiliary/Rulebook/07_Stats4.psd
+Auxiliary/Rulebook/07_Stats5.psd
+Auxiliary/Rulebook/08_Global_Turn.psd
+Auxiliary/Rulebook/09_TakingYourTurn.psd
+Auxiliary/Rulebook/10_Attacking.psd
+Auxiliary/Rulebook/10_Attacking2.psd
+Auxiliary/Rulebook/11_Abilities.psd
+Auxiliary/Rulebook/11_Abilities2.psd
+Auxiliary/Rulebook/11_Abilities3.psd
+Auxiliary/Rulebook/11_Abilities4.psd
+Auxiliary/Rulebook/11_Abilities5.psd
+Auxiliary/Rulebook/11_Abilities6.psd
+Auxiliary/Rulebook/11_Abilities7.psd
+Auxiliary/Rulebook/12_Reactions.psd
+Auxiliary/Rulebook/12_Reactions2.psd
+Auxiliary/Rulebook/12_Reactions3.psd
+Auxiliary/Rulebook/12_Reactions4.psd
+Auxiliary/Rulebook/12_Reactions5.psd
+Auxiliary/Rulebook/13_Items.psd
+Auxiliary/Rulebook/14_Item_Types.psd
+Auxiliary/Rulebook/14_Item_Types2.psd
+Auxiliary/Rulebook/15_Minions.psd
+Auxiliary/Rulebook/16_The_Field.psd
+Auxiliary/Rulebook/16_The_Field2.psd
+Auxiliary/Rulebook/17_Death.psd
+Auxiliary/Rulebook/18_Field_Cards.psd
+Auxiliary/Rulebook/19_Status_Effects.psd
+Auxiliary/Rulebook/19_Status_Effects2.psd
+Auxiliary/Rulebook/20_Creature_Types.psd
+Auxiliary/Rulebook/21_Damage_Types.psd
+Auxiliary/Rulebook/22_Negation.psd
+Auxiliary/Status Effects/Buffs/Diligent_Watch.psd
+Auxiliary/Status Effects/Buffs/Empowered.psd
+Auxiliary/Status Effects/Buffs/Enraged.psd
+Auxiliary/Status Effects/Buffs/Hardened.psd
+Auxiliary/Status Effects/Buffs/Hyper.psd
+Auxiliary/Status Effects/Buffs/Inspired.psd
+Auxiliary/Status Effects/Buffs/Marked For Life.psd
+Auxiliary/Status Effects/Buffs/Peppy.psd
+Auxiliary/Status Effects/Buffs/Regen.psd
+Auxiliary/Status Effects/Buffs/Reinforced.psd
+Auxiliary/Status Effects/Buffs/Thickened.psd
+Auxiliary/Status Effects/Buffs/Vigor.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Blindness.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Burdened.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Burning.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Disgusted.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Enfeebled.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Poison.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Sickness.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Smeckeldorfed.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Smoldering.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Softened.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Stuffed.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Thinned.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Afraid.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Blazing.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Chained.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Chilled.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Confusion.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Edible.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Empty.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Engorged.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Exposed.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Frostbite.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Glued.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Loony.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Paralyzed.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Plague.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Restrained.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Spirit_Flame.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Become_Back_Money.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Cheap.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Corrupted_Blood.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Corruption.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Cursed_Inferno.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Disarmed.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Frozen.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Hexed.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Imprisoned.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Insane.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Pessimism.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Resentful_Glare.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Shell_Shock.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Suffocation.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Condemned.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Contracted.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Curse.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Despair.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Frozen_In_Time.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Hemorrhaging.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Infected.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Marked For Death.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Recursion.psd
+Auxiliary/Status Effects/Debuffs/4 Stars/Withering.psd
+Creatures/BTD/4 Stars/Avatar_Of_Wrath.psd
+Creatures/BTD/5 Stars/Prince_Of_Darkness.psd
+Creatures/Bug Fables/2 Stars/Spuder.psd
+Creatures/Bug Fables/5 Stars/Tanjerin.psd
+Creatures/Crypt/2 Stars/Pot_Full_of_Spiders!.psd
+Creatures/Crypt/2 Stars/Stone_Golem.psd
+Creatures/Crypt/4 Stars/Grief.psd
+Creatures/Cuphead/5 Stars/Chef_Saltbaker.psd
+Creatures/DST/2 Stars/Wilson.psd
+Creatures/DST/3 Stars/Moose_Goose.psd
+Creatures/DST/3 Stars/WX-78.psd
+Creatures/DST/3 Stars/Waxwell.psd
+Creatures/DST/3 Stars/Wendy.psd
+Creatures/DST/3 Stars/Wickerbottom.psd
+Creatures/DST/3 Stars/Wigfrid.psd
+Creatures/DST/4 Stars/Wolfgang.psd
+Creatures/DST/5 Stars/Ancient_Fuelweaver.psd
+Creatures/Everhood/2 Stars/Knight_Lost_A_Lot.psd
+Creatures/Everhood/3 Stars/Zigg.psd
+Creatures/Everhood/4 Stars/Green_Mage.psd
+Creatures/Everhood/4 Stars/Rasta_Beast.psd
+Creatures/Everhood/5 Stars/Chris_&_Jordi.psd
+Creatures/Everhood/5 Stars/Frog.psd
+Creatures/FTL/2 Stars/Mantis.psd
+Creatures/FTL/2 Stars/Zoltan.psd
+Creatures/FTL/4 Stars/Glaive_Main_Cannon.psd
+Creatures/FTL/4 Stars/The_Kestrel.psd
+Creatures/FTL/5 Stars/Royal_Eradicator_Main_Cannon.psd
+Creatures/Fnaf/3 Stars/Balloon_Boy.psd
+Creatures/Fnaf/3 Stars/Mangle.psd
+Creatures/Fnaf/3 Stars/Toy_Bonnie.psd
+Creatures/Fnaf/3 Stars/Toy_Chica.psd
+Creatures/Fnaf/3 Stars/Toy_Freddy.psd
+Creatures/Fnaf/4 Stars/Old_Bonnie.psd
+Creatures/Fnaf/4 Stars/Old_Chica.psd
+Creatures/Fnaf/4 Stars/Old_Foxy.psd
+Creatures/Fnaf/4 Stars/Old_Freddy.psd
+Creatures/Fnaf/5 Stars/Golden_Freddy.psd
+Creatures/Fnaf/5 Stars/The_Man_Behind_The_Slaughter.psd
+Creatures/Fnaf/5 Stars/The_Puppet.psd
+Creatures/Hollow Knight Silksong/4 Stars/Shakra.psd
+Creatures/Hollow Knight/2 Stars/Crystal_Guardian.psd
+Creatures/Hollow Knight/2 Stars/False_Knight.psd
+Creatures/Hollow Knight/3 Stars/Dung_Defender.psd
+Creatures/Hollow Knight/3 Stars/Hive_Knight.psd
+Creatures/Hollow Knight/3 Stars/Mantis_Lords.psd
+Creatures/Hollow Knight/3 Stars/Markoth.psd
+Creatures/Hollow Knight/3 Stars/The_Beast.psd
+Creatures/Hollow Knight/3 Stars/The_Collector.psd
+Creatures/Hollow Knight/3 Stars/Uumuu.psd
+Creatures/Hollow Knight/4 Stars/Dryya.psd
+Creatures/Hollow Knight/4 Stars/Grey_Prince_Zote.psd
+Creatures/Hollow Knight/4 Stars/Hegemol.psd
+Creatures/Hollow Knight/4 Stars/Hornet.psd
+Creatures/Hollow Knight/4 Stars/Isma.psd
+Creatures/Hollow Knight/4 Stars/Lost_Kin.psd
+Creatures/Hollow Knight/4 Stars/Nailsage_Sly.psd
+Creatures/Hollow Knight/4 Stars/Nosk.psd
+Creatures/Hollow Knight/4 Stars/Soul_Master.psd
+Creatures/Hollow Knight/4 Stars/Traitor_Lord.psd
+Creatures/Hollow Knight/4 Stars/White Defender.psd
+Creatures/Hollow Knight/5 Stars/Nightmare_King_Grimm.psd
+Creatures/Hollow Knight/5 Stars/Pure_Vessel.psd
+Creatures/Hollow Knight/5 Stars/The_Radiance.psd
+Creatures/Hollow Knight/5 Stars/Ze'mer.psd
+Creatures/In Sound Mind/2 Stars/Helpful_Mannequin.psd
+Creatures/In Sound Mind/3 Stars/The_Shade.psd
+Creatures/In Sound Mind/3 Stars/The_Watcher.psd
+Creatures/In Sound Mind/4 Stars/The_Bull.psd
+Creatures/In Sound Mind/4 Stars/The_Flash.psd
+Creatures/Isaac/2 Stars/Tainted_Eden.psd
+Creatures/Isaac/2 Stars/Tainted_Lost.psd
+Creatures/Isaac/3 Stars/Tainted_Isaac.psd
+Creatures/Isaac/3 Stars/Tainted_Jacob.psd
+Creatures/Isaac/3 Stars/Tainted_Lazarus.psd
+Creatures/Isaac/3 Stars/Tainted_Magdalene.psd
+Creatures/Isaac/4 Stars/Dogma.psd
+Creatures/Isaac/4 Stars/Tainted_Bethany.psd
+Creatures/Isaac/4 Stars/Tainted_Eve.psd
+Creatures/Isaac/4 Stars/Tainted_Keeper.psd
+Creatures/Kirby/2 Stars/Acro.psd
+Creatures/Kirby/2 Stars/Whispy_Woods.psd
+Creatures/Kirby/3 Stars/Computer_Virus.psd
+Creatures/Kirby/3 Stars/Dark_Matter_Swordsman.psd
+Creatures/Kirby/3 Stars/Dark_matter.psd
+Creatures/Kirby/3 Stars/Daroach.psd
+Creatures/Kirby/3 Stars/Doc.psd
+Creatures/Kirby/3 Stars/Drawcia.psd
+Creatures/Kirby/3 Stars/Fatty_Whale.psd
+Creatures/Kirby/3 Stars/Final_Dark_Mind_Eye.psd
+Creatures/Kirby/3 Stars/Halberd_Main_Cannon.psd
+Creatures/Kirby/3 Stars/Halberd_Reactor.psd
+Creatures/Kirby/3 Stars/Heavy_Lobster.psd
+Creatures/Kirby/3 Stars/Heavy_Mole.psd
+Creatures/Kirby/3 Stars/Holo_Defense_API.psd
+Creatures/Kirby/3 Stars/Kabula.psd
+Creatures/Kirby/3 Stars/Kracko.psd
+Creatures/Kirby/3 Stars/Magolor.psd
+Creatures/Kirby/3 Stars/Master_Hand.psd
+Creatures/Kirby/3 Stars/Mega_Titan.psd
+Creatures/Kirby/3 Stars/Metal_General.psd
+Creatures/Kirby/3 Stars/Miracle_Matter.psd
+Creatures/Kirby/3 Stars/Pix.psd
+Creatures/Kirby/3 Stars/Retro_Kirby.psd
+Creatures/Kirby/3 Stars/Skullord.psd
+Creatures/Kirby/3 Stars/Spinni.psd
+Creatures/Kirby/3 Stars/Storo.psd
+Creatures/Kirby/3 Stars/Taranza.psd
+Creatures/Kirby/3 Stars/Waddle_Dee.psd
+Creatures/Kirby/3 Stars/Wham_Bam_Rock.psd
+Creatures/Kirby/4 Stars/Dark_Daroach.psd
+Creatures/Kirby/4 Stars/Dark_Mind.psd
+Creatures/Kirby/4 Stars/Dark_Nebula.psd
+Creatures/Kirby/4 Stars/Drawcia_Soul.psd
+Creatures/Kirby/4 Stars/Dyna_Blade.psd
+Creatures/Kirby/4 Stars/King_Dedede.psd
+Creatures/Kirby/4 Stars/Lor_Starcutter.psd
+Creatures/Kirby/4 Stars/Meta_Knight.psd
+Creatures/Kirby/4 Stars/NME_Salesman.psd
+Creatures/Kirby/4 Stars/Wham_Bam_Bone.psd
+Creatures/Kirby/4 Stars/Wham_Bam_Jewel.psd
+Creatures/Kirby/4 Stars/Zero.psd
+Creatures/Kirby/4 Stars/grand_doomer.psd
+Creatures/Kirby/4 Stars/hr-h.psd
+Creatures/Kirby/5 Stars/Butterfly.psd
+Creatures/Kirby/5 Stars/Crowned_Magolor.psd
+Creatures/Kirby/5 Stars/Dark_Mind_Eye.psd
+Creatures/Kirby/5 Stars/Galacta_Knight.psd
+Creatures/Kirby/5 Stars/HR-D3.psd
+Creatures/Kirby/5 Stars/Landia.psd
+Creatures/Kirby/5 Stars/Marx.psd
+Creatures/Kirby/5 Stars/Masked_Dedede.psd
+Creatures/Kirby/5 Stars/Necrodeus.psd
+Creatures/Kirby/5 Stars/Nightmare.psd
+Creatures/Kirby/5 Stars/Star_Dream.psd
+Creatures/Kirby/5 Stars/Yin_Yarn.psd
+Creatures/Kirby/5 Stars/Zero_Override.psd
+Creatures/Kirby/5 Stars/Zero_Two.psd
+Creatures/Lisa/2 Stars/Terry_Hintz.psd
+Creatures/Lisa/3 Stars/Joel_Miller.psd
+Creatures/Lisa/4 Stars/Brad_Armstrong.psd
+Creatures/Lisa/4 Stars/Buzzo.psd
+Creatures/Mario/2 Stars/Block_Hopper.psd
+Creatures/Mario/2 Stars/Bob-ulk.psd
+Creatures/Mario/2 Stars/Gold_Fuzzy.psd
+Creatures/Mario/2 Stars/Goombella.psd
+Creatures/Mario/2 Stars/Gooper_Blooper.psd
+Creatures/Mario/2 Stars/Hooktail.psd
+Creatures/Mario/2 Stars/Koops.psd
+Creatures/Mario/2 Stars/Magnus_Von_Grapple.psd
+Creatures/Mario/2 Stars/Ms_Mowz.psd
+Creatures/Mario/2 Stars/Yoshi_Kid.psd
+Creatures/Mario/3 Stars/Beldam.psd
+Creatures/Mario/3 Stars/Bobbery.psd
+Creatures/Mario/3 Stars/Flurrie.psd
+Creatures/Mario/3 Stars/King_Bob-omb.psd
+Creatures/Mario/3 Stars/Lord_Crump.psd
+Creatures/Mario/3 Stars/Marilyn.psd
+Creatures/Mario/3 Stars/Raw_Cock.psd
+Creatures/Mario/3 Stars/Sniffle_Thwomp.psd
+Creatures/Mario/3 Stars/Tutankoopa.psd
+Creatures/Mario/3 Stars/Vivian.psd
+Creatures/Mario/4 Stars/Cortez.psd
+Creatures/Mario/4 Stars/Crystal_King.psd
+Creatures/Mario/4 Stars/DooPliss.psd
+Creatures/Mario/4 Stars/Fawful.psd
+Creatures/Mario/4 Stars/Macho_Grubba.psd
+Creatures/Mario/4 Stars/Sir_Grodus.psd
+Creatures/Mario/4 Stars/Smorg.psd
+Creatures/Mario/5 Stars/The_Master.psd
+Creatures/Monkey D Folder/2 Stars/Mol_D_Truffy.psd
+Creatures/Monkey D Folder/2 Stars/Monkey_D_Pression.psd
+Creatures/Monkey D Folder/2 Stars/Whippy_D_Cream.psd
+Creatures/Monkey D Folder/3 Stars/Monkey_D_Letion.psd
+Creatures/Monkey D Folder/3 Stars/Pan_D_Luffy.psd
+Creatures/Monkey D Folder/3 Stars/Wokey_D_pronouns.psd
+Creatures/Monkey D Folder/4 Stars/Funky_D_Luffy.psd
+Creatures/Monkey D Folder/4 Stars/Monkey_D_Goofy.psd
+Creatures/Monkey D Folder/4 Stars/Monkey_D_Vour.psd
+Creatures/Omori/2 Stars/The_Maverick.psd
+Creatures/Omori/3 Stars/Captain_Spaceboy.psd
+Creatures/Omori/3 Stars/Kel.psd
+Creatures/Omori/3 Stars/Mr_Jawsum.psd
+Creatures/Omori/3 Stars/Nefarious_Chip.psd
+Creatures/Omori/3 Stars/Papa_Chip.psd
+Creatures/Omori/3 Stars/SOMETHING.psd
+Creatures/Omori/3 Stars/Shattered_Omori.psd
+Creatures/Omori/3 Stars/Snow_Angel.psd
+Creatures/Omori/3 Stars/Sweetheart.psd
+Creatures/Omori/4 Stars/Acrophobia.psd
+Creatures/Omori/4 Stars/Arachnophobia.psd
+Creatures/Omori/4 Stars/Mari.psd
+Creatures/Omori/4 Stars/Stranger.psd
+Creatures/Omori/4 Stars/Thalassophobia.psd
+Creatures/Omori/4 Stars/Unbread_Twins.psd
+Creatures/Omori/5 Stars/ABBI.psd
+Creatures/Omori/5 Stars/Humphrey.psd
+Creatures/Omori/5 Stars/The_Big_Yellow_Cat.psd
+Creatures/Omori/5 Stars/omori.psd
+Creatures/Other/2 Stars/Auto_Croissant.psd
+Creatures/Other/2 Stars/Barry_The_Barrel.psd
+Creatures/Other/2 Stars/Future_Niiue.psd
+Creatures/Other/2 Stars/Igor_Robotowski.psd
+Creatures/Other/2 Stars/Little_Guy.psd
+Creatures/Other/2 Stars/Slugcat.psd
+Creatures/Other/2 Stars/Stotch.psd
+Creatures/Other/2 Stars/Stubborn_King.psd
+Creatures/Other/3 Stars/Elmadan.psd
+Creatures/Other/3 Stars/Empress Bulblax.psd
+Creatures/Other/3 Stars/Grimora.psd
+Creatures/Other/3 Stars/John_Ward.psd
+Creatures/Other/3 Stars/King_Harkinian.psd
+Creatures/Other/3 Stars/Niko.psd
+Creatures/Other/3 Stars/Overseer.psd
+Creatures/Other/3 Stars/Pizza.psd
+Creatures/Other/3 Stars/Puzzled_Cat.psd
+Creatures/Other/3 Stars/Stay.psd
+Creatures/Other/3 Stars/Supreme_Jeh'Oul.psd
+Creatures/Other/3 Stars/The_Last_Cabbage_Merchant.psd
+Creatures/Other/3 Stars/The_Patients.psd
+Creatures/Other/4 Stars/Astr_Meiana.psd
+Creatures/Other/4 Stars/Katarina.psd
+Creatures/Other/4 Stars/Miles_Edgeworth.psd
+Creatures/Other/4 Stars/Militron.psd
+Creatures/Other/4 Stars/Morshu.psd
+Creatures/Other/4 Stars/Mr_Krabs.psd
+Creatures/Other/4 Stars/Nasus.psd
+Creatures/Other/4 Stars/Quote.psd
+Creatures/Other/4 Stars/Sonic.psd
+Creatures/Other/4 Stars/Tai_Lung.psd
+Creatures/Other/4 Stars/The_Kingchin.psd
+Creatures/Other/5 Stars/Alex_YIIK.psd
+Creatures/Other/5 Stars/Baba.psd
+Creatures/Other/5 Stars/Bobberlington.psd
+Creatures/Other/5 Stars/Croissant.psd
+Creatures/Other/5 Stars/Doctor_Zomboss.psd
+Creatures/Other/5 Stars/Gandhi.psd
+Creatures/Other/5 Stars/Koro-Sensei.psd
+Creatures/Other/5 Stars/Kyle.psd
+Creatures/Other/5 Stars/Leshy.psd
+Creatures/Other/5 Stars/Michael.psd
+Creatures/Other/5 Stars/Niiue.psd
+Creatures/Other/5 Stars/The_Forbidden_One.psd
+Creatures/Other/5 Stars/The_Queen.psd
+Creatures/Other/5 Stars/The_Thin_Man.psd
+Creatures/Other/5 Stars/Tyler.psd
+Creatures/Other/5 Stars/Z!!!!!.psd
+Creatures/Pandas/2 Stars/Assault_Panda.psd
+Creatures/Pandas/2 Stars/Minecraft_Panda.psd
+Creatures/Pandas/2 Stars/Panda.psd
+Creatures/Pandas/2 Stars/Pandanoko.psd
+Creatures/Pandas/2 Stars/Peter_Panda.psd
+Creatures/Pandas/2 Stars/YIIK_Panda.psd
+Creatures/Pandas/2 Stars/Zompanda.psd
+Creatures/Pandas/3 Stars/Defcon_Panda.psd
+Creatures/Pandas/3 Stars/P.A.N.D.A._Mk_A.psd
+Creatures/Pandas/3 Stars/P.A.N.D.A._Mk_F.psd
+Creatures/Pandas/3 Stars/P.A.N.D.A._Mk_T.psd
+Creatures/Pandas/3 Stars/Pandabal.psd
+Creatures/Pandas/3 Stars/Panseida.psd
+Creatures/Pandas/3 Stars/Project_P.A.N.D.A.psd
+Creatures/Pandas/3 Stars/Shield_Master_Pi.psd
+Creatures/Pandas/3 Stars/Sumo_Panda.psd
+Creatures/Pandas/4 Stars/Groda.psd
+Creatures/Pandas/4 Stars/Pandevourer.psd
+Creatures/Pandas/4 Stars/Po.psd
+Creatures/Pandas/5 Stars/Pandora.psd
+Creatures/R.E.P.O/2 Stars/Apex_Predator.psd
+Creatures/ROTMG/4 Stars/Oryx_the_Exalted_God.psd
+Creatures/ROTMG/5 Stars/Azamoth_the_Forgotten_King.psd
+Creatures/Souls/3 Stars/The_Abyss_Watchers.psd
+Creatures/Souls/4 Stars/Godskin_Noble.psd
+Creatures/Souls/4 Stars/Pontiff_Sulyvahn.psd
+Creatures/Souls/5 Stars/Lothric.psd
+Creatures/Undertale/3 Stars/BergenTRUCK.psd
+Creatures/Undertale/3 Stars/Martlet.psd
+Creatures/Undertale/3 Stars/Papyrus.psd
+Creatures/Undertale/4 Stars/Jevil.psd
+Creatures/Undertale/4 Stars/Mettaton.psd
+Creatures/Undertale/4 Stars/Toriel.psd
+Creatures/Undertale/4 Stars/Undyne.psd
+Creatures/Undertale/5 Stars/Sans.psd
+Creatures/Undertale/5 Stars/Spamton_Neo.psd
+Creatures/Undertale/5 Stars/Zenith_Martlet.psd
+Creatures/World Of Warcraft/3 Stars/Leeroy_Jenkins.psd
+Creatures/World Of Warcraft/4 Stars/Kalecgos.psd
+Creatures/World Of Warcraft/4 Stars/Twin_Emperors.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Druid.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Hunter.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Mage.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Paladin.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Priest.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Rogue.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Shaman.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Warlock.psd
+Creatures/World Of Warcraft/4 Stars/Warcraftian_Warrior.psd
+Creatures/World Of Warcraft/5 Stars/The_Lich_King.psd
+Field/1 Stars/Bench.psd
+Field/1 Stars/Cloud_Soiree.psd
+Field/1 Stars/Forgotten_Crossroads.psd
+Field/1 Stars/Keelhaul Key.psd
+Field/1 Stars/Pandora's_Gym.psd
+Field/1 Stars/Resting_Grounds.psd
+Field/1 Stars/Rogueport.psd
+Field/1 Stars/The_Freezer.psd
+Field/1 Stars/The_Ringed_City.psd
+Field/2 Stars/Asteroid_Field.psd
+Field/2 Stars/Boggly_Woods.psd
+Field/2 Stars/Crystal_Peak.psd
+Field/2 Stars/Dimension_D.psd
+Field/2 Stars/E._Gadd's_Garage.psd
+Field/2 Stars/Fahr_Outpost.psd
+Field/2 Stars/Fog_Canyon.psd
+Field/2 Stars/Forsaken_City.psd
+Field/2 Stars/Greenpath.psd
+Field/2 Stars/Hooktail_Castle.psd
+Field/2 Stars/Irithyll.psd
+Field/2 Stars/Soul_Sanctum.psd
+Field/2 Stars/Stingy's_Floor_And_Ceiling.psd
+Field/2 Stars/The_Core.psd
+Field/2 Stars/The_Farlands.psd
+Field/2 Stars/Trick_Room.psd
+Field/2 Stars/Twilit_Woods.psd
+Field/2 Stars/Utica_Stock_Exchange.psd
+Field/3 Stars/Colosseum_Of_Fools.psd
+Field/3 Stars/Deepnest.psd
+Field/3 Stars/Elemental_World.psd
+Field/3 Stars/Excess Express.psd
+Field/3 Stars/Glitz_Pit.psd
+Field/3 Stars/Infected_Crossroads.psd
+Field/3 Stars/Nebulous_Precipice.psd
+Field/3 Stars/Rock_Bottom.psd
+Field/3 Stars/The_Krusty_Krab.psd
+Field/3 Stars/The_Plaguelands.psd
+Field/3 Stars/The_Spire.psd
+Field/3 Stars/White_Space.psd
+Field/4 Stars/Cave_Of_The_Past.psd
+Field/4 Stars/Dark_Bramble.psd
+Field/4 Stars/Error_Room.psd
+Field/4 Stars/Hot_Spring.psd
+Field/4 Stars/Palace_of_Shadow.psd
+Field/4 Stars/The_Gates_of_Ahn'Qiraj.psd
+Field/4 Stars/The_Hive.psd
+Field/4 Stars/The_Maelstrom.psd
+Field/4 Stars/The_Panda_Future.psd
+Field/4 Stars/The_Structure.psd
+Items/Active/2 Stars/Clock.psd
+Items/Active/2 Stars/Dirty_Bed.psd
+Items/Active/3 Stars/Ancient_Altar.psd
+Items/Active/3 Stars/Black_Light_Bulb.psd
+Items/Active/3 Stars/Blank_Card.psd
+Items/Active/3 Stars/Star_Cannon.psd
+Items/Active/3 Stars/The Orb of Confusion.psd
+Items/Active/4 Stars/Blockade.psd
+Items/Active/4 Stars/Pandamonium.psd
+Items/Attack/1 Stars/Bleach.psd
+Items/Attack/1 Stars/Mighty_Pebble.psd
+Items/Attack/2 Stars/Bomb.psd
+Items/Attack/2 Stars/Firebomb.psd
+Items/Attack/2 Stars/Ice_Bomb.psd
+Items/Attack/2 Stars/Pie.psd
+Items/Attack/2 Stars/Zess_Dynamite.psd
+Items/Attack/3 Stars/Big_Bomb.psd
+Items/Attack/3 Stars/Blood_Bomb.psd
+Items/Attack/3 Stars/Burly_Bomb.psd
+Items/Attack/3 Stars/Fireball.psd
+Items/Attack/3 Stars/Lightning_Bolt.psd
+Items/Attack/3 Stars/POW_Block.psd
+Items/Attack/3 Stars/Shooting_Star.psd
+Items/Attack/4 Stars/Dynamite.psd
+Items/Attack/4 Stars/Golden_Bomb.psd
+Items/Counter/1 Stars/Poison_Trap.psd
+Items/Counter/1 Stars/Wooden_Spikes.psd
+Items/Counter/2 Stars/Stone_Spikes.psd
+Items/Counter/3 Stars/Crystal_Spikes.psd
+Items/Counter/3 Stars/Flame_Trap.psd
+Items/Counter/3 Stars/Iron_Spikes.psd
+Items/Counter/3 Stars/Spiky_Ball_Trap.psd
+Items/Counter/3 Stars/You_are_going_DOWN_you_Sputnik!.psd
+Items/Counter/4 Stars/Return_To_Sender.psd
+Items/Deploy/1 Stars/Poison_Circle.psd
+Items/Deploy/2 Stars/Ominous_Red_Circle.psd
+Items/Deploy/2 Stars/Pananda Peel.psd
+Items/Equip/1 Stars/Boko_Club.psd
+Items/Equip/1 Stars/Bone's Loans.psd
+Items/Equip/1 Stars/Copper_Sword.psd
+Items/Equip/1 Stars/GrubSong.psd
+Items/Equip/1 Stars/Lazy_Worm.psd
+Items/Equip/1 Stars/Leaf_Shield.psd
+Items/Equip/1 Stars/Pillow.psd
+Items/Equip/1 Stars/Shellphone.psd
+Items/Equip/1 Stars/Steady_Body.psd
+Items/Equip/2 Stars/Basic_Shield.psd
+Items/Equip/2 Stars/Berserk!.psd
+Items/Equip/2 Stars/Charge.psd
+Items/Equip/2 Stars/Danger_Badges.psd
+Items/Equip/2 Stars/Dead_Orchid_Children.psd
+Items/Equip/2 Stars/Door_Shield.psd
+Items/Equip/2 Stars/Fire_Staff.psd
+Items/Equip/2 Stars/Glowing_Womb.psd
+Items/Equip/2 Stars/Heavy_Blow.psd
+Items/Equip/2 Stars/Holy_Card.psd
+Items/Equip/2 Stars/Ice_Staff.psd
+Items/Equip/2 Stars/Iron_Sword.psd
+Items/Equip/2 Stars/Man_Serpent_Shield.psd
+Items/Equip/2 Stars/Soul_of_Eden.psd
+Items/Equip/2 Stars/SpiralHorn_Shield.psd
+Items/Equip/2 Stars/Thorns_Of_Agony.psd
+Items/Equip/2 Stars/Tomorrow_I'll.psd
+Items/Equip/3 Stars/Adrenaline.psd
+Items/Equip/3 Stars/Charm_Of_The_Vampire.psd
+Items/Equip/3 Stars/Dark_Sword.psd
+Items/Equip/3 Stars/Dashmaster.psd
+Items/Equip/3 Stars/Deep_Focus.psd
+Items/Equip/3 Stars/Flameblade.psd
+Items/Equip/3 Stars/Fragile_Heart.psd
+Items/Equip/3 Stars/Fragile_Strength.psd
+Items/Equip/3 Stars/Hiveblood.psd
+Items/Equip/3 Stars/Inner_Eye.psd
+Items/Equip/3 Stars/Maggy's_Bow.psd
+Items/Equip/3 Stars/Magic_Hammer.psd
+Items/Equip/3 Stars/Mechanical_Shield.psd
+Items/Equip/3 Stars/Metal_Shield.psd
+Items/Equip/3 Stars/Newspaper.psd
+Items/Equip/3 Stars/Piko_Piko_Hammer.psd
+Items/Equip/3 Stars/Poison_Shiv.psd
+Items/Equip/3 Stars/Quick_Slash.psd
+Items/Equip/3 Stars/Shield_of_the_Guilty.psd
+Items/Equip/3 Stars/Shiny_Knife.psd
+Items/Equip/3 Stars/Stalwart_Shell.psd
+Items/Equip/3 Stars/Titanium_Sword.psd
+Items/Equip/3 Stars/steam_sale.psd
+Items/Equip/4 Stars/Binge_Eater.psd
+Items/Equip/4 Stars/Blasphemous Blade.psd
+Items/Equip/4 Stars/Dad's_Ring.psd
+Items/Equip/4 Stars/Dark_Ritual.psd
+Items/Equip/4 Stars/Godhead.psd
+Items/Equip/4 Stars/Holy_Blade.psd
+Items/Equip/4 Stars/Holy_Mantle.psd
+Items/Equip/4 Stars/Kingsoul.psd
+Items/Equip/4 Stars/Magic_Shield.psd
+Items/Equip/4 Stars/Mom's_Knife.psd
+Items/Equip/4 Stars/Nuclear_Proliferation.psd
+Items/Equip/4 Stars/Sacred_Heart.psd
+Items/Equip/4 Stars/Shield_of_Ogmur.psd
+Items/Equip/4 Stars/Sword_of_Aeons.psd
+Items/Equip/4 Stars/Thunderfury_Blessed_Blade_of_the_Windseeker.psd
+Items/Equip/4 Stars/Time_Riddle.psd
+Items/Heal/1 Stars/Bolts_and_Screws.psd
+Items/Heal/1 Stars/Candy_Corn.psd
+Items/Heal/1 Stars/Ingredient_Desert_Limes.psd
+Items/Heal/1 Stars/Monster_Meat.psd
+Items/Heal/1 Stars/Potato.psd
+Items/Heal/1 Stars/Tomato.psd
+Items/Heal/2 Stars/A_Snack.psd
+Items/Heal/2 Stars/All_Purpose_Medical_Kit.psd
+Items/Heal/2 Stars/Cake_Mix.psd
+Items/Heal/2 Stars/Grapes.psd
+Items/Heal/2 Stars/Ingredient_Gnome_Berries.psd
+Items/Heal/2 Stars/Ingredient_Icy_Sugar_Cubes.psd
+Items/Heal/2 Stars/Ingredient_Pineapple_Mint.psd
+Items/Heal/2 Stars/Mushroom.psd
+Items/Heal/2 Stars/Pep_Drink.psd
+Items/Heal/2 Stars/Pepperoni_Pizza.psd
+Items/Heal/2 Stars/Regeneration_Potion.psd
+Items/Heal/2 Stars/Sandwich_of_Rejects.psd
+Items/Heal/2 Stars/Snow_Bunny.psd
+Items/Heal/2 Stars/Strawberry_Shortcake.psd
+Items/Heal/2 Stars/The_Chicken.psd
+Items/Heal/2 Stars/Thunder_Thighs.psd
+Items/Heal/2 Stars/Watermelon.psd
+Items/Heal/3 Stars/Bucket_Of_Lard.psd
+Items/Heal/3 Stars/Dumplings.psd
+Items/Heal/3 Stars/Feast.psd
+Items/Heal/3 Stars/Hadal_Stew.psd
+Items/Heal/3 Stars/Healing_Ritual.psd
+Items/Heal/3 Stars/Ingredient_Distillery_Dough.psd
+Items/Heal/3 Stars/Life_Shroom.psd
+Items/Heal/3 Stars/Maxim_Tomato.psd
+Items/Heal/3 Stars/Squash_Candy.psd
+Items/Heal/3 Stars/Super_Shroom.psd
+Items/Heal/3 Stars/Wand_of_Obesity.psd
+Items/Heal/4 Stars/Zess_T_Deluxe.psd
+Items/Infliction/1 Stars/Smoke_Bomb.psd
+Items/Infliction/2 Stars/Bag_of_Evil.psd
+Items/Infliction/2 Stars/Mr_Softener.psd
+Items/Infliction/3 Stars/Flower_Of_Decay.psd
+Items/Infliction/3 Stars/Freeze_Spell.psd
+Items/Infliction/3 Stars/Ice_Storm.psd
+Items/Infliction/3 Stars/Mystery_Gift.psd
+Items/Infliction/4 Stars/Crimson_Flag.psd
+Items/Infliction/4 Stars/Pandora's_Box.psd
+Items/Infliction/4 Stars/Standstill.psd
+Items/Negation/2 Stars/Metronome.psd
+Items/Negation/2 Stars/Stopwatch.psd
+Items/Negation/3 Stars/Ancient_Stopwatch.psd
+Items/Negation/3 Stars/Impassable_Obstruction.psd
+Items/Negation/4 Stars/Golden_Metronome.psd
+Items/Support/1 Stars/Back In Time Juice.psd
+Items/Support/1 Stars/Consolation_Prize.psd
+Items/Support/1 Stars/Dr_Robotnik's_Roboticizer.psd
+Items/Support/2 Stars/Bag_of_Good.psd
+Items/Support/2 Stars/Cancer.psd
+Items/Support/2 Stars/Erasure.psd
+Items/Support/2 Stars/Gasoline.psd
+Items/Support/2 Stars/Gust_of_Wind.psd
+Items/Support/2 Stars/NME_Stock.psd
+Items/Support/2 Stars/Reverse_Mushroom.psd
+Items/Support/2 Stars/Spice.psd
+Items/Support/2 Stars/Spicy_Spray.psd
+Items/Support/2 Stars/The_Hydrant.psd
+Items/Support/2 Stars/Volt_Shroom.psd
+Items/Support/3 Stars/Blood_Ritual.psd
+Items/Support/3 Stars/Blue_Marker.psd
+Items/Support/3 Stars/Credit_Card.psd
+Items/Support/3 Stars/Energy_Ritual.psd
+Items/Support/3 Stars/Forget_Me_Now.psd
+Items/Support/3 Stars/Halo.psd
+Items/Support/3 Stars/Life_Link.psd
+Items/Support/3 Stars/Portal.psd
+Items/Support/3 Stars/Reflection.psd
+Items/Support/3 Stars/Scapular.psd
+Items/Support/3 Stars/Second_Wind.psd
+Items/Support/3 Stars/Shia_Surprise!.psd
+Items/Support/4 Stars/Amazing_Mirror.psd
+Items/Support/4 Stars/Flip.psd
+Items/Support/4 Stars/Mimic.psd
+Items/Support/4 Stars/Pile_Of_Swords.psd
+N.M.E/Black Hole.psd
+N.M.E/Bubble.psd
+N.M.E/Crock_Pot.psd
+N.M.E/Double_Pain.psd
+N.M.E/Duel_Flag.psd
+N.M.E/Electric_Dart.psd
+N.M.E/How_To_Jump.psd
+N.M.E/Jera.psd
+N.M.E/Magnet-shroom.psd
+N.M.E/Metronome_Lite.psd
+N.M.E/Michael's_Blessing.psd
+N.M.E/Minion_Dematerializer.psd
+N.M.E/Paintbrush.psd
+N.M.E/Remote_Detonator.psd
+N.M.E/Rope.psd
+N.M.E/Sigil_of_Divinity.psd
+N.M.E/Staff_of_Purity.psd
+N.M.E/Star_Jar.psd
+N.M.E/Star_Scraper.psd
+N.M.E/Termination_Shock.psd
+N.M.E/The_Bagel.psd
+N.M.E/The_Bank.psd
+N.M.E/The_Claw.psd
+N.M.E/The_Evil,_Fricked_Up_Cursed_Idol.psd
+N.M.E/Whacka_Bump.psd
+N.M.E/chuckya.psd

@@ -1,0 +1,60 @@
+Auxiliary/Items/Crystal_Bits.psd
+Auxiliary/Items/Indoctrination.psd
+Auxiliary/Items/Party!.psd
+Auxiliary/Items/The_Temple_of_Ahn'Qiraj.psd
+Auxiliary/Minions/Bulborb Larva.psd
+Auxiliary/Minions/Delta.psd
+Auxiliary/Minions/Heavy_Ion.psd
+Auxiliary/Minions/Miasma.psd
+Auxiliary/Minions/PoD05Lead_Bloon.psd
+Auxiliary/Minions/Shadow_Chopper.psd
+Auxiliary/Minions/Voidwalker.psd
+Auxiliary/Rulebook/04_Table3.psd
+Auxiliary/Rulebook/10_Attacking.psd
+Auxiliary/Rulebook/12_Reactions5.psd
+Auxiliary/Rulebook/22_Negation.psd
+Auxiliary/Status Effects/Debuffs/1 Stars/Blindness.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Blazing.psd
+Auxiliary/Status Effects/Debuffs/2 Stars/Restrained.psd
+Auxiliary/Status Effects/Debuffs/3 Stars/Resentful_Glare.psd
+Creatures/BTD/4 Stars/Avatar_Of_Wrath.psd
+Creatures/DST/3 Stars/Wigfrid.psd
+Creatures/Fnaf/3 Stars/Toy_Chica.psd
+Creatures/FTL/5 Stars/Royal_Eradicator_Main_Cannon.psd
+Creatures/Hollow Knight/4 Stars/Hegemol.psd
+Creatures/In Sound Mind/2 Stars/Helpful_Mannequin.psd
+Creatures/Isaac/4 Stars/Tainted_Eve.psd
+Creatures/Kirby/3 Stars/Halberd_Reactor.psd
+Creatures/Kirby/3 Stars/Skullord.psd
+Creatures/Kirby/4 Stars/King_Dedede.psd
+Creatures/Kirby/5 Stars/Marx.psd
+Creatures/Mario/2 Stars/Bob-ulk.psd
+Creatures/Mario/3 Stars/Lord_Crump.psd
+Creatures/Mario/5 Stars/The_Master.psd
+Creatures/Omori/3 Stars/Mr_Jawsum.psd
+Creatures/Omori/5 Stars/ABBI.psd
+Creatures/Other/3 Stars/Empress Bulblax.psd
+Creatures/Other/4 Stars/Katarina.psd
+Creatures/Other/5 Stars/Croissant.psd
+Creatures/Pandas/2 Stars/Assault_Panda.psd
+Creatures/Pandas/3 Stars/Project_P.A.N.D.A.psd
+Creatures/Souls/5 Stars/Lothric.psd
+Creatures/World Of Warcraft/4 Stars/Twin_Emperors.psd
+Field/1 Stars/Forgotten_Crossroads.psd
+Field/2 Stars/Fog_Canyon.psd
+Field/3 Stars/Deepnest.psd
+Field/4 Stars/Error_Room.psd
+Items/Active/3 Stars/Star_Cannon.psd
+Items/Attack/3 Stars/Burly_Bomb.psd
+Items/Counter/3 Stars/Spiky_Ball_Trap.psd
+Items/Equip/1 Stars/Shellphone.psd
+Items/Equip/2 Stars/Iron_Sword.psd
+Items/Equip/3 Stars/Fragile_Strength.psd
+Items/Equip/3 Stars/Stalwart_Shell.psd
+Items/Equip/4 Stars/Nuclear_Proliferation.psd
+Items/Heal/2 Stars/All_Purpose_Medical_Kit.psd
+Items/Heal/2 Stars/The_Chicken.psd
+Items/Heal/3 Stars/Wand_of_Obesity.psd
+Items/Negation/2 Stars/Stopwatch.psd
+Items/Support/2 Stars/Reverse_Mushroom.psd
+Items/Support/3 Stars/Reflection.psd
