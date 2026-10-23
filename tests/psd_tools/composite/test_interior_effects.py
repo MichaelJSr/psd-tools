@@ -25,7 +25,7 @@ from psd_tools.composite.text_blend import TEXT_BLEND_GAMMA
 from psd_tools.composite.widen import make_widen
 from psd_tools.constants import BlendMode, Tag
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated
-from psd_tools.terminology import Key, Klass, Type
+from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
 
@@ -196,19 +196,8 @@ def test_a_full_normal_overlay_hides_a_type_layers_mode_to_its_edge(
     assert not np.allclose(as_group[box], normal[box], atol=4 / 255)
 
 
-@pytest.mark.parametrize("donor_name", ["Stroke", "Inner Glow"])
-def test_an_effect_at_the_edge_meets_the_layer_as_on_a_normal_one(
-    donor_name: str,
-) -> None:
-    """An effect at the layer's edge goes on there as on a Normal layer.
-
-    The band outside goes on beside the layer's finished coverage, and an
-    inner glow covers its share of the layer's region. ``layer_effects.psd``'s
-    outside stroke or inner glow, with the layer's Normal overlay switched on
-    under it, on a soft-edged disc: the overlay covers the paint whole, so a
-    Screen disc renders as a Normal one does, where the edge cuts the effect
-    included.
-    """
+def _style_over_overlay(donor_name: str) -> Descriptor:
+    """``layer_effects.psd``'s style on ``donor_name``, its Normal overlay on."""
     donor = PSDImage.open(full_name("layer_effects.psd"))
     styled = next(sub for sub in donor.descendants() if sub.name == donor_name)
     block = copy.deepcopy(
@@ -218,6 +207,24 @@ def test_an_effect_at_the_edge_meets_the_layer_as_on_a_normal_one(
     overlay[b"enab"] = overlay[b"present"] = True
     overlay[Key.Mode] = Enumerated(typeID=Type.BlendMode, enum=b"normal")
     overlay[Key.Opacity] = Double(100.0)
+    return block
+
+
+@pytest.mark.parametrize("opacity", [255, 128])
+@pytest.mark.parametrize("donor_name", ["Stroke", "Inner Glow"])
+def test_an_effect_at_the_edge_meets_the_layer_as_on_a_normal_one(
+    donor_name: str, opacity: int
+) -> None:
+    """An effect at the layer's edge goes on there as on a Normal layer.
+
+    The band outside goes on beside the layer's finished coverage, at the
+    layer opacity, and an inner glow covers its share of the layer's region.
+    ``layer_effects.psd``'s outside stroke or inner glow, with the layer's
+    Normal overlay switched on under it, on a soft-edged disc: the overlay
+    covers the paint whole, so a Screen disc renders as a Normal one does,
+    where the edge cuts the effect included.
+    """
+    block = _style_over_overlay(donor_name)
 
     size, scale = 40, 4
     fine = (np.arange(size * scale) + 0.5) / scale - size / 2
@@ -231,7 +238,9 @@ def test_an_effect_at_the_edge_meets_the_layer_as_on_a_normal_one(
     for blend_mode in (BlendMode.NORMAL, BlendMode.SCREEN):
         psd = PSDImage.new(mode="RGB", size=(size, size))
         psd.create_pixel_layer(Image.new("RGB", (size, size), _BACKDROP), "backdrop")
-        layer = psd.create_pixel_layer_from_array(disc, "disc", blend_mode=blend_mode)
+        layer = psd.create_pixel_layer_from_array(
+            disc, "disc", blend_mode=blend_mode, opacity=opacity
+        )
         layer.tagged_blocks.set_data(
             Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, copy.deepcopy(block)
         )
@@ -240,3 +249,45 @@ def test_an_effect_at_the_edge_meets_the_layer_as_on_a_normal_one(
     assert edge.sum() > 20
     assert not np.allclose(renders[BlendMode.NORMAL], _rgb(_BACKDROP), atol=0.1)
     assert np.allclose(renders[BlendMode.SCREEN], renders[BlendMode.NORMAL], atol=1e-5)
+
+
+@pytest.mark.parametrize("style", [Enum.InsetFrame, Enum.CenteredFrame])
+def test_a_normal_stroke_knocks_the_layer_out_under_it(style: bytes) -> None:
+    """A stroke is no interior effect: inside the layer it knocks it out.
+
+    ``layer_effects.psd``'s white stroke at half opacity, over the layer's
+    Normal overlay, on a square at half opacity. Within the band the stroke
+    shows the backdrop through it, not the overlay, whether the layer is at
+    full fill, at fill 0 or in Screen.
+    """
+    block = _style_over_overlay("Stroke")
+    stroke = block[b"FrFX"]
+    stroke[Key.Style] = Enumerated(typeID=Type.FrameStyle, enum=style)
+    stroke[Key.Opacity] = Double(50.0)
+    opacity = 128
+    square = np.zeros((40, 40, 4), dtype=np.float32)
+    square[10:30, 10:30, :3] = _rgb(_PAINT)
+    square[10:30, 10:30, 3] = 1.0
+
+    renders = []
+    for blend_mode, fill in (
+        (BlendMode.NORMAL, 255),
+        (BlendMode.NORMAL, 0),
+        (BlendMode.SCREEN, 255),
+    ):
+        psd = PSDImage.new(mode="RGB", size=(40, 40))
+        psd.create_pixel_layer(Image.new("RGB", (40, 40), _BACKDROP), "backdrop")
+        layer = psd.create_pixel_layer_from_array(
+            square, "square", blend_mode=blend_mode, opacity=opacity
+        )
+        layer.fill_opacity = fill
+        layer.tagged_blocks.set_data(
+            Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, copy.deepcopy(block)
+        )
+        renders.append(composite(psd)[0])
+
+    band = 0.5 * _rgb((255, 255, 255)) + 0.5 * _rgb(_BACKDROP)
+    expected = _faded(band, opacity / 255.0)[0, 0]
+    for render in renders:
+        assert np.allclose(render[20, 11], expected, atol=1e-5)
+        assert np.allclose(render, renders[0], atol=1e-5)

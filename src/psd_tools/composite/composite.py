@@ -1888,7 +1888,9 @@ def _composites_as_passthrough(source: _Source, blend_mode: BlendMode) -> bool:
 
 
 # The effects "Blend Interior Effects as Group" decides about, as ``_readable``
-# names them.
+# names them. Adobe names inner glow, satin and the colour and gradient
+# overlays "such as"; a pattern overlay and an inner shadow paint inside the
+# layer the same way, and no corpus layer tests them (#846).
 _INTERIOR_EFFECTS = (
     "coloroverlay",
     "gradientoverlay",
@@ -1916,9 +1918,9 @@ def _blends_interior_apart(layer: Layer, source: _Source) -> bool:
         and source.fill_opacity >= 1.0
     ):
         return False
-    # TODO: with the flag on, fill opacity fades the interior effects too,
-    # which _EffectCanvas does not do (#846).
     if layer.tagged_blocks.get_data(Tag.BLEND_INTERIOR_ELEMENTS, 0):
+        # TODO: blended as a group, fill opacity fades the interior effects
+        # too, which _EffectCanvas does not do (#846).
         return False
     return _has_enabled_effects(layer) and any(
         _readable(layer, name) for name in _INTERIOR_EFFECTS
@@ -2313,8 +2315,21 @@ class _ApartCanvas(_AdjustmentCanvas):
 
     Onto the compositor, over the layer's paint put on at full coverage, each
     at the share of the region it covers: the layer's coverage and opacity
-    fade the lot once, afterwards (:py:meth:`Compositor._apply_apart`).
+    fade the lot once, afterwards (:py:meth:`Compositor._apply_apart`). What
+    paints beside the layer is not faded there, so it is drawn at the layer
+    opacity, as on an :py:class:`_EffectCanvas`.
     """
+
+    def __init__(
+        self, compositor: "Compositor", region: np.ndarray, opacity: float
+    ) -> None:
+        super().__init__(compositor, region)
+        self._opacity = opacity
+
+    @property
+    def opacity(self) -> float:
+        """The layer opacity, which fades what paints beside the layer."""
+        return self._opacity
 
     def over(
         self,
@@ -2334,6 +2349,33 @@ class _ApartCanvas(_AdjustmentCanvas):
         self._compositor._apply_source(
             color, coverage, coverage * opacity, blend_mode, faded=faded
         )
+
+    knocks_out = True
+
+    def replace(
+        self, coverage: np.ndarray, color: np.ndarray, opacity: float | np.ndarray
+    ) -> None:
+        """Paint an effect in place of the layer and the effects under it.
+
+        A stroke is no interior effect, so it knocks out as on an
+        :py:class:`_EffectCanvas`: what ``coverage`` covers goes back to the
+        canvas the compositor was seeded with, and the effect goes on that.
+        """
+        if not coverage.any():
+            return
+        canvas = self._compositor
+        color = canvas._fit_source(color)
+        kept = 1.0 - coverage
+        alpha = coverage * opacity
+        premultiplied = (
+            kept * canvas._alpha * canvas._color
+            + (coverage - alpha) * canvas._alpha_0 * canvas._color_0
+            + alpha * color
+        )
+        canvas._shape_g = cast(np.ndarray, utils.union(canvas._shape_g, coverage))
+        canvas._alpha_g = kept * canvas._alpha_g + alpha
+        canvas._alpha = cast(np.ndarray, utils.union(canvas._alpha_0, canvas._alpha_g))
+        canvas._color = utils.clip(utils.divide(premultiplied, canvas._alpha))
 
 
 @dataclass
@@ -3436,7 +3478,10 @@ class Compositor:
         )
         scratch._apply_source(source.color, paint, paint, layer.blend_mode)
         outer = scratch._paint_effects(
-            layer, _ApartCanvas(scratch, region), source.shape, source.shape_mask
+            layer,
+            _ApartCanvas(scratch, region, source.opacity),
+            source.shape,
+            source.shape_mask,
         )
         # The scratch canvas is ``own`` of what went on over ``1 - own`` of
         # this one; taking that back out leaves what went on.
