@@ -1741,22 +1741,26 @@ def test_drop_shadows_render_to_photoshops_preview_when_forced() -> None:
     assert _error(PSDImage.open(full_name("masks.psb")), None, force=True) <= 1.5e-5
 
 
-@pytest.mark.parametrize("size", [2, 3, 4, 7, 10])
-def test_a_shadow_blurs_by_two_box_passes_as_wide_as_its_size(size: int) -> None:
-    """The blur is two box passes, a tent that ends a pixel short of ``size``.
+@pytest.mark.parametrize(("size", "width"), [(1, 2), (2, 2), (3, 3), (4, 4), (10, 10)])
+def test_a_shadow_blurs_by_two_box_passes_as_wide_as_its_size(
+    size: int, width: int
+) -> None:
+    """The blur is two box passes, a tent that ends a pixel short of the box.
 
     The fidelity cases above hold it to Photoshop's previews, where the wide
     shadows fix its width; the narrow ones fix where it ends, which only a
-    stroke traced round the shadow shows (the test below).
+    stroke traced round the shadow shows (the test below). A one-pixel
+    shadow is as soft as a two-pixel one: the card corpus's strokes traced
+    round one-pixel shadows match nothing narrower.
     """
     shape = _disc(81, 20.0)
     settings: dict[str, Any] = {"distance": 0.0, "angle": 0.0, "spread": 0.0}
     shadow = effects.draw_drop_shadow((0, 0, 81, 81), shape, size=size, **settings)
-    expected = _box_passes(shape[:, :, 0].astype(np.float64), size)
+    expected = _box_passes(shape[:, :, 0].astype(np.float64), width)
     assert np.allclose(shadow[:, :, 0], expected, atol=1e-6)
     # Nothing past the tent's reach: the disc's rim is 20 px from its centre.
-    assert float(shadow[40, 40 + 20 + size, 0]) == 0.0
-    assert float(shadow[40, 40 + 20 + size - 1, 0]) > 0.0
+    assert float(shadow[40, 40 + 20 + width, 0]) == 0.0
+    assert float(shadow[40, 40 + 20 + width - 1, 0]) > 0.0
 
 
 def test_a_size_two_shadow_ends_where_photoshop_strokes_round_it() -> None:

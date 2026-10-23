@@ -843,6 +843,9 @@ def stroke_band(
 # tests.
 _GLOW_SIGMA_PER_SIZE = 0.45
 
+# The narrowest box :py:func:`_tent_blur` passes over a matte, in pixels.
+_MIN_BOX_WIDTH = 2.0
+
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
 
@@ -1288,8 +1291,7 @@ def _shadow_matte(
     """``alpha`` spread and blurred as a shadow's or an inner glow's matte.
 
     The blur is :py:func:`_tent_blur` of what the spread leaves of the size,
-    so the matte stops a pixel short of that size past the silhouette. Its
-    end matters where a group's stroke traces it: every partial pixel states
+    so the matte ends within that size of the silhouette. Its end matters where a group's stroke traces it: every partial pixel states
     a boundary (:py:func:`_signed_distance`), so a faint tail moves the
     stroke out by up to a pixel, whatever its level.
     """
@@ -1302,16 +1304,18 @@ def _tent_blur(alpha: np.ndarray, radius: float, outside: float) -> np.ndarray:
 
     What two box passes ``radius`` pixels wide add up to, which is how
     Photoshop blurs a shadow; the weights are the tent sampled at whole
-    pixels, so nothing ``radius`` or further away is read, and a radius of a
-    pixel or less leaves the matte as it is. What lies past the canvas is
-    ``outside``: empty for a matte drawn from the silhouette, full for one
-    drawn from its complement.
+    pixels, so nothing ``radius`` or further away is read. A box is at least
+    :data:`_MIN_BOX_WIDTH` wide, since a one-pixel box would leave the matte
+    as it is and Photoshop softens a one-pixel shadow as a two-pixel one. What
+    lies past the canvas is ``outside``: empty for a matte drawn from the
+    silhouette, full for one drawn from its complement.
     """
     from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    reach = math.ceil(radius) - 1
-    if reach < 1:
+    if radius <= 0.0:
         return alpha
+    radius = max(radius, _MIN_BOX_WIDTH)
+    reach = math.ceil(radius) - 1
     taps = np.arange(-reach, reach + 1, dtype=np.float64)
     weights = 1.0 - np.abs(taps) / radius
     weights = (weights / weights.sum()).astype(np.float32)
