@@ -611,15 +611,21 @@ def draw_gradient_fill(
     box_height, box_width = max(box[3] - box[1], 1), max(box[2] - box[0], 1)
 
     angle = _finite(desc, Key.Angle, 0.0)
-    scale = float(desc.get(Key.Scale, 100.0)) / 100.0
-    scale *= _gradient_length(angle, box_width, box_height)
+    factor = float(desc.get(Key.Scale, 100.0)) / 100.0
+    scale = factor * _gradient_length(angle, box_width, box_height)
+    centre_width, centre_height = box_width, box_height
+    if factor != 1.0:
+        # Photoshop lays a scaled ramp on whole pixels: its half length and
+        # its centre are each rounded down.
+        scale = max(2.0 * math.floor(scale / 2.0), 1.0)
+        centre_width, centre_height = 2 * (box_width // 2), 2 * (box_height // 2)
     # ``Ofst`` moves the ramp's centre by a share of the box.
     offset = get_descriptor(desc, Key.Offset)
     shift_x = box_width * _offset_share(offset, Key.Horizontal)
     shift_y = box_height * _offset_share(offset, Key.Vertical)
     X, Y = np.meshgrid(
-        _ramp_axis(viewport[0] - box[0] - shift_x, width, box_width, scale),
-        _ramp_axis(viewport[1] - box[1] - shift_y, height, box_height, scale),
+        _ramp_axis(viewport[0] - box[0] - shift_x, width, centre_width, scale),
+        _ramp_axis(viewport[1] - box[1] - shift_y, height, centre_height, scale),
     )
 
     gradient_kind = desc.get(Key.Type).enum
