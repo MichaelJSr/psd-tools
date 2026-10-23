@@ -282,19 +282,22 @@ def test_an_inner_effect_asks_for_scipy_by_name_when_it_is_missing(
         draw(_disc(81, 20.0))
 
 
-# The blur the inner effects take is the drop shadow's, at the same fitted
-# width per pixel of size.
-_FITTED_SIGMA_PER_SIZE = 0.45
-
-
-def test_the_inner_effects_blur_at_the_drop_shadows_fitted_width() -> None:
+def test_the_inner_effects_blur_as_the_drop_shadow_does() -> None:
     """The blur is shared with the drop shadow, so a change to it moves both.
 
-    The glows on the card renders score best at the drop shadow's width,
-    with the range dividing the matte; neither is retuned for them.
+    Two box passes as wide as the size, from the complement of the layer,
+    with the canvas past the viewport counted as outside it. The previews
+    below score better with it than with the gaussian it replaced.
     """
-    assert effects._SHADOW_SIGMA_PER_SIZE == _FITTED_SIGMA_PER_SIZE
+    from scipy.ndimage import convolve1d  # type: ignore[import-untyped]  # noqa: PLC0415
+
     shape = _disc(81, 20.0)
+    box = np.ones(8) / 8
+    tent = np.convolve(box, box)
+    complement = 1.0 - shape[:, :, 0].astype(np.float64)
+    for axis in range(2):
+        complement = convolve1d(complement, tent, axis=axis, mode="constant", cval=1.0)
+    assert np.allclose(_glow(shape)[:, :, 0], complement * shape[:, :, 0], atol=1e-6)
     blurred = effects._cast_matte(
         1.0 - shape[:, :, 0],
         distance=0.0,

@@ -127,19 +127,23 @@ def test_the_precise_technique_ramps_straight_with_the_distance() -> None:
     assert np.all(row[6:] == 0.0)
 
 
-def test_a_soft_glow_is_a_drop_shadow_cast_nowhere() -> None:
-    """Beside the silhouette the soft matte is the drop shadow's at distance zero.
+def test_a_soft_glow_spreads_as_a_drop_shadow_does() -> None:
+    """Beside the silhouette the soft matte is the drop shadow's spread, blurred.
 
-    The two share their spread and blur, so what differs is only what the
-    glow cuts away under the silhouette and what the range does to the
-    rest; at 100% the range does nothing.
+    The two share their spread; the shadow blurs it with a tent and the
+    glow with its fitted gaussian. What else differs is what the glow cuts
+    away under the silhouette and what the range does to the rest; at 100%
+    the range does nothing.
     """
     disc = _disc(81, _RADIUS)
     glow = _glow(disc, size=6.0, spread=30.0)
+    spread, radius = effects._spread_matte(disc[:, :, 0], 6.0, 30.0)
     shadow = effects.draw_drop_shadow(
         _CANVAS, disc, distance=0.0, angle=0.0, size=6.0, spread=30.0
     )
-    assert np.allclose(glow, shadow * (1.0 - disc), atol=1e-6)
+    assert np.allclose(shadow[:, :, 0], effects._tent_blur(spread, radius, 0.0))
+    soft = effects._soft_matte(disc[:, :, 0], 6.0, 30.0, effects._GLOW_SIGMA_PER_SIZE)
+    assert np.allclose(glow[:, :, 0], soft * (1.0 - disc[:, :, 0]), atol=1e-6)
 
 
 def _soft_disc(size: int, radius: float, hard_radius: float) -> np.ndarray:

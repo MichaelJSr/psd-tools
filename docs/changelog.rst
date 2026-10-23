@@ -18,6 +18,11 @@ Changelog
   axis, rounded to the nearest, as Photoshop casts them, so a shadow lit from
   an angle off the axes no longer lands a fraction of a pixel out with a
   blurred edge. Shadows lit along an axis are unchanged
+- [fix] Drop shadows, inner shadows and inner glows blur by two box passes as
+  wide as their size, as Photoshop does, instead of by a gaussian whose faint
+  tail ran a pixel further: a group's outside stroke traced round a child's
+  soft shadow no longer reaches a pixel too far. Soft shadows' falloffs move
+  slightly; outer glows are unchanged
 - [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
   layer set from a preset does, is read as its own adjustment instead of as a
   Brightness/Contrast at 0/0 that left the image unchanged. Only layers that
