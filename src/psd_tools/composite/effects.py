@@ -722,6 +722,9 @@ def draw_stroke_effect(
     return color, coverage
 
 
+_CRIT_LAYOUT: list = [None]
+
+
 def draw_stroke_effect_split(
     viewport: tuple[int, int, int, int],
     shape: np.ndarray,
@@ -759,8 +762,10 @@ def draw_stroke_effect_split(
         if color is None:
             color = np.ones((height, width, 1))
     elif paint_type == Enum.GradientFill:
+        import os as _os  # SCRATCH
+        _lay = _CRIT_LAYOUT[0] if _os.environ.get("CRIT_GSTROKE") else None
         color, _ = paint.draw_gradient_fill(
-            viewport, psd.color_mode, desc, paint.gradient_anchor(psd, desc)
+            viewport, psd.color_mode, desc, paint.gradient_anchor(psd, desc, _lay)
         )
         if color is None:
             color = np.ones((height, width, 1))
@@ -1819,7 +1824,11 @@ def draw_satin(
             moved = ndimage.shift(
                 alpha, (sign * dy, sign * dx), order=1, mode="constant", cval=0.0
             )
-        copies.append(_blur(moved, size * _SATIN_SIGMA_PER_SIZE, size))
+        import os as _os  # SCRATCH
+        if _os.environ.get("PSDT_SATIN_TENT"):
+            copies.append(_tent_blur(moved, size * float(_os.environ["PSDT_SATIN_TENT"]), 0.0))
+        else:
+            copies.append(_blur(moved, size * _SATIN_SIGMA_PER_SIZE, size))
     satin = np.clip(np.abs(copies[0] - copies[1]), 0.0, 1.0)
     if contour is not None:
         satin = _contoured(satin, contour, anti_aliased)
@@ -1893,7 +1902,11 @@ def _bevel_height(
     ):
         # The blur reaches a pixel short of the band, so that the band's
         # width counts the edge pixel.
-        height = _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
+        import os as _os  # SCRATCH
+        if _os.environ.get("PSDT_BEVEL_TENT"):
+            height = _tent_blur(alpha, width * float(_os.environ["PSDT_BEVEL_TENT"]), 0.0)
+        else:
+            height = _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
         if style == BevelStyle.PILLOW_EMBOSS:
             height = np.where(alpha >= 0.5, height, 1.0 - height)
         return (height * width).astype(np.float32)

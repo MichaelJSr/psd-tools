@@ -299,6 +299,7 @@ _UNREADABLE = (
 import os as _os
 
 _CRIT_INFX = _os.environ.get("CRIT_INFX", "")
+_CRIT_VSTASH: dict = {}
 _CRIT_INFX_FILL = "fill" in _CRIT_INFX
 _INTERIOR = ("ColorOverlay", "GradientOverlay", "PatternOverlay", "Satin", "InnerGlow", "InnerShadow")
 
@@ -2791,6 +2792,11 @@ class Compositor:
 
         if layer.has_clip_layers():
             color = self._apply_clip_layers(layer, color, alpha)
+            _st = _CRIT_VSTASH.pop(id(layer), None)
+            if _st is not None:
+                _c = Compositor(self._viewport, self._widen(color, self.channels), _st[3], widen=self._widen, color_mode=self._color_mode)
+                _c._apply_source(_st[0], _st[1], _st[2], BlendMode.NORMAL)
+                color = _c.result_over_backdrop()
 
         shape_mask = self._get_mask(layer)
         fill_opacity, opacity = self._get_const(layer)
@@ -3769,7 +3775,11 @@ class Compositor:
             )
             # Photoshop paints a vector stroke Normal whatever its
             # ``strokeStyleBlendMode`` says, against the fill and the backdrop alike.
-            compositor._apply_source(color_s, shape_s, alpha_s, BlendMode.NORMAL)
+            if _os.environ.get("CRIT_VSTROKE") and layer.has_clip_layers():
+                # SCRATCH: the stroke goes on after the clipped layers.
+                _CRIT_VSTASH[id(layer)] = (color_s, shape_s, alpha_s, covered)
+            else:
+                compositor._apply_source(color_s, shape_s, alpha_s, BlendMode.NORMAL)
             # Seeded with the fill's color and alpha, so the result is wanted
             # as it stands on that seed: the stroke is painted onto the fill it
             # outlines, and a pixel it covers in part is that much of the
@@ -4967,7 +4977,26 @@ class Compositor:
             if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
                 continue
             shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
+            _q = _os.environ.get("CRIT_QTRACE", "")
+            if _q and (layer.is_group() or _q == "all"):
+                shape_in_bbox = (np.floor(shape_in_bbox * 255.0 + 0.5) / 255.0).astype(shape_in_bbox.dtype) if "floor" not in _q else (np.floor(shape_in_bbox * 255.0) / 255.0).astype(shape_in_bbox.dtype)
             try:
+                import psd_tools.composite.effects as _E  # SCRATCH
+                _g = _os.environ.get("CRIT_GSTROKE", "")
+                if _g == "layer":
+                    _E._CRIT_LAYOUT[0] = _style_bbox(layer)
+                elif _g == "content":
+                    _E._CRIT_LAYOUT[0] = _content_bbox(layer, self._cache.content_bboxes) if layer.is_group() else _style_bbox(layer)
+                elif _g in ("size", "sosize", "sosize0"):
+                    _b = _style_bbox(layer)
+                    if _g.startswith("so") and layer.kind == "smartobject":
+                        _t = layer.smart_object.transform_box
+                        _b = (int(round(min(_t[0::2]))), int(round(min(_t[1::2]))), int(round(max(_t[0::2]))), int(round(max(_t[1::2]))))
+                    _k = 0.0 if _g == "sosize0" and layer.kind == "smartobject" else float(effect.descriptor.get(b"Sz  ").value)
+                    _E._CRIT_LAYOUT[0] = (int(_b[0] - _k), int(_b[1] - _k), int(_b[2] + _k), int(_b[3] + _k))
+                elif _g.startswith("grow"):
+                    _b = _style_bbox(layer); _k = float(_g[4:])
+                    _E._CRIT_LAYOUT[0] = (int(_b[0] - _k), int(_b[1] - _k), int(_b[2] + _k), int(_b[3] + _k))
                 color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
                     bbox, shape_in_bbox, effect.descriptor, layer._psd
                 )
