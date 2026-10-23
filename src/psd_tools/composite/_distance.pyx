@@ -76,7 +76,10 @@ cdef inline void _relax(double[:, ::1] f, Py_ssize_t row, Py_ssize_t before, Py_
 
 def chamfer_transform(mask, double diag, double knight):
     mask = np.ascontiguousarray(mask, dtype=bool)
-    cdef Py_ssize_t height = mask.shape[0], width = mask.shape[1]
+    cdef Py_ssize_t height, width
+    # Unpacking checks the length (ValueError, as the numpy code); shape[1]
+    # of a 1-D mask would read past the tuple under boundscheck=False.
+    height, width = mask.shape
     out = np.where(mask, np.inf, 0.0)
     cdef double[:, ::1] f = out
     cdef double[::1] tmp = np.empty(max(width, 1), dtype=np.float64)
