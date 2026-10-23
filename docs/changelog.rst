@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] Drop shadows, outer glows, inner shadows and inner glows draw their
+  noise, from Photoshop's own field: the same at each document pixel in every
+  document, so a noisy effect renders as Photoshop's does rather than smooth.
+  **Rendering change** for effects with noise above 0%
 - [fix] A gradient stroke's ramp is laid out on the layer's pixels over half
   opaque, grown by the whole pixels the band reaches past them and by one at
   least, as Photoshop lays it, instead of on the layer's box with its soft

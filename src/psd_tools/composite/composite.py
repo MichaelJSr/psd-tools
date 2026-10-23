@@ -4931,8 +4931,6 @@ class Compositor:
                 continue
             if bbox == (0, 0, 0, 0):
                 continue
-            if noise > 0.0:
-                logger.debug("The noise of a drop shadow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
             try:
                 coverage = draw_drop_shadow(
@@ -4944,6 +4942,7 @@ class Compositor:
                     spread=geometry.spread,
                     contour=contour,
                     anti_aliased=anti_aliased,
+                    noise=noise,
                 )
                 color, _ = paint.draw_solid_color_fill(
                     self._viewport, layer._psd.color_mode, shadow.descriptor
@@ -5022,8 +5021,9 @@ class Compositor:
                 continue
             if bbox == (0, 0, 0, 0):
                 continue
-            if noise > 0.0:
-                logger.debug("The noise of an outer glow of %s is not applied", layer)
+            if noise > 0.0 and Key.Gradient in glow.descriptor:
+                logger.debug("The noise of a gradient glow of %s is not applied", layer)
+                noise = 0.0
             if jitter > 0.0:
                 logger.debug("The jitter of an outer glow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
@@ -5032,7 +5032,12 @@ class Compositor:
                     silhouette, size=size, spread=spread, precise=precise
                 )
                 falloff = glow_ranged(
-                    matte, range_=range_, contour=contour, anti_aliased=anti_aliased
+                    matte,
+                    range_=range_,
+                    contour=contour,
+                    anti_aliased=anti_aliased,
+                    noise=noise,
+                    viewport=bbox,
                 )
                 color, coverage = glow_paint(
                     bbox,
@@ -5215,8 +5220,7 @@ class Compositor:
         distance, size, choke = geometry.distance, geometry.size, geometry.spread
         contour = contour_table(inner.contour)
         anti_aliased = inner.anti_aliased
-        if inner.noise > 0.0:
-            logger.debug("The noise of an inner effect of %s is not applied", layer)
+        noise = inner.noise
         bbox = drop_shadow_bbox(cast_from, 0.0, 0.0, size, layer._psd._max_alloc_bytes)
         if isinstance(inner, InnerShadow):
             bbox = _within_reach(
@@ -5235,6 +5239,7 @@ class Compositor:
                     choke=choke,
                     contour=contour,
                     anti_aliased=anti_aliased,
+                    noise=noise,
                 )
 
             return bbox, draw_shadow
@@ -5257,6 +5262,7 @@ class Compositor:
                 glow_range=glow_range,
                 contour=contour,
                 anti_aliased=anti_aliased,
+                noise=noise,
             )
 
         return bbox, draw_glow

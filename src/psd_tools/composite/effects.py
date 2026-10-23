@@ -21,19 +21,20 @@ Currently supported effects:
   - Solid color; honors distance, angle (including global light), size,
     spread, contour and its anti-aliasing, opacity, blend mode and "layer
     knocks out drop shadow"
-  - The blur is Photoshop's tent of two box passes; noise is read but not
-    applied
+  - The blur is Photoshop's tent of two box passes; the noise is
+    Photoshop's own field (:py:mod:`~psd_tools.composite.effect_noise`)
 - **Outer glow**: The layer's silhouette, spread and blurred by the drop
   shadow's tent (softer) or ramped by distance (precise), painted behind the
   layer and never under it
   - Solid color or a gradient along the falloff; honors size, spread,
-    technique, range, contour and its anti-aliasing, opacity and blend mode
-  - Noise and jitter are read but not applied
+    technique, range, contour and its anti-aliasing, opacity, blend mode and
+    a solid glow's noise
+  - Jitter is read but not applied
 - **Inner shadow** and **inner glow**: the same blur, cast from the outside of
   the silhouette and painted inside the layer
-  - Solid color; honors distance, angle, size, choke, contour, opacity and
-    blend mode, and an inner glow's source, technique and range; noise is
-    read but not applied, and a gradient glow is not drawn
+  - Solid color; honors distance, angle, size, choke, contour, noise,
+    opacity and blend mode, and an inner glow's source, technique and range;
+    a gradient glow is not drawn
 
 - **Satin**: Two offset, blurred copies of the silhouette and their difference,
   painted inside the layer
@@ -89,7 +90,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 
 from psd_tools.api.utils import AllocBudget, check_pixel_size
-from psd_tools.composite import paint
+from psd_tools.composite import effect_noise, paint
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.utils import divide, intersect
 from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
@@ -959,9 +960,10 @@ _GRADIENT_GLOW_GAIN = 8.0
 # ``draw_drop_shadow()`` or ``glow_falloff()``: the silhouette it is cast
 # from, the matte spread grows and the distance transform and masks that grow
 # it, the blurred or ramped matte and the shifted one, with the object read or
-# group composite the silhouette is taken from. The knockout that follows a
-# shadow holds less: the cut silhouette and the stroke bands pasted onto it,
-# each drawn on its own stroke's box, which ``stroke_bbox()`` checks on its own.
+# group composite the silhouette is taken from, and the noise moved over the
+# matte. The knockout that follows a shadow holds less: the cut silhouette and
+# the stroke bands pasted onto it, each drawn on its own stroke's box, which
+# ``stroke_bbox()`` checks on its own.
 _SHADOW_BYTES = 64
 
 # What one pixel of a gradient glow's canvas costs while ``glow_paint()`` lays
@@ -1200,6 +1202,18 @@ def _contoured(alpha: np.ndarray, table: np.ndarray, anti_aliased: bool) -> np.n
     return table[np.rint(alpha * last).astype(np.intp)]
 
 
+def _contour_lit(levels: np.ndarray, table: np.ndarray | None) -> np.ndarray | None:
+    """Where ``table``, read between its entries, leaves ``levels`` any coverage.
+
+    Photoshop adds no noise where the contour takes an effect to nothing,
+    even where a table read at its nearest entry would round to nothing.
+    """
+    if table is None:
+        return None
+    grid = np.linspace(0.0, 1.0, len(table))
+    return np.interp(levels, grid, table) > 0.0
+
+
 def _spread_pixels(size: float, spread: float) -> int:
     """How many whole pixels of ``size`` a ``spread`` percentage grows a matte by.
 
@@ -1251,6 +1265,7 @@ def draw_drop_shadow(
     spread: float,
     contour: np.ndarray | None = None,
     anti_aliased: bool = False,
+    noise: float = 0.0,
 ) -> np.ndarray:
     """The coverage a drop shadow casts from ``shape``, on ``viewport``.
 
@@ -1263,7 +1278,9 @@ def draw_drop_shadow(
     coverage out. It is applied on this canvas alone, so a contour that
     lifts zero coverage paints the canvas and not the document. The table
     is read between its entries when ``anti_aliased`` and at the nearest
-    one otherwise. Noise is not applied.
+    one otherwise. ``noise`` moves the contoured coverage last, held under
+    the cast matte as :py:func:`~psd_tools.composite.effect_noise.noisy`
+    says for an effect beneath the layer.
 
     ``spread`` and ``size`` make the matte as :py:func:`_shadow_matte` says.
     (The spread key shrinks the silhouette of an inner shadow, where the
@@ -1283,8 +1300,12 @@ def draw_drop_shadow(
         outside=0.0,
         what="Drop shadow",
     )
+    matte = alpha
     if contour is not None:
         alpha = _contoured(alpha, contour, anti_aliased)
+    if noise > 0.0:
+        lit = _contour_lit(matte, contour)
+        alpha = effect_noise.noisy(alpha, noise, viewport, matte, lit=lit)
     return alpha[:, :, None]
 
 
@@ -1337,6 +1358,7 @@ def draw_inner_shadow(
     choke: float,
     contour: np.ndarray | None = None,
     anti_aliased: bool = False,
+    noise: float = 0.0,
 ) -> np.ndarray:
     """The coverage an inner shadow casts inside ``shape``, on ``viewport``.
 
@@ -1344,7 +1366,10 @@ def draw_inner_shadow(
     ``shape``, cut to ``shape``: the outside falls into the layer from the
     side the light comes from. ``choke`` is a percentage of ``size``, as a
     drop shadow's spread is, and shrinks the silhouette before the blur.
-    The canvas past ``viewport`` counts as outside the layer. The result is
+    The canvas past ``viewport`` counts as outside the layer. ``noise`` moves
+    the contoured matte before the cut to ``shape``, held under the cast
+    matte as :py:func:`~psd_tools.composite.effect_noise.noisy` says for an
+    effect inside the layer. The result is
     ``(height, width, 1)`` and never exceeds ``shape``.
     """
     _require_scipy("Inner shadow effects")
@@ -1358,8 +1383,12 @@ def draw_inner_shadow(
         outside=1.0,
         what="Inner shadow",
     )
+    cast = matte
     if contour is not None:
         matte = _contoured(matte, contour, anti_aliased)
+    if noise > 0.0:
+        lit = _contour_lit(cast, contour)
+        matte = effect_noise.noisy(matte, noise, viewport, cast, inside=True, lit=lit)
     return (matte * alpha)[:, :, None]
 
 
@@ -1522,18 +1551,44 @@ def glow_ranged(
     range_: float = _DEFAULT_GLOW_RANGE,
     contour: np.ndarray | None = None,
     anti_aliased: bool = False,
+    noise: float = 0.0,
+    viewport: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
     """A glow's ``matte`` squeezed by its range, then mapped by its contour.
 
-    The range is read as :py:func:`_ranged` says. A range that is not finite
-    raises ``ValueError``.
+    The range is read as :py:func:`_ranged` says. ``noise`` moves the result
+    last, on the matte's canvas ``viewport``, held under the matte as
+    :py:func:`~psd_tools.composite.effect_noise.noisy` says for an effect
+    beneath the layer; without a viewport there is none. A range that is not finite raises ``ValueError``.
     """
     if not math.isfinite(range_):
         raise ValueError("Outer glow range must be finite: %r" % range_)
-    falloff = _ranged(matte, min(max(range_, 1.0), 100.0))
+    range_ = min(max(range_, 1.0), 100.0)
+    ranged = _ranged(matte, range_)
+    falloff = ranged
     if contour is not None:
         falloff = _contoured(falloff, contour, anti_aliased)
-    return np.clip(falloff, 0.0, 1.0).astype(np.float32)
+    falloff = np.clip(falloff, 0.0, 1.0).astype(np.float32)
+    if viewport is not None and noise > 0.0:
+        falloff = effect_noise.noisy(
+            falloff,
+            noise,
+            viewport,
+            _noise_matte(matte, ranged, range_),
+            lit=_contour_lit(ranged, contour),
+        )
+    return falloff
+
+
+def _noise_matte(matte: np.ndarray, ranged: np.ndarray, range_: float) -> np.ndarray:
+    """The matte a glow's noise is held under: none where a range leaves no level.
+
+    Under a range of less than 100%, Photoshop adds no noise where the
+    ranged matte is under one 8-bit level.
+    """
+    if range_ >= 100.0:
+        return matte
+    return np.where(ranged * 255.0 >= 1.0, matte, 0.0).astype(np.float32)
 
 
 def glow_falloff(
@@ -1545,6 +1600,8 @@ def glow_falloff(
     precise: bool = False,
     contour: np.ndarray | None = None,
     anti_aliased: bool = False,
+    noise: float = 0.0,
+    viewport: tuple[int, int, int, int] | None = None,
 ) -> np.ndarray:
     """How an outer glow falls off from ``shape``.
 
@@ -1553,7 +1610,14 @@ def glow_falloff(
     if not math.isfinite(range_):
         raise ValueError("Outer glow range must be finite: %r" % range_)
     matte = glow_matte(shape, size=size, spread=spread, precise=precise)
-    return glow_ranged(matte, range_=range_, contour=contour, anti_aliased=anti_aliased)
+    return glow_ranged(
+        matte,
+        range_=range_,
+        contour=contour,
+        anti_aliased=anti_aliased,
+        noise=noise,
+        viewport=viewport,
+    )
 
 
 def uncovered(shape: np.ndarray, hidden: np.ndarray) -> np.ndarray:
@@ -1656,6 +1720,7 @@ def draw_inner_glow(
     glow_range: float = 50.0,
     contour: np.ndarray | None = None,
     anti_aliased: bool = False,
+    noise: float = 0.0,
 ) -> np.ndarray:
     """The coverage an inner glow puts inside ``shape``, on ``viewport``.
 
@@ -1667,8 +1732,10 @@ def draw_inner_glow(
     distance to the edge, read at each pixel's centre, as a precise outer
     glow fades outward (:py:func:`_precise_ramp`). ``glow_range`` is the
     percentage of the fade the contour is spread over. The canvas past
-    ``viewport`` counts as outside the layer under either technique. The
-    result is ``(height, width, 1)`` and never exceeds ``shape``.
+    ``viewport`` counts as outside the layer under either technique.
+    ``noise`` moves the contoured glow before the cut to ``shape``, as an
+    inner shadow's. The result is ``(height, width, 1)`` and never exceeds
+    ``shape``.
     """
     _require_scipy("Inner glow effects")
     if not all(math.isfinite(value) for value in (size, choke, glow_range)):
@@ -1695,10 +1762,19 @@ def draw_inner_glow(
         )
     if center:
         matte = 1.0 - matte
-    matte = _glow_range(matte, glow_range)
+    ranged = falloff = _glow_range(matte, glow_range)
     if contour is not None:
-        matte = _contoured(matte, contour, anti_aliased)
-    return (matte * alpha)[:, :, None]
+        falloff = _contoured(falloff, contour, anti_aliased)
+    if noise > 0.0:
+        falloff = effect_noise.noisy(
+            falloff,
+            noise,
+            viewport,
+            _noise_matte(matte, ranged, glow_range),
+            inside=True,
+            lit=_contour_lit(ranged, contour),
+        )
+    return (falloff * alpha)[:, :, None]
 
 
 # How wide a gaussian stands in for the blur of a satin, and for the blur

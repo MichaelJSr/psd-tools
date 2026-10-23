@@ -376,8 +376,8 @@ option::
     out with a warning.
 
     Layer effects are approximated, and some of their settings are not
-    drawn: noise and jitter, a gradient inner glow, and a bevel's stroke
-    emboss style and shape contour. Adjustment layers have
+    drawn: jitter, a gradient glow's noise, a gradient inner glow, and a
+    bevel's stroke emboss style and shape contour. Adjustment layers have
     limited support (BrightnessContrast, Levels, Curves, Exposure,
     HueSaturation, Invert, Posterize, Threshold, ChannelMixer, BlackAndWhite,
     GradientMap, ColorBalance, Vibrance). The compositing result may look

@@ -1038,22 +1038,32 @@ def test_the_technique_is_read_and_an_unknown_one_is_soft() -> None:
     assert np.array_equal(_alone(layer, viewport), soft)
 
 
-def test_noise_and_jitter_are_read_but_not_applied(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A noisy, jittered glow renders as the plain one, and says so."""
+def test_noise_moves_the_glow_only_where_it_falls() -> None:
+    """A noisy glow differs from the plain one, and only where that one paints."""
     _, layer = _masks_card()
     glow = _forge_glow(layer)
     viewport = _around(layer)
     plain = _alone(layer, viewport)
     glow[Key.Noise] = Double(50.0)
-    glow[Key.ShadingNoise] = Double(50.0)
     assert _outer_glow(layer).noise == 50.0
+    noisy = _alone(layer, viewport)
+    moved = noisy != plain
+    assert moved.any()
+    assert not (moved & (plain == 0.0)).any()
+
+
+def test_jitter_is_read_but_not_applied(caplog: pytest.LogCaptureFixture) -> None:
+    """A jittered glow renders as the plain one, and says so."""
+    _, layer = _masks_card()
+    glow = _forge_glow(layer)
+    viewport = _around(layer)
+    plain = _alone(layer, viewport)
+    glow[Key.ShadingNoise] = Double(50.0)
     assert _outer_glow(layer).quality_jitter == 50.0
     with caplog.at_level(logging.DEBUG, logger="psd_tools.composite.composite"):
-        noisy = _alone(layer, viewport)
-    assert "noise" in caplog.text and "jitter" in caplog.text
-    assert np.array_equal(noisy, plain)
+        jittered = _alone(layer, viewport)
+    assert "jitter" in caplog.text
+    assert np.array_equal(jittered, plain)
 
 
 def test_a_glow_over_the_documents_budget_is_dropped_not_drawn() -> None:

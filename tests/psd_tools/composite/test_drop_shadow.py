@@ -2141,17 +2141,17 @@ def test_the_caption_contour_brings_layer_params_closer_to_photoshop(
     assert contoured < identity < without
 
 
-def test_noise_is_read_but_not_applied(caplog: pytest.LogCaptureFixture) -> None:
-    """A noisy shadow renders as the same shadow without noise, and says so."""
+def test_noise_moves_the_shadow_only_where_it_falls() -> None:
+    """A noisy shadow differs from the plain one, and only where that one paints."""
     psd, layer = _masks_card()
     viewport = _around(layer)
     plain = _alone(layer, viewport)
     _shadow_descriptor(layer)[Key.Noise] = Double(50.0)
     assert _drop_shadow(layer).noise == 50.0
-    with caplog.at_level(logging.DEBUG, logger="psd_tools.composite.composite"):
-        noisy = _alone(layer, viewport)
-    assert "noise" in caplog.text
-    assert np.array_equal(noisy, plain)
+    noisy = _alone(layer, viewport)
+    moved = noisy != plain
+    assert moved.any()
+    assert not (moved & (plain == 0.0)).any()
 
 
 def test_a_shadow_lit_by_the_global_light_follows_the_documents_angle() -> None:

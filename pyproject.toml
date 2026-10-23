@@ -76,6 +76,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 psd_tools = ["*.pyx", "py.typed"]
+"psd_tools.composite" = ["noise_field.npz"]
 
 [tool.setuptools.dynamic]
 version = { attr = "psd_tools.version.__version__" }
