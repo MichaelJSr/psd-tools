@@ -2732,11 +2732,10 @@ class Compositor:
         is_group = isinstance(layer, GroupMixin)
         if is_group:
             color, shape, alpha, adjustment_isolated = self._get_group(layer, knockout)
+            if layer.has_clip_layers():
+                color = self._apply_clip_layers(layer, color)
         else:
-            color, shape, alpha, stroke = self._get_object(layer)
-
-        if layer.has_clip_layers():
-            color = self._apply_clip_layers(layer, color, alpha)
+            color, shape, alpha, stroke = self._get_object(layer, clip_layers=True)
 
         shape_mask = self._get_mask(layer)
         fill_opacity, opacity = self._get_const(layer)
@@ -3287,9 +3286,7 @@ class Compositor:
             transformed_color = content
 
         if layer.has_clip_layers():
-            transformed_color = self._apply_clip_layers(
-                layer, transformed_color, content_alpha
-            )
+            transformed_color = self._apply_clip_layers(layer, transformed_color)
 
         shape_mask = self._get_mask(layer)
         shape_const, opacity_const = self._get_const(layer)
@@ -3666,7 +3663,10 @@ class Compositor:
         )
 
     def _get_object(
-        self, layer: Layer, viewport: tuple[int, int, int, int] | None = None
+        self,
+        layer: Layer,
+        viewport: tuple[int, int, int, int] | None = None,
+        clip_layers: bool = False,
     ) -> tuple[
         np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray] | None
     ]:
@@ -3675,7 +3675,17 @@ class Compositor:
         The last item is the coverage and alpha a redrawn stroke has of its own,
         where the fill leaves any. Unlike the fill it is not clipped to the
         vector mask, which a centred or outer stroke reaches past.
+
+        ``clip_layers`` paints the layer's clip layers into the color, on this
+        compositor's viewport. They go on the fill and under a redrawn stroke,
+        which Photoshop draws over them; with the fill off they go on the
+        stroke, the layer's only paint.
         """
+        if clip_layers and layer.has_clip_layers():
+            assert viewport is None, "clip layers paint on this compositor's viewport"
+            clip: Layer | None = layer
+        else:
+            clip = None
         if viewport is None:
             viewport = self._viewport
         height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
@@ -3699,6 +3709,8 @@ class Compositor:
             inner = layer.stroke.line_alignment is StrokeAlignment.INNER
             if fill_off:
                 # No fill to paint onto: the layer is the stroke.
+                if clip is not None:
+                    color_s = self._apply_clip_layers(clip, color_s)
                 if inner:
                     return color_s, shape * shape_s, alpha * alpha_s, None
                 return color_s, shape * 0.0, alpha * 0.0, (shape_s, alpha_s)
@@ -3706,6 +3718,9 @@ class Compositor:
             # fill's own alpha, so the stroke is painted onto it whole (#883).
             assert path is not None
             covered = alpha if inner else alpha * path
+            if clip is not None:
+                # Under the stroke: Photoshop draws it over the clip layers.
+                color = self._apply_clip_layers(clip, color)
             compositor = Compositor(
                 viewport,
                 self._widen(color, self.channels),
@@ -3737,16 +3752,24 @@ class Compositor:
 
         if fill_off and (self._force or not layer.has_pixels()):
             shape, alpha = shape * 0.0, alpha * 0.0
+        if clip is not None:
+            color = self._apply_clip_layers(clip, color)
         return color, shape, alpha, None
 
-    def _apply_clip_layers(
-        self, layer: Layer, color: np.ndarray, alpha: np.ndarray
-    ) -> np.ndarray:
-        # TODO: Consider Tag.BLEND_CLIPPING_ELEMENTS.
+    def _apply_clip_layers(self, layer: Layer, color: np.ndarray) -> np.ndarray:
+        """``color`` with ``layer``'s clip layers painted on it.
+
+        The clip layers blend with the base's color as though the base were
+        opaque, and the base keeps its own alpha: a partly covered base pixel
+        is that much of the blended color, never the clip layer's own color
+        mixed in by the base's transparency. That is Blend Clipped Layers as
+        Group, Photoshop's default.
+        """
+        # TODO: Consider Tag.BLEND_CLIPPING_ELEMENTS, which this reads as on.
         compositor = Compositor(
             self._viewport,
             self._widen(color, self.channels),
-            alpha,
+            np.ones((self.height, self.width, 1), dtype=np.float32),
             layer_filter=self._layer_filter,
             force=self._force,
             widen=self._widen,
