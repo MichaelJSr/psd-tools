@@ -216,6 +216,13 @@ def test_opacity_of_a_single_shape_group() -> None:
     assert rgba[..., 3] == pytest.approx(np.full((2, 2), 0.5))
 
 
+def test_oversized_images_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(svg, "_MAX_IMAGE_PIXELS", 35)
+    assert _table({1: IMAGE.format(gid=1)}).drawing(1) is None
+    monkeypatch.setattr(svg, "_MAX_IMAGE_PIXELS", 36)
+    assert _table({1: IMAGE.format(gid=1)}).drawing(1) is not None
+
+
 def test_entities_are_refused() -> None:
     doc = (
         '<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "aaaa">]>'

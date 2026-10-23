@@ -39,6 +39,8 @@ IDENTITY: Affine = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 _PARSED_DOCS = 64
 #: Bytes a compressed document may inflate to.
 _MAX_DOCUMENT = 1 << 26
+#: Pixels an embedded image may decode to.
+_MAX_IMAGE_PIXELS = 1 << 24
 _XLINK = "{http://www.w3.org/1999/xlink}href"
 _SHAPES = ("path", "rect", "circle", "ellipse", "line", "polyline", "polygon")
 #: Elements that draw nothing themselves and need no support.
@@ -896,6 +898,8 @@ class _Parser:
 
         raw = base64.b64decode(href.strip()[hit.end() :])
         with Image.open(io.BytesIO(raw)) as im:
+            if im.width * im.height > _MAX_IMAGE_PIXELS:
+                raise Unsupported("image size")
             im.load()
             rgba = np.asarray(im.convert("RGBA"), dtype=np.float32) / 255
         ih, iw = rgba.shape[:2]
