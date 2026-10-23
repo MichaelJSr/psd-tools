@@ -205,3 +205,31 @@ def test_copy_between_numbered_and_named_txt2_refuses() -> None:
     with pytest.raises(ValueError, match="numbered keys"):
         layer.copy_to(dest)
     assert (_raw(_txt2(dest)), len(list(dest.descendants()))) == before
+
+
+def test_copy_between_named_txt2_documents() -> None:
+    # text.psd and pen-text.psd are pre-CC: named Txt2 keys. The copy's
+    # ArialMT is not in pen-text.psd's FontSet and is added.
+    source, dest = _open("text.psd"), _open("pen-text.psd")
+    layer = next(x for x in source.descendants() if isinstance(x, TypeLayer))
+    copy = layer.copy_to(dest)
+    root = _txt2(dest)
+    fonts = [
+        str(f["Resource"]["Identifier"]["Name"].value)
+        for f in root["DocumentResources"]["FontSet"]["Resources"]
+    ]
+    assert fonts == ["TimesNewRomanPSMT", "Courier", "AdobeInvisFont", "ArialMT"]
+    story = root["DocumentObjects"]["TextObjects"][_index(copy)]
+    runs = story["Model"]["StyleRun"]["RunArray"]
+    assert fonts[int(runs[0]["RunData"]["StyleSheet"]["Features"]["Font"].value)] == (
+        "ArialMT"
+    )
+    frame = int(story["View"]["Frames"][0]["Resource"].value)
+    assert frame == len(root["DocumentResources"]["TextFrameSet"]["Resources"]) - 1
+    again = _reopen(dest)
+    texts = [
+        (_index(x), x.story_text == x.text + "\r")
+        for x in again.descendants()
+        if isinstance(x, TypeLayer)
+    ]
+    assert sorted(texts) == [(0, True), (1, True), (2, True)]

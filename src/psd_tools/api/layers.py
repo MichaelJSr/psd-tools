@@ -1359,8 +1359,9 @@ class Layer(LayerProtocol):
 
         The copy retains its layer type, channels, masks and layer metadata,
         with fresh layer IDs. A type layer's copy gets its own ``Txt2`` story.
-        Document resources such as smart-object contents remain shared. No cached API wrappers are copied. An artboard's copy
-        keeps its rectangle and so overlaps the source.
+        Document resources such as smart-object contents remain shared. No
+        cached API wrappers are copied. An artboard's copy keeps its rectangle
+        and so overlaps the source.
 
         :param parent: Destination group or document. Defaults to this layer's
             parent. A detached layer requires an explicit destination.
@@ -2200,7 +2201,8 @@ class GroupMixin(GroupMixinProtocol, Protocol):
         """Re-encode every moved layer, and its descendants, for this document.
 
         Run before either tree changes, so a conversion that raises leaves both
-        documents as they were. Keyed by ``id(layer)``.
+        documents as they were; so does a type layer's story that cannot come
+        along. Keyed by ``id(layer)``.
         """
         converted: dict[int, tuple[LayerRecord, ChannelDataList]] = {}
         for layer in layers:
