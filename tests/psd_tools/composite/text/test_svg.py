@@ -254,6 +254,15 @@ def test_undecodable_images_are_not_drawn(monkeypatch: pytest.MonkeyPatch) -> No
     assert _table({1: _image_doc(png)}).drawing(1) is None
 
 
+@pytest.mark.parametrize("encoding", ["bogus", "shift_jis"])
+def test_an_unreadable_encoding_is_not_drawn(encoding: str) -> None:
+    doc = (
+        f'<?xml version="1.0" encoding="{encoding}"?>'
+        '<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>'
+    )
+    assert _table({1: doc}).drawing(1) is None
+
+
 def test_a_corrupt_compressed_document_is_not_drawn() -> None:
     table = _table({1: "x" * 40})
     start = table._index[0][2]

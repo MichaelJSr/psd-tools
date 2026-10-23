@@ -250,7 +250,8 @@ class SvgTable:
         if doc is not None and b"<!ENTITY" not in doc and b"<!DOCTYPE" not in doc:
             try:
                 root = ET.fromstring(doc)
-            except ET.ParseError:
+            except (ET.ParseError, ValueError, LookupError):
+                # Malformed XML, or an encoding the parser cannot read.
                 root = None
         with self._lock:
             self._docs[where] = root
