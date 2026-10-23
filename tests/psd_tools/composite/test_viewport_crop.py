@@ -195,12 +195,9 @@ def test_a_spread_matte_reads_its_whole_box() -> None:
 
 
 def test_a_precise_glow_is_bounded_whatever_its_spread() -> None:
-    """Spread to the coverage, it also reads the edge test's reach around it."""
-    assert effects.glow_reach(5.0, 40.0, precise=True) == 8 + effects._GLOW_EDGE_REACH
+    assert effects.glow_reach(5.0, 40.0, precise=True) == 8
     assert effects.glow_reach(5.0, 9.0, precise=True) == 8
     assert effects.glow_reach(5.0, 0.0, precise=False) == 8
-    # An inner glow's choke does not read the coverage.
-    assert effects.glow_reach(5.0, 40.0, precise=True, outer=False) == 8
 
 
 _Cut = DropShadow | Stroke | OuterGlow | InnerShadow | InnerGlow
@@ -218,7 +215,7 @@ def _reach(effect: _Cut) -> int | None:
     if isinstance(effect, InnerGlow):
         geometry = effects.shadow_geometry(desc, 0.0, "Inner glow")
         precise = effect.glow_type == GlowTechnique.PRECISE_MATTE
-        return effects.glow_reach(geometry.size, geometry.spread, precise, outer=False)
+        return effects.glow_reach(geometry.size, geometry.spread, precise)
     geometry = effects.shadow_geometry(desc, effect.angle)
     return effects.cast_reach(
         geometry.distance, geometry.angle, geometry.size, geometry.spread

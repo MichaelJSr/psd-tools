@@ -23,8 +23,9 @@ Currently supported effects:
     knocks out drop shadow"
   - The blur is Photoshop's tent of two box passes; noise is read but not
     applied
-- **Outer glow**: The layer's silhouette, spread and blurred (softer) or
-  ramped by distance (precise), painted behind the layer and never under it
+- **Outer glow**: The layer's silhouette, spread and blurred by the drop
+  shadow's tent (softer) or ramped by distance (precise), painted behind the
+  layer and never under it
   - Solid color or a gradient along the falloff; honors size, spread,
     technique, range, contour and its anti-aliasing, opacity and blend mode
   - Noise and jitter are read but not applied
@@ -875,42 +876,19 @@ def stroke_band(
     return np.expand_dims(coverage, 2), np.expand_dims(inside, 2)
 
 
-# How wide a gaussian stands in for the blur Photoshop gives an outer glow of
-# a given size, fitted against the glow previews, one of which the shadows'
-# tent (:py:func:`_tent_blur`) scores worse on. The fit is asserted in the
-# tests.
-_GLOW_SIGMA_PER_SIZE = 0.45
-
 # The narrowest box :py:func:`_tent_blur` passes over a matte, in pixels.
 _MIN_BOX_WIDTH = 2.0
 
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
 
-# The spread, in pixels, from which an outer glow is cast from the layer's
-# coverage rather than its opacity: half a pixel, the least that rounds to a
-# whole one. And what the opacity is scaled by, held to one, to read as
-# coverage. Both fitted against Photoshop's renders of soft-edged layers;
-# the tests pin the values.
-_GLOW_SPREAD_PIXELS = 0.5
-_GLOW_COVERAGE_GAIN = 20.0
+# The steps an outer glow's range is held in: Photoshop reads the percentage
+# as a byte, so a 1% range squeezes the falloff by 255 / 3 and not 100.
+_GLOW_RANGE_STEPS = 255
 
-# How far below one a coverage still counts as opaque when the coverage
-# reading looks for an antialiased edge: one 8-bit step, so a layer painted
-# a step short of solid, or a 32-bit one a rounding short, still has edges.
-_OPAQUE_STEP = 1.0 / 255.0
-
-# How far, in pixels along the axes, a partial pixel may lie from an opaque
-# one and from a clear one and still read as the shape's antialiased edge:
-# two, the width of the band a resampled edge is antialiased over.
-_GLOW_EDGE_REACH = 2
-
-# What a glow's range is held above, in the same percent, when its falloff is
-# squeezed: a range read as the inverse of the slider would draw a 1% range as
-# a hard band, and Photoshop draws a soft halo. Fitted against Photoshop's
-# renders of documents outside the fixture corpus, where no glow has a range
-# far from 100%; the tests pin the value and the closed form, not the fit.
-_GLOW_RANGE_FLOOR = 15.0
+# How much stronger than its matte a gradient glow covers, whatever its range:
+# full out to about half its size from a straight edge.
+_GRADIENT_GLOW_GAIN = 8.0
 
 # What one pixel of a shadow's or glow's canvas costs at the peak of
 # ``draw_drop_shadow()`` or ``glow_falloff()``: the silhouette it is cast
@@ -1064,23 +1042,15 @@ def cast_reach(distance: float, angle: float, size: float, spread: float) -> int
     return math.ceil(max(size, 0.0)) + math.ceil(max(abs(dx), abs(dy))) + 3
 
 
-def glow_reach(
-    size: float, spread: float, precise: bool, *, outer: bool = True
-) -> int | None:
+def glow_reach(size: float, spread: float, precise: bool) -> int | None:
     """How far a glow's falloff reads from each pixel, as :py:func:`cast_reach`.
 
     A precise glow reads the silhouette no further than its size and a
-    pixel or two, so it is bounded whatever its spread; when an ``outer``
-    glow's spread reads the coverage (:py:func:`_glow_coverage`), each pixel
-    of the silhouette also reads :data:`_GLOW_EDGE_REACH` around it. An inner
-    glow's choke does not read it.
+    pixel or two, so it is bounded whatever its spread.
     """
     if not precise and size > 0.0 and spread > 0.0:
         return None
-    reach = math.ceil(max(size, 0.0)) + 3
-    if outer and _reads_coverage(size, spread):
-        reach += _GLOW_EDGE_REACH
-    return reach
+    return math.ceil(max(size, 0.0)) + 3
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:
@@ -1351,7 +1321,7 @@ def _spread_matte(
 def _shadow_matte(
     alpha: np.ndarray, size: float, spread: float, outside: float = 0.0
 ) -> np.ndarray:
-    """``alpha`` spread and blurred as a shadow's or an inner glow's matte.
+    """``alpha`` spread and blurred as a shadow's, a soft glow's or an inner glow's matte.
 
     The blur is :py:func:`_tent_blur` of what the spread leaves of the size,
     so the matte ends within that size of the silhouette. Its end matters
@@ -1386,35 +1356,6 @@ def _tent_blur(alpha: np.ndarray, radius: float, outside: float) -> np.ndarray:
     for axis in range(2):
         alpha = ndimage.correlate1d(
             alpha, weights, axis=axis, mode="constant", cval=outside
-        )
-    return alpha
-
-
-def _soft_matte(
-    alpha: np.ndarray,
-    size: float,
-    spread: float,
-    sigma_per_size: float,
-    outside: float = 0.0,
-) -> np.ndarray:
-    """``alpha`` grown by the spread and blurred by what is left of the size.
-
-    The spread is :py:func:`_spread_matte`'s. The blur is a gaussian cut off
-    at that remaining radius, rounded to a whole pixel, so the matte reaches
-    at most a pixel or two past ``size`` from the silhouette, and the
-    canvases the bbox functions ask for hold all of it; a gaussian left to
-    its default reach runs on past both. It treats what lies past the canvas
-    as ``outside``, as :py:func:`_tent_blur` does; the default for a blur is
-    to reflect the edge instead, which doubles back any coverage that
-    reaches it.
-    """
-    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
-
-    alpha, radius = _spread_matte(alpha, size, spread)
-    sigma = radius * sigma_per_size
-    if sigma > 1e-3:
-        alpha = ndimage.gaussian_filter(
-            alpha, sigma, mode="constant", cval=outside, truncate=radius / sigma
         )
     return alpha
 
@@ -1465,45 +1406,69 @@ def _precise_ramp(
 def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
     """``matte`` scaled up by the inverse of its range and held to one.
 
-    Photoshop's range picks the part of the falloff the contour is laid over.
-    The inverse is taken over the range and :data:`_GLOW_RANGE_FLOOR`
-    together, so a small range squeezes no harder than the floor does, and
-    100% is the matte itself.
+    Photoshop's range picks the part of the falloff the contour is laid over,
+    the range read in :data:`_GLOW_RANGE_STEPS` steps (a half rounding up) and
+    never less than one, so 100% is the matte itself.
     """
-    scale = math.hypot(100.0, _GLOW_RANGE_FLOOR) / math.hypot(range_, _GLOW_RANGE_FLOOR)
+    steps = max(math.floor(range_ * _GLOW_RANGE_STEPS / 100.0 + 0.5), 1)
+    scale = _GLOW_RANGE_STEPS / steps
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
 
 
-def _reads_coverage(size: float, spread: float) -> bool:
-    """Whether a glow of ``size`` and ``spread`` is cast from the coverage."""
-    grow = max(float(size), 0.0) * min(max(float(spread), 0.0), 100.0) / 100.0
-    return grow >= _GLOW_SPREAD_PIXELS
+def glow_matte(
+    shape: np.ndarray, *, size: float, spread: float, precise: bool = False
+) -> np.ndarray:
+    """The matte an outer glow falls off along, before its range and contour.
 
+    ``shape`` is the layer's silhouette on the canvas
+    :py:func:`outer_glow_bbox` sizes; the result is ``(height, width)`` on
+    it, one at the silhouette's edge and dying away over ``size`` pixels: a
+    shadow's matte cast nowhere (:py:func:`_shadow_matte`), from the layer's
+    opacity, so a spread grows a faint layer from where its coverage ends as
+    :py:func:`_spread` grows a shadow's. It is not cut under the silhouette.
 
-def _glow_coverage(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
-    """What a glow of ``size`` and ``spread`` is cast from.
+    ``precise`` ramps the matte by its distance from the silhouette instead
+    of blurring it (:py:func:`_precise_matte`). A glow of size zero is the
+    silhouette itself, whatever its spread.
 
-    A glow with no spread is cast from the layer's opacity. One spread by
-    half a pixel or more (:data:`_GLOW_SPREAD_PIXELS`) is cast from its
-    coverage: the opacity scaled by :data:`_GLOW_COVERAGE_GAIN` and held to
-    one, so a soft-edged or faint layer glows as the shape it fades out to
-    and only its faintest pixels cast less than a solid one. A partial pixel
-    within :data:`_GLOW_EDGE_REACH` of both a clear pixel and an opaque one
-    is a hard shape's antialiased edge and keeps its opacity, so text and a
-    resampled shape cast from exactly where their edges lie; the neighbours
-    are read along the axes, as :py:func:`_signed_distance` reads a hard
-    step. Photoshop's renders of such layers split the same way.
+    A parameter that is not finite raises ``ValueError``, for the reason
+    :py:func:`draw_drop_shadow` gives.
     """
-    alpha = alpha.astype(np.float32)
-    if not _reads_coverage(size, spread):
-        return alpha
-    covered = alpha > 0.0
-    near_clear, near_opaque = ~covered, alpha >= 1.0 - _OPAQUE_STEP
-    for _ in range(_GLOW_EDGE_REACH):
-        near_clear, near_opaque = _grow(near_clear), _grow(near_opaque)
-    edge = covered & near_clear & near_opaque
-    coverage = np.clip(alpha * _GLOW_COVERAGE_GAIN, 0.0, 1.0)
-    return np.where(edge, alpha, coverage).astype(np.float32)
+    _require_scipy("Outer glow effects")
+    if not all(math.isfinite(value) for value in (size, spread)):
+        raise ValueError(
+            "Outer glow parameters must be finite: size=%r spread=%r" % (size, spread)
+        )
+    alpha = shape[:, :, 0].astype(np.float32)
+    if not alpha.any():
+        return np.zeros(alpha.shape, dtype=np.float32)
+    if size <= 0.0:
+        matte = alpha
+    elif precise:
+        matte = _precise_matte(alpha, size, spread)
+    else:
+        matte = _shadow_matte(alpha, size, spread)
+    return np.clip(matte, 0.0, 1.0).astype(np.float32)
+
+
+def glow_ranged(
+    matte: np.ndarray,
+    *,
+    range_: float = _DEFAULT_GLOW_RANGE,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+) -> np.ndarray:
+    """A glow's ``matte`` squeezed by its range, then mapped by its contour.
+
+    The range is read as :py:func:`_ranged` says. A range that is not finite
+    raises ``ValueError``.
+    """
+    if not math.isfinite(range_):
+        raise ValueError("Outer glow range must be finite: %r" % range_)
+    falloff = _ranged(matte, min(max(range_, 1.0), 100.0))
+    if contour is not None:
+        falloff = _contoured(falloff, contour, anti_aliased)
+    return np.clip(falloff, 0.0, 1.0).astype(np.float32)
 
 
 def glow_falloff(
@@ -1518,41 +1483,12 @@ def glow_falloff(
 ) -> np.ndarray:
     """How an outer glow falls off from ``shape``.
 
-    ``shape`` is the layer's silhouette on the canvas
-    :py:func:`outer_glow_bbox` sizes; the result is ``(height, width)`` on
-    it, one at the silhouette's edge and dying away over ``size`` pixels: a
-    shadow's matte cast nowhere, squeezed by the range (:py:func:`_ranged`)
-    and then mapped by the contour. A glow spread by half a pixel or more is
-    cast from the silhouette's coverage rather than its opacity, so a soft
-    edge glows as the shape it fades out to, while a hard shape's
-    antialiased edge keeps its opacity. It is not cut under the silhouette.
-
-    ``precise`` ramps the matte by its distance from the silhouette instead
-    of blurring it (:py:func:`_precise_matte`). A size of zero draws nothing
-    either way.
-
-    A parameter that is not finite raises ``ValueError``, for the reason
-    :py:func:`draw_drop_shadow` gives.
+    :py:func:`glow_matte`, then :py:func:`glow_ranged`.
     """
-    _require_scipy("Outer glow effects")
-    if not all(math.isfinite(value) for value in (size, spread, range_)):
-        raise ValueError(
-            "Outer glow parameters must be finite: size=%r spread=%r range=%r"
-            % (size, spread, range_)
-        )
-    if size <= 0.0:
-        return np.zeros(shape.shape[:2], dtype=np.float32)
-    alpha = _glow_coverage(shape[:, :, 0], size, spread)
-    if not alpha.any():
-        return np.zeros(alpha.shape, dtype=np.float32)
-    if precise:
-        matte = _precise_matte(alpha, size, spread)
-    else:
-        matte = _soft_matte(alpha, size, spread, _GLOW_SIGMA_PER_SIZE)
-    falloff = _ranged(np.clip(matte, 0.0, 1.0), min(max(range_, 1.0), 100.0))
-    if contour is not None:
-        falloff = _contoured(falloff, contour, anti_aliased)
-    return np.clip(falloff, 0.0, 1.0).astype(np.float32)
+    if not math.isfinite(range_):
+        raise ValueError("Outer glow range must be finite: %r" % range_)
+    matte = glow_matte(shape, size=size, spread=spread, precise=precise)
+    return glow_ranged(matte, range_=range_, contour=contour, anti_aliased=anti_aliased)
 
 
 def uncovered(shape: np.ndarray, hidden: np.ndarray) -> np.ndarray:
@@ -1595,26 +1531,28 @@ def glow_paint(
     shape: np.ndarray,
     falloff: np.ndarray,
     over: float = 0.0,
+    matte: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """What an outer glow is painted with, on ``viewport``: its colour and coverage.
 
-    ``shape`` is the silhouette and ``falloff`` what :py:func:`glow_falloff`
-    drew from it. A solid colour is the descriptor's, covering the falloff.
-    A gradient is laid along the falloff instead: its start at the
-    silhouette's edge, where the falloff is full, and its end where the
-    falloff dies away, so the opaque end of Photoshop's default glow
-    gradient sits against the layer. Its transparency stops, read at the
-    same place as its colour stops, hold the coverage under them: the glow
-    is as opaque as the falloff or the transparency there, whichever is
-    less, so a gradient opaque at both ends paints what a solid colour would
-    and a translucent stop holds the glow at its opacity for as long as the
-    falloff is above it. The gradient's reverse flag turns it around, and its
-    stops blend in the method ``gs99`` names, as an overlay's do. Either way
-    the coverage is cut away under the silhouette. ``over`` is how much of
-    the silhouette a Normal layer composited on top paints, its fill opacity
-    and opacity together; the coverage under it is raised so the glow shows
-    at ``1 - shape`` once the layer is on. Zero leaves the plain complement.
-    A descriptor with neither raises as the solid colour reader does.
+    ``shape`` is the silhouette, ``falloff`` what :py:func:`glow_falloff`
+    drew from it and ``matte`` the :py:func:`glow_matte` under that falloff.
+    A solid colour is the descriptor's, covering the falloff. A gradient is
+    laid along the falloff instead: its start at the silhouette's edge,
+    where the falloff is full, and its end where the falloff dies away, so
+    the opaque end of Photoshop's default glow gradient sits against the
+    layer. What it covers does not follow the range: it is the matte held
+    :data:`_GRADIENT_GLOW_GAIN` times as strong, or the falloff when no
+    matte is given, and its transparency stops, read at the same place as
+    its colour stops, hold the coverage under them: the glow is as opaque as
+    that or the transparency there, whichever is less. The gradient's
+    reverse flag turns it around, and its stops blend in the method ``gs99``
+    names, as an overlay's do. Either way the coverage is cut away under the
+    silhouette. ``over`` is how much of the silhouette a Normal layer
+    composited on top paints, its fill opacity and opacity together; the
+    coverage under it is raised so the glow shows at ``1 - shape`` once the
+    layer is on. Zero leaves the plain complement. A descriptor with neither
+    raises as the solid colour reader does.
     """
     if Key.Gradient not in desc:
         color, _ = paint.draw_solid_color_fill(viewport, color_mode, desc)
@@ -1629,6 +1567,8 @@ def glow_paint(
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)
     coverage = falloff
+    if matte is not None:
+        coverage = np.clip(matte * _GRADIENT_GLOW_GAIN, 0.0, 1.0)
     if opacities is not None:
         coverage = np.minimum(coverage, np.asarray(opacities(along), dtype=np.float32))
     return color, _beside(coverage, shape, over)

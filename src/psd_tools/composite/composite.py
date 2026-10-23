@@ -47,7 +47,12 @@ from psd_tools.api.utils import (
 from psd_tools.composite import paint, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
-from psd_tools.composite.blend import fade_source, get_blend_func, normal
+from psd_tools.composite.blend import (
+    fade_source,
+    faded_color,
+    get_blend_func,
+    normal,
+)
 from psd_tools.composite.effects import (
     BevelShape,
     bevel_beside,
@@ -64,9 +69,10 @@ from psd_tools.composite.effects import (
     draw_satin,
     draw_stroke_effect_split,
     drop_shadow_bbox,
-    glow_falloff,
     glow_geometry,
+    glow_matte,
     glow_paint,
+    glow_ranged,
     glow_reach,
     inner_bbox,
     outer_glow_bbox,
@@ -1971,6 +1977,10 @@ class _OuterEffect(NamedTuple):
     # pixel, which this one is disjoint from -- see
     # :py:meth:`Compositor._apply_outer_effects`.
     above: float | np.ndarray = 0.0
+    # The effect's own opacity, without the layer's: with the coverage, what
+    # fades its colour in the modes :py:func:`~psd_tools.composite.blend.fade_source`
+    # names. The layer opacity mixes it in instead.
+    own: float | np.ndarray = 1.0
 
 
 class _StrokeBand(NamedTuple):
@@ -2077,7 +2087,6 @@ class _EffectSink(Protocol):
         color: np.ndarray,
         blend_mode: BlendMode,
         opacity: float | np.ndarray,
-        fades_source: bool = False,
     ) -> None: ...
 
     def replace(
@@ -2186,25 +2195,25 @@ class _EffectCanvas:
         color: np.ndarray,
         blend_mode: BlendMode,
         opacity: float | np.ndarray,
-        fades_source: bool = False,
     ) -> None:
         """Paint an effect over the layer, inside its region.
 
         ``coverage`` is a share of the region, and ``opacity`` the effect's
-        own; ``fades_source`` is whether that opacity fades the colour in the
-        modes :py:func:`~psd_tools.composite.blend.fade_source` names. The
-        layer's opacity is not applied here -- see :py:meth:`_start`.
+        own; the two together fade the colour in the modes
+        :py:func:`~psd_tools.composite.blend.fade_source` names. The layer's
+        opacity is not applied here -- see :py:meth:`_start`.
         """
         if not coverage.any():
             return
         self._start()
         color = self._compositor._fit_source(color)
-        blend_fn = get_blend_func(blend_mode, self._compositor._color_mode)
-        if fades_source:
-            # Only an overlay or a satin fades its colour, at one opacity.
-            assert not isinstance(opacity, np.ndarray)
-            blend_fn = fade_source(blend_fn, blend_mode, opacity)
         alpha = coverage * opacity
+        faded = faded_color(blend_mode, color, alpha)
+        if faded is not None:
+            # The colour fades in place of the coverage, and the faded colour
+            # covers all the effect reaches, the layer's clear part included.
+            color, alpha = faded, (alpha > 0.0).astype(np.float32)
+        blend_fn = get_blend_func(blend_mode, self._compositor._color_mode)
         # ``normal`` ignores what is under it, and is also what an effect whose
         # blend mode this module does not know answers, so the un-premultiply
         # is skipped rather than computed for a function that will drop it.
@@ -2303,18 +2312,17 @@ class _AdjustmentCanvas:
         color: np.ndarray,
         blend_mode: BlendMode,
         opacity: float | np.ndarray,
-        fades_source: bool = False,
     ) -> None:
-        """Composite an effect onto the canvas, inside the region."""
+        """Composite an effect onto the canvas, inside the region.
+
+        The effect's share of the region and its opacity fade its colour;
+        the region mixes it in.
+        """
         if not coverage.any():
             return
         shape = self._region * coverage
-        faded = 1.0
-        if fades_source:
-            assert not isinstance(opacity, np.ndarray)
-            faded = opacity
         self._compositor._apply_source(
-            color, shape, shape * opacity, blend_mode, faded=faded
+            color, shape, shape * opacity, blend_mode, faded=coverage * opacity
         )
 
     knocks_out = False
@@ -2357,18 +2365,19 @@ class _ApartCanvas(_AdjustmentCanvas):
         color: np.ndarray,
         blend_mode: BlendMode,
         opacity: float | np.ndarray,
-        fades_source: bool = False,
     ) -> None:
-        """Composite an effect onto the canvas at its share of the region."""
+        """Composite an effect onto the canvas at its share of the region.
+
+        In the modes that fade their source the faded colour covers all the
+        effect reaches, as on an :py:class:`_EffectCanvas`.
+        """
         if not coverage.any():
             return
-        faded = 1.0
-        if fades_source:
-            assert not isinstance(opacity, np.ndarray)
-            faded = opacity
-        self._compositor._apply_source(
-            color, coverage, coverage * opacity, blend_mode, faded=faded
-        )
+        alpha = coverage * opacity
+        faded = faded_color(blend_mode, self._compositor._fit_source(color), alpha)
+        if faded is not None:
+            color, alpha = faded, (alpha > 0.0).astype(np.float32)
+        self._compositor._apply_source(color, coverage, alpha, blend_mode)
 
     knocks_out = True
 
@@ -3108,6 +3117,7 @@ class Compositor:
                 coverage,
                 coverage * effect.opacity,
                 effect.blend_mode,
+                faded=effect.coverage * effect.own,
             )
 
     def _apply_passthrough_source(
@@ -3208,7 +3218,7 @@ class Compositor:
         blend_mode: BlendMode,
         knockout: Knockout = Knockout.NONE,
         text_gamma: float | None = None,
-        faded: float = 1.0,
+        faded: float | np.ndarray = 1.0,
         text_key: int | None = None,
     ) -> None:
         """Put a source on the canvases.
@@ -3218,8 +3228,9 @@ class Compositor:
         The blend mode still sees the document's values; only the mix by
         coverage moves into that space.
 
-        ``faded`` is the opacity in ``alpha`` that fades the colour instead,
-        for the modes :py:func:`~psd_tools.composite.blend.fade_source` names.
+        ``faded`` is the share of ``alpha`` that fades the colour instead, for
+        the modes :py:func:`~psd_tools.composite.blend.fade_source` names: an
+        effect's coverage and opacity, per pixel.
         """
         color = self._fit_source(color)
         knockout_color, knockout_alpha = self._knockout_backdrop(knockout)
@@ -4202,7 +4213,7 @@ class Compositor:
                 shape_e = np.ones((self.height, self.width, 1), dtype=np.float32)
             else:
                 shape_e = paste(self._viewport, box, shape_e)
-            canvas.over(shape_e, color, blend_mode, opacity, fades_source=True)
+            canvas.over(shape_e, color, blend_mode, opacity)
 
     def _trace_shape(
         self,
@@ -4608,8 +4619,9 @@ class Compositor:
                 )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
+                faded = coverage * effect_opacity
                 self._apply_source(
-                    color, coverage, coverage * effect_opacity * opacity, blend_mode
+                    color, coverage, faded * opacity, blend_mode, faded=faded
                 )
 
     def _apply_outer_glows(self, layer: Layer) -> None:
@@ -4676,14 +4688,11 @@ class Compositor:
                 logger.debug("The jitter of an outer glow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
             try:
-                falloff = glow_falloff(
-                    silhouette,
-                    size=size,
-                    spread=spread,
-                    range_=range_,
-                    precise=precise,
-                    contour=contour,
-                    anti_aliased=anti_aliased,
+                matte = glow_matte(
+                    silhouette, size=size, spread=spread, precise=precise
+                )
+                falloff = glow_ranged(
+                    matte, range_=range_, contour=contour, anti_aliased=anti_aliased
                 )
                 color, coverage = glow_paint(
                     bbox,
@@ -4692,6 +4701,7 @@ class Compositor:
                     np.zeros_like(silhouette) if banded else silhouette,
                     falloff,
                     over=0.0 if banded else over,
+                    matte=matte,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an outer glow of %s: %s", layer, error)
@@ -4702,11 +4712,13 @@ class Compositor:
                 )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
+                faded = coverage * effect_opacity
                 self._apply_source(
                     paste(self._viewport, bbox, color),
                     coverage,
-                    coverage * effect_opacity * opacity,
+                    faded * opacity,
                     blend_mode,
+                    faded=faded,
                 )
 
     def _add_inner_effects(self, layer: Layer, canvas: _EffectSink) -> None:
@@ -4843,9 +4855,7 @@ class Compositor:
                 logger.debug("Cannot draw a satin of %s: %s", layer, error)
                 continue
             coverage = paste(self._viewport, bbox, coverage)
-            canvas.over(
-                canvas.within(coverage), color, blend_mode, opacity, fades_source=True
-            )
+            canvas.over(canvas.within(coverage), color, blend_mode, opacity)
 
     def _inner_effect(
         self,
@@ -4894,9 +4904,7 @@ class Compositor:
         center = glow.glow_source == GlowSource.CENTER
         precise = glow.glow_type == GlowTechnique.PRECISE_MATTE
         glow_range = float(desc.get(Key.InputRange, 50.0))
-        bbox = _within_reach(
-            bbox, self._viewport, glow_reach(size, choke, precise, outer=False)
-        )
+        bbox = _within_reach(bbox, self._viewport, glow_reach(size, choke, precise))
 
         def draw_glow(box: tuple[int, int, int, int], shape: np.ndarray) -> np.ndarray:
             return draw_inner_glow(
@@ -5019,7 +5027,11 @@ class Compositor:
                     if beside.any():
                         outer.append(
                             _OuterEffect(
-                                color, beside, opacity * canvas.opacity, blend_mode
+                                color,
+                                beside,
+                                opacity * canvas.opacity,
+                                blend_mode,
+                                own=opacity,
                             )
                         )
 
@@ -5222,5 +5234,6 @@ class Compositor:
                         band.opacity * canvas.opacity,
                         band.blend_mode,
                         above_beside,
+                        own=band.opacity,
                     )
                 )

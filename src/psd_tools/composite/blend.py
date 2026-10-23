@@ -733,27 +733,61 @@ _NEUTRAL_SOURCE: dict[BlendMode, float] = {
 }
 
 
+def faded_color(
+    blend_mode: BlendMode, color: np.ndarray, share: float | np.ndarray
+) -> np.ndarray | None:
+    """*color* moved towards *blend_mode*'s neutral colour, keeping *share* of it.
+
+    None for a mode that does not fade its source: see :py:func:`fade_source`.
+    """
+    neutral = _NEUTRAL_SOURCE.get(blend_mode)
+    if neutral is None:
+        return None
+    return neutral + share * (color - neutral)
+
+
 def fade_source(
     blend_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
     blend_mode: BlendMode,
-    opacity: float,
+    opacity: float | np.ndarray,
 ) -> Callable[[np.ndarray, np.ndarray], np.ndarray]:
     """*blend_fn* for a source composited at *opacity* that fades its source.
 
-    Photoshop fades a Color Dodge, Linear Dodge, Color Burn, Linear Burn,
-    Vivid Light, Linear Light or Difference overlay or satin by moving its
-    colour towards the mode's neutral one, so 60% dodges by 60% of the colour.
-    The result is meant to be composited at *opacity* as usual: it is the
-    blend that, mixed with the backdrop by *opacity*, lands where the faded
-    source blends at full strength. Any other mode, and an opacity of 0 or 1,
-    answers *blend_fn*.
+    Photoshop fades a layer effect in Color Dodge, Linear Dodge, Color Burn,
+    Linear Burn, Vivid Light, Linear Light or Difference by moving its colour
+    towards the mode's neutral one, so 60% dodges by 60% of the colour. What
+    fades it is the effect's coverage and its opacity together, so *opacity*
+    may be a canvas. The result is meant to be composited at *opacity* as
+    usual: it is the blend that, mixed with the backdrop by *opacity*, lands
+    where the faded source blends at full strength. Any other mode, and a
+    scalar opacity of 0 or 1, answers *blend_fn*.
     """
     neutral = _NEUTRAL_SOURCE.get(blend_mode)
-    if neutral is None or not 0.0 < opacity < 1.0:
+    if neutral is None:
         return blend_fn
+    if not isinstance(opacity, np.ndarray):
+        if not 0.0 < opacity < 1.0:
+            return blend_fn
 
-    def faded(Cb: np.ndarray, Cs: np.ndarray) -> np.ndarray:
-        blended = blend_fn(Cb, neutral + opacity * (Cs - neutral))
-        return Cb + (blended - Cb) / opacity
+        def faded(Cb: np.ndarray, Cs: np.ndarray) -> np.ndarray:
+            blended = blend_fn(Cb, neutral + opacity * (Cs - neutral))
+            return Cb + (blended - Cb) / opacity
 
-    return faded
+        return faded
+
+    share = opacity
+
+    def faded_by(Cb: np.ndarray, Cs: np.ndarray) -> np.ndarray:
+        blended = blend_fn(Cb, neutral + share * (Cs - neutral))
+        # Where nothing covers the pixel the source is mixed in at nothing,
+        # so what stands for the blend there is never read.
+        return Cb + np.divide(
+            blended - Cb,
+            share,
+            out=np.zeros(
+                np.broadcast_shapes(blended.shape, share.shape), blended.dtype
+            ),
+            where=share > 0.0,
+        )
+
+    return faded_by
