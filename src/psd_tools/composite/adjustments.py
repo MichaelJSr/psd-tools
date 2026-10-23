@@ -951,7 +951,11 @@ def apply_colorbalance(
     # that a shift toward one primary darkens the other two instead of
     # brightening the pixel.
     amounts = np.array([shadows, midtones, highlights], dtype=np.float32)
-    if layer.luminosity:
+    import os as _os
+    _crit = _os.environ.get("CRIT_CB", "")
+    if _crit.startswith("scale="):
+        amounts *= np.float32(float(_crit[6:]))
+    if layer.luminosity and _crit != "lumrestore":
         amounts -= amounts.mean(axis=1, keepdims=True)
     lows, gammas, highs = amounts[0] / _255, amounts[1] / _100, amounts[2] / _255
     level = _lut_domain(_get_lut_size(layer))
@@ -966,6 +970,13 @@ def apply_colorbalance(
             value = np.clip(value + highs[channel] * weight, _0, _1)
         value = value ** np.exp2(-gammas[channel])
         luts[channel + 1] = value.astype(np.float32, copy=False)
+    if layer.luminosity and _crit == "lumrestore":
+        out = _apply_luts(luts, img, colormode)
+        y0 = img[..., :3] @ _BT601_LUMINANCE
+        y1 = out[..., :3] @ _BT601_LUMINANCE
+        out = out.copy()
+        out[..., :3] = np.clip(out[..., :3] + (y0 - y1)[..., None], _0, _1)
+        return out
     return _apply_luts(luts, img, colormode)
 
 
@@ -1051,6 +1062,13 @@ def _vibrance(img: np.ndarray, vibrance: float, saturation: float) -> np.ndarray
         gray = low + np.minimum(position, _1) * chroma
         out = out + weight * (gray - out)
     out = np.clip(out, _0, _1)
+    import os as _os
+    _vs = _os.environ.get("CRIT_VIBSAT")
+    if saturation and (_vs == "601enc" or (_vs == "601enc_neg" and saturation < 0)):
+        enc = paint._linear_to_srgb(out)
+        luma = enc @ _BT601_LUMINANCE
+        enc = np.clip(luma[..., None] + (enc - luma[..., None]) * (_1 + saturation), _0, _1)
+        return paint._srgb_to_linear(enc)
     if saturation:
         luminance = out @ _LINEAR_LUMINANCE
         out = luminance[..., None] + (out - luminance[..., None]) * (_1 + saturation)

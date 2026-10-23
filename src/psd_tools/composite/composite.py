@@ -1550,6 +1550,9 @@ def _blends_in_text_space(layer: Layer, color_mode: ColorMode | None) -> bool:
     """
     if not isinstance(layer, TypeLayer):
         return False
+    import os as _os
+    if _os.environ.get("CRIT_TEXTGAMMA") == "off":
+        return False
     if color_mode not in (None, ColorMode.RGB) or layer._psd.depth == 32:
         return False
     # Unreadable text data leaves nothing but the stored pixels.
@@ -4057,6 +4060,8 @@ class Compositor:
             if jitter > 0.0:
                 logger.debug("The jitter of an outer glow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
+            import os as _os
+            band_cut = bool(_os.environ.get("CRIT_GLOWBAND")) and bool(_readable(layer, "stroke"))
             try:
                 falloff = glow_falloff(
                     silhouette,
@@ -4067,14 +4072,26 @@ class Compositor:
                     contour=contour,
                     anti_aliased=anti_aliased,
                 )
-                color, coverage = glow_paint(
-                    bbox,
-                    layer._psd.color_mode,
-                    glow.descriptor,
-                    silhouette,
-                    falloff,
-                    over=over,
-                )
+                if band_cut:
+                    color, coverage = glow_paint(
+                        bbox,
+                        layer._psd.color_mode,
+                        glow.descriptor,
+                        np.zeros_like(silhouette),
+                        falloff,
+                    )
+                    coverage = coverage * (
+                        1.0 - self._knockout_shape(layer, bbox, silhouette, covers)
+                    )
+                else:
+                    color, coverage = glow_paint(
+                        bbox,
+                        layer._psd.color_mode,
+                        glow.descriptor,
+                        silhouette,
+                        falloff,
+                        over=over,
+                    )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an outer glow of %s: %s", layer, error)
                 continue
