@@ -19,6 +19,7 @@ from psd_tools.composite.adjustments import (
     _huesaturation,
     _lut_domain,
     _rows_from_rgb,
+    _vibrance_space,
     apply_blackandwhite,
     apply_brightnesscontrast,
     apply_channelmixer,
@@ -1453,7 +1454,7 @@ def test_vibrance_at_rest_leaves_the_image_alone() -> None:
 
 # Photoshop 2023 documents: one colour balance or vibrance layer, or the
 # colour balance and vibrance pair Masked_Dedede's types carry, over four rows
-# of a gray ramp and 3840 random colours. The display one carries Apple's
+# of a gray ramp and 3840 random colours. The display ones carry Apple's
 # "Display" profile, as the cards do.
 @pytest.mark.parametrize(
     "name",
@@ -1464,6 +1465,7 @@ def test_vibrance_at_rest_leaves_the_image_alone() -> None:
         "vibrance_saturation_boost",
         "vibrance_negative",
         "vibrance_display_saturation",
+        "vibrance_display",
         "colorbalance_vibrance",
     ],
 )
@@ -1472,6 +1474,25 @@ def test_color_balance_and_vibrance_match_photoshop(name: str) -> None:
     reference = np.rint(psd.numpy()[..., :3] * 255)
     result = psd.composite(force=True, apply_icc=False)
     assert np.abs(np.asarray(result, np.float64)[..., :3] - reference).max() <= 1
+
+
+# Photoshop's working space for the display fixtures, fitted to its renders
+# of saturation -50 and +50 over 8192 colours.
+_DISPLAY_SPACE = [
+    [0.95945, -0.0662, 0.10675],
+    [-0.00185, 1.01888, -0.01703],
+    [0.00148, -0.01114, 1.00965],
+]
+
+
+def test_vibrance_runs_in_the_space_a_display_profile_implies() -> None:
+    """Derived from the profile's tags; a profile-less document has none."""
+    tagged = PSDImage.open(full_name("adjustments/vibrance_display_rgb.psd"))
+    plain = PSDImage.open(full_name("adjustments/vibrance_negative_rgb.psd"))
+    space = _vibrance_space(tagged[1])
+    assert space is not None
+    assert np.allclose(space, _DISPLAY_SPACE, atol=2e-4)
+    assert _vibrance_space(plain[1]) is None
 
 
 def test_saturation_keeps_photoshops_gray_unless_a_profile_moves_it() -> None:

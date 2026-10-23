@@ -1011,7 +1011,15 @@ def apply_vibrance(
     saturation = layer.saturation / 100.0
     if vibrance == 0 and saturation == 0:
         return img
-    out = _vibrance(img, vibrance, saturation, _vibrance_gray_weights(layer))
+    linear = paint._srgb_to_linear(img)
+    space = _vibrance_space(layer)
+    if space is None:
+        out = _vibrance(img, linear, vibrance, saturation)
+    else:
+        linear = linear @ space.T
+        encoded = np.sign(linear) * paint._linear_to_srgb(np.abs(linear))
+        out = _vibrance(encoded, linear, vibrance, saturation)
+        out = np.clip(out @ np.linalg.inv(space).T, _0, _1)
     return paint._linear_to_srgb(out).astype(np.float32, copy=False)
 
 
@@ -1026,7 +1034,7 @@ def apply_vibrance(
 # below an encoded value of about a quarter, and dims mid-saturated pixels away
 # from white.
 # The saturation slider then scales chroma about 0.288 R + 0.712 G,
-# Photoshop's gray for it: blue has no say.
+# Photoshop's gray for it: blue has no say. Only that result is clipped.
 _VIBRANCE_BOOST = 2.44
 _VIBRANCE_BOOST_CURVE = 2.6
 _VIBRANCE_BOOST_TAIL = 0.25
@@ -1048,37 +1056,44 @@ _VIBRANCE_DARK_CURVE = 1.14
 _VIBRANCE_DIM = 1.79
 _VIBRANCE_DIM_DARK_SCALE = 0.02
 _VIBRANCE_GRAY_WEIGHTS = np.array([0.288, 0.712, 0.0], dtype=np.float32)
-# Photoshop moves that gray for a version 2 profile that carries a chromatic
-# adaptation tag and a white other than D50, unless its primaries are sRGB's.
-# These weights are its gray for Apple's "Display" profile, the cards' one;
-# other such profiles measured within 0.004 of them.
-_VIBRANCE_ADAPTED_GRAY_WEIGHTS = np.array([0.275, 0.7063, 0.0186], dtype=np.float32)
-_ICC_D50 = (0.9642, 1.0, 0.8249)
-_ICC_SRGB_COLORANTS = (
-    (0.4361, 0.2225, 0.0139),
-    (0.3851, 0.7169, 0.0971),
-    (0.1431, 0.0606, 0.7141),
+_ICC_D50 = np.array([0.9642, 1.0, 0.8249])
+_ICC_SRGB_COLORANTS = np.array(
+    [[0.4361, 0.3851, 0.1431], [0.2225, 0.7169, 0.0606], [0.0139, 0.0971, 0.7141]]
+)
+_BRADFORD = np.array(
+    [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]]
 )
 
 
-def _vibrance_gray_weights(layer: Layer) -> NDArray[np.float32]:
-    """The weights of the saturation slider's gray in the layer's document."""
+def _vibrance_space(layer: Layer) -> NDArray[np.float64] | None:
+    """The linear RGB Photoshop runs vibrance in, from the document's, or None.
+
+    It is the document's own unless its profile is version 2 with a chromatic
+    adaptation tag, a white other than D50 and primaries other than sRGB's.
+    Photoshop then reads the primaries as adapted from D50 to that white by
+    Bradford and back by scaling XYZ, which moves them a little.
+    """
     resources = layer._psd.image_resources
     if Resource.ICC_PROFILE not in resources:
-        return _VIBRANCE_GRAY_WEIGHTS
+        return None
     tags = _icc_tags(resources.get_data(Resource.ICC_PROFILE))
     if tags is None or tags.get(b"version") != 2 or b"chad" not in tags:
-        return _VIBRANCE_GRAY_WEIGHTS
+        return None
     try:
-        white = _icc_xyz(tags[b"wtpt"])
-        colorants = tuple(_icc_xyz(tags[key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ"))
+        white = np.array(_icc_xyz(tags[b"wtpt"]))
+        colorants = np.array(
+            [_icc_xyz(tags[key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
+        ).T
     except (KeyError, struct.error):
-        return _VIBRANCE_GRAY_WEIGHTS
+        return None
     if np.allclose(white, _ICC_D50, atol=2e-3) or np.allclose(
         colorants, _ICC_SRGB_COLORANTS, atol=2e-3
     ):
-        return _VIBRANCE_GRAY_WEIGHTS
-    return _VIBRANCE_ADAPTED_GRAY_WEIGHTS
+        return None
+    cone = _BRADFORD @ white / (_BRADFORD @ _ICC_D50)
+    adapt = np.linalg.solve(_BRADFORD, cone[:, None] * _BRADFORD)
+    moved = (_ICC_D50 / white)[:, None] * adapt @ colorants
+    return np.linalg.solve(colorants, moved)
 
 
 def _icc_tags(data: bytes) -> dict[bytes, bytes | int] | None:
@@ -1103,13 +1118,12 @@ def _icc_xyz(tag: bytes | int) -> tuple[float, float, float]:
 
 
 def _vibrance(
-    img: np.ndarray,
-    vibrance: float,
-    saturation: float,
-    gray_weights: NDArray[np.float32] = _VIBRANCE_GRAY_WEIGHTS,
+    img: np.ndarray, linear: np.ndarray, vibrance: float, saturation: float
 ) -> np.ndarray:
-    """Linear-light result of the vibrance and saturation sliders."""
-    linear = paint._srgb_to_linear(img)
+    """Linear-light result of the vibrance and saturation sliders.
+
+    ``img`` is ``linear`` encoded.
+    """
     high = linear.max(axis=2, keepdims=True)
     low = linear.min(axis=2, keepdims=True)
     out = linear
@@ -1118,12 +1132,10 @@ def _vibrance(
     elif vibrance < 0:
         encoded_high = img.max(axis=2, keepdims=True)
         out = _lower_vibrance(linear, high, low, encoded_high, -vibrance)
-    out = np.clip(out, _0, _1)
     if saturation:
-        gray = out @ gray_weights
+        gray = out @ _VIBRANCE_GRAY_WEIGHTS
         out = gray[..., None] + (out - gray[..., None]) * (_1 + saturation)
-        out = np.clip(out, _0, _1)
-    return out
+    return np.clip(out, _0, _1)
 
 
 def _lower_vibrance(
@@ -1166,8 +1178,9 @@ def _raise_vibrance(
     sat = (encoded_high - img.min(axis=2, keepdims=True)) / np.maximum(
         encoded_high, _FLOAT_EPSILON
     )
+    sat = np.clip(sat, _0, _1)
     pale = _1 - sat
-    hue = rgb2hsl(img)[..., 0:1]
+    hue = rgb2hsl(np.clip(img, _0, _1))[..., 0:1]
     from_red = np.minimum(hue, _1 - hue) / _VIBRANCE_SKIN_WIDTH
     skin = np.exp(-0.5 * from_red**2) * pale**_VIBRANCE_SKIN_CURVE
     boost = _VIBRANCE_BOOST * (
