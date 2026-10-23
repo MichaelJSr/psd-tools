@@ -900,12 +900,23 @@ def _box_safe(layer: Layer, cache: "_PassCache") -> bool:
     return safe
 
 
+def _drawn_bbox(layer: Layer) -> tuple[int, int, int, int]:
+    """:py:func:`vector.drawn_bbox`, or the canvas when the path cannot be measured."""
+    try:
+        box = vector.drawn_bbox(layer)
+    except (OverflowError, TypeError, ValueError):
+        return (0, 0, layer._psd.width, layer._psd.height)
+    return (0, 0, 0, 0) if box is None else box
+
+
 def _change_bbox(layer: Layer, cache: "_PassCache") -> tuple[int, int, int, int]:
     """Every box ``layer`` can change the canvas in.
 
     Its paint box, plus for an adjustment the box its mask reveals (the
     adjustments are pointwise), and for a pass-through group the boxes its
     children change, since an adjustment in it reaches the canvas beneath.
+    A path drawn for the layer can cover pixels past the rounded boxes those
+    are measured on, so its own box is added.
     """
     memo = cache.change_bboxes
     known = memo.get(id(layer))
@@ -916,6 +927,8 @@ def _change_bbox(layer: Layer, cache: "_PassCache") -> tuple[int, int, int, int]
     bbox = _effect_reach(layer, cache.content_bboxes)
     if isinstance(layer, GroupMixin):
         bbox = utils.union_bbox(bbox, _content_bbox(layer, cache.content_bboxes))
+    elif layer.has_vector_mask():
+        bbox = utils.union_bbox(bbox, _drawn_bbox(layer))
     if isinstance(layer, AdjustmentLayer):
         bbox = utils.union_bbox(bbox, _style_bbox(layer))
     elif layer.is_group() and layer.blend_mode == BlendMode.PASS_THROUGH:
