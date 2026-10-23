@@ -40,7 +40,7 @@ from psd_tools.api.utils import (
     check_pixel_size,
     get_color_channels,
 )
-from psd_tools.composite import paint, utils, vector
+from psd_tools.composite import paint, rcache, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
 from psd_tools.composite.blend import fade_source, get_blend_func, normal
@@ -812,6 +812,12 @@ class _PassCache:
     group_alphas: _GroupAlphas = field(default_factory=dict)
     scipy_warned: bool = False
     unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
+    # PROTO(rcache): the cross-pass cache this pass reads, its layer keys and
+    # its document key.
+    rc: Any = None
+    fps: dict = field(default_factory=dict)
+    doc: Any = None
+    doc_key: bytes | None = None
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -1220,11 +1226,93 @@ def composite(
         widen=_widen_fn,
         color_mode=_psd.color_mode,
         text_gamma=text_gamma,
+        cache=_PassCache(rc=rcache.active(), doc=_psd),
     )
     target_group = group if isinstance(group, GroupMixin) and not as_layer else [group]
-    for layer in target_group:  # type: ignore
-        compositor.apply(layer)  # type: ignore[arg-type]
+    layers = list(target_group)  # type: ignore[arg-type]
+    keys = _prefix_keys(
+        compositor, layers, viewport, color, alpha, as_layer, text_gamma
+    )
+    start = _resume(compositor, keys)
+    for index in range(start, len(layers)):
+        compositor.apply(layers[index])
+        if keys is not None and _settled(layers, index):
+            compositor._cache.rc.put(
+                ("prefix", keys[index]),
+                tuple(
+                    np.array(a)
+                    for a in (
+                        compositor._color,
+                        compositor._alpha,
+                        compositor._shape_g,
+                        compositor._alpha_g,
+                    )
+                ),
+            )
     return compositor.finish()
+
+
+_PREFIX_STATE = ("_color", "_alpha", "_shape_g", "_alpha_g")
+
+
+def _prefix_keys(
+    compositor: "Compositor",
+    layers: list[Layer],
+    viewport: tuple[int, int, int, int],
+    color: Any,
+    alpha: Any,
+    as_layer: bool,
+    text_gamma: float | None,
+) -> list[bytes] | None:
+    """PROTO(rcache): one key per top-level layer, for the state after it.
+
+    Each key chains the one before it, so a key names everything composited
+    so far; scalar backdrops only.
+    """
+    cache = compositor._cache
+    if cache.rc is None or compositor._layer_filter not in (None, Layer.is_visible):
+        return None
+    if not (np.isscalar(color) and np.isscalar(alpha)):
+        return None
+    import hashlib
+
+    if cache.doc_key is None:
+        cache.doc_key = rcache.doc_key(cache.doc)
+    seed = repr(
+        (viewport, color, alpha, as_layer, text_gamma, compositor._force)
+    ).encode()
+    chain = hashlib.blake2b(cache.doc_key + seed, digest_size=16).digest()
+    keys = []
+    for layer in layers:
+        chain = hashlib.blake2b(
+            chain + rcache.layer_key(layer, cache.fps), digest_size=16
+        ).digest()
+        keys.append(chain)
+    return keys
+
+
+def _settled(layers: list[Layer], index: int) -> bool:
+    """Whether the state after ``layers[index]`` is final: a clip layer above
+    it is composited as part of it, so a key that has not seen the clip layer
+    cannot name that state.
+    """
+    return index + 1 == len(layers) or not layers[index + 1].clipping
+
+
+def _resume(compositor: "Compositor", keys: list[bytes] | None) -> int:
+    """PROTO(rcache): restore the longest cached prefix; the index to go on from."""
+    if keys is None:
+        return 0
+    for index in range(len(keys) - 1, -1, -1):
+        state = compositor._cache.rc.peek(("prefix", keys[index]))
+        if state is not None:
+            for name, array in zip(_PREFIX_STATE, state):
+                setattr(compositor, name, array.copy())
+            compositor._cache.rc.hits["prefix"] += 1
+            compositor._cache.rc.hits["prefix_layers"] += index + 1
+            return index + 1
+    compositor._cache.rc.misses["prefix"] += 1
+    return 0
 
 
 def paste(
@@ -3168,6 +3256,19 @@ class Compositor:
         viewport (#804), without restating which of the two sources -- stored
         pixels or a redrawn fill -- this layer's arrays come from.
         """
+        rkey = self._rkey("object", layer)
+        if rkey is not None:
+            hit = self._cache.rc.get(rkey)
+            if hit is not None:
+                return hit[0], hit[1]
+            color, shape = self._read_object_uncached(layer)
+            self._cache.rc.put(rkey, (color, shape))
+            return color, shape
+        return self._read_object_uncached(layer)
+
+    def _read_object_uncached(
+        self, layer: Layer
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
         color = layer.numpy("color")
         # The colour array stays live through the shape read, so it is charged
         # to that read's allocation guard.
@@ -3683,6 +3784,23 @@ class Compositor:
         inside = vector.draw_vector_mask(layer, viewport) >= 1.0 - _PATH_FULL
         return np.where(inside, mask, stored).astype(np.float32, copy=False)
 
+    def _rkey(self, tag: str, layer: Layer, *args: Any) -> tuple | None:
+        """PROTO(rcache): a cross-pass key, or None when no cache is active."""
+        cache = self._cache
+        if cache.rc is None or self._layer_filter not in (None, Layer.is_visible):
+            return None
+        if cache.doc_key is None:
+            cache.doc_key = rcache.doc_key(cache.doc)
+        return (
+            tag,
+            rcache.layer_key(layer, cache.fps),
+            cache.doc_key,
+            self._force,
+            self._channels,
+            self._color_mode,
+            args,
+        )
+
     def _get_group_alpha(
         self, layer: Layer, viewport: tuple[int, int, int, int]
     ) -> np.ndarray:
@@ -3732,6 +3850,11 @@ class Compositor:
 
         key = (id(layer), inner)
         alpha = self._cache.group_alphas.get(key)
+        rkey = self._rkey("group_alpha", layer, inner) if alpha is None else None
+        if rkey is not None:
+            hit = self._cache.rc.get(rkey)
+            if hit is not None:
+                alpha = self._cache.group_alphas[key] = hit[0]
         if alpha is None:
             inner_h, inner_w = inner[3] - inner[1], inner[2] - inner[0]
             group_compositor = Compositor(
@@ -3749,6 +3872,8 @@ class Compositor:
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
             alpha = self._cache.group_alphas[key] = group_compositor.alpha
+            if rkey is not None:
+                self._cache.rc.put(rkey, (alpha,))
         return paste(viewport, inner, alpha)
 
     def _cast_shape(
@@ -4476,7 +4601,7 @@ class Compositor:
         # claim, built from it once there is a band to cut.
         top: _StrokeBand | None = None
         claimed: tuple[np.ndarray, np.ndarray] | None = None
-        for effect in reversed(_readable(layer, "stroke")):
+        for n_effect, effect in enumerate(reversed(_readable(layer, "stroke"))):
             try:
                 # Effect must happen at the layer viewport, grown so an outset
                 # or centered stroke has room for the part of itself that
@@ -4492,11 +4617,21 @@ class Compositor:
                 continue
             if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
                 continue
-            shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
+            rkey = self._rkey("stroke", layer, bbox, traces_mask, n_effect)
+            hit = self._cache.rc.get(rkey) if rkey is not None else None
+            if hit is not None:
+                color, mask_in_bbox, inside_in_bbox = hit
+                opacity = effect.opacity / 100.0
+                blend_mode = effect.blend_mode
+            else:
+                shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
             try:
-                color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
-                    bbox, shape_in_bbox, effect.descriptor, layer._psd
-                )
+                if hit is None:
+                    color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
+                        bbox, shape_in_bbox, effect.descriptor, layer._psd
+                    )
+                    if rkey is not None:
+                        self._cache.rc.put(rkey, (color, mask_in_bbox, inside_in_bbox))
                 opacity = effect.opacity / 100.0
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:

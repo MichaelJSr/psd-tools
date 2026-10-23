@@ -1,0 +1,4 @@
+{"family": "dropshadow-size",
+ "seed": "tests/psd_files/layer_effects.psd",
+ "layer": "Drop Shadow", "effect": "dropshadow",
+ "vary": {"blur": [0, 1, 2, 4, 8, 16, 32, 64], "Ckmt": [0, 25, 50, 100]}}

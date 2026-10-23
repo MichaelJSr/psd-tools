@@ -33,6 +33,8 @@ class PlacedGlyph:
     faux_bold: bool
     faux_italic: bool
     run: int
+    cluster: int = -1  #: ``str`` index of the character that produced it
+    advance: float = 0.0  #: pen advance in pt, justification stretch included
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,8 @@ class LineInfo:
     stretch: float
     decision: Decision
     drawn: bool = True  #: ``False`` for a line below the box (``overflow``)
+    start: int = 0  #: ``str`` index of the line's first character
+    end: int = 0  #: ``str`` index past its last, the break character excluded
 
 
 @dataclass(frozen=True, eq=False)
@@ -265,6 +269,8 @@ def layout(
                     line.stretch,
                     line.decision,
                     drawn,
+                    line.start,
+                    line.end,
                 )
             )
             if not drawn:
@@ -288,6 +294,9 @@ def layout(
                         faux_bold=style.faux_bold,
                         faux_italic=style.faux_italic,
                         run=g.run,
+                        cluster=g.cluster,
+                        advance=g.adv
+                        + (line.stretch if g.cluster in shaped.space_adv else 0.0),
                     )
                 )
                 if g.run != span_run:
