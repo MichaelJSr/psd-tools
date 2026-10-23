@@ -19,6 +19,7 @@ from psd_tools.composite.adjustments import (
     _huesaturation,
     _lut_domain,
     _rows_from_rgb,
+    _vibrance_space,
     apply_blackandwhite,
     apply_brightnesscontrast,
     apply_channelmixer,
@@ -1152,26 +1153,68 @@ def _color_balance_layer(
 
 
 def test_color_balance_midtones_are_a_gamma_per_channel() -> None:
-    """+100 toward red is the square root of red; the other channels stay."""
+    """+100 toward red is the square root of red above its toe.
+
+    The other channels stay.
+    """
     layer = _color_balance_layer((100, 0, 0), luminosity=False)
     out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, layer))
-    assert np.allclose(out[..., 0], np.sqrt(_RAMP[..., 0]), atol=1 / 255)
+    above = _RAMP[0, :, 0] >= 0.2
+    assert np.allclose(out[0, above, 0], np.sqrt(_RAMP[0, above, 0]), atol=1 / 255)
+    assert np.all(out[0, ~above, 0] <= np.sqrt(_RAMP[0, ~above, 0]) + 1e-6)
     assert np.allclose(out[..., 1:], _RAMP[..., 1:], atol=1 / 255)
 
 
-def test_color_balance_preserving_luminosity_centres_the_amounts() -> None:
-    """With the flag the three amounts lose their mean.
+# Photoshop 2023's levels for 8, 16, 32, 64, 128, 192 and 240 under midtones
+# +100 and +50, and under three triples with Preserve Luminosity.
+_CB_LEVELS = [8, 16, 32, 64, 128, 192, 240]
+_CB_PLUS_100 = [30, 55, 90, 128, 181, 221, 247]
+_CB_PLUS_50 = [20, 36, 59, 96, 156, 209, 244]
+_CB_DARKER_50 = [2, 5, 14, 36, 97, 171, 234]
+_CB_PRESERVED = {
+    (100, 0, 0): (_CB_PLUS_50, _CB_DARKER_50, _CB_DARKER_50),
+    (100, -100, -16): (
+        _CB_PLUS_100,
+        [0, 1, 4, 16, 64, 145, 226],
+        [5, 12, 25, 55, 119, 186, 238],
+    ),
+    (-79, -61, 100): (
+        [0, 2, 5, 20, 71, 151, 228],
+        [1, 3, 8, 26, 82, 160, 231],
+        [28, 51, 84, 122, 176, 219, 247],
+    ),
+}
 
-    So +100 red also darkens green and blue, and opposite shifts cancel out.
+
+def _color_balance_levels(
+    midtones: tuple[int, int, int], *, luminosity: bool
+) -> np.ndarray:
+    """The adjusted gray levels of ``_CB_LEVELS``, per channel, in 0-255."""
+    layer = _color_balance_layer(midtones, luminosity=luminosity)
+    gray = np.repeat(np.array(_CB_LEVELS, np.float32)[None, :, None] / 255, 3, 2)
+    return _applied(apply_colorbalance(gray, ColorMode.RGB, layer))[0] * 255
+
+
+@pytest.mark.parametrize(("amount", "levels"), [(100, _CB_PLUS_100), (50, _CB_PLUS_50)])
+def test_color_balance_brightening_midtones_match_photoshop(
+    amount: int, levels: list[int]
+) -> None:
+    """A brightening gamma starts from black on a parabola, not straight up."""
+    out = _color_balance_levels((amount, amount, amount), luminosity=False)
+    assert np.allclose(out, np.array(levels)[:, None], atol=1.5)
+
+
+@pytest.mark.parametrize("midtones", list(_CB_PRESERVED))
+def test_color_balance_preserving_luminosity_takes_off_the_midrange(
+    midtones: tuple[int, int, int],
+) -> None:
+    """Each channel keeps a curve of its own, its amount less the midrange.
+
+    (100, 0, 0) is +50 red and -50 green and blue; (100, -100, -16) is itself.
     """
-    layer = _color_balance_layer((100, 0, 0), luminosity=True)
-    out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, layer))
-    assert np.allclose(out[..., 0], _RAMP[..., 0] ** (2 ** (-2 / 3)), atol=1 / 255)
-    assert np.allclose(out[..., 1], _RAMP[..., 1] ** (2 ** (1 / 3)), atol=1 / 255)
-    balanced = _color_balance_layer((100, -100, 0), luminosity=True)
-    out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, balanced))
-    assert np.allclose(out[..., 0], np.sqrt(_RAMP[..., 0]), atol=1 / 255)
-    assert np.allclose(out[..., 1], _RAMP[..., 1] ** 2, atol=1 / 255)
+    out = _color_balance_levels(midtones, luminosity=True)
+    for channel, levels in enumerate(_CB_PRESERVED[midtones]):
+        assert np.allclose(out[:, channel], levels, atol=1.5)
 
 
 def test_color_balance_shadows_and_highlights_work_their_own_end() -> None:
@@ -1200,21 +1243,6 @@ def test_color_balance_preserving_luminosity_centres_every_range(name: str) -> N
         out, _applied(apply_colorbalance(_RAMP, ColorMode.RGB, centred)), atol=1e-6
     )
     assert out[0, 5, 0] > _RAMP[0, 5, 0] > out[0, 5, 1]
-
-
-# Per-channel exponents measured on a Photoshop render of
-# midtones (100, -100, -16) with Preserve Luminosity.
-_SILITHID_MIDTONES = (100, -100, -16)
-_SILITHID_EXPONENTS = (0.46, 2.04, 1.10)
-_SILITHID_TOLERANCE = 6 / 255
-
-
-def test_color_balance_matches_the_exponents_measured_on_photoshop() -> None:
-    layer = _color_balance_layer(_SILITHID_MIDTONES, luminosity=True)
-    out = _applied(apply_colorbalance(_RAMP, ColorMode.RGB, layer))
-    for channel, exponent in enumerate(_SILITHID_EXPONENTS):
-        expected = _RAMP[..., channel] ** exponent
-        assert np.allclose(out[..., channel], expected, atol=_SILITHID_TOLERANCE)
 
 
 def test_color_balance_keeps_black_white_and_channel_order() -> None:
@@ -1285,30 +1313,41 @@ def test_positive_vibrance_boosts_pale_pixels_and_spares_skin_tones() -> None:
     assert gained[0, 2] < gained[0, 3]
 
 
-def test_saturation_scales_chroma_about_the_linear_luminance() -> None:
-    """-100 is the Rec. 709 luminance gray.
+def test_saturation_scales_chroma_about_photoshops_gray() -> None:
+    """-100 is the gray 0.288 R + 0.712 G in linear light, whatever the blue.
 
     +50 is one and a half times the chroma around it.
     """
-    image = np.array([[_DEEP_BLUE, _PALE_RED]], dtype=np.float32)
-    luminance = _linear(image) @ np.array([0.2126, 0.7152, 0.0722])
-    gray = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, -100)))
-    assert np.allclose(_linear(gray), luminance[..., None], atol=1 / 255)
+    image = np.array([[_DEEP_BLUE, _PALE_RED, [0.1, 0.2, 0.0]]], dtype=np.float32)
+    gray = _linear(image) @ _SATURATION_GRAY
+    out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, -100)))
+    assert np.allclose(_linear(out), gray[..., None], atol=1 / 255)
+    assert np.allclose(out[0, 0], out[0, 2], atol=1 / 255)
     boosted = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 50)))
-    expected = luminance[..., None] + (_linear(image) - luminance[..., None]) * 1.5
+    expected = gray[..., None] + (_linear(image) - gray[..., None]) * 1.5
     assert np.allclose(_linear(boosted), np.clip(expected, 0, 1), atol=1 / 255)
 
 
 # The fitted vibrance model, with its constants. Fitted on Photoshop renders
 # of the layer over the same art; a changed constant fails this test.
-_LINEAR_LUMINANCE = np.array([0.2126, 0.7152, 0.0722])
-_BOOST, _BOOST_CURVE, _BOOST_TAIL, _BOOST_AMOUNT_CURVE = 2.44, 2.6, 0.25, 1.33
-_BOOST_BRIGHT, _BOOST_DARK = 0.73, 0.023
-_BOOST_GRAY, _BOOST_GRAY_SLOPE = 0.79, -0.29
-_SKIN_WIDTH, _SKIN_CURVE = 0.058, 1.8
-_WEIGHT_PALE, _WEIGHT_DROP, _WEIGHT_CURVE, _AMOUNT_CURVE = 1.01, 0.67, 2.04, 1.03
-_GRAY_PALE, _GRAY_RISE, _GRAY_BRIGHT = -0.82, 1.58, 1.86
-_GRAY_DARK, _GRAY_DARK_SCALE = 1.59, 0.015
+_SATURATION_GRAY = np.array([0.288, 0.712, 0.0])
+_BOOST_AMOUNT_CURVE, _BOOST_MID, _BOOST_MID_CURVE = 1.27, 1.274, 1.045
+_BOOST_PALE_DARK, _BOOST_PALE_CURVE, _BOOST_DARK_CURVE = 2.908, 1.842, 1.045
+_BOOST_BLACK_FROM, _BOOST_BLACK_TO, _BOOST_GRAY, _BOOST_GRAY_DARK = (
+    0.038,
+    0.292,
+    0.861,
+    -0.272,
+)
+_SKIN_HUES, _SKIN, _SKIN_CURVE = (-0.175, 0.0, 0.096, 0.139), 1.022, 0.829
+_LOSS, _LOSS_PALE, _LOSS_PALE2, _REGAIN_PALE, _REGAIN_PALE2 = (
+    0.25,
+    1.5,
+    -0.5,
+    0.38,
+    -0.14,
+)
+_DARK, _DARK_LEVEL, _DARK_CURVE, _DIM, _DIM_DARK_SCALE = 1.18, 0.26, 1.14, 1.79, 0.02
 
 
 def _fitted_vibrance(
@@ -1320,31 +1359,41 @@ def _fitted_vibrance(
     high, low = linear.max(), linear.min()
     chroma = high - low
     if vibrance > 0:
-        sat = (encoded.max() - encoded.min()) / encoded.max()
-        from_red = min(hue, 1 - hue) / _SKIN_WIDTH
-        skin = np.exp(-0.5 * from_red**2) * (1 - sat) ** _SKIN_CURVE
-        boost = _BOOST * ((1 - sat) ** _BOOST_CURVE + _BOOST_TAIL * sat * (1 - sat))
-        boost *= (1 - _BOOST_BRIGHT * encoded.max()) * (1 - skin)
-        boost *= 1 - np.exp(-high / _BOOST_DARK)
-        gray = low + (_BOOST_GRAY + _BOOST_GRAY_SLOPE * sat) * chroma
+        sat = chroma / high
+        pale, value = 1 - sat, encoded.max()
+        boost = _BOOST_MID * sat * pale**_BOOST_MID_CURVE
+        boost += (
+            _BOOST_PALE_DARK
+            * pale**_BOOST_PALE_CURVE
+            * (1 - value) ** _BOOST_DARK_CURVE
+        )
+        black = (value - _BOOST_BLACK_FROM) / (_BOOST_BLACK_TO - _BOOST_BLACK_FROM)
+        black = np.clip(black, 0, 1)
+        boost *= black * black * (3 - 2 * black)
+        rise_from, core_from, core_to, fall_to = _SKIN_HUES
+        hue = hue - 1 if hue > 0.5 else hue
+        skin = min(
+            np.clip((hue - rise_from) / (core_from - rise_from), 0, 1),
+            np.clip((fall_to - hue) / (fall_to - core_to), 0, 1),
+        )
+        boost *= 1 - skin * _SKIN * pale**_SKIN_CURVE
+        position = np.clip(_BOOST_GRAY + _BOOST_GRAY_DARK * (1 - value), 0, 1)
+        gray = low + position * chroma
         scale = 1 + vibrance**_BOOST_AMOUNT_CURVE * boost
         linear = gray + scale * (linear - gray)
     elif vibrance < 0:
-        sat = chroma / high
-        weight = (_WEIGHT_PALE - _WEIGHT_DROP * sat**_WEIGHT_CURVE) * (
-            -vibrance
-        ) ** _AMOUNT_CURVE
-        position = (
-            _GRAY_PALE
-            + _GRAY_RISE * sat
-            + _GRAY_BRIGHT * high * (1 - sat)
-            + _GRAY_DARK * np.exp(-high / _GRAY_DARK_SCALE)
-        )
-        gray = low + min(position, 1) * chroma
-        linear = linear + weight * (gray - linear)
-    linear = np.clip(linear, 0, 1)
-    luminance = linear @ _LINEAR_LUMINANCE
-    linear = luminance + (linear - luminance) * (1 + saturation)
+        amount, sat = -vibrance, chroma / high
+        pale = 1 - sat
+        loss = _LOSS + (_LOSS_PALE + _LOSS_PALE2 * pale) * pale
+        regain = (_REGAIN_PALE + _REGAIN_PALE2 * pale) * pale
+        dark = np.clip(1 - encoded.max() / _DARK_LEVEL, 0, 1) ** _DARK_CURVE
+        kept = (1 - amount * loss + amount**2 * regain) * (1 - amount * _DARK * dark)
+        new_sat = np.clip(sat * kept, 0, sat)
+        dim = (1 - high) * (1 - np.exp(-high / _DIM_DARK_SCALE)) * sat * pale
+        value = high * (1 - amount * _DIM * dim)
+        linear = value - value * new_sat / (high * sat) * (high - linear)
+    gray = linear @ _SATURATION_GRAY
+    linear = gray + (linear - gray) * (1 + saturation)
     linear = np.clip(linear, 0, 1)
     return np.where(
         linear <= 0.0031308, linear * 12.92, 1.055 * linear ** (1 / 2.4) - 0.055
@@ -1376,28 +1425,52 @@ def test_vibrance_is_the_fitted_model(
     assert np.allclose(out[0, 0], expected, atol=0.5 / 255)
 
 
+# Photoshop 2023 at vibrance +100: a dark olive, a light cyan, a pale cyan and
+# a pale red, and what it makes of them.
+_BOOSTED = [
+    ([82, 84, 69], [83, 88, 48]),
+    ([204, 245, 255], [188, 242, 255]),
+    ([140, 178, 178], [114, 183, 183]),
+    ([178, 153, 140], [183, 149, 130]),
+]
+
+
 def test_positive_vibrance_boosts_a_dark_pale_pixel_more_than_a_bright_one() -> None:
-    """A dark olive gains more chroma than a light cyan of similar saturation."""
-    image = np.array([[[0.32, 0.33, 0.27], [0.8, 0.96, 1.0]]], dtype=np.float32)
+    """The dark olive gains more chroma than the light cyan, as in Photoshop."""
+    image = np.array([[pixel for pixel, _ in _BOOSTED]], dtype=np.float32) / 255
     out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(100, 0)))
+    assert np.allclose(out * 255, [[boosted for _, boosted in _BOOSTED]], atol=6)
     gained = _linear_chroma(out) / _linear_chroma(image)
-    assert gained[0, 0] > 1.5 * gained[0, 1]
+    assert gained[0, 0] > 1.4 * gained[0, 1]
 
 
-def test_negative_vibrance_lifts_a_near_black_pixel_to_its_brightest_channel() -> None:
-    """The other channels close more than half the gap; the brightest stays."""
-    image = np.array([[[0.02, 0.01, 0.04]]], dtype=np.float32)
+# Photoshop 2023 at vibrance -100: (brightest, darkest) levels, and the
+# darkest level it gives; the brightest stays.
+_NEAR_BLACK = [((10, 3), 9), ((20, 0), 18), ((34, 0), 26), ((68, 34), 44)]
+
+
+@pytest.mark.parametrize(("levels", "darkest"), _NEAR_BLACK)
+def test_negative_vibrance_desaturates_a_near_black_pixel_more(
+    levels: tuple[int, int], darkest: int
+) -> None:
+    """Below about a quarter of white the other channels close more of the gap."""
+    high, low = levels
+    image = np.array([[[high, low, low]]], dtype=np.float32) / 255
     out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0)))
-    assert out[0, 0].min() > (0.01 + 0.04) / 2
-    assert out[0, 0, 2] == pytest.approx(0.04, abs=1e-6)
+    assert out[0, 0, 1] * 255 == pytest.approx(darkest, abs=1)
+    if low == 0:
+        assert out[0, 0, 0] * 255 == pytest.approx(high, abs=0.5)
+
+
+_REC709 = np.array([0.2126, 0.7152, 0.0722])
 
 
 def test_negative_vibrance_keeps_a_bright_pale_pixel_bright() -> None:
     """A pale pixel near white keeps its luminance; a dark pale one loses some."""
     image = np.array([[[0.9, 0.85, 0.8], [0.25, 0.2, 0.15]]], dtype=np.float32)
     out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(-100, 0)))
-    luminance_in = _linear(image) @ _LINEAR_LUMINANCE
-    luminance_out = _linear(out) @ _LINEAR_LUMINANCE
+    luminance_in = _linear(image) @ _REC709
+    luminance_out = _linear(out) @ _REC709
     assert luminance_out[0, 0] > luminance_in[0, 0] * 0.98
     assert luminance_out[0, 1] < luminance_in[0, 1] * 0.9
 
@@ -1405,3 +1478,62 @@ def test_negative_vibrance_keeps_a_bright_pale_pixel_bright() -> None:
 def test_vibrance_at_rest_leaves_the_image_alone() -> None:
     image = np.array([[_DEEP_BLUE]], dtype=np.float32)
     assert apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, 0)) is image
+
+
+# Photoshop 2023 documents: one colour balance or vibrance layer, or the
+# colour balance and vibrance pair Masked_Dedede's types carry, over four rows
+# of a gray ramp and 3840 random colours. The display ones carry Apple's
+# "Display" profile, as the cards do.
+@pytest.mark.parametrize(
+    ("name", "levels"),
+    [
+        ("colorbalance_luminosity", 1),
+        ("colorbalance_midtones", 1),
+        ("vibrance_saturation", 1),
+        ("vibrance_saturation_boost", 1),
+        ("vibrance_negative", 1),
+        ("vibrance_positive", 3),
+        ("vibrance_display_saturation", 1),
+        ("vibrance_display", 1),
+        ("colorbalance_vibrance", 1),
+    ],
+)
+def test_color_balance_and_vibrance_match_photoshop(name: str, levels: int) -> None:
+    psd = PSDImage.open(full_name(f"adjustments/{name}_rgb.psd"))
+    reference = np.rint(psd.numpy()[..., :3] * 255)
+    result = psd.composite(force=True, apply_icc=False)
+    assert np.abs(np.asarray(result, np.float64)[..., :3] - reference).max() <= levels
+
+
+# Photoshop's working space for the display fixtures, fitted to its renders
+# of saturation -50 and +50 over 8192 colours.
+_DISPLAY_SPACE = [
+    [0.95945, -0.0662, 0.10675],
+    [-0.00185, 1.01888, -0.01703],
+    [0.00148, -0.01114, 1.00965],
+]
+
+
+def test_vibrance_runs_in_the_space_a_display_profile_implies() -> None:
+    """Derived from the profile's tags; a profile-less document has none."""
+    tagged = PSDImage.open(full_name("adjustments/vibrance_display_rgb.psd"))
+    plain = PSDImage.open(full_name("adjustments/vibrance_negative_rgb.psd"))
+    space = _vibrance_space(tagged[1])
+    assert space is not None
+    assert np.allclose(space, _DISPLAY_SPACE, atol=2e-4)
+    assert _vibrance_space(plain[1]) is None
+
+
+def test_saturation_keeps_photoshops_gray_unless_a_profile_moves_it() -> None:
+    """The display fixture's gray has blue in it; a profile-less one has none."""
+    tagged = PSDImage.open(full_name("adjustments/vibrance_display_saturation_rgb.psd"))
+    plain = PSDImage.open(full_name("adjustments/vibrance_saturation_rgb.psd"))
+    blue = np.array([[[0.0, 0.0, 1.0]]], dtype=np.float32)
+    for psd, gray in ((tagged, 0.0186), (plain, 0.0)):
+        layer = next(layer for layer in psd if isinstance(layer, adjustments.Vibrance))
+        data = Descriptor()
+        data[b"vibrance"] = Integer(0)
+        data[b"Strt"] = Integer(-100)
+        layer._data = data
+        out = _applied(apply_vibrance(blue, ColorMode.RGB, layer))
+        assert _linear(out[0, 0, 0]) == pytest.approx(gray, abs=1 / 255)

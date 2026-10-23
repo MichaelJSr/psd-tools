@@ -21,8 +21,8 @@ Currently supported effects:
   - Solid color; honors distance, angle (including global light), size,
     spread, contour and its anti-aliasing, opacity, blend mode and "layer
     knocks out drop shadow"
-  - The blur is a gaussian approximation of Photoshop's own, so a soft
-    shadow's falloff can differ; noise is read but not applied
+  - The blur is Photoshop's tent of two box passes; noise is read but not
+    applied
 - **Outer glow**: The layer's silhouette, spread and blurred (softer) or
   ramped by distance (precise), painted behind the layer and never under it
   - Solid color or a gradient along the falloff; honors size, spread,
@@ -837,15 +837,14 @@ def stroke_band(
     return np.expand_dims(coverage, 2), np.expand_dims(inside, 2)
 
 
-# How wide a gaussian stands in for the blur Photoshop gives a drop shadow of a
-# given size. Photoshop's blur is its own, so this is fitted against its
-# previews rather than derived; a third of the size, the usual rule of thumb,
-# leaves the falloff too steep. The fit is asserted in the tests.
-_SHADOW_SIGMA_PER_SIZE = 0.45
-
-# The same for an outer glow, fitted on its own against the glow previews,
-# since Photoshop need not blur the two alike.
+# How wide a gaussian stands in for the blur Photoshop gives an outer glow of
+# a given size, fitted against the glow previews, one of which the shadows'
+# tent (:py:func:`_tent_blur`) scores worse on. The fit is asserted in the
+# tests.
 _GLOW_SIGMA_PER_SIZE = 0.45
+
+# The narrowest box :py:func:`_tent_blur` passes over a matte, in pixels.
+_MIN_BOX_WIDTH = 2.0
 
 # The range Photoshop gives a new glow, read where a descriptor has none.
 _DEFAULT_GLOW_RANGE = 50.0
@@ -901,8 +900,8 @@ _CONTOUR_STEPS = 256
 _SPREAD_FLOOR = 1.0 / 255.0
 
 
-def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
-    """How far a shadow is cast, as ``(dx, dy)`` in image coordinates.
+def _cast_offset(distance: float, angle: float) -> tuple[float, float]:
+    """How far ``distance`` along a light from ``angle`` moves, as ``(dx, dy)``.
 
     ``angle`` is where the light comes *from*, counter-clockwise from the
     positive x axis, so the shadow falls the opposite way; image rows run
@@ -920,6 +919,23 @@ def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
     )
 
 
+def _shadow_offset(distance: float, angle: float) -> tuple[float, float]:
+    """How far a shadow is cast: :py:func:`_cast_offset` in whole pixels.
+
+    Photoshop moves a shadow's matte by whole pixels, each axis rounded to
+    the nearest and a half away from zero, so a 4 px shadow lit from 125
+    degrees falls 2 px across and 3 down rather than 2.29 and 3.28.
+    """
+    dx, dy = _cast_offset(distance, angle)
+    return _away_from_zero(dx), _away_from_zero(dy)
+
+
+def _away_from_zero(value: float) -> float:
+    """``value`` rounded to the nearest whole number, a half away from zero."""
+    whole = math.floor(abs(value) + 0.5)
+    return float(whole if value >= 0.0 else -whole)
+
+
 def drop_shadow_bbox(
     bbox: tuple[int, int, int, int],
     distance: float,
@@ -932,8 +948,7 @@ def drop_shadow_bbox(
     ``bbox`` grown by the shadow's size on every side and by its offset on
     the side it is cast to. It is the box the silhouette is read on, before
     it is moved, so it has to hold that too. The two pixels added on top are
-    the antialiased fringe spread leaves, and the one the offset's
-    interpolation can spill into.
+    the antialiased fringe spread leaves and a pixel to spare.
 
     An empty ``bbox`` is returned untouched, as :py:func:`stroke_bbox` does:
     there is no silhouette to cast.
@@ -997,10 +1012,10 @@ def _cast_canvas(
 def cast_reach(distance: float, angle: float, size: float, spread: float) -> int | None:
     """How far a cast matte reads from each pixel it covers, in pixels.
 
-    The blur's radius and the offset, each rounded out, with the pixel the
-    offset interpolates across and the fringe the blur's rounding leaves:
-    the silhouette further away than that moves no pixel of the matte, so
-    the matte on a box is the matte on any larger box, cut.
+    The blur's radius rounded out and the offset, with the fringe the
+    blur's rounding leaves and a pixel to spare: the silhouette further away
+    than that moves no pixel of the matte, so the matte on a box is the
+    matte on any larger box, cut.
 
     None when the matte is spread; such a matte is drawn on its whole box.
     A spread of a size-0 matte grows nothing.
@@ -1016,11 +1031,11 @@ def glow_reach(
 ) -> int | None:
     """How far a glow's falloff reads from each pixel, as :py:func:`cast_reach`.
 
-    A precise glow ramps along the distance to the silhouette and is never
-    spread, so it is bounded whatever its spread; when an ``outer`` glow's
-    spread reads the coverage (:py:func:`_glow_coverage`), each pixel of the
-    silhouette also reads :data:`_GLOW_EDGE_REACH` around it. An inner glow's
-    choke does not read it.
+    A precise glow reads the silhouette no further than its size and a
+    pixel or two, so it is bounded whatever its spread; when an ``outer``
+    glow's spread reads the coverage (:py:func:`_glow_coverage`), each pixel
+    of the silhouette also reads :data:`_GLOW_EDGE_REACH` around it. An inner
+    glow's choke does not read it.
     """
     if not precise and size > 0.0 and spread > 0.0:
         return None
@@ -1177,7 +1192,7 @@ def draw_drop_shadow(
     is read between its entries when ``anti_aliased`` and at the nearest
     one otherwise. Noise is not applied.
 
-    ``spread`` and ``size`` make the matte as :py:func:`_soft_matte` says.
+    ``spread`` and ``size`` make the matte as :py:func:`_shadow_matte` says.
     (The spread key shrinks the silhouette of an inner shadow, where the
     dialog calls it choke.) The offset treats what lies past the canvas as
     empty, as the blur does, since nothing outside it casts a shadow.
@@ -1216,18 +1231,27 @@ def _cast_matte(
     silhouette, 1 for one drawn from its complement. Raises ``ValueError``
     for a parameter that is not finite, naming ``what``.
     """
-    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
-
     if not all(math.isfinite(value) for value in (distance, angle, size, spread)):
         raise ValueError(
             "%s parameters must be finite: distance=%r angle=%r size=%r spread=%r"
             % (what, distance, angle, size, spread)
         )
-    alpha = _soft_matte(alpha, size, spread, _SHADOW_SIGMA_PER_SIZE, outside=outside)
+    alpha = _shadow_matte(alpha, size, spread, outside=outside)
     dx, dy = _shadow_offset(distance, angle)
     if dx or dy:
-        alpha = ndimage.shift(alpha, (dy, dx), order=1, mode="constant", cval=outside)
+        alpha = _moved(alpha, int(dx), int(dy), outside)
     return np.clip(alpha, 0.0, 1.0)
+
+
+def _moved(alpha: np.ndarray, dx: int, dy: int, outside: float) -> np.ndarray:
+    """``alpha`` moved ``dx`` pixels across and ``dy`` down, ``outside`` behind it."""
+    height, width = alpha.shape
+    moved = np.full_like(alpha, outside)
+    if abs(dx) < width and abs(dy) < height:
+        moved[max(dy, 0) : height + min(dy, 0), max(dx, 0) : width + min(dx, 0)] = (
+            alpha[max(-dy, 0) : height + min(-dy, 0), max(-dx, 0) : width + min(-dx, 0)]
+        )
+    return moved
 
 
 def draw_inner_shadow(
@@ -1266,6 +1290,68 @@ def draw_inner_shadow(
     return (matte * alpha)[:, :, None]
 
 
+def _spread_matte(
+    alpha: np.ndarray, size: float, spread: float
+) -> tuple[np.ndarray, float]:
+    """``alpha`` grown by the spread, and what is left of the size to blur it by.
+
+    ``spread`` is a percentage of ``size``, which is how Photoshop's dialog
+    states it, even though the descriptor labels the value in pixels. Its
+    whole pixels (:py:func:`_spread_pixels`) *grow* the silhouette's coverage
+    before the blur (:py:func:`_spread`), and the blur takes what is left
+    of ``size``, so the matte turns hard-edged at 100%, and a feathered
+    edge is hardened by a spread of a pixel.
+    """
+    alpha = alpha.astype(np.float32)
+    size = max(float(size), 0.0)
+    pixels = _spread_pixels(size, spread)
+    if pixels > 0:
+        alpha = _spread(alpha, pixels)
+    return alpha, max(size - pixels, 0.0)
+
+
+def _shadow_matte(
+    alpha: np.ndarray, size: float, spread: float, outside: float = 0.0
+) -> np.ndarray:
+    """``alpha`` spread and blurred as a shadow's or an inner glow's matte.
+
+    The blur is :py:func:`_tent_blur` of what the spread leaves of the size,
+    so the matte ends within that size of the silhouette. Its end matters
+    where a group's stroke traces it: every partial pixel states a boundary
+    (:py:func:`_signed_distance`), so a faint tail moves the stroke out by up
+    to a pixel, whatever its level.
+    """
+    alpha, radius = _spread_matte(alpha, size, spread)
+    return _tent_blur(alpha, radius, outside)
+
+
+def _tent_blur(alpha: np.ndarray, radius: float, outside: float) -> np.ndarray:
+    """``alpha`` blurred along each axis by a tent reaching zero at ``radius``.
+
+    What two box passes ``radius`` pixels wide add up to, which is how
+    Photoshop blurs a shadow; the weights are the tent sampled at whole
+    pixels, so nothing ``radius`` or further away is read. A box is at least
+    :data:`_MIN_BOX_WIDTH` wide, since a one-pixel box would leave the matte
+    as it is and Photoshop softens a one-pixel shadow as a two-pixel one. What
+    lies past the canvas is ``outside``: empty for a matte drawn from the
+    silhouette, full for one drawn from its complement.
+    """
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    if radius <= 0.0:
+        return alpha
+    radius = max(radius, _MIN_BOX_WIDTH)
+    reach = math.ceil(radius) - 1
+    taps = np.arange(-reach, reach + 1, dtype=np.float64)
+    weights = 1.0 - np.abs(taps) / radius
+    weights = (weights / weights.sum()).astype(np.float32)
+    for axis in range(2):
+        alpha = ndimage.correlate1d(
+            alpha, weights, axis=axis, mode="constant", cval=outside
+        )
+    return alpha
+
+
 def _soft_matte(
     alpha: np.ndarray,
     size: float,
@@ -1275,30 +1361,18 @@ def _soft_matte(
 ) -> np.ndarray:
     """``alpha`` grown by the spread and blurred by what is left of the size.
 
-    ``spread`` is a percentage of ``size``, which is how Photoshop's dialog
-    states it, even though the descriptor labels the value in pixels. Its
-    whole pixels (:py:func:`_spread_pixels`) *grow* the silhouette's coverage
-    before the blur (:py:func:`_spread`), and the blur takes what is left
-    of ``size``, so the matte turns hard-edged at 100%, and a feathered
-    edge is hardened by a spread of a pixel.
-
-    The blur is cut off at that remaining radius, rounded to a whole pixel,
-    so the matte reaches at most a pixel or two past ``size`` from the
-    silhouette, and the canvases the bbox functions ask for hold all of it;
-    a gaussian left to its default reach runs on past both. It treats what
-    lies past the canvas as ``outside``: empty for a matte drawn from the
-    silhouette, since nothing outside it casts anything, full for one drawn
-    from its complement. The default for a blur is to reflect the edge
-    instead, which doubles back any coverage that reaches it.
+    The spread is :py:func:`_spread_matte`'s. The blur is a gaussian cut off
+    at that remaining radius, rounded to a whole pixel, so the matte reaches
+    at most a pixel or two past ``size`` from the silhouette, and the
+    canvases the bbox functions ask for hold all of it; a gaussian left to
+    its default reach runs on past both. It treats what lies past the canvas
+    as ``outside``, as :py:func:`_tent_blur` does; the default for a blur is
+    to reflect the edge instead, which doubles back any coverage that
+    reaches it.
     """
     from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    alpha = alpha.astype(np.float32)
-    size = max(float(size), 0.0)
-    pixels = _spread_pixels(size, spread)
-    if pixels > 0:
-        alpha = _spread(alpha, pixels)
-    radius = max(size - pixels, 0.0)
+    alpha, radius = _spread_matte(alpha, size, spread)
     sigma = radius * sigma_per_size
     if sigma > 1e-3:
         alpha = ndimage.gaussian_filter(
@@ -1310,19 +1384,44 @@ def _soft_matte(
 def _precise_matte(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
     """``alpha`` ramped down with the distance from its boundary.
 
-    Photoshop's precise technique: full out to the spread, then a straight
-    ramp to nothing at ``size``, so the glow follows the silhouette's
-    corners as a stroke does rather than rounding them off as a blur does.
-    A ramp shorter than a pixel is drawn as an antialiased hard edge, the
-    way :py:func:`_distance_band` draws one.
+    Photoshop's precise technique, so the glow follows the silhouette's
+    corners as a stroke does rather than rounding them off as a blur does
+    (:py:func:`_precise_ramp`).
     """
     size = max(float(size), 0.0)
-    grow = size * min(max(float(spread), 0.0), 100.0) / 100.0
-    distance = _signed_distance(alpha, size + 1.0)
+    return _precise_ramp(_signed_distance(alpha, size + 1.0), size, spread)
+
+
+def _precise_ramp(
+    distance: np.ndarray, size: float, spread: float, outside: float | None = None
+) -> np.ndarray:
+    """A precise glow's matte at ``distance`` from the silhouette's edge.
+
+    The spread, or an inner glow's choke, grows the silhouette by whole
+    pixels (:py:func:`_spread_pixels`), and the matte ramps straight along
+    the distance to the grown edge: centred on it and a pixel more than the
+    rest of the size wide on either side, so it ends at ``size``. With no
+    spread the glow starts at about half strength; some holds it full out to
+    a knee, which follows the corners of the grown silhouette rather than
+    the silhouette's own. One that leaves no pixel of the size is drawn as
+    an antialiased hard edge, the way :py:func:`_distance_band` draws one.
+    What lies past the canvas is ``outside``, as for :py:func:`_tent_blur`;
+    with none, it is not read, as :py:func:`_signed_distance` reads none.
+    """
+    size = max(float(size), 0.0)
+    grow = _spread_pixels(size, spread)
     ramp = size - grow
     if ramp < 1.0:
         return np.clip(size + 0.5 - distance, 0.0, 1.0).astype(np.float32)
-    return np.clip((size - distance) / ramp, 0.0, 1.0).astype(np.float32)
+    if grow > 0:
+        grown = np.clip(grow + 0.5 - distance, 0.0, 1.0).astype(np.float32)
+        if outside is None:
+            distance = grow + _signed_distance(grown, ramp + 2.0)
+        else:
+            grown = np.pad(grown, 1, constant_values=outside)
+            distance = grow + _signed_distance(grown, ramp + 2.0)[1:-1, 1:-1]
+    width = 2.0 * (ramp + 1.0)
+    return np.clip((size + 0.5 - distance) / width, 0.0, 1.0).astype(np.float32)
 
 
 def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
@@ -1522,7 +1621,8 @@ def draw_inner_glow(
     out towards the edge. ``choke`` is a percentage of ``size`` held at full
     strength before the fade. The softer technique fades along the blur
     :py:func:`draw_inner_shadow` uses, the ``precise`` one linearly with the
-    distance to the edge, read at each pixel's centre. ``glow_range`` is the
+    distance to the edge, read at each pixel's centre, as a precise outer
+    glow fades outward (:py:func:`_precise_ramp`). ``glow_range`` is the
     percentage of the fade the contour is spread over. The canvas past
     ``viewport`` counts as outside the layer under either technique. The
     result is ``(height, width, 1)`` and never exceeds ``shape``.
@@ -1536,12 +1636,10 @@ def draw_inner_glow(
     alpha = shape[:, :, 0].astype(np.float32)
     size = max(float(size), 0.0)
     if precise:
-        grow = size * min(max(float(choke), 0.0), 100.0) / 100.0
         # A ring of clear pixels puts an edge at the canvas, as the blur's
         # ``outside`` does for the softer technique.
         depth = -_signed_distance(np.pad(alpha, 1), size + 1.0)[1:-1, 1:-1]
-        fade = max(size - grow, 1e-3)
-        matte = np.clip((size - depth) / fade, 0.0, 1.0).astype(np.float32)
+        matte = _precise_ramp(depth, size, choke, outside=1.0)
     else:
         matte = _cast_matte(
             1.0 - alpha,
@@ -1712,7 +1810,7 @@ def draw_satin(
 
     _finite("Satin", distance=distance, angle=angle, size=size)
     alpha = shape[:, :, 0].astype(np.float32)
-    dx, dy = _shadow_offset(distance, angle)
+    dx, dy = _cast_offset(distance, angle)
     size = max(float(size), 0.0)
     copies = []
     for sign in (1.0, -1.0):

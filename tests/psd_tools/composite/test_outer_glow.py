@@ -18,6 +18,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from psd_tools.api.effects import OuterGlow
 from psd_tools.api.layers import Layer
@@ -38,7 +39,7 @@ from psd_tools.constants import (
     Tag,
 )
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
+from psd_tools.psd.descriptor import Bool, Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
@@ -115,31 +116,56 @@ def test_spread_at_full_makes_a_hard_band_of_the_size(precise: bool) -> None:
 
 
 def test_the_precise_technique_ramps_straight_with_the_distance() -> None:
-    """Precise is a straight ramp from the edge to nothing at the size.
+    """Precise is a straight ramp to nothing at the size, centred on the edge.
 
-    The pixel centres sit half a pixel past the disc's last covered pixel,
-    so the ramp reads one minus that distance over the size.
+    With no spread it is a pixel more than the size wide on either side of
+    the edge, so it starts at about half strength. The pixel centres sit half
+    a pixel past the disc's last covered pixel.
     """
     glow = _glow(_disc(81, _RADIUS), size=6.0, precise=True)
     row = _ring(glow)[int(_RADIUS) + 1 :]
-    expected = [1.0 - (step + 0.5) / 6.0 for step in range(6)]
+    expected = [(6.0 - step) / 14.0 for step in range(6)]
     assert np.allclose(row[:6], expected, atol=1e-6), row[:6]
     assert np.all(row[6:] == 0.0)
 
 
-def test_a_soft_glow_is_a_drop_shadow_cast_nowhere() -> None:
-    """Beside the silhouette the soft matte is the drop shadow's at distance zero.
+@pytest.mark.parametrize(
+    ("spread", "width"),
+    [(33.0, 14.0), (50.0, 10.0), (67.0, 8.0)],
+    ids=["33", "half-pixel", "67"],
+)
+def test_a_precise_spread_steepens_the_ramp_about_the_grown_edge(
+    spread: float, width: float
+) -> None:
+    """The spread grows the silhouette by whole pixels, a half rounding up.
 
-    The two share their spread and blur, so what differs is only what the
-    glow cuts away under the silhouette and what the range does to the
-    rest; at 100% the range does nothing.
+    What is left of the size, plus a pixel, is the ramp's reach on either
+    side of the grown edge; the end of the ramp stays at the size.
+    """
+    edge = np.zeros((1, 16), dtype=np.float32)
+    edge[0, :4] = 1.0
+    matte = effects._precise_matte(edge, 9.0, spread)[0, 4:]
+    expected = np.clip([(9.0 - step) / width for step in range(12)], 0.0, 1.0)
+    assert np.allclose(matte, expected, atol=1e-6), matte
+
+
+def test_a_soft_glow_spreads_as_a_drop_shadow_does() -> None:
+    """Beside the silhouette the soft matte is the drop shadow's spread, blurred.
+
+    The two share their spread; the shadow blurs it with a tent and the
+    glow with its fitted gaussian. What else differs is what the glow cuts
+    away under the silhouette and what the range does to the rest; at 100%
+    the range does nothing.
     """
     disc = _disc(81, _RADIUS)
     glow = _glow(disc, size=6.0, spread=30.0)
+    spread, radius = effects._spread_matte(disc[:, :, 0], 6.0, 30.0)
     shadow = effects.draw_drop_shadow(
         _CANVAS, disc, distance=0.0, angle=0.0, size=6.0, spread=30.0
     )
-    assert np.allclose(glow, shadow * (1.0 - disc), atol=1e-6)
+    assert np.allclose(shadow[:, :, 0], effects._tent_blur(spread, radius, 0.0))
+    soft = effects._soft_matte(disc[:, :, 0], 6.0, 30.0, effects._GLOW_SIGMA_PER_SIZE)
+    assert np.allclose(glow[:, :, 0], soft * (1.0 - disc[:, :, 0]), atol=1e-6)
 
 
 def _soft_disc(size: int, radius: float, hard_radius: float) -> np.ndarray:
@@ -910,6 +936,114 @@ def test_a_glow_goes_over_the_drop_shadow_of_the_same_layer() -> None:
     assert np.allclose(_over_grey(layer, viewport)[y, x], 1.0, atol=1e-6)
 
 
+def _stroked_square(
+    mode: bytes, opacity: float, grouped: bool = False
+) -> tuple[Layer, Descriptor, Descriptor]:
+    """A white 20 px square with a hard blue glow and a black 6 px outset stroke.
+
+    The glow is Normal and spread to a hard band of 12 px, so it is opaque
+    under the whole stroke band and past it. The stroke is the donor's,
+    switched on and moved outside, blended in ``mode`` at ``opacity``. With
+    ``grouped`` both go on a pass-through group holding the square. Returns
+    the layer carrying them, the glow's descriptor and the stroke's.
+    """
+    psd = PSDImage.new("RGB", (60, 60))
+    square = Image.new("RGBA", (20, 20), (255, 255, 255, 255))
+    target: Layer = psd.create_pixel_layer(square, top=20, left=20)
+    if grouped:
+        target = psd.create_group([target])
+        assert target.blend_mode == BlendMode.PASS_THROUGH
+    glow = _hard_glow(target, size=12.0)
+    _blue(glow)
+    glow[Key.Mode].enum = Enum.Normal
+    block = target.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    stroke = block[b"frameFXMulti"][0]
+    stroke[Key.Enabled] = Bool(True)
+    stroke[b"present"] = Bool(True)
+    stroke[Key.Style] = Enumerated(Type.FrameFill, Enum.OutsetFrame)
+    stroke[Key.Mode] = Enumerated(Type.BlendMode, mode)
+    stroke[Key.Opacity] = Double(opacity)
+    assert [effect.name for effect in target.effects] == ["OuterGlow", "Stroke"]
+    return target, glow, stroke
+
+
+# The 20 px square's row through its middle, the stroke band left of it, and
+# a stretch past the band that only the glow reaches.
+_ROW, _BAND, _PAST = 30, slice(14, 20), slice(9, 13)
+
+
+@pytest.mark.parametrize("grouped", [False, True], ids=["layer", "group"])
+def test_a_lighten_stroke_shows_the_backdrop_under_its_band_not_the_glow(
+    grouped: bool,
+) -> None:
+    """The glow is cut from under the stroke's band as a knocked-out shadow is.
+
+    A black Lighten stroke over grey leaves the grey: under the band the
+    composite is the one without the glow, while past the band the glow is
+    whole. Left under the band, the glow would show there in blue.
+    """
+    layer, glow, _ = _stroked_square(Enum.Lighten, 100.0, grouped)
+    viewport = layer._psd.viewbox
+    glowing = _over_grey(layer, viewport)
+    glow[Key.Enabled] = False
+    bare = _over_grey(layer, viewport)
+
+    assert np.allclose(bare[_ROW, _BAND], 0.5, atol=1e-6)
+    assert np.allclose(glowing[_ROW, _BAND], bare[_ROW, _BAND], atol=1e-6)
+    assert np.allclose(glowing[_ROW, _PAST], (0.0, 0.0, 1.0), atol=1e-6)
+
+
+def test_a_faint_stroke_shows_the_backdrop_through_itself_not_the_glow() -> None:
+    """A Normal stroke at 71% hides 71% of what lies under its band, not all of it.
+
+    Through the rest shows the backdrop: over nothing the band's alpha is
+    the stroke's opacity rather than whole, and over grey it comes out as it
+    does with the glow off.
+    """
+    layer, glow, _ = _stroked_square(Enum.Normal, 71.0)
+    viewport = layer._psd.viewbox
+    alpha = _alone(layer, viewport)
+    glowing = _over_grey(layer, viewport)
+    glow[Key.Enabled] = False
+    bare = _over_grey(layer, viewport)
+
+    assert np.allclose(alpha[_ROW, _BAND, 0], 0.71, atol=1e-6)
+    assert np.allclose(alpha[_ROW, _PAST, 0], 1.0, atol=1e-6)
+    assert np.allclose(glowing[_ROW, _BAND], bare[_ROW, _BAND], atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("mode", "opacity"),
+    [(Enum.Normal, 100.0), (Enum.Normal, 71.0), (Enum.Lighten, 100.0)],
+    ids=["normal", "normal at 71%", "lighten"],
+)
+def test_a_strokes_antialiased_rim_hides_the_glow_at_its_opacity(
+    mode: bytes, opacity: float
+) -> None:
+    """Round the square's corners the stroke alone claims ``b`` of a pixel.
+
+    A Normal stroke at opacity ``o`` hides ``o * b`` of the glow once on, so
+    the cut leaves the glow at ``(1 - b) / (1 - o * b)`` and it shows at
+    ``1 - b``; a Lighten stroke hides none of it and the cut takes ``b``. An
+    opaque Normal stroke leaves the glow showing nowhere under its band.
+    """
+    layer, glow, _ = _stroked_square(mode, opacity)
+    viewport = layer._psd.viewbox
+    alpha = _alone(layer, viewport)[:, :, 0]
+    glow[Key.Enabled] = False
+    o = opacity / 100.0
+    band = _alone(layer, viewport)[:, :, 0] / o
+    beside = np.ones(band.shape, dtype=bool)
+    beside[20:40, 20:40] = False
+    rim = beside & (band > 0.0) & (band < 1.0)
+    assert rim.any(), "no antialiased rim"
+
+    b = band[rim]
+    p = o if mode == Enum.Normal else 0.0
+    expected = o * b + (1.0 - o * b) * (1.0 - b) / (1.0 - p * b)
+    assert np.allclose(alpha[rim], expected, atol=1e-5), alpha[rim]
+
+
 def test_a_glow_reaches_a_viewport_its_layer_misses() -> None:
     """The glow is drawn from the whole layer, wherever the viewport is.
 
@@ -1218,3 +1352,71 @@ def test_outer_glows_render_to_photoshops_preview(
     assert floor >= without, "the region has no glow"
     assert error <= bound
     assert error * _IMPROVEMENT < floor
+
+
+# effects/precise-glow-spread.psd: on white, a 16 px black square and a disc
+# beside it on each layer, with a black Normal precise outer glow at 100%,
+# a Linear contour and a range of 100%. The sizes, 5, 9 and 20, run down the
+# rows and the spreads, 0, 33, 50, 67 and 100, along them. Photoshop's
+# composite is the reference.
+_PRECISE_FIXTURE = "effects/precise-glow-spread.psd"
+_PRECISE_SQUARE = 16
+
+# A spread of 100% grows a hard band; Photoshop antialiases its outer edge
+# by a little more than the render does.
+_PRECISE_BOUND = 2.5e-4
+
+
+def _precise_glow_layers() -> list[str]:
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    return [layer.name for layer in psd if any(layer.effects.find("outerglow"))]
+
+
+@pytest.fixture(scope="module")
+def precise_fixture() -> tuple[PSDImage, np.ndarray, np.ndarray]:
+    """The fixture, Photoshop's composite of it and the render."""
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    color, _, _ = composite(psd)
+    return psd, psd.numpy(), color
+
+
+@pytest.mark.parametrize(
+    "name", [name for name in _precise_glow_layers() if not name.endswith(" 100")]
+)
+def test_a_precise_glow_falls_off_beside_a_straight_edge_as_photoshops(
+    precise_fixture: tuple[PSDImage, np.ndarray, np.ndarray], name: str
+) -> None:
+    """Along the row through the middle of the square, out from its left side.
+
+    Every spread that leaves some of the size to the ramp, to the 8-bit
+    step of Photoshop's composite.
+    """
+    psd, reference, color = precise_fixture
+    layer = next(layer for layer in psd if layer.name == name)
+    glow = cast(OuterGlow, next(iter(layer.effects.find("outerglow"))))
+    reach = int(glow.size) + 2
+    left, top = layer.bbox[0], layer.bbox[1]
+    row = top + _PRECISE_SQUARE // 2
+    expected = reference[row, left - reach : left, 0]
+    rendered = color[row, left - reach : left, 0]
+    assert expected.min() < 1.0, "the row has no glow"
+    assert np.allclose(rendered, expected, atol=1.0 / 255 + 1e-6), (
+        rendered,
+        expected,
+    )
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_precise_glows_render_to_photoshops_preview(force: bool) -> None:
+    """Every layer of the fixture, against Photoshop's composite of it."""
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    reference = psd.numpy()
+    color, _, _ = composite(psd, force=force)
+    error = float(_mse(reference, color))
+
+    for layer in psd.descendants():
+        for effect in list(layer.effects.find("outerglow")):
+            effect.descriptor[Key.Enabled] = False
+    unglowed, _, _ = composite(psd, force=force)
+    assert error <= _PRECISE_BOUND
+    assert error * _IMPROVEMENT < float(_mse(reference, unglowed))

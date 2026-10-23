@@ -4,6 +4,52 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] A document's composite reads off its stored preview which type layers
+  Photoshop blended straight, not in the text gamma, as it does for a raster
+  kept through a session; nothing else in the file records it. An export from
+  another session than the preview's may disagree. ``text_preview=False``
+  keeps the gamma for every layer, and ``layer_text_gamma`` pins layers by ID
+  (``PSDImage.composite()`` and ``psd_tools.composite.composite()``)
+- [fix] An outer glow is cut from under its layer's outside stroke band as
+  well as its silhouette, as a knocked-out drop shadow is, so a Lighten or
+  partly transparent stroke shows the backdrop through itself and not the
+  glow. Layers without a stroke are unchanged
+- [fix] Precise outer and inner glows fall off as Photoshop draws them: the
+  spread, or the choke, grows the silhouette by whole pixels, and the glow
+  ramps straight along the distance to that grown edge, centred on it and
+  ending at the size. With no spread a precise glow starts at about half
+  strength, and a spread steepens the ramp instead of holding it full out to
+  the spread. Softer glows, and precise ones spread over their whole size,
+  are unchanged
+- [fix] Colour balance and vibrance adjustments follow Photoshop's renders:
+  Preserve Luminosity takes the midrange of the three midtone amounts off each
+  one instead of their mean, a brightening midtone starts from black on a
+  parabola, the saturation slider scales chroma about 0.288 R + 0.712 G, and
+  both vibrance amounts are refitted to Photoshop probes. In a document whose
+  version 2 profile carries a chromatic adaptation tag and a white other than
+  D50, such as Apple's "Display" profiles, vibrance runs in the slightly moved
+  RGB Photoshop reads the profile as. **Rendering change** for documents with
+  these adjustments
+- [fix] Crisp, Strong and Smooth text is antialiased from a 4 x 4 grid of
+  point samples per pixel, as Photoshop stores it, instead of the exact area
+  under the outline: every rendered type layer changes slightly.
+  ``Options(coverage="area")`` keeps the exact area
+- [fix] The text engine draws OpenType-SVG colour glyphs (emoji, icon fonts)
+  in colour as Photoshop does: paths and shapes with solid or gradient fills,
+  stroked rectangles and embedded PNG or JPEG images. A glyph whose SVG uses
+  anything else is still drawn as a silhouette and reported as
+  ``monochrome_emoji``; ``Options(color_glyphs=False)`` restores the
+  silhouettes
+- [fix] Drop and inner shadows are cast a whole number of pixels along each
+  axis, rounded to the nearest, as Photoshop casts them, so a shadow lit from
+  an angle off the axes no longer lands a fraction of a pixel out with a
+  blurred edge. Shadows cast a whole number of pixels along an axis are
+  unchanged
+- [fix] Drop shadows, inner shadows and inner glows blur by two box passes as
+  wide as their size, as Photoshop does, instead of by a gaussian whose faint
+  tail ran a pixel further: a group's outside stroke traced round a child's
+  soft shadow no longer reaches a pixel too far. Soft shadows' falloffs move
+  slightly; outer glows are unchanged
 - [fix] A Hue/Saturation adjustment no longer turns some near-white pixels
   black and some near-black ones bright: a pixel whose lightness rounds to 0
   or 1 reads as unsaturated instead of infinitely saturated. Only documents
@@ -48,11 +94,13 @@ Changelog
   Photoshop draws it on pixel, smart object and fill layers, instead of being
   stretched to put its end stops on the end pixels: the last pixel now falls
   one pixel short of the far stop. Gradient overlays, fill layers and strokes
-  move by up to a pixel along the ramp. Type layers' overlays move the same
-  way, unconfirmed against Photoshop
-- [fix] A gradient overlay on a pixel or smart object layer is laid out on the
-  bounds of the layer's pixels over half opaque, as Photoshop does, instead of
-  on the layer's box, so a soft edge no longer stretches the ramp
+  move by up to a pixel along the ramp
+- [fix] A gradient overlay on a pixel, smart object or type layer is laid out
+  on the bounds of the layer's pixels over half opaque, as Photoshop does,
+  instead of on the layer's box, so a soft edge or a glyph's antialiased rim
+  no longer stretches the ramp
+- [fix] ``BrightnessContrast.automatic`` reads the ``Auto`` key Photoshop
+  writes, so it is True for an adjustment set with Auto
 - [fix] A smart object whose smart filters have a painted filter mask is
   composited through it, as Photoshop shows it: filtered where the mask is
   white, the object as it was before its filters where it is black, instead

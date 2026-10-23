@@ -71,9 +71,11 @@ def font_names(layer: TypeLayer) -> list[str]:
     )
 
 
-def _report(lay: Layout, transform: Transform, t0: float) -> RenderReport:
+def _report(
+    lay: Layout, transform: Transform, options: Options, t0: float
+) -> RenderReport:
     warnings = list(lay.warnings)
-    for w in raster_warnings(lay, transform):
+    for w in raster_warnings(lay, transform, options):
         if w not in warnings:
             warnings.append(w)
     return RenderReport(
@@ -113,7 +115,7 @@ def render(
         _GLYPH_CACHE,
         max_alloc_bytes=layer._psd._max_alloc_bytes,
     )
-    return RenderResult(rgba, bbox, _report(lay, transform, t0))
+    return RenderResult(rgba, bbox, _report(lay, transform, options, t0))
 
 
 def render_type_layer(

@@ -1087,14 +1087,36 @@ def test_a_pixel_layers_overlay_is_laid_out_on_its_over_half_opaque_pixels() -> 
 
 
 def test_an_overlay_keeps_its_layout_without_pixels_over_half_opaque() -> None:
-    """A layer under half opaque throughout, and a type layer, keep the box given."""
+    """A layer under half opaque throughout keeps the box given."""
     psd, _ = _soft_edged_layer()
     faint = PixelLayer.frompil(Image.new("RGBA", (6, 6), (255, 255, 255, 127)), psd)
     assert _opaque_bounds(faint, faint.bbox) == faint.bbox
-    text = next(
-        x for x in PSDImage.open(full_name("layer_effects.psd")) if x.kind == "type"
-    )
-    assert _opaque_bounds(text, (1, 2, 3, 4)) == (1, 2, 3, 4)
+
+
+def test_a_type_layers_overlay_is_laid_out_on_its_over_half_opaque_pixels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A glyph rim under half opaque stays out of the box, as on a pixel layer.
+
+    The text's top row is a quarter opaque and its right column a third, so
+    the box loses both; its bottom row, at 128, stays in.
+    """
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    text = next(x for x in psd if x.name == "Gradient Overlay")
+    assert text.kind == "type"
+    left, top, right, bottom = text.bbox
+    shape = np.ones((bottom - top, right - left, 1), dtype=np.float32)
+    shape[0] = 64 / 255
+    shape[:, -1] = 85 / 255
+    shape[-1, :-1] = 128 / 255
+    monkeypatch.setattr(text, "numpy", lambda *args, **kwargs: shape)
+    opaque = (left, top + 1, right - 1, bottom)
+    assert _opaque_bounds(text, text.bbox) == opaque
+    desc = _gradient(angle=90.0)
+    color, _ = _draw_gradient_overlay(text, desc, 3, text.bbox, text.bbox)
+    expected, _ = paint.draw_gradient_fill(text.bbox, psd.color_mode, desc, opaque)
+    assert color is not None and expected is not None
+    assert np.array_equal(color, expected)
 
 
 def test_an_overlay_keeps_its_layout_when_its_pixels_cannot_be_read(

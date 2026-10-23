@@ -111,8 +111,8 @@ class BrightnessContrast(AdjustmentLayer):
 
     @property
     def automatic(self) -> bool:
-        """Value of the `auto` flag."""
-        return get_scalar(self._data, b"auto", bool, False)
+        """Value of the `Auto` flag."""
+        return get_scalar(self._data, b"Auto", bool, False)
 
 
 @register(Tag.CURVES)

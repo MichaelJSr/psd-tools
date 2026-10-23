@@ -23,7 +23,9 @@ import numpy as np
 
 from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite.scanline import fill_coverage
+from psd_tools.composite.text import svg
 from psd_tools.composite.text.constants import (
+    COVERAGE_SAMPLES,
     CRISP_SUBPIXEL_X,
     FAUX_BOLD_EM,
     FAUX_ITALIC_SHEAR,
@@ -47,6 +49,9 @@ Glyph = tuple[int, int, np.ndarray]
 # alive at once, for the allocation budget.
 #: A glyph: FreeType's bitmap and its copy, both uint8.
 _GLYPH_BYTES = 1 + 1
+#: A point-sampled glyph, per pixel of its large render: the uint16 hits
+#: and the inside mask.
+_SAMPLED_BYTES = 2 + 1
 #: A rule: the float32 coverage, its scaling and the uint8 result.
 _RULE_BYTES = 4 + 4 + 1
 #: The canvas: uint32 coverage sum, float32 RGB, uint8 winning coverage,
@@ -76,12 +81,18 @@ class Options:
     missing_font: Literal["raise", "skip", "substitute"] = "raise"
     #: Non-diagonal transforms: FreeType matrix, or axis-aligned then resampled.
     general_transform: Literal["matrix", "resample"] = "matrix"
-    #: Draw the outlines of a colour (``SVG ``) font as a silhouette; when
-    #: false its glyphs are skipped.
+    #: A colour glyph not drawn in colour (``color_glyphs`` false, or SVG
+    #: the renderer does not cover) is drawn as its outline's silhouette;
+    #: when false it is skipped.
     monochrome_emoji: bool = True
     #: Pixels a glyph bitmap or the canvas may not exceed. The document's
     #: allocation budget and the PSD per-axis limit apply as well.
     max_canvas_pixels: int = MAX_CANVAS_PIXELS
+    #: Draw the glyphs of a colour (``SVG ``) font in colour.
+    color_glyphs: bool = True
+    #: Coverage of Crisp, Strong and Smooth text: Photoshop's point samples,
+    #: or the exact area under the outline.
+    coverage: Literal["samples", "area"] = "samples"
 
 
 #: Where a glyph origin lands: as computed, on whole pixels, or (Crisp) on
@@ -98,15 +109,16 @@ class _Mode:
     embolden: int  #: 26.6 total widening in x and in y
     origin: _Origin
     threshold: float | None  #: binarise the final coverage above this
+    samples: int = 1  #: point samples a side per pixel; 1 is the exact area
 
     def snaps(self, general: bool) -> bool:
         return self.origin == "integer" or (self.origin == "crisp" and not general)
 
 
-_STRONG = _Mode(_UNHINTED, STRONG_EMBOLDEN_26_6, "fractional", None)
+_STRONG = _Mode(_UNHINTED, STRONG_EMBOLDEN_26_6, "fractional", None, COVERAGE_SAMPLES)
 _MODES: dict[int, _Mode] = {
     0: _Mode(_UNHINTED, 0, "fractional", NONE_THRESHOLD),
-    1: _Mode(_UNHINTED, 0, "crisp", None),
+    1: _Mode(_UNHINTED, 0, "crisp", None, COVERAGE_SAMPLES),
     2: _STRONG,
     3: _STRONG,
     4: _Mode(_LIGHT, 0, "integer", None),
@@ -211,8 +223,33 @@ def strike_scale(px_h: float, strikes: frozenset[int]) -> int:
     return k
 
 
-def raster_warnings(layout: Layout, transform: Transform) -> tuple[str, ...]:
-    """Warnings :func:`rasterize` would raise for ``layout`` under ``transform``."""
+def _is_color(g: PlacedGlyph) -> bool:
+    """``g`` is a colour glyph: its face's ``SVG `` table has a document for it.
+
+    A face whose table cannot be read counts every glyph.
+    """
+    if not g.face.metrics.has_svg:
+        return False
+    table = g.face.svg
+    return table is None or g.gid in table
+
+
+def _drawing(g: PlacedGlyph, options: Options) -> svg.Drawing | None:
+    """The colour drawing of ``g``, or ``None`` when it is not drawn in colour."""
+    table = g.face.svg if options.color_glyphs else None
+    if table is None:
+        return None
+    return table.drawing(g.gid, (*g.fill, 1.0))
+
+
+def raster_warnings(
+    layout: Layout, transform: Transform, options: Options | None = None
+) -> tuple[str, ...]:
+    """Warnings :func:`rasterize` would raise for ``layout`` under ``transform``.
+
+    ``monochrome_emoji``: a colour font's glyph is drawn without its colours.
+    """
+    options = options or Options()
     out: list[str] = []
     if is_general(transform):
         out.append("generic_transform")
@@ -221,7 +258,7 @@ def raster_warnings(layout: Layout, transform: Transform) -> tuple[str, ...]:
         strike_scale(g.em_h * cy, g.face.metrics.strikes) > 1 for g in layout.glyphs
     ):
         out.append("strike_guard")
-    if any(g.face.metrics.has_svg for g in layout.glyphs):
+    if any(_is_color(g) and _drawing(g, options) is None for g in layout.glyphs):
         out.append("monochrome_emoji")
     return tuple(out)
 
@@ -274,6 +311,30 @@ def _render_glyph(
         return slot.bitmap_left, slot.bitmap_top, _bitmap(slot)
 
 
+def _samples(mode: _Mode, options: Options) -> int:
+    return mode.samples if options.coverage == "samples" else 1
+
+
+def _point_sampled(glyph: Glyph, n: int) -> Glyph:
+    """``glyph`` rendered at ``n`` times the size, as ``n`` x ``n`` point samples.
+
+    A pixel of the large render holds a sample where its centre is inside,
+    which is where its coverage reaches one half.
+    """
+    left, top, cov = glyph
+    if n == 1 or not cov.size:
+        return glyph
+    h, w = cov.shape
+    x0, y0 = left // n, -top // n
+    x1, y1 = -(-(left + w) // n), -(-(h - top) // n)
+    hits = np.zeros(((y1 - y0) * n, (x1 - x0) * n), np.uint16)
+    hits[-top - y0 * n : -top - y0 * n + h, left - x0 * n : left - x0 * n + w] = (
+        cov >= 128
+    )
+    count = hits.reshape(y1 - y0, n, x1 - x0, n).sum(axis=(1, 3))
+    return x0, -y0, ((count * 255 + n * n // 2) // (n * n)).astype(np.uint8)
+
+
 def _fixed(v: float) -> int:
     return int(round(v * 0x10000))
 
@@ -283,8 +344,9 @@ def _empty(transform: Transform) -> tuple[np.ndarray, Bbox]:
     return np.zeros((0, 0, 4), dtype=np.float32), (x, y, x, y)
 
 
-#: A coverage array pasted with its top-left pixel at ``(x, y)`` in one fill.
-_Item = tuple[int, int, np.ndarray, RGB]
+#: A coverage array pasted with its top-left pixel at ``(x, y)`` in one fill,
+#: or with no fill a colour glyph's premultiplied RGBA laid over the rest.
+_Item = tuple[int, int, np.ndarray, RGB | None]
 
 
 def _glyph_items(
@@ -300,17 +362,27 @@ def _glyph_items(
     # Text space is y-down and FreeType y-up, so the two off-diagonals flip sign.
     base = (xx / cx, -yx / cy, -xy / cx, yy / cy)
     snap = mode.snaps(is_general(transform))
+    n = _samples(mode, options)
     items: list[_Item] = []
     for g in glyphs:
-        if g.face.metrics.has_svg and not options.monochrome_emoji:
+        color = _is_color(g)
+        drawing = _drawing(g, options) if color else None
+        if drawing is not None:
+            item = _color_item(g, drawing, transform, mode, cache, options, budget)
+            if item is not None:
+                items.append(item)
+            continue
+        if color and not options.monochrome_emoji:
             continue
         px_w, px_h = g.em_w * cx, g.em_h * cy
-        k = strike_scale(px_h, g.face.metrics.strikes)
-        size66 = (round(64 * px_w * k), round(64 * px_h * k))
+        # Point samples come from a render at n times the size.
+        k = strike_scale(px_h * n, g.face.metrics.strikes)
+        size66 = (round(64 * px_w * n * k), round(64 * px_h * n * k))
         if not size66[0] or not size66[1]:
             continue
-        w, h = math.ceil(px_w), math.ceil(px_h)
-        _guard("glyph", w, h, w * h * _GLYPH_BYTES, options, budget)
+        w, h = math.ceil(px_w * n), math.ceil(px_h * n)
+        per_pixel = _GLYPH_BYTES + (_SAMPLED_BYTES if n > 1 else 0)
+        _guard("glyph", w, h, w * h * per_pixel, options, budget)
         m = base
         if g.faux_italic:
             s = FAUX_ITALIC_SHEAR
@@ -324,7 +396,7 @@ def _glyph_items(
         x = xx * g.x + yx * g.y + tx
         y = xy * g.x + yy * g.y + ty
         if snap:
-            steps = crisp_x_steps(size66[1] // k) if mode.origin == "crisp" else 1
+            steps = crisp_x_steps(size66[1] // (k * n)) if mode.origin == "crisp" else 1
             x, y = round(x * steps) / steps, float(round(y))
         ix, iy = math.floor(x), math.floor(y)
         dx, dy = round((x - ix) * 64), round((y - iy) * 64)
@@ -336,16 +408,60 @@ def _glyph_items(
         if g.faux_bold:
             ex += round(64 * px_w * FAUX_BOLD_EM)
             ey += round(64 * px_h * FAUX_BOLD_EM)
-        key = (g.face.key, g.gid, size66, matrix, dx, -dy, mode.flags, ex, ey)
+        delta = (dx * n, -dy * n)
+        key = (g.face.key, g.gid, size66, matrix, delta, mode.flags, ex, ey, n)
         left, top, cov = cache.get(
             key,
-            lambda: _render_glyph(
-                g.face, g.gid, size66, matrix, (dx, -dy), mode.flags, (ex, ey)
+            lambda: _point_sampled(
+                _render_glyph(
+                    g.face, g.gid, size66, matrix, delta, mode.flags, (ex * n, ey * n)
+                ),
+                n,
             ),
         )
         if cov.size:
             items.append((ix + left, iy - top, cov, g.fill))
     return items
+
+
+def _color_item(
+    g: PlacedGlyph,
+    drawing: svg.Drawing,
+    transform: Transform,
+    mode: _Mode,
+    cache: GlyphCache,
+    options: Options,
+    budget: AllocBudget | None,
+) -> _Item | None:
+    """A colour glyph drawn from its SVG at its origin."""
+    xx, xy, yx, yy, tx, ty = transform
+    upem = g.face.metrics.upem
+    sw, sh = g.em_w / upem, g.em_h / upem
+    shear = FAUX_ITALIC_SHEAR if g.faux_italic else 0.0
+    # Font units, y down, to document px: the em scale and faux italic in
+    # text space, then the layer transform.
+    a, b = xx * sw, xy * sw
+    c, d = (yx - shear * xx) * sh, (yy - shear * xy) * sh
+    x = xx * g.x + yx * g.y + tx
+    y = xy * g.x + yy * g.y + ty
+    if mode.snaps(is_general(transform)):
+        x, y = float(round(x)), float(round(y))
+    ix, iy = math.floor(x), math.floor(y)
+    dx, dy = round((x - ix) * 64) / 64, round((y - iy) * 64) / 64
+    matrix: svg.Affine = (a, b, c, d, dx, dy)
+    box = svg.device_bbox(drawing, matrix)
+    if box is None:
+        return None
+    w, h = box[2] - box[0], box[3] - box[1]
+    if w <= 0 or h <= 0:
+        return None
+    grid = _samples(mode, options)
+    _guard("glyph", w, h, svg.peak_bytes(drawing, w, h, grid), options, budget)
+    key = ("svg", g.face.key, g.gid, matrix, g.fill, grid)
+    left, top, rgba = cache.get(key, lambda: svg.rasterize(drawing, matrix, grid))
+    if not rgba.size:
+        return None
+    return ix + left, iy + top, rgba, None
 
 
 def _rule_items(
@@ -397,9 +513,11 @@ def _compose(
     # Coverage is summed in 8-bit units and clipped once at the end.
     acc = np.zeros((h, w), np.uint32)
     rgb = np.zeros((h, w, 3), np.float32)
-    fills = {f for _, _, _, f in items}
+    fills = {f for _, _, _, f in items if f is not None}
     best = np.zeros((h, w), np.uint8) if len(fills) > 1 else None
     for x, y, cov, fill in items:
+        if fill is None:
+            continue
         ys, xs = (
             slice(y - y0, y - y0 + cov.shape[0]),
             slice(x - x0, x - x0 + cov.shape[1]),
@@ -411,7 +529,7 @@ def _compose(
         win = cov > best[ys, xs]
         rgb[ys, xs][win] = fill
         np.maximum(best[ys, xs], cov, out=best[ys, xs])
-    if best is None:
+    if best is None and fills:
         rgb[acc > 0] = fills.pop()
     if mode.threshold is not None:
         alpha = (acc > mode.threshold * 255).astype(np.float32)
@@ -419,7 +537,26 @@ def _compose(
         alpha = np.minimum(acc, 255).astype(np.float32)
         alpha /= 255
     rgba = np.concatenate([rgb, alpha[..., None]], axis=-1)
+    colors = [(x, y, c) for x, y, c, f in items if f is None]
+    if colors:
+        _lay_colors(rgba, colors, x0, y0)
     return rgba, (x0, y0, x1, y1)
+
+
+def _lay_colors(
+    rgba: np.ndarray, colors: list[tuple[int, int, np.ndarray]], x0: int, y0: int
+) -> None:
+    """Lay premultiplied colour glyphs over straight ``rgba``, in order, in place."""
+    rgba[..., :3] *= rgba[..., 3:]
+    for x, y, color in colors:
+        ys = slice(y - y0, y - y0 + color.shape[0])
+        xs = slice(x - x0, x - x0 + color.shape[1])
+        rgba[ys, xs] *= 1 - color[..., 3:]
+        rgba[ys, xs] += color
+    alpha = rgba[..., 3:]
+    np.clip(alpha, 0, 1, out=alpha)
+    ink = alpha[..., 0] > 0
+    rgba[..., :3][ink] = np.clip(rgba[..., :3][ink] / alpha[ink], 0, 1)
 
 
 def _rasterize_matrix(

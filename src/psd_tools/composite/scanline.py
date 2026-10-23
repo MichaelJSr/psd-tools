@@ -134,12 +134,16 @@ def _split(
     return p0[owner] + t0[:, None] * step, p0[owner] + t1[:, None] * step
 
 
-def fill_coverage(polylines: list, width: int, height: int) -> np.ndarray:
-    """Area of ``polylines`` inside each pixel, under the non-zero rule.
+def fill_coverage(
+    polylines: list, width: int, height: int, *, nonzero: bool = False
+) -> np.ndarray:
+    """Area of ``polylines`` inside each pixel, under the even-odd rule.
 
     Each polyline is an ``(n, 2)`` array of ``(x, y)`` vertices and is closed
     implicitly. Together they describe one path: a subpath wound against its
     neighbour is a hole, which is how Photoshop reads a combined path.
+    ``nonzero`` reads the winding under the non-zero rule instead, as SVG
+    does by default.
     """
     coverage = np.zeros((max(height, 0), max(width, 0)), dtype=np.float32)
     if width <= 0 or height <= 0:
@@ -206,8 +210,11 @@ def fill_coverage(polylines: list, width: int, height: int) -> np.ndarray:
         # folded into [0, 1] rather than clamped there. Clamping is the
         # non-zero rule, and Photoshop does not use it -- see the module
         # docstring.
-        np.mod(rows, 2.0, out=rows)
-        np.subtract(1.0, np.abs(rows - 1.0), out=rows)
+        if nonzero:
+            np.minimum(rows, 1.0, out=rows)
+        else:
+            np.mod(rows, 2.0, out=rows)
+            np.subtract(1.0, np.abs(rows - 1.0), out=rows)
         rows[rows < _RESIDUE] = 0.0
         coverage[top:bottom] = rows[:, 1 : width + 1]
     return coverage

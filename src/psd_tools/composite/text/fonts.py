@@ -12,14 +12,16 @@ import re
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
-from ctypes import byref, c_ulong
+from ctypes import byref, c_ubyte, c_ulong
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Literal
 
 import freetype
 import uharfbuzz as hb
 
 from psd_tools.composite.text.constants import ASCENT_GLYPHS, FACE_CACHE_SIZE
+from psd_tools.composite.text.svg import SvgTable
 
 How = Literal["exact", "loose", "system", "substitute", "missing"]
 Policy = Literal["raise", "skip", "substitute"]
@@ -55,7 +57,7 @@ class FontMetrics:
     #: it: ``post``'s top edge minus half the thickness.
     underline_position: int
     underline_thickness: int
-    #: The face carries an ``SVG `` table; its outlines render as silhouettes.
+    #: The face carries an ``SVG `` table of colour glyphs.
     has_svg: bool
     #: ``y_ppem`` of each embedded bitmap strike.
     strikes: frozenset[int]
@@ -74,6 +76,15 @@ class Face:
     metrics: FontMetrics
     key: tuple[str, int]
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    @cached_property
+    def svg(self) -> SvgTable | None:
+        """The face's ``SVG `` table, or ``None`` when it has none."""
+        if not self.metrics.has_svg:
+            return None
+        with self.lock:
+            data = sfnt_table(self.ft, b"SVG ")
+        return None if data is None else SvgTable(data, self.metrics.upem)
 
 
 @dataclass(frozen=True, eq=False)
@@ -138,6 +149,18 @@ def _glyph_ymax(slot: freetype.GlyphSlot) -> int:
     if slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE and slot.outline.n_points:
         return int(slot.outline.get_bbox().yMax)
     return int(slot.metrics.horiBearingY)
+
+
+def sfnt_table(face: freetype.Face, tag: bytes) -> bytes | None:
+    """The raw bytes of the face's ``tag`` table, or ``None`` when it has none."""
+    code = int.from_bytes(tag, "big")
+    length = c_ulong(0)
+    if freetype.FT_Load_Sfnt_Table(face._FT_Face, code, 0, None, byref(length)):
+        return None
+    buffer = (c_ubyte * length.value)()
+    if freetype.FT_Load_Sfnt_Table(face._FT_Face, code, 0, buffer, byref(length)):
+        return None
+    return bytes(buffer)
 
 
 def _metrics(face: freetype.Face) -> FontMetrics:

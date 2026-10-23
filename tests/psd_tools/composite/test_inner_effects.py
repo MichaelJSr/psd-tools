@@ -11,11 +11,12 @@ import copy
 import logging
 import sys
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
 
+from psd_tools.api.effects import InnerGlow
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite, effects
@@ -191,8 +192,9 @@ def test_a_precise_glow_fades_linearly_with_the_distance_to_the_edge() -> None:
     """The precise technique ramps along the distance field, not a blur.
 
     A hard edge at column 10: the first column inside lies half a pixel from
-    it, and the ramp falls by one size-th per pixel from there. Measured
-    short of the far canvas edge, which counts as an edge of its own.
+    it. The ramp is centred on the edge and a pixel more than the size wide
+    on either side, so it starts at about half strength. Measured short of
+    the far canvas edge, which counts as an edge of its own.
     """
     shape = np.zeros((20, 40, 1), dtype=np.float32)
     shape[:, 10:] = 1.0
@@ -201,23 +203,32 @@ def test_a_precise_glow_fades_linearly_with_the_distance_to_the_edge() -> None:
         (0, 0, 40, 20), shape, size=size, choke=0.0, precise=True, glow_range=100.0
     )
     depth = np.arange(20) + 0.5
-    expected = np.clip((size - depth) / size, 0.0, 1.0)
+    expected = np.clip((size + 0.5 - depth) / (2.0 * (size + 1.0)), 0.0, 1.0)
     assert np.allclose(glow[10, 10:30, 0], expected, atol=1e-6)
     assert not glow[:, :10].any()
 
 
-def test_the_canvas_past_a_precise_glow_counts_as_outside() -> None:
+@pytest.mark.parametrize(
+    ("choke", "width", "start"), [(0.0, 20.0, 9.0 / 20.0), (67.0, 8.0, 1.0)]
+)
+def test_the_canvas_past_a_precise_glow_counts_as_outside(
+    choke: float, width: float, start: float
+) -> None:
     """A layer that fills its canvas has an edge there under either technique.
 
     The first pixel inside a hard edge lies half a pixel from it, so the
-    precise ramp starts there, and the centre is out of its reach.
+    precise ramp starts there, and the centre is out of its reach. A choke
+    grows the outside, past the canvas too, before the ramp is laid on it.
     """
     shape = np.ones((40, 40, 1), dtype=np.float32)
     size = 9.0
     glow = effects.draw_inner_glow(
-        (0, 0, 40, 40), shape, size=size, choke=0.0, precise=True, glow_range=100.0
+        (0, 0, 40, 40), shape, size=size, choke=choke, precise=True, glow_range=100.0
     )
-    assert float(glow[20, 0, 0]) == pytest.approx((size - 0.5) / size, abs=1e-6)
+    row = glow[20, :12, 0]
+    expected = np.clip([(size - step) / width for step in range(12)], 0.0, 1.0)
+    assert float(row[0]) == pytest.approx(start, abs=1e-6)
+    assert np.allclose(row, expected, atol=1e-6), row
     assert float(glow[20, 20, 0]) == 0.0
 
 
@@ -282,19 +293,22 @@ def test_an_inner_effect_asks_for_scipy_by_name_when_it_is_missing(
         draw(_disc(81, 20.0))
 
 
-# The blur the inner effects take is the drop shadow's, at the same fitted
-# width per pixel of size.
-_FITTED_SIGMA_PER_SIZE = 0.45
-
-
-def test_the_inner_effects_blur_at_the_drop_shadows_fitted_width() -> None:
+def test_the_inner_effects_blur_as_the_drop_shadow_does() -> None:
     """The blur is shared with the drop shadow, so a change to it moves both.
 
-    The glows on the card renders score best at the drop shadow's width,
-    with the range dividing the matte; neither is retuned for them.
+    Two box passes as wide as the size, from the complement of the layer,
+    with the canvas past the viewport counted as outside it. The previews
+    below score better with it than with the gaussian it replaced.
     """
-    assert effects._SHADOW_SIGMA_PER_SIZE == _FITTED_SIGMA_PER_SIZE
+    from scipy.ndimage import convolve1d  # type: ignore[import-untyped]  # noqa: PLC0415
+
     shape = _disc(81, 20.0)
+    box = np.ones(8) / 8
+    tent = np.convolve(box, box)
+    complement = 1.0 - shape[:, :, 0].astype(np.float64)
+    for axis in range(2):
+        complement = convolve1d(complement, tent, axis=axis, mode="constant", cval=1.0)
+    assert np.allclose(_glow(shape)[:, :, 0], complement * shape[:, :, 0], atol=1e-6)
     blurred = effects._cast_matte(
         1.0 - shape[:, :, 0],
         distance=0.0,
@@ -616,3 +630,93 @@ def test_an_inner_glow_renders_to_photoshops_preview() -> None:
     red_green = slice(0, 2)
     assert _preview_error("Inner Glow", "innerglow", False, red_green) >= 5e-2
     assert _preview_error("Inner Glow", "innerglow", True, red_green) <= 3e-4
+
+
+# effects/precise-inner-glow-choke.psd: on mid grey, a 48 px white square and
+# a disc beside it on each layer, with a black Normal precise inner glow from
+# the edge at 100%, a Linear contour and a range of 100%. The sizes, 5, 9 and
+# 20, run down the rows and the chokes, 0, 33, 50, 67 and 100, along them.
+# Photoshop's composite is the reference.
+_PRECISE_FIXTURE = "effects/precise-inner-glow-choke.psd"
+_PRECISE_SQUARE = 48
+
+# A choke of 100% grows a hard band, whose inner edge Photoshop antialiases
+# by a little more than the render does, and a ramp of two pixels or less
+# turns within a pixel or two of the corners, where Photoshop's knee is
+# rounder than the render's. The rest of the square is held to a few 8-bit
+# levels.
+_PRECISE_BOUND = 1.5e-4
+_PRECISE_LEVELS = 12
+_PRECISE_RAMP = 3.0
+
+
+def _precise_glow_layers() -> list[tuple[str, float, float]]:
+    """Each glowing layer's name, size and choke."""
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    found = []
+    for layer in psd:
+        for effect in layer.effects.find("innerglow"):
+            glow = cast(InnerGlow, effect)
+            found.append((layer.name, float(glow.size), float(glow.choke)))
+    return found
+
+
+_PRECISE_RAMPED = [
+    layer
+    for layer in _precise_glow_layers()
+    if layer[1] - effects._spread_pixels(layer[1], layer[2]) >= _PRECISE_RAMP
+]
+
+
+@pytest.fixture(scope="module")
+def precise_fixture() -> tuple[PSDImage, np.ndarray, np.ndarray]:
+    """The fixture, Photoshop's composite of it and the render."""
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    color, _, _ = composite(psd)
+    return psd, psd.numpy(), color
+
+
+@pytest.mark.parametrize(
+    ("name", "size"),
+    [layer[:2] for layer in _PRECISE_RAMPED],
+    ids=[layer[0] for layer in _PRECISE_RAMPED],
+)
+def test_a_precise_inner_glow_matches_photoshops_inside_a_square(
+    precise_fixture: tuple[PSDImage, np.ndarray, np.ndarray], name: str, size: float
+) -> None:
+    """In from the square's side, and round its corners.
+
+    Along the row through the middle of the square the render is
+    Photoshop's to its 8-bit step. Round the corners the ramp is laid along
+    the distance to the choked edge rather than to the square's own.
+    """
+    psd, reference, color = precise_fixture
+    layer = next(layer for layer in psd if layer.name == name)
+    left, top = layer.bbox[0], layer.bbox[1]
+    row = top + _PRECISE_SQUARE // 2
+    reach = int(size) + 2
+    expected = reference[row, left : left + reach, 0]
+    rendered = color[row, left : left + reach, 0]
+    assert expected.min() < 1.0, "the row has no glow"
+    assert np.allclose(rendered, expected, atol=1.0 / 255 + 1e-6), (
+        rendered,
+        expected,
+    )
+    square = (slice(top, top + _PRECISE_SQUARE), slice(left, left + _PRECISE_SQUARE))
+    assert np.abs(color[square] - reference[square]).max() * 255 <= _PRECISE_LEVELS
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_precise_inner_glows_render_to_photoshops_preview(force: bool) -> None:
+    """Every layer of the fixture, against Photoshop's composite of it."""
+    psd = PSDImage.open(full_name(_PRECISE_FIXTURE))
+    reference = psd.numpy()
+    color, _, _ = composite(psd, force=force)
+    error = float(_mse(reference, color))
+
+    for layer in psd.descendants():
+        for effect in list(layer.effects.find("innerglow")):
+            effect.descriptor[Key.Enabled] = False
+    unglowed, _, _ = composite(psd, force=force)
+    assert error <= _PRECISE_BOUND
+    assert error * 4.0 < float(_mse(reference, unglowed))

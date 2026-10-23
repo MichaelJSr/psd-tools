@@ -35,6 +35,11 @@ STRONG_EMBOLDEN_26_6 = 19
 # AntA None keeps a pixel whose coverage exceeds 0.5 ** (1 / 1.25).
 NONE_THRESHOLD = 0.574
 
+# AntA Crisp, Strong and Smooth take coverage from this many point samples
+# a side per pixel: Photoshop stores their edges in sixteenths. A colour
+# glyph's colours keep the exact coverage.
+COVERAGE_SAMPLES = 4
+
 # AntA Crisp snaps glyph origins to whole pixels in y and, in x, to a grid
 # that gets finer for smaller text: ``(pixel-size bound, positions per
 # pixel)`` for sizes below each bound, one position from the last bound up.

@@ -1,4 +1,9 @@
-"""Rasterization on the rectangle fixture fonts: coverages are hand-computed."""
+"""Rasterization on the rectangle fixture fonts: coverages are hand-computed.
+
+Most tests pin the geometry under the exact-area coverage
+(``Options(coverage="area")``); Photoshop's point samples, the default, have
+their own tests.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +43,8 @@ from psd_tools.composite.text.raster import (  # noqa: E402
 from .conftest import GLYPHS, UPEM  # noqa: E402
 
 NONE, CRISP, STRONG, SMOOTH, SHARP = 0, 1, 2, 3, 4
+AREA = Options(coverage="area")
+SAMPLES = Options()
 IDENTITY: Transform = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 RED: RGB = (1.0, 0.0, 0.0)
 BLUE: RGB = (0.0, 0.0, 1.0)
@@ -94,7 +101,7 @@ def render(
         layout(glyphs, rules),
         transform,
         antialias,
-        options or Options(),
+        options or AREA,
         cache,
         max_alloc_bytes=max_alloc_bytes,
     )
@@ -129,6 +136,33 @@ def test_phase_columns_strong(face: Face) -> None:
     assert cols[0] - 0.75 == pytest.approx(cols[4] - 0.296875, abs=TOL)
     assert cols.sum() == pytest.approx(STEM_W + 2 * DILATE, abs=3 * TOL)
     assert (rgba[..., :3][rgba[..., 3] > 0] == RED).all()
+
+
+def test_strong_coverage_is_point_sampled(face: Face) -> None:
+    """Four samples a column: the dilated stem spans 0.10 to 4.45 px."""
+    rgba, bbox = render([glyph(face, "I", 0.25, 100.0)], options=SAMPLES)
+    assert bbox[0] == 0 and bbox[2] == 5
+    assert rgba[5, :, 3] == pytest.approx([1, 1, 1, 1, 0.5], abs=1 / 255)
+    assert (rgba[..., :3][rgba[..., 3] > 0] == RED).all()
+
+
+@pytest.mark.parametrize("antialias", [CRISP, STRONG, SMOOTH])
+def test_sampled_coverage_comes_in_sixteenths(
+    luckiest_guy_path: str, antialias: int
+) -> None:
+    lg = load_face(luckiest_guy_path)
+    glyphs = [glyph(lg, c, 0.37 + 23.1 * i, 60.2) for i, c in enumerate("Ag&")]
+    rgba, _ = render(glyphs, antialias, options=SAMPLES)
+    alpha = rgba[..., 3]
+    assert ((alpha > 0) & (alpha < 1)).any()
+    sixteenths = np.round(alpha * 16) / 16
+    assert np.abs(alpha - sixteenths).max() < 1 / 255
+
+
+def test_sharp_and_none_keep_their_coverage(face: Face) -> None:
+    g = [glyph(face, "I", 0.25, 100.3)]
+    for antialias in (NONE, SHARP):
+        assert same(render(g, antialias, options=SAMPLES), render(g, antialias))
 
 
 def test_delta_sign(face: Face) -> None:
@@ -399,7 +433,12 @@ def test_resample_without_scipy(
     skew: Transform = (3.0, 0.4, 0.6, 3.0, 20.0, 50.0)
     g = [glyph(real, "A", 0.0, 0.0, em=12)]
     with pytest.raises(ImportError, match="scipy"):
-        render(g, STRONG, skew, options=Options(general_transform="resample"))
+        render(
+            g,
+            STRONG,
+            skew,
+            options=Options(general_transform="resample", coverage="area"),
+        )
     render(g, STRONG, skew)
 
 
@@ -465,7 +504,10 @@ def test_resample_matches_matrix(luckiest_guy_path: str) -> None:
     assert is_general(skew)
     matrix, mb = render(glyphs, STRONG, skew)
     warped, wb = render(
-        glyphs, STRONG, skew, options=Options(general_transform="resample")
+        glyphs,
+        STRONG,
+        skew,
+        options=Options(general_transform="resample", coverage="area"),
     )
     ub = (min(mb[0], wb[0]), min(mb[1], wb[1]), max(mb[2], wb[2]), max(mb[3], wb[3]))
     place = np.zeros((2, ub[3] - ub[1], ub[2] - ub[0]), np.float32)
@@ -476,7 +518,12 @@ def test_resample_matches_matrix(luckiest_guy_path: str) -> None:
     assert np.abs(place[0] - place[1])[either].mean() < 0.05
     diagonal: Transform = (3.0, 0.0, 0.0, 3.0, 20.0, 50.0)
     assert same(
-        render(glyphs, STRONG, diagonal, options=Options(general_transform="resample")),
+        render(
+            glyphs,
+            STRONG,
+            diagonal,
+            options=Options(general_transform="resample", coverage="area"),
+        ),
         render(glyphs, STRONG, diagonal),
     )
 
