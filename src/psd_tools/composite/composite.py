@@ -1,6 +1,7 @@
 """Composite implementation for layer rendering and blending."""
 
 import functools
+import hashlib
 import logging
 import math
 import warnings
@@ -44,7 +45,7 @@ from psd_tools.api.utils import (
     get_transparency_index,
     has_transparency,
 )
-from psd_tools.composite import paint, utils, vector
+from psd_tools.composite import paint, rcache, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
 from psd_tools.composite.blend import fade_source, get_blend_func, normal
@@ -849,6 +850,11 @@ class _PassCache:
     the stroke drawn after it (:py:func:`effects.stroke_band`).
     ``change_bboxes`` and ``box_safe`` hold :py:func:`_change_bbox` and
     :py:func:`_box_safe` per layer.
+
+    ``rc`` is the cache shared across passes
+    (:py:mod:`~psd_tools.composite.rcache`), or None, and ``doc_key`` the
+    document's key in it; ``layer_keys`` holds each layer's
+    :py:func:`~psd_tools.composite.rcache.layer_key`.
     """
 
     content_bboxes: _ContentBBoxes = field(default_factory=dict)
@@ -859,6 +865,9 @@ class _PassCache:
     stroke_bands: dict = field(default_factory=dict)
     change_bboxes: _ContentBBoxes = field(default_factory=dict)
     box_safe: dict[int, bool] = field(default_factory=dict)
+    rc: rcache.RenderCache | None = None
+    doc_key: bytes = b""
+    layer_keys: dict[int, bytes] = field(default_factory=dict)
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -1239,7 +1248,46 @@ def composite(
           layers does not render here the way it looks there. Use
           :py:meth:`~psd_tools.api.psd_image.PSDImage.topil` for the merged
           data.
+        - Inside ``with RenderCache():`` intermediates are shared across
+          passes; see :py:mod:`psd_tools.composite.rcache`.
     """
+    args = (
+        group,
+        color,
+        alpha,
+        viewport,
+        layer_filter,
+        force,
+        as_layer,
+        text_gamma,
+        layer_text_gamma,
+        text_preview,
+    )
+    cache = rcache.active()
+    if cache is None or not cache.verify:
+        return _composite(*args)
+    token = rcache.suspended()
+    try:
+        plain = _composite(*args)
+    finally:
+        rcache._ACTIVE.reset(token)
+    cached = _composite(*args)
+    rcache.check(plain, cached, group)
+    return cached
+
+
+def _composite(
+    group: Layer | PSDImage,
+    color: float | Sequence[float] | np.ndarray,
+    alpha: float | np.ndarray,
+    viewport: tuple[int, int, int, int] | None,
+    layer_filter: Callable[[Layer], bool] | None,
+    force: bool,
+    as_layer: bool,
+    text_gamma: float | None,
+    layer_text_gamma: Mapping[int, float | None] | None,
+    text_preview: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if viewport is None:
         if isinstance(group, PSDImage):
             viewport = group.viewbox
@@ -1338,12 +1386,26 @@ def composite(
     )
 
     layer_filter = layer_filter or Layer.is_visible
-
     target_group = group if isinstance(group, GroupMixin) and not as_layer else [group]
+    layers: list[Layer] = list(target_group)  # type: ignore[arg-type]
     overrides = dict(layer_text_gamma or {})
     reference: Callable[[], np.ndarray | None] | None = None
     if text_preview and isinstance(group, PSDImage) and text_gamma is not None:
         reference = functools.partial(_text_reference, group)
+
+    rc = rcache.active()
+    doc_key = None
+    if (
+        rc is not None
+        and layer_filter is Layer.is_visible
+        and not (as_layer and isinstance(group, PSDImage))
+    ):
+        doc_key = rcache.doc_key(cast(PSDImage, _psd))
+    # A layer whose type the preview decides records that in the pass, so
+    # checkpoints stop below the first one.
+    settled_below = len(layers)
+    if doc_key is not None and reference is not None:
+        settled_below = _first_text_decision(layers, overrides, _psd.color_mode)
 
     def composite_pass(
         chosen: dict[int, bool], box: tuple[int, int, int, int] = viewport
@@ -1366,8 +1428,26 @@ def composite(
             cache=cache,
             text_gamma=text_gamma,
         )
-        for layer in target_group:  # type: ignore
-            compositor.apply(layer)  # type: ignore[arg-type]
+        if doc_key is None:
+            for layer in layers:
+                compositor.apply(layer)
+            return compositor.finish(), cache.text
+        cache.rc, cache.doc_key = rc, doc_key
+        # What the pass starts from, besides its layers.
+        seed = [
+            doc_key,
+            repr(
+                (box, force, as_layer, text_gamma, sorted(overrides.items()))
+            ).encode(),
+            _array_bytes(color),
+            _array_bytes(alpha),
+        ]
+        if not isinstance(group, PSDImage):
+            # Deep knockout reads the document's bottom layer.
+            seed.append(rcache.layer_key(group, cache.layer_keys))
+            seed.append(rcache.layer_key(cast(Layer, _psd[0]), cache.layer_keys))
+            seed.append(b"%d" % group.is_visible())
+        _apply_cached(compositor, layers, seed, settled_below)
         return compositor.finish(), cache.text
 
     result, text = composite_pass({})
@@ -1400,6 +1480,25 @@ def composite(
     return composite_pass(text.chosen | dict.fromkeys(settled, True))[0]
 
 
+def _first_text_decision(
+    layers: list[Layer], overrides: Mapping[int, float | None], color_mode: ColorMode
+) -> int:
+    """The first of ``layers`` holding a type layer the preview may decide.
+
+    See :py:class:`_TextBlend`; a layer pinned in ``overrides`` is decided.
+    """
+    for index, layer in enumerate(layers):
+        tree = [layer]
+        if isinstance(layer, GroupMixin):
+            tree.extend(layer.descendants())
+        if any(
+            _blends_in_text_space(item, color_mode) and item.layer_id not in overrides
+            for item in tree
+        ):
+            return index
+    return len(layers)
+
+
 def _within(
     viewport: tuple[int, int, int, int], box: tuple[int, int, int, int]
 ) -> tuple[slice, slice]:
@@ -1408,6 +1507,77 @@ def _within(
         slice(box[1] - viewport[1], box[3] - viewport[1]),
         slice(box[0] - viewport[0], box[2] - viewport[0]),
     )
+
+
+def _array_bytes(value: float | Sequence[float] | np.ndarray) -> bytes:
+    array = np.asarray(value)
+    return repr((array.dtype.str, array.shape)).encode() + array.tobytes()
+
+
+# A checkpoint is the whole compositor state after a top-level layer.
+_CHECKPOINT = ("_color", "_alpha", "_shape_g", "_alpha_g")
+
+
+def _apply_cached(
+    compositor: "Compositor",
+    layers: list[Layer],
+    seed: list[bytes],
+    settled_below: int,
+) -> None:
+    """Apply ``layers``, resuming after the longest prefix already rendered.
+
+    Each key chains the one before it, so it names everything composited so
+    far. Only a settled state is stored or restored: a clip layer is
+    composited by the layer it clips to, so the state after that layer
+    depends on the clip layers above it too. Nor is one at or past
+    ``settled_below``, the first layer whose text blend the pass decides.
+    """
+    cache = compositor._cache
+    rc = cache.rc
+    assert rc is not None
+    digest = hashlib.blake2b(digest_size=16)
+    for part in seed:
+        digest.update(b"%d:" % len(part) + part)
+    chain = digest.digest()
+    keys = []
+    for layer in layers:
+        chain = hashlib.blake2b(
+            chain + rcache.layer_key(layer, cache.layer_keys), digest_size=16
+        ).digest()
+        keys.append(("prefix", chain))
+    # The arrays already stored, by the identity of the canvas they copy, so
+    # a layer that leaves a canvas as it was stores no second copy.
+    stored: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    start = 0
+    for index in range(min(settled_below, len(layers)) - 1, -1, -1):
+        if _settled(layers, index) and keys[index] in rc:
+            state = rc.get(keys[index])
+            assert state is not None
+            for name, array in zip(_CHECKPOINT, state, strict=True):
+                canvas = array.copy()
+                setattr(compositor, name, canvas)
+                stored[name] = (canvas, array)
+            start = index + 1
+            break
+    else:
+        rc.misses["prefix"] += 1
+    for index in range(start, len(layers)):
+        compositor.apply(layers[index])
+        if index >= settled_below or not _settled(layers, index):
+            continue
+        copies = []
+        for name in _CHECKPOINT:
+            canvas = getattr(compositor, name)
+            known = stored.get(name)
+            if known is None or known[0] is not canvas:
+                known = stored[name] = (canvas, canvas.copy())
+            copies.append(known[1])
+        rc.put(keys[index], tuple(copies))
+
+
+def _settled(layers: list[Layer], index: int) -> bool:
+    """Whether no clip layer above ``layers[index]`` is still to come."""
+    return index + 1 == len(layers) or not layers[index + 1].clipping
 
 
 def paste(
@@ -4217,6 +4387,21 @@ class Compositor:
         inside = vector.draw_vector_mask(layer, viewport) >= 1.0 - _PATH_FULL
         return np.where(inside, mask, stored).astype(np.float32, copy=False)
 
+    def _rkey(self, kind: str, layer: Layer, *args: object) -> tuple | None:
+        """A key in the cross-pass cache, or None when there is none."""
+        cache = self._cache
+        if cache.rc is None:
+            return None
+        return (
+            kind,
+            rcache.layer_key(layer, cache.layer_keys),
+            cache.doc_key,
+            self._force,
+            self._channels,
+            self._color_mode,
+            args,
+        )
+
     def _get_group_alpha(
         self, layer: Layer, viewport: tuple[int, int, int, int]
     ) -> np.ndarray:
@@ -4256,7 +4441,8 @@ class Compositor:
         outset one beside it, which ``group-clips-child-stroke.psd`` measures.
         """
         inner = viewport
-        if layer.blend_mode != BlendMode.PASS_THROUGH:
+        passthrough = layer.blend_mode == BlendMode.PASS_THROUGH
+        if not passthrough:
             inner = utils.intersect(
                 viewport, _content_bbox(layer, self._cache.content_bboxes)
             )
@@ -4264,8 +4450,25 @@ class Compositor:
         if inner == (0, 0, 0, 0):
             return np.zeros((height, width, 1), dtype=np.float32)
 
+        # Shared across passes, the alpha is composited on the whole content
+        # box, so another viewport crops it from there. Not a pass-through
+        # artboard's: it paints outside its frame.
+        rkey = None
+        if self._cache.rc is not None and not (
+            passthrough and isinstance(layer, Artboard)
+        ):
+            inner = utils.intersect(
+                _content_bbox(layer, self._cache.content_bboxes),
+                utils.union_bbox(layer._psd.viewbox, viewport),
+            )
+            rkey = self._rkey("group_alpha", layer, inner)
         key = (id(layer), inner)
         alpha = self._cache.group_alphas.get(key)
+        if alpha is None and rkey is not None:
+            assert self._cache.rc is not None
+            hit = self._cache.rc.get(rkey)
+            if hit is not None:
+                alpha = self._cache.group_alphas[key] = hit[0]
         if alpha is None:
             inner_h, inner_w = inner[3] - inner[1], inner[2] - inner[0]
             group_compositor = Compositor(
@@ -4283,6 +4486,9 @@ class Compositor:
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
             alpha = self._cache.group_alphas[key] = group_compositor.alpha
+            if rkey is not None:
+                assert self._cache.rc is not None
+                self._cache.rc.put(rkey, (alpha,))
         return paste(viewport, inner, alpha)
 
     def _cast_shape(
@@ -5026,7 +5232,7 @@ class Compositor:
         # claim, built from it once there is a band to cut.
         top: _StrokeBand | None = None
         claimed: tuple[np.ndarray, np.ndarray] | None = None
-        for effect in reversed(_readable(layer, "stroke")):
+        for index, effect in enumerate(reversed(_readable(layer, "stroke"))):
             try:
                 # Effect must happen at the layer viewport, grown so an outset
                 # or centered stroke has room for the part of itself that
@@ -5042,15 +5248,27 @@ class Compositor:
                 continue
             if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
                 continue
-            shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
+            rkey = self._rkey("stroke", layer, bbox, traces_mask, index)
+            hit = None
+            if rkey is not None:
+                assert self._cache.rc is not None
+                hit = self._cache.rc.get(rkey)
+            if hit is None:
+                shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
             try:
-                color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
-                    bbox,
-                    shape_in_bbox,
-                    effect.descriptor,
-                    layer._psd,
-                    self._cache.stroke_bands,
-                )
+                if hit is not None:
+                    color, mask_in_bbox, inside_in_bbox = hit
+                else:
+                    color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
+                        bbox,
+                        shape_in_bbox,
+                        effect.descriptor,
+                        layer._psd,
+                        self._cache.stroke_bands,
+                    )
+                    if rkey is not None:
+                        assert self._cache.rc is not None
+                        self._cache.rc.put(rkey, (color, mask_in_bbox, inside_in_bbox))
                 opacity = effect.opacity / 100.0
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:

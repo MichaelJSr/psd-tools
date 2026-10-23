@@ -50,6 +50,13 @@ Changelog
   tail ran a pixel further: a group's outside stroke traced round a child's
   soft shadow no longer reaches a pixel too far. Soft shadows' falloffs move
   slightly; outer glows are unchanged
+- [api] ``psd_tools.composite.rcache.RenderCache``: inside ``with
+  RenderCache():`` composite passes share their intermediates, so a render
+  after an edit resumes below the edited layer and a reopened file renders
+  from the cache. ``PSD_RCACHE_VERIFY=1`` checks every cached pass against an
+  uncached one. A pass that reads the preview for its type layers' blend
+  (``text_preview``) resumes no further than the first of them. Renders
+  without it are unchanged
 - [refactor] Compositing and opening are faster: a layer is composited on the
   box it can change instead of the whole canvas, stroke distance fields use
   the new compiled ``psd_tools.composite._distance`` (numpy where it is not
