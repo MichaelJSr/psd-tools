@@ -95,6 +95,11 @@ from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key
 
+try:  # PROTO(speed): compiled loops, bit-identical to the numpy ones below
+    from psd_tools.composite import _distance as _cdistance
+except ImportError:  # pragma: no cover
+    _cdistance = None
+
 if TYPE_CHECKING:
     from psd_tools.api.protocols import PSDProtocol
 
@@ -371,6 +376,17 @@ def _prune_offsets(
     bigger than the stroke. It still runs every offset within ``span`` for a
     pixel that never resolves, so this does not change the loop's worst case.
     """
+    if _cdistance is not None and near_pad.dtype == np.float32:
+        return _cdistance.prune_min(
+            np.ascontiguousarray(rows, dtype=np.intp),
+            np.ascontiguousarray(cols, dtype=np.intp),
+            span,
+            np.ascontiguousarray(offsets, dtype=np.intp),
+            np.ascontiguousarray(lengths, dtype=np.float32),
+            np.ascontiguousarray(stating_pad).view(np.uint8),
+            np.ascontiguousarray(near_pad),
+            outward,
+        )
     prows, pcols = rows + span, cols + span
     result = np.empty(rows.shape, dtype=np.float32)
     order = np.arange(rows.size)
@@ -430,6 +446,8 @@ def _chamfer_transform(mask: np.ndarray) -> np.ndarray:
     second pass, run bottom to top, every one that never turns back down;
     the shortest path to a pixel is one or the other.
     """
+    if _cdistance is not None:
+        return _cdistance.chamfer_transform(mask, _DIAGONAL, _KNIGHT)
     height, width = mask.shape
     field = np.where(mask, np.inf, 0.0)
     cols = np.arange(width, dtype=np.float64)
@@ -532,7 +550,9 @@ def _nearest_boundary(
         return field
     density = active.sum() / ((r1 - r0) * (c1 - c0))
 
-    if density >= _DENSE_EROSION_DENSITY:
+    if density >= _DENSE_EROSION_DENSITY and (
+        _cdistance is None or near.dtype != np.float32
+    ):
         sub_stating, sub_near, sub_alpha, sub_active = (
             stating[crop],
             near[crop],
