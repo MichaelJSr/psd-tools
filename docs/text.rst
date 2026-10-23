@@ -79,10 +79,10 @@ and ``save()`` show it::
     print(report.warnings)   # ("font_loose", "overflow", ...)
     psd.save("card-edited.psd")
 
-``report.lines`` lists every composed line with its position; a line an
-overflowing box did not draw has ``drawn`` false. The render is stored at
-the document's depth for RGB documents and converted through PIL, at 8
-bits, for the other colour modes.
+``report.lines`` lists every composed line with its position and its
+``start`` and ``end`` in the text; a line an overflowing box did not draw
+has ``drawn`` false. The render is stored at the document's depth for RGB
+documents and converted through PIL, at 8 bits, for the other colour modes.
 
 Fonts are looked up by PostScript name in the ``FontMap``'s directories,
 then ``PSD_TOOLS_FONT_DIRS`` and the platform font directories, each with
@@ -103,6 +103,29 @@ raster::
 
     fidelity = verify(layer, fonts=fonts)
     print(fidelity.iou, fidelity.bad_pct)
+
+Geometry
+--------
+
+:py:func:`~psd_tools.composite.text.text_geometry` lays a layer out without
+rendering it and returns where its lines and glyphs sit, in document pixels,
+as JSON-ready data. Every index points into the result's ``text``, so a
+word finds its boxes::
+
+    from psd_tools.composite.text import text_geometry
+
+    geometry = text_geometry(layer, fonts)
+    start = geometry["text"].index("Frozen")
+    end = start + len("Frozen")
+    boxes = [g["ink"] for g in geometry["glyphs"] if start <= g["i"] < end]
+    for line in geometry["lines"]:
+        print(line["text"], line["start"], line["end"], line["box"])
+
+A glyph draws ``text[i:end]``, several characters for a ligature; its
+``cell`` is its pen advance by the face's ascent and descent and its ``ink``
+the box of its outline. Warped text is laid out unwarped, as it is rendered.
+Under ``FontMap(policy="skip")`` the runs of a font listed in
+``missing_fonts`` have no glyphs.
 
 What is rendered
 ----------------
