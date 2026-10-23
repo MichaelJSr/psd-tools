@@ -102,7 +102,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from psd_tools.api.typesetting import TypeSetting
-    from psd_tools.composite.text import FontMap, Options, RenderReport
+    from psd_tools.composite.text import Before, FontMap, Options, RenderReport
 
 import numpy as np
 from PIL import Image, ImageChops
@@ -3196,7 +3196,11 @@ class TypeLayer(Layer):
         return text_edit.sync_story(self)
 
     def rasterize(
-        self, fonts: "FontMap | None" = None, options: "Options | None" = None
+        self,
+        fonts: "FontMap | None" = None,
+        options: "Options | None" = None,
+        keep: "Before | None" = None,
+        unit: Literal["line", "glyph"] = "line",
     ) -> "RenderReport":
         """
         Render the text into the layer's pixels.
@@ -3210,20 +3214,35 @@ class TypeLayer(Layer):
         colours as written, not linearised. Other colour modes convert
         through PIL at 8 bits.
 
+        With ``keep``, :py:func:`~psd_tools.composite.text.capture` of the
+        layer before the edit, only the changed lines (``unit="line"``) or
+        glyphs (``"glyph"``) are drawn and the stored pixels stay elsewhere;
+        when nothing changed the channels are left as they are.
+        ``report.splice`` says what was kept.
+
         :param fonts: :py:class:`~psd_tools.composite.text.FontMap`; the
             default scans ``PSD_TOOLS_FONT_DIRS`` and the platform fonts.
         :param options: :py:class:`~psd_tools.composite.text.Options`.
+        :param keep: :py:class:`~psd_tools.composite.text.Before`.
+        :param unit: what a change redraws with ``keep``.
         :return: :py:class:`~psd_tools.composite.text.RenderReport`.
         """
         try:
             from psd_tools.composite.text import render  # noqa: PLC0415
+            from psd_tools.composite.text.splice import splice  # noqa: PLC0415
         except ImportError as e:
             raise ImportError(
                 "Type layer rendering requires: uharfbuzz, freetype-py\n\n"
                 "Install with:\n"
                 "    pip install 'psd-tools[text]'"
             ) from e
-        result = render(self, fonts=fonts, options=options)
+        if keep is None:
+            result = render(self, fonts=fonts, options=options)
+        else:
+            result = splice(self, keep, fonts=fonts, options=options, unit=unit)
+            info = result.report.splice
+            if info is not None and info.zone is None and info.fallback is None:
+                return result.report
         self._store_raster(result.rgba, result.bbox)
         self._rewrite_text_bounds(result.bbox, result.report)
         self._invalidate_bbox()

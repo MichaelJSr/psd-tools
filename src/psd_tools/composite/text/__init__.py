@@ -28,17 +28,26 @@ from psd_tools.composite.text.raster import (
     raster_warnings,
     rasterize,
 )
-from psd_tools.composite.text.report import Fidelity, RenderReport, RenderResult
+from psd_tools.composite.text.report import (
+    Fidelity,
+    RenderReport,
+    RenderResult,
+    Splice,
+)
+from psd_tools.composite.text.splice import Before, capture
 from psd_tools.composite.text.verify import fidelity, stored_raster
 
 __all__ = [
+    "Before",
     "Fidelity",
     "FontMap",
     "MissingFontError",
     "Options",
     "RenderReport",
     "RenderResult",
+    "Splice",
     "TextRenderError",
+    "capture",
     "default_font_map",
     "font_names",
     "render",
@@ -100,6 +109,16 @@ def render(
     ``raise`` font policy; under ``skip`` the runs of a missing font draw
     nothing and the report lists the font as ``"missing"``.
     """
+    return _render(layer, fonts, options, breaks)[0]
+
+
+def _render(
+    layer: TypeLayer,
+    fonts: FontMap | None,
+    options: Options | None,
+    breaks: list[int] | None = None,
+) -> tuple[RenderResult, Layout, TextModel]:
+    """:func:`render`, the layout it drew and the model it read."""
     t0 = time.perf_counter()
     options = options or Options()
     fonts = fonts or default_font_map(options.missing_font)
@@ -115,7 +134,7 @@ def render(
         _GLYPH_CACHE,
         max_alloc_bytes=layer._psd._max_alloc_bytes,
     )
-    return RenderResult(rgba, bbox, _report(lay, transform, t0))
+    return RenderResult(rgba, bbox, _report(lay, transform, t0)), lay, model
 
 
 def render_type_layer(
