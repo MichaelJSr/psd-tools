@@ -15,6 +15,7 @@ from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite, paint
 from psd_tools.composite.adjustments import (
+    _apply_lut,
     _brightness_curve,
     _huesaturation,
     _levels_gamma,
@@ -280,6 +281,13 @@ def test_default_levels_leave_an_8_bit_ramp_alone(
     image = np.repeat(ramp[None, :, None], 3, axis=2)
     result = apply_levels(image, ColorMode.RGB, layer)
     assert np.array_equal(np.rint(result * 255), np.rint(image * 255))
+
+
+def test_a_lut_reads_the_nearest_level() -> None:
+    """As Photoshop reads its backdrop, in whole levels rounded."""
+    lut = _lut_domain(256) ** 2
+    values = np.array([0.4, 0.6, 127.49, 127.51, 254.6], dtype=np.float32) / 255
+    assert _apply_lut(values, lut).tolist() == lut[[0, 1, 127, 128, 255]].tolist()
 
 
 def test_a_master_gamma_follows_a_channel_output_range(

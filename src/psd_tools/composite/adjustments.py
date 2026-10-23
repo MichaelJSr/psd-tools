@@ -184,35 +184,37 @@ def _apply_luts(
     channels = range(1, n_channels + 1)
 
     # individual adjustments get applied independently of each other, then the master lut its applied if exists
-    master = luts.get(0) if colormode != ColorMode.GRAYSCALE else None
     for channel_id in channels:
         if channel_id in luts:
-            value = _apply_lut(img[:, :, channel_id - 1], luts[channel_id])
-            if master is not None:
-                # Photoshop chains the curves on whole levels: the master
-                # reads a channel's output at its nearest, not below it.
-                value = _nearest_level(value, int(master.shape[0]))
-            out[:, :, channel_id - 1] = value
+            lut = luts[channel_id]
+            out[:, :, channel_id - 1] = _apply_lut(img[:, :, channel_id - 1], lut)
 
-    if master is not None:
-        out = _apply_lut(out, master)
+    if colormode != ColorMode.GRAYSCALE and 0 in luts:
+        out = _apply_lut(out, luts[0])
 
     return out
 
 
+def _level_index(values: np.ndarray, lut_size: int) -> NDArray[np.intp]:
+    """The index of the LUT's level nearest each of ``values`` (0 to 1)."""
+    index = np.floor(values * np.float32(lut_size - 1) + np.float32(0.5))
+    return np.clip(index, 0, lut_size - 1).astype(np.intp)
+
+
 def _nearest_level(values: np.ndarray, lut_size: int) -> NDArray[np.float32]:
     """``values`` (0 to 1) moved to the nearest of the LUT's levels."""
-    index = np.floor(values * np.float32(lut_size - 1) + np.float32(0.5))
-    return _lut_domain(lut_size)[np.clip(index, 0, lut_size - 1).astype(np.intp)]
+    return _lut_domain(lut_size)[_level_index(values, lut_size)]
 
 
 def _apply_lut(values: np.ndarray, lut: np.ndarray) -> NDArray[np.float32]:
+    """``lut`` read at the level nearest each value.
+
+    Photoshop's backdrop is in whole levels, rounded, and its curves chain
+    on them, the master reading each channel's output at its nearest.
+    """
     lut_size = int(lut.shape[0])
-
     if lut_size <= 2**16:
-        depth = lut_size - 1
-        values = np.floor(values * depth) / depth
-
+        return lut[_level_index(values, lut_size)].astype(np.float32, copy=False)
     xp = _lut_domain(lut_size)
     return np.interp(values, xp, lut).astype(np.float32, copy=False)
 
@@ -258,7 +260,7 @@ def apply_brightnesscontrast(
     contrast = interpolate.CubicSpline(x, y, bc_type="natural")
     lut = contrast(_brightness_curve(layer.brightness, t)).clip(0.0, 1.0)
 
-    # Interpolated rather than truncated to the LUT's levels as _apply_luts
+    # Interpolated rather than read at the nearest level as _apply_luts
     # does: the curve is steep near white, and an identity adjustment must
     # leave the pixels as they are.
     return np.interp(img, t, lut).astype(np.float32, copy=False)
