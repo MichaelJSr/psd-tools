@@ -722,6 +722,9 @@ def draw_stroke_effect(
     return color, coverage
 
 
+_CRIT_GANCHOR: list = [None]  # SCRATCH
+
+
 def draw_stroke_effect_split(
     viewport: tuple[int, int, int, int],
     shape: np.ndarray,
@@ -760,7 +763,7 @@ def draw_stroke_effect_split(
             color = np.ones((height, width, 1))
     elif paint_type == Enum.GradientFill:
         color, _ = paint.draw_gradient_fill(
-            viewport, psd.color_mode, desc, paint.gradient_anchor(psd, desc)
+            viewport, psd.color_mode, desc, paint.gradient_anchor(psd, desc, _CRIT_GANCHOR[0])
         )
         if color is None:
             color = np.ones((height, width, 1))
@@ -1432,7 +1435,9 @@ def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
     together, so a small range squeezes no harder than the floor does, and
     100% is the matte itself.
     """
-    scale = math.hypot(100.0, _GLOW_RANGE_FLOOR) / math.hypot(range_, _GLOW_RANGE_FLOOR)
+    import os as _os  # SCRATCH PSDT_GLOW_RFLOOR
+    _fl = float(_os.environ.get("PSDT_GLOW_RFLOOR", _GLOW_RANGE_FLOOR))
+    scale = math.hypot(100.0, _fl) / max(math.hypot(range_, _fl), 1e-6)
     return np.clip(matte * scale, 0.0, 1.0).astype(np.float32)
 
 
@@ -1510,7 +1515,8 @@ def glow_falloff(
     if precise:
         matte = _precise_matte(alpha, size, spread)
     else:
-        matte = _soft_matte(alpha, size, spread, _GLOW_SIGMA_PER_SIZE)
+        import os as _os  # SCRATCH PSDT_GLOW_SIGMA
+        matte = _soft_matte(alpha, size, spread, float(_os.environ.get("PSDT_GLOW_SIGMA", _GLOW_SIGMA_PER_SIZE)))
     falloff = _ranged(np.clip(matte, 0.0, 1.0), min(max(range_, 1.0), 100.0))
     if contour is not None:
         falloff = _contoured(falloff, contour, anti_aliased)

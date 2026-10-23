@@ -5132,6 +5132,30 @@ class Compositor:
             if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
                 continue
             shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
+            import os as _os  # SCRATCH CRIT_GBOX
+            _gb = _os.environ.get("CRIT_GBOX", "")
+            import psd_tools.composite.effects as _E
+            _E._CRIT_GANCHOR[0] = None
+            if _gb:
+                try:
+                    _thr, _grow = _gb.split(":")
+                    _sz = float(effect.descriptor.get(b"Sz  ").value)
+                    _g = {"size": _sz, "half": _sz / 2.0, "size1": _sz + 1.0}.get(_grow)
+                    _g = float(_grow) if _g is None else _g
+                    _sh = np.asarray(shape_in_bbox)[..., 0]
+                    if _thr == "bbox":
+                        _b0 = _vector_stroke_reach(layer) if not layer.is_group() else None
+                        _ys, _xs = (None, None)
+                    else:
+                        _ys, _xs = np.nonzero(_sh > float(_thr))
+                    if _thr == "bbox" and _b0 is not None:
+                        _E._CRIT_GANCHOR[0] = (int(math.floor(_b0[0] - _g)), int(math.floor(_b0[1] - _g)), int(math.ceil(_b0[2] + _g)), int(math.ceil(_b0[3] + _g)))
+                    elif _ys is not None and len(_ys):
+                        _E._CRIT_GANCHOR[0] = (int(math.floor(bbox[0] + _xs.min() - _g)), int(math.floor(bbox[1] + _ys.min() - _g)), int(math.ceil(bbox[0] + _xs.max() + 1 + _g)), int(math.ceil(bbox[1] + _ys.max() + 1 + _g)))
+                    if _os.environ.get("CRIT_GBOX_LOG"):
+                        logger.warning("CRIT_GBOX %s %s bbox=%s anchor=%s", layer.name, _gb, bbox, _E._CRIT_GANCHOR[0])
+                except Exception as _e:
+                    logger.warning("CRIT_GBOX failed %s", _e)
             try:
                 color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
                     bbox, shape_in_bbox, effect.descriptor, layer._psd
