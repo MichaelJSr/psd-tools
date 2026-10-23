@@ -84,7 +84,7 @@ class Face:
             return None
         with self.lock:
             data = sfnt_table(self.ft, b"SVG ")
-        return None if data is None else SvgTable(data)
+        return None if data is None else SvgTable(data, self.metrics.upem)
 
 
 @dataclass(frozen=True, eq=False)

@@ -400,3 +400,42 @@ def test_image_glyph_and_text_compose(color_face: Face) -> None:
     assert blue.any()
     red = (rgba[..., 0] > 0.99) & (rgba[..., 3] > 0.99)
     assert red.any()
+
+
+def test_viewbox_maps_onto_the_em_square() -> None:
+    """A root viewBox is scaled onto ``upem`` units from the glyph origin."""
+    doc = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="-5 -5 10 10">'
+        '<rect x="-5" y="-5" width="10" height="5" fill="#0f0"/></svg>'
+    )
+    drawing = _table({1: doc}).drawing(1)
+    assert drawing is not None
+    m: svg.Affine = (0.01, 0.0, 0.0, 0.01, 0.0, 0.0)
+    left, top, rgba = svg.rasterize(drawing, m)
+    # 1000 units at 0.01 px: the top half of a 10 px square at the origin.
+    assert (left, top, rgba.shape[:2]) == (0, 0, (5, 10))
+    assert rgba[..., 3] == pytest.approx(np.ones((5, 10)))
+
+
+def test_viewbox_keeps_its_aspect_ratio() -> None:
+    doc = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10">'
+        '<rect width="20" height="10" fill="#0f0"/></svg>'
+    )
+    drawing = _table({1: doc}).drawing(1)
+    assert drawing is not None
+    left, top, rgba = svg.rasterize(drawing, (0.01, 0.0, 0.0, 0.01, 0.0, 0.0))
+    # Fitted to the width and centred: 10 x 5 px from y 2.5.
+    assert (left, top, rgba.shape[:2]) == (0, 2, (6, 10))
+    assert rgba[:, 0, 3] == pytest.approx([0.5, 1, 1, 1, 1, 0.5])
+
+
+def test_rotated_color_glyph(color_face: Face) -> None:
+    rotate: Transform = (0.0, 1.0, -1.0, 0.0, 100.0, 0.0)
+    layout = Layout((_glyph(color_face, "A", 0.0, 0.0, 50.0),), (), (), {}, ())
+    rgba, bbox = rasterize(layout, rotate, STRONG, Options())
+    # 80 x 40 px badge turned a quarter: 40 wide, 80 tall.
+    assert bbox[2] - bbox[0] == pytest.approx(42, abs=1)
+    assert bbox[3] - bbox[1] == pytest.approx(82, abs=1)
+    assert rgba[..., 3].max() == 1.0
+    assert not np.allclose(rgba[..., :3][rgba[..., 3] > 0], RED)

@@ -8,7 +8,8 @@ uses anything else (``use``, clipping, masks, filters, text, a stroke on
 another shape) is unsupported: :meth:`SvgTable.drawing` returns ``None`` and
 the caller draws its outline instead.
 
-Coordinates are font units, y down, with the glyph origin at ``(0, 0)``.
+Coordinates are font units, y down, with the glyph origin at ``(0, 0)``; a
+root ``viewBox`` is mapped onto the em square there.
 """
 
 from __future__ import annotations
@@ -178,8 +179,9 @@ class Drawing:
 class SvgTable:
     """The ``SVG `` table of one face: its documents by glyph id, parsed lazily."""
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes, upem: int = 1000):
         self._data = data
+        self.upem = upem
         self._index: list[tuple[int, int, int, int]] = []
         self._firsts: list[int] = []
         self._docs: OrderedDict[tuple[int, int], ET.Element | None] = OrderedDict()
@@ -261,7 +263,7 @@ class SvgTable:
         drawing = None
         if root is not None:
             try:
-                drawing = _Parser(root, gid, context).drawing()
+                drawing = _Parser(root, gid, context, self.upem).drawing()
             except (Unsupported, ValueError, KeyError, IndexError, OSError):
                 drawing = None
         with self._lock:
@@ -643,8 +645,9 @@ def _bbox(contours: list[np.ndarray]) -> tuple[float, float, float, float]:
 
 
 class _Parser:
-    def __init__(self, root: ET.Element, gid: int, context: RGBA):
+    def __init__(self, root: ET.Element, gid: int, context: RGBA, upem: int = 1000):
         self.context = context
+        self.upem = upem
         self.ids = {el.get("id"): el for el in root.iter() if el.get("id")}
         target = self.ids.get(f"glyph{gid}")
         self.root = root
@@ -654,17 +657,37 @@ class _Parser:
     def drawing(self) -> Drawing:
         if _local(self.root.tag) != "svg":
             raise Unsupported("root")
-        if self.root.get("viewBox"):
-            raise Unsupported("viewBox")
         # Ancestors of the glyph element pass on their transform and paint.
         chain = self._chain(self.root, self.target) or [self.root]
-        m, style, opacity = IDENTITY, self._inherited({}, self.root), 1.0
+        m, style, opacity = self._viewbox(), self._inherited({}, self.root), 1.0
         for el in chain[1:-1] if len(chain) > 1 else []:
             m = compose(m, parse_transform(el.get("transform")))
             style = self._inherited(style, el)
             opacity *= _length(_style(el).get("opacity"), 1.0)
         self._walk(self.target, m, style, opacity)
         return Drawing(tuple(self.items))
+
+    def _viewbox(self) -> Affine:
+        """A root ``viewBox`` mapped onto the em square at the glyph origin."""
+        value = self.root.get("viewBox")
+        if not value:
+            return IDENTITY
+        box = [float(v) for v in _NUMBER.findall(value)]
+        if len(box) != 4 or box[2] <= 0 or box[3] <= 0:
+            raise Unsupported("viewBox")
+        x, y, w, h = box
+        sx, sy = self.upem / w, self.upem / h
+        if self.root.get("preserveAspectRatio", "xMidYMid") != "none":
+            s = min(sx, sy)
+            return (
+                s,
+                0.0,
+                0.0,
+                s,
+                (self.upem - w * s) / 2 - x * s,
+                (self.upem - h * s) / 2 - y * s,
+            )
+        return (sx, 0.0, 0.0, sy, -x * sx, -y * sy)
 
     def _chain(self, node: ET.Element, target: ET.Element) -> list[ET.Element] | None:
         if node is target:
