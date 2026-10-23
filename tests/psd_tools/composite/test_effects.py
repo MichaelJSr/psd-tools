@@ -2066,6 +2066,20 @@ def test_the_compiled_disk_marking_is_the_distance_transform(radius: float) -> N
     assert np.array_equal(marked, expected)
 
 
+@pytest.mark.parametrize("compiled", [True, False])
+@pytest.mark.parametrize("shape", [(5,), (), (3, 4, 2)])
+def test_the_chamfer_transform_refuses_a_mask_that_is_not_2d(
+    monkeypatch: pytest.MonkeyPatch, compiled: bool, shape: tuple[int, ...]
+) -> None:
+    """A ValueError either way; the compiled loop once read past the shape."""
+    if compiled and effects._cdistance is None:
+        pytest.skip("compiled loops not built")
+    if not compiled:
+        monkeypatch.setattr(effects, "_cdistance", None)
+    with pytest.raises(ValueError):
+        _chamfer_transform(np.ones(shape, dtype=bool))
+
+
 @pytest.mark.parametrize(
     "style", [Enum.OutsetFrame, Enum.InsetFrame, Enum.CenteredFrame]
 )
