@@ -1031,11 +1031,11 @@ def glow_reach(
 ) -> int | None:
     """How far a glow's falloff reads from each pixel, as :py:func:`cast_reach`.
 
-    A precise glow ramps along the distance to the silhouette and is never
-    spread, so it is bounded whatever its spread; when an ``outer`` glow's
-    spread reads the coverage (:py:func:`_glow_coverage`), each pixel of the
-    silhouette also reads :data:`_GLOW_EDGE_REACH` around it. An inner glow's
-    choke does not read it.
+    A precise glow reads the silhouette no further than its size and a
+    pixel or two, so it is bounded whatever its spread; when an ``outer``
+    glow's spread reads the coverage (:py:func:`_glow_coverage`), each pixel
+    of the silhouette also reads :data:`_GLOW_EDGE_REACH` around it. An inner
+    glow's choke does not read it.
     """
     if not precise and size > 0.0 and spread > 0.0:
         return None
@@ -1384,19 +1384,44 @@ def _soft_matte(
 def _precise_matte(alpha: np.ndarray, size: float, spread: float) -> np.ndarray:
     """``alpha`` ramped down with the distance from its boundary.
 
-    Photoshop's precise technique: full out to the spread, then a straight
-    ramp to nothing at ``size``, so the glow follows the silhouette's
-    corners as a stroke does rather than rounding them off as a blur does.
-    A ramp shorter than a pixel is drawn as an antialiased hard edge, the
-    way :py:func:`_distance_band` draws one.
+    Photoshop's precise technique, so the glow follows the silhouette's
+    corners as a stroke does rather than rounding them off as a blur does
+    (:py:func:`_precise_ramp`).
     """
     size = max(float(size), 0.0)
-    grow = size * min(max(float(spread), 0.0), 100.0) / 100.0
-    distance = _signed_distance(alpha, size + 1.0)
+    return _precise_ramp(_signed_distance(alpha, size + 1.0), size, spread)
+
+
+def _precise_ramp(
+    distance: np.ndarray, size: float, spread: float, outside: float | None = None
+) -> np.ndarray:
+    """A precise glow's matte at ``distance`` from the silhouette's edge.
+
+    The spread, or an inner glow's choke, grows the silhouette by whole
+    pixels (:py:func:`_spread_pixels`), and the matte ramps straight along
+    the distance to the grown edge: centred on it and a pixel more than the
+    rest of the size wide on either side, so it ends at ``size``. With no
+    spread the glow starts at about half strength; some holds it full out to
+    a knee, which follows the corners of the grown silhouette rather than
+    the silhouette's own. One that leaves no pixel of the size is drawn as
+    an antialiased hard edge, the way :py:func:`_distance_band` draws one.
+    What lies past the canvas is ``outside``, as for :py:func:`_tent_blur`;
+    with none, it is not read, as :py:func:`_signed_distance` reads none.
+    """
+    size = max(float(size), 0.0)
+    grow = _spread_pixels(size, spread)
     ramp = size - grow
     if ramp < 1.0:
         return np.clip(size + 0.5 - distance, 0.0, 1.0).astype(np.float32)
-    return np.clip((size - distance) / ramp, 0.0, 1.0).astype(np.float32)
+    if grow > 0:
+        grown = np.clip(grow + 0.5 - distance, 0.0, 1.0).astype(np.float32)
+        if outside is None:
+            distance = grow + _signed_distance(grown, ramp + 2.0)
+        else:
+            grown = np.pad(grown, 1, constant_values=outside)
+            distance = grow + _signed_distance(grown, ramp + 2.0)[1:-1, 1:-1]
+    width = 2.0 * (ramp + 1.0)
+    return np.clip((size + 0.5 - distance) / width, 0.0, 1.0).astype(np.float32)
 
 
 def _ranged(matte: np.ndarray, range_: float) -> np.ndarray:
@@ -1596,7 +1621,8 @@ def draw_inner_glow(
     out towards the edge. ``choke`` is a percentage of ``size`` held at full
     strength before the fade. The softer technique fades along the blur
     :py:func:`draw_inner_shadow` uses, the ``precise`` one linearly with the
-    distance to the edge, read at each pixel's centre. ``glow_range`` is the
+    distance to the edge, read at each pixel's centre, as a precise outer
+    glow fades outward (:py:func:`_precise_ramp`). ``glow_range`` is the
     percentage of the fade the contour is spread over. The canvas past
     ``viewport`` counts as outside the layer under either technique. The
     result is ``(height, width, 1)`` and never exceeds ``shape``.
@@ -1610,12 +1636,10 @@ def draw_inner_glow(
     alpha = shape[:, :, 0].astype(np.float32)
     size = max(float(size), 0.0)
     if precise:
-        grow = size * min(max(float(choke), 0.0), 100.0) / 100.0
         # A ring of clear pixels puts an edge at the canvas, as the blur's
         # ``outside`` does for the softer technique.
         depth = -_signed_distance(np.pad(alpha, 1), size + 1.0)[1:-1, 1:-1]
-        fade = max(size - grow, 1e-3)
-        matte = np.clip((size - depth) / fade, 0.0, 1.0).astype(np.float32)
+        matte = _precise_ramp(depth, size, choke, outside=1.0)
     else:
         matte = _cast_matte(
             1.0 - alpha,

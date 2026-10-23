@@ -14,6 +14,13 @@ Changelog
   well as its silhouette, as a knocked-out drop shadow is, so a Lighten or
   partly transparent stroke shows the backdrop through itself and not the
   glow. Layers without a stroke are unchanged
+- [fix] Precise outer and inner glows fall off as Photoshop draws them: the
+  spread, or the choke, grows the silhouette by whole pixels, and the glow
+  ramps straight along the distance to that grown edge, centred on it and
+  ending at the size. With no spread a precise glow starts at about half
+  strength, and a spread steepens the ramp instead of holding it full out to
+  the spread. Softer glows, and precise ones spread over their whole size,
+  are unchanged
 - [fix] Crisp, Strong and Smooth text is antialiased from a 4 x 4 grid of
   point samples per pixel, as Photoshop stores it, instead of the exact area
   under the outline: every rendered type layer changes slightly.
