@@ -13,10 +13,11 @@ from PIL import Image
 from psd_tools.api import adjustments
 from psd_tools.api.layers import Group, Layer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import paint
+from psd_tools.composite import composite, paint
 from psd_tools.composite.adjustments import (
     _brightness_curve,
     _huesaturation,
+    _levels_gamma,
     _lut_domain,
     _rows_from_rgb,
     _vibrance_space,
@@ -216,6 +217,46 @@ def test_levels_composite_icc(name: str, colormode: str) -> None:
 def test_levels_composite_error(name: str, colormode: str) -> None:
     filename = f"adjustments/{name}_{colormode}.psd"
     check_composite_quality(filename, levels_tests[name], False)
+
+
+# Photoshop 2023 documents: a gray ramp, two rows to each Levels layer
+# clipped to them. levels_gamma_rgb: gammas 0.6 to 9.99, one channel each,
+# then input and output ranges, a master gamma alone and one over a
+# channel's. levels_gamma_16bit_rgb: a 16-bit ramp over the darkest eighth,
+# master gammas 1.5 to 7.
+def test_levels_gamma_matches_photoshop() -> None:
+    psd = PSDImage.open(full_name("adjustments/levels_gamma_rgb.psd"))
+    reference = np.rint(psd.numpy()[..., :3] * 255)
+    result = psd.composite(force=True, apply_icc=False)
+    assert np.abs(np.asarray(result, np.float64)[..., :3] - reference).max() <= 1
+
+
+def test_levels_gamma_matches_photoshop_in_16_bits() -> None:
+    psd = PSDImage.open(full_name("adjustments/levels_gamma_16bit_rgb.psd"))
+    color, _, _ = composite(psd, force=True)
+    assert np.abs(color[..., :3] - psd.numpy()[..., :3]).max() <= 1.0 / 255
+
+
+@pytest.mark.parametrize("gamma", [1.5, 2.0, 3.59, 5.0, 7.0])
+def test_levels_gamma_leaves_black_at_two_to_the_gamma(gamma: float) -> None:
+    """A straight start, then the power curve from where the toe joins it."""
+    values = np.linspace(0.0, 0.5, 65536, dtype=np.float32)
+    curve = _levels_gamma(values, gamma, 65536)
+    step = float(values[1])
+    assert float(curve[1]) / step == pytest.approx(2.0**gamma, rel=1e-3)
+    join = 2.0 ** -(gamma + 1.0 / (gamma - 1.0))
+    past = values >= join + step
+    assert np.allclose(curve[past], values[past] ** (1.0 / gamma), atol=1e-6)
+    assert (curve[~past] <= values[~past] ** (1.0 / gamma) + 1e-6).all()
+    assert (np.diff(curve) >= 0).all()
+
+
+@pytest.mark.parametrize(("gamma", "lut_size"), [(0.5, 256), (1.0, 256), (1.1, 256)])
+def test_levels_gamma_without_a_toe_is_a_power(gamma: float, lut_size: int) -> None:
+    """At or below gamma 1, and where the toe ends inside the first level."""
+    values = _lut_domain(lut_size)
+    expected = np.power(values, np.float32(1.0 / gamma))
+    assert np.array_equal(_levels_gamma(values, gamma, lut_size), expected)
 
 
 # Curves

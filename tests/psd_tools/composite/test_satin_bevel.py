@@ -13,7 +13,7 @@ import importlib
 import logging
 import math
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -890,3 +890,150 @@ def test_a_non_finite_texture_raises() -> None:
     texture = np.full((24, 24), np.nan, dtype=np.float32)
     with pytest.raises(ValueError):
         _bevel(_flat_layer(), size=2.0, texture=texture)
+
+
+# -- Smooth inner bevel, against Photoshop's renders ----------------------- #
+
+# effects/bevel-smooth-inner.psd: on white, one black layer per cell (a 24 px
+# square, a disc and bars 2, 3 and 4 px across each way), each with a smooth
+# inner bevel lit from 90 degrees at 30, its highlight red and its shadow
+# blue, Normal at 100%. The layer names give the size, the depth and the
+# shape contour (Linear, a curve or a cone, its range, and "noaa" where it is
+# not anti-aliased). Photoshop 2023's composite is the reference.
+_SMOOTH_FIXTURE = "effects/bevel-smooth-inner.psd"
+
+# Pixels further than 24 levels from Photoshop's that a cell may hold: the
+# disc's anti-aliased rim strays, and a curved contour is only read as
+# _SMOOTH_CURVES says.
+_SMOOTH_STRAY = 20
+_SMOOTH_CURVED_STRAY = 250
+_SMOOTH_CURVES = ("cur", "cone")
+
+
+def _smooth_errors() -> dict[str, int]:
+    """Per layer of the fixture, its pixels more than 24 levels off."""
+    psd = PSDImage.open(full_name(_SMOOTH_FIXTURE))
+    color, _, _ = composite(psd)
+    off = np.abs(color[..., :3] - psd.numpy()[..., :3]).max(axis=2) * 255 > 24
+    errors = {}
+    for layer in psd:
+        if not any(layer.effects.find("bevelemboss")):
+            continue
+        left, top, right, bottom = layer.bbox
+        errors[layer.name] = int(off[top - 2 : bottom + 2, left - 2 : right + 2].sum())
+    return errors
+
+
+def test_smooth_inner_bevels_render_to_photoshops_composite() -> None:
+    errors = _smooth_errors()
+    assert len(errors) == 16
+    for name, count in errors.items():
+        curved = any(word in name.split() for word in _SMOOTH_CURVES)
+        assert count <= (_SMOOTH_CURVED_STRAY if curved else _SMOOTH_STRAY), name
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("_SMOOTH_INNER_MIN_WIDTH", 1.0),
+        ("_SMOOTH_INNER_MIN_HEIGHT", 0.0),
+        ("_SHAPE_RANGE_FLOOR", 1.0 / 64.0),
+        ("_SHAPE_AA_SAMPLES", (0.0,)),
+        ("_SHAPE_AA_SAMPLES", (-1.0 / 3.0, 0.0, 1.0 / 3.0)),
+    ],
+)
+def test_each_smooth_inner_law_is_read_off_the_fixture(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: Any
+) -> None:
+    """Undoing any part of the law puts the render further from Photoshop's."""
+    fitted = sum(_smooth_errors().values())
+    monkeypatch.setattr(effects, name, value)
+    assert sum(_smooth_errors().values()) > fitted
+
+
+def test_a_smooth_bevel_of_size_0_lights_its_edge_whatever_its_depth() -> None:
+    """The silhouette itself, one pixel high: the edge pixels and no others."""
+    shallow = _bevel(_square(), size=0.0, depth=1.0)
+    deep = _bevel(_square(), size=0.0, depth=1000.0)
+    assert np.array_equal(shallow[0], deep[0])
+    assert np.array_equal(shallow[1], deep[1])
+    highlight, shadow = shallow
+    assert float(highlight[10, 20, 0]) > 0.5 and float(shadow[29, 20, 0]) > 0.5
+    assert float(highlight[11:29, 11:29].max()) == 0.0
+    assert float(shadow[11:29, 11:29].max()) == 0.0
+
+
+def test_a_smooth_bevel_of_size_1_draws_as_size_2() -> None:
+    for depth in (10.0, 100.0, 300.0):
+        one = _bevel(_square(), size=1.0, depth=depth)
+        two = _bevel(_square(), size=2.0, depth=depth)
+        assert np.array_equal(one[0], two[0]) and np.array_equal(one[1], two[1])
+
+
+@pytest.mark.parametrize("size", [2.0, 5.0, 8.0])
+def test_a_shallow_smooth_bevel_stands_a_pixel_high(size: float) -> None:
+    """Below a depth of 100 / size it lights as that depth does."""
+    least = _bevel(_disc(41, 14.0), size=size, depth=100.0 / size)
+    shallow = _bevel(_disc(41, 14.0), size=size, depth=1.0)
+    assert np.allclose(least[0], shallow[0]) and np.allclose(least[1], shallow[1])
+    deeper = _bevel(_disc(41, 14.0), size=size, depth=150.0 / size)
+    assert float(deeper[1].sum()) > float(least[1].sum())
+
+
+def test_a_shape_contours_range_steepens_the_surface_below_its_top() -> None:
+    surface = np.linspace(0.5, 1.0, 11, dtype=np.float32)
+    half = effects.BevelShape(None, 50.0, False).apply(surface)
+    assert np.allclose(half - 1.0, 2.0 * (surface - 1.0), atol=1e-6)
+    whole = effects.BevelShape(None, 100.0, False).apply(surface)
+    assert np.allclose(whole, surface, atol=1e-6)
+    none = effects.BevelShape(None, 0.0, False).apply(surface)
+    assert np.allclose(none - 1.0, (surface - 1.0) / effects._SHAPE_RANGE_FLOOR)
+
+
+def test_an_anti_aliased_shape_contour_shades_one_more_row_below() -> None:
+    """A six-row bar lit from above: two lit rows on top, three shaded below.
+
+    Lit at points toward the right and the bottom of each pixel, the band on
+    the far side reaches a row further in.
+    """
+    shape = np.zeros((20, 20, 1), dtype=np.float32)
+    shape[7:13, 2:18] = 1.0
+    params: dict[str, Any] = dict(size=2.0, depth=100.0)
+    sharp = _bevel(shape, bevel_shape=effects.BevelShape(None, 0.0, False), **params)
+    smooth = _bevel(shape, bevel_shape=effects.BevelShape(None, 0.0, True), **params)
+    column = 10
+    assert int((sharp[0][7:13, column, 0] > 0.5).sum()) == 2
+    assert int((sharp[1][7:13, column, 0] > 0.5).sum()) == 2
+    assert int((smooth[0][7:13, column, 0] > 0.5).sum()) == 2
+    assert int((smooth[1][7:13, column, 0] > 0.5).sum()) == 3
+
+
+def _contoured_bevel(psd: PSDImage) -> BevelEmboss:
+    layer = next(layer for layer in psd if layer.name == "s2 lin r0")
+    return cast(BevelEmboss, next(iter(layer.effects.find("bevelemboss"))))
+
+
+def test_a_shape_contour_is_left_out_of_other_bevels(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    psd = PSDImage.open(full_name(_SMOOTH_FIXTURE))
+    bevel = _contoured_bevel(psd)
+    bevel.descriptor[Key.BevelStyle] = Enumerated(
+        typeID=Key.BevelStyle, enum=BevelStyle.EMBOSS.value
+    )
+    with caplog.at_level(logging.DEBUG, logger="psd_tools.composite.composite"):
+        composite(psd)
+    assert "shape contour of a bevel" in caplog.text
+
+
+def test_an_unreadable_shape_range_draws_the_bevel_without_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    psd = PSDImage.open(full_name(_SMOOTH_FIXTURE))
+    plain = PSDImage.open(full_name(_SMOOTH_FIXTURE))
+    _contoured_bevel(psd).descriptor[Key.InputRange] = Double(float("nan"))
+    _contoured_bevel(plain).descriptor[b"useShape"] = False
+    with caplog.at_level(logging.DEBUG, logger="psd_tools.composite.composite"):
+        color, _, _ = composite(psd)
+    assert "Cannot read a bevel's shape" in caplog.text
+    assert np.array_equal(color, composite(plain)[0])

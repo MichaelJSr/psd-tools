@@ -4,6 +4,14 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] Smooth inner bevels follow Photoshop's renders: a size of 1 draws as
+  2, the bevel stands at least a pixel high however shallow, so size 0 lights
+  the edge pixels, and the shape contour (``useShape``) is applied, its range
+  steepening the bevel and anti-aliasing lighting it within each pixel.
+  **Rendering change** for those bevels; other styles are unchanged
+- [fix] Levels gammas above 1 start from black on Photoshop's straight toe
+  instead of the power curve's vertical slope, input levels round to the
+  document's own, and a master gamma folds into each channel's
 - [fix] A document's composite reads off its stored preview which type layers
   Photoshop blended straight, not in the text gamma, as it does for a raster
   kept through a session; nothing else in the file records it. An export from

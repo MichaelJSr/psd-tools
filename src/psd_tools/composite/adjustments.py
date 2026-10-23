@@ -4,7 +4,7 @@ import functools
 import logging
 import math
 import struct
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Literal, TypeVar, cast
 
 import numpy as np
@@ -37,6 +37,7 @@ from psd_tools.composite.blend import (
 )
 from psd_tools.constants import ColorMode, Resource
 from psd_tools.psd.adjustments import LevelRecord
+from psd_tools.psd.adjustments import Levels as LevelsData
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +326,7 @@ def _record_gamma(record: LevelRecord) -> float:
     return float(min(max(_GAMMA_LOWER, np.float32(record.gamma / _100)), _GAMMA_UPPER))
 
 
-def _master_gamma(records: Sequence[LevelRecord], colormode: ColorMode) -> float:
+def _master_gamma(records: LevelsData, colormode: ColorMode) -> float:
     """The gamma of a master record that sets nothing else, else 1.
 
     Only where every colour channel has its own record to carry it.
@@ -344,7 +345,7 @@ def _master_gamma(records: Sequence[LevelRecord], colormode: ColorMode) -> float
 
 
 def _levels_gamma(
-    values: NDArray[np.float32], gamma: float, lut_size: int
+    values: np.ndarray, gamma: float, lut_size: int
 ) -> NDArray[np.float32]:
     """``values`` raised to ``1 / gamma``, with Photoshop's toe above gamma 1.
 
