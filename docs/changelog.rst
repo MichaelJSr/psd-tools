@@ -75,6 +75,21 @@ Changelog
   story another layer shares raise ``ValueError``, leaving the layer as it was
 - [api] ``TypeLayer.story_text`` reads the layer's ``Txt2`` story and
   ``TypeLayer.sync_story()`` brings a stale one back to the layer's text
+- [api] ``Layer.copy_effects_from()`` replaces a layer's effects with a copy
+  of another layer's, from any document, patterns included;
+  ``Layer.clear_effects()`` removes them.
+- [api] ``Mask.offset``, ``Mask.left`` and ``Mask.top`` are writable: setting
+  them moves a pixel mask without moving its layer. A layer with a vector
+  mask, shape layers included, raises ``ValueError``.
+- [api] ``TypeLayer.add_font()`` adds a face to the layer's ``FontSet``, and
+  to the document's ``Txt2`` font set, for ``set_span_style(Font=...)``.
+- [api] ``TypeLayer.fit_text()`` and ``psd_tools.composite.text.fit_text()``
+  shrink point text until its widest line fits a width, refusing below a
+  minimum scale. Requires the ``text`` extra.
+- [fix] A type layer copied by ``duplicate()`` or ``copy_to()``, or moved into
+  another document, gets its own ``Txt2`` story under a new ``TextIndex``
+  instead of sharing, or pointing at another layer's, story. Copying a type
+  layer between a Photoshop CC file and an older one raises ``ValueError``.
 - [fix] An adjustment layer that also carries a ``CgEd`` block, as a Curves
   layer set from a preset does, is read as its own adjustment instead of as a
   Brightness/Contrast at 0/0 that left the image unchanged. Only layers that

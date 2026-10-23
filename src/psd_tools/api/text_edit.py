@@ -23,11 +23,13 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from psd_tools.constants import Tag
 from psd_tools.psd import engine_data
+from psd_tools.psd.tagged_blocks import TaggedBlocks
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import TypeLayer
 
 __all__ = [
+    "add_font",
     "set_run_style",
     "set_span_style",
     "set_text",
@@ -58,10 +60,22 @@ class _Spelling:
     sheet: str
     features: str
     rendered: str
-    fonts: tuple[str, ...]
+    font_set: str
     font_name: tuple[str, ...]
     paint: tuple[str, str, str, str]
     numbered: bool
+    # Document resources and the story's references into them.
+    resources: str
+    items: str
+    item: str
+    display: str
+    name: str
+    style_sheets: tuple[str, str, str, str]  #: set, sheet, parent, features
+    paragraph_sheets: tuple[str, str, str, str]
+    frame_set: str
+    frames: str
+    strikes: str
+    frame_strike: tuple[str, str, str]  #: tag key, tag, frame index key
 
 
 _NUMBERED = _Spelling(
@@ -78,10 +92,21 @@ _NUMBERED = _Spelling(
     sheet="0",
     features="6",
     rendered="1",
-    fonts=("0", "1", "0"),
+    font_set="1",
     font_name=("0", "0", "0"),
     paint=("99", "0", "0", "1"),
     numbered=True,
+    resources="0",
+    items="0",
+    item="0",
+    display="1",
+    name="0",
+    style_sheets=("5", "0", "5", "6"),
+    paragraph_sheets=("6", "0", "6", "5"),
+    frame_set="8",
+    frames="0",
+    strikes="2",
+    frame_strike=("99", "F", "10"),
 )
 _NAMED = _Spelling(
     objects="DocumentObjects",
@@ -97,10 +122,21 @@ _NAMED = _Spelling(
     sheet="StyleSheet",
     features="Features",
     rendered="RenderedData",
-    fonts=("DocumentResources", "FontSet", "Resources"),
+    font_set="FontSet",
     font_name=("Resource", "Identifier", "Name"),
     paint=("StreamTag", "Color", "Type", "Values"),
     numbered=False,
+    resources="DocumentResources",
+    items="Resources",
+    item="Resource",
+    display="DisplayList",
+    name="Name",
+    style_sheets=("StyleSheetSet", "StyleSheet", "Parent", "Features"),
+    paragraph_sheets=("ParagraphSheetSet", "ParagraphSheet", "Parent", "Features"),
+    frame_set="TextFrameSet",
+    frames="Frames",
+    strikes="Strikes",
+    frame_strike=("StreamTag", "FrameStrike", "Frame"),
 )
 
 #: What ends a paragraph run: Photoshop ends one at a forced line break too.
@@ -200,9 +236,9 @@ def set_span_style(
 
     ``keys`` are ``StyleSheetData`` names with plain Python values
     (``FauxBold=True``, ``Tracking=50``, ``FontSize=20.0``); ``Font`` takes
-    a PostScript name already in the layer's ``FontSet``. ``fill`` is an RGB
-    triple in 0..1. Runs are split at the ends of the span and equal
-    neighbours merged.
+    a PostScript name in the layer's ``FontSet``, which :func:`add_font`
+    extends. ``fill`` is an RGB triple in 0..1. Runs are split at the ends
+    of the span and equal neighbours merged.
 
     With a Txt2 story the key must have a story feature (``_FEATURES``),
     else ``ValueError``: Photoshop would undo a TySh-only style.
@@ -471,21 +507,39 @@ class _Story:
         if isinstance(value, str):
             name = value
         else:
-            tysh = [
-                str(f["Name"].value) for f in layer.resource_dict.get("FontSet", [])
-            ]
-            name = tysh[int(value)]
-        node: Any = self.root
-        for key in self.k.fonts:
-            node = node[key]
-        names = []
-        for font in node:
-            for key in self.k.font_name:
-                font = font[key]
-            names.append(str(font.value))
+            name = _font_names(_font_set(layer.resource_dict))[int(value)]
+        names = _story_font_names(self.root, self.k)
         if name not in names:
-            raise ValueError(f"font {name!r} is not in the Txt2 FontSet {names}")
+            raise ValueError(
+                f"font {name!r} is not in the Txt2 FontSet {names}; "
+                "add it with add_font()"
+            )
         return names.index(name)
+
+    def font_adder(
+        self, name: str, font_type: int, script: int, synthetic: int
+    ) -> Callable[[], None] | None:
+        """Return the write that adds face ``name`` to Txt2; None when listed."""
+        fonts = _resource_items(self.root, self.k, self.k.font_set)
+        if name in _story_font_names(self.root, self.k):
+            return None
+        k = self.k
+        item_key, identifier_key, name_key = k.font_name
+        identifier = engine_data.Dict()
+        identifier[name_key] = engine_data.String(name)
+        if k.numbered:
+            # Script and Synthetic are written only when set, as Photoshop does.
+            for key, value in (("1", script), ("2", font_type), ("3", synthetic)):
+                if value or key == "2":
+                    identifier[key] = engine_data.Integer(int(value))
+        else:
+            identifier["Type"] = engine_data.Integer(int(font_type))
+        resource = engine_data.Dict()
+        resource[k.paint[0]] = engine_data.Property("CoolTypeFont")
+        resource[identifier_key] = identifier
+        entry = engine_data.Dict()
+        entry[item_key] = resource
+        return lambda: fonts.append(entry)
 
     def _paint(self, fill: tuple[float, float, float]) -> engine_data.Dict:
         tag, color_key, type_key, values_key = self.k.paint
@@ -505,13 +559,25 @@ def _story(layer: TypeLayer) -> _Story | None:
     psd = getattr(layer, "_psd", None)
     if psd is None:
         return None
-    record = getattr(psd, "_record", None)
-    info = getattr(record, "layer_and_mask_information", None)
-    blocks = getattr(info, "tagged_blocks", None)
-    if blocks is None or Tag.TEXT_ENGINE_DATA not in blocks:
-        return None
     index = layer._data.text_data.get(b"TextIndex")
-    if index is None:
+    txt2 = None if index is None else _txt2(psd)
+    if txt2 is None:
+        return None
+    root, keys, stories = txt2
+    i = int(getattr(index, "value", index))
+    story = _nth_story(stories, i, keys)
+    for other in psd.descendants():  # a copied layer keeps its source's index
+        if other is not layer and getattr(other, "kind", None) == "type":
+            j = other._data.text_data.get(b"TextIndex")
+            if j is not None and int(getattr(j, "value", j)) == i:
+                raise ValueError(f"TextIndex {i} is also {other.name!r}'s")
+    return _Story(root, story, keys)
+
+
+def _txt2(psd: Any) -> tuple[engine_data.Dict, _Spelling, engine_data.List] | None:
+    """Return the document's Txt2 root, its spelling and its stories, or None."""
+    blocks = _document_blocks(psd)
+    if blocks is None or Tag.TEXT_ENGINE_DATA not in blocks:
         return None
     root = blocks.get_data(Tag.TEXT_ENGINE_DATA)
     for keys in (_NUMBERED, _NAMED):
@@ -520,22 +586,234 @@ def _story(layer: TypeLayer) -> _Story | None:
             objects.get(keys.stories) if isinstance(objects, engine_data.Dict) else None
         )
         if isinstance(stories, engine_data.List):
-            break
-    else:
-        raise ValueError("the document's Txt2 block has no text objects")
-    i = int(getattr(index, "value", index))
+            return root, keys, stories
+    raise ValueError("the document's Txt2 block has no text objects")
+
+
+def _document_blocks(psd: Any) -> Any:
+    record = getattr(psd, "_record", None)
+    info = getattr(record, "layer_and_mask_information", None)
+    return getattr(info, "tagged_blocks", None)
+
+
+def _nth_story(stories: engine_data.List, i: int, keys: _Spelling) -> engine_data.Dict:
     if not 0 <= i < len(stories):
         raise ValueError(f"TextIndex {i} outside the {len(stories)} Txt2 stories")
-    for other in psd.descendants():  # a copied layer keeps its source's index
-        if other is not layer and getattr(other, "kind", None) == "type":
-            j = other._data.text_data.get(b"TextIndex")
-            if j is not None and int(getattr(j, "value", j)) == i:
-                raise ValueError(f"TextIndex {i} is also {other.name!r}'s")
     story = stories[i]
     model = story.get(keys.model) if isinstance(story, engine_data.Dict) else None
     if not isinstance(model, engine_data.Dict) or keys.text not in model:
         raise ValueError(f"Txt2 story {i} has no text")
-    return _Story(root, story, keys)
+    return story
+
+
+def _resource_items(
+    root: engine_data.Dict, keys: _Spelling, set_key: str
+) -> engine_data.List:
+    """Return the ``Resources`` list of one of the document's resource sets."""
+    node = root.get(keys.resources)
+    node = node.get(set_key) if isinstance(node, engine_data.Dict) else None
+    node = node.get(keys.items) if isinstance(node, engine_data.Dict) else None
+    if not isinstance(node, engine_data.List):
+        raise ValueError(f"the document's Txt2 block has no {set_key} resources")
+    return node
+
+
+def _story_font_names(root: engine_data.Dict, keys: _Spelling) -> list[str]:
+    names = []
+    for font in _resource_items(root, keys, keys.font_set):
+        for key in keys.font_name:
+            font = font[key]
+        names.append(str(font.value))
+    return names
+
+
+def carry_story(layer: TypeLayer, source: Any, dest: Any) -> Callable[[], None] | None:
+    """Check that ``layer``'s story in ``source`` can go to ``dest``.
+
+    Returns the write that appends a copy of the story, and of its text
+    frames, to ``dest``'s Txt2 and points the layer's ``TextIndex`` at it,
+    so a copy, or a layer moved between documents, keeps a story of its
+    own. Across documents the fonts and sheets the story names are found by
+    name, or added. ``dest`` without a Txt2 block gets one shaped like
+    ``source``'s. None when the layer has no ``TextIndex``.
+    """
+    index = layer._data.text_data.get(b"TextIndex")
+    if index is None:
+        return None
+    src = _txt2(source)
+    if src is None:
+        # The index names no story here, and another layer's story there.
+        return lambda: layer._data.text_data.pop(b"TextIndex", None)
+    root, keys, stories = src
+    story = _nth_story(stories, int(getattr(index, "value", index)), keys)
+    dst = _txt2(dest)
+    if dst is not None and dst[1] is not keys:
+        raise ValueError(
+            "cannot copy a Txt2 story between Photoshop CC's numbered keys and "
+            "an older version's named ones"
+        )
+    frames = _resource_items(root, keys, keys.frame_set)
+    refs = _frame_refs(story, keys)
+    if any(not 0 <= i < len(frames) for i in refs):
+        raise ValueError(f"a Txt2 story names text frames {refs} of {len(frames)}")
+
+    def write() -> None:
+        to_root, _, to_stories = _txt2(dest) or _new_txt2(source, dest)
+        new = copy.deepcopy(story)
+        if to_root is not root:
+            _Remap(root, to_root, keys).story(new)
+        to_frames = _resource_items(to_root, keys, keys.frame_set)
+        moved: dict[int, int] = {}
+        for i in refs:  # each story owns its frames
+            moved[i] = len(to_frames)
+            to_frames.append(copy.deepcopy(frames[i]))
+        _set_frame_refs(new, keys, moved)
+        to_stories.append(new)
+        index.value = len(to_stories) - 1
+
+    return write
+
+
+def _frame_refs(story: engine_data.Dict, keys: _Spelling) -> list[int]:
+    view = story.get(keys.view)
+    refs = view.get(keys.frames) if isinstance(view, engine_data.Dict) else None
+    out: list[int] = []
+    for ref in refs if isinstance(refs, engine_data.List) else ():
+        value = ref.get(keys.item) if isinstance(ref, engine_data.Dict) else None
+        if isinstance(value, engine_data.Integer):
+            out.append(int(value.value))
+    return list(dict.fromkeys(out))
+
+
+def _set_frame_refs(
+    story: engine_data.Dict, keys: _Spelling, moved: Mapping[int, int]
+) -> None:
+    """Point the story's view, and the frame strikes of its layout, at ``moved``."""
+    view = story.get(keys.view)
+    if not isinstance(view, engine_data.Dict):
+        return
+    for ref in view.get(keys.frames) or ():
+        value = ref.get(keys.item) if isinstance(ref, engine_data.Dict) else None
+        if isinstance(value, engine_data.Integer) and int(value.value) in moved:
+            ref[keys.item] = engine_data.Integer(moved[int(value.value)])
+    tag_key, tag, frame_key = keys.frame_strike
+    pending: list[Any] = [view.get(keys.strikes)]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, engine_data.List):
+            pending.extend(node)
+        elif isinstance(node, engine_data.Dict):
+            frame = node.get(frame_key)
+            if (
+                str(getattr(node.get(tag_key), "value", "")) == tag
+                and isinstance(frame, engine_data.Integer)
+                and int(frame.value) in moved
+            ):
+                node[frame_key] = engine_data.Integer(moved[int(frame.value)])
+            pending.extend(node.values())
+
+
+def _new_txt2(source: Any, dest: Any) -> tuple[engine_data.Dict, _Spelling, Any]:
+    """Give ``dest`` a Txt2 block: ``source``'s, without stories or frames."""
+    blocks = _document_blocks(source)
+    block = copy.deepcopy(blocks[Tag.TEXT_ENGINE_DATA])
+    info = dest._record.layer_and_mask_information
+    if info.tagged_blocks is None:
+        info.tagged_blocks = TaggedBlocks()
+    info.tagged_blocks[Tag.TEXT_ENGINE_DATA] = block
+    txt2 = _txt2(dest)
+    assert txt2 is not None
+    root, keys, stories = txt2
+    del stories[:]
+    del _resource_items(root, keys, keys.frame_set)[:]
+    return txt2
+
+
+class _Remap:
+    """Rewrite a story's font and sheet indices from one document to another."""
+
+    def __init__(
+        self, source: engine_data.Dict, dest: engine_data.Dict, keys: _Spelling
+    ) -> None:
+        self.source, self.dest, self.k = source, dest, keys
+        self.done: dict[tuple[str, int], int] = {}
+
+    def story(self, story: engine_data.Dict) -> None:
+        model = story[self.k.model]
+        for section, kind in (
+            (self.k.styles, self.k.style_sheets),
+            (self.k.paragraphs, self.k.paragraph_sheets),
+        ):
+            node = model.get(section)
+            runs = node.get(self.k.runs) if isinstance(node, engine_data.Dict) else None
+            for run in runs or ():
+                data = (
+                    run.get(self.k.data) if isinstance(run, engine_data.Dict) else None
+                )
+                sheet = (
+                    data.get(kind[1]) if isinstance(data, engine_data.Dict) else None
+                )
+                if isinstance(sheet, engine_data.Dict):
+                    self.sheet(sheet, kind)
+
+    def sheet(self, sheet: engine_data.Dict, kind: tuple[str, str, str, str]) -> None:
+        """Remap a sheet's parent and, for a character sheet, its font."""
+        set_key, _, parent_key, features_key = kind
+        parent = sheet.get(parent_key)
+        if isinstance(parent, engine_data.Integer):
+            sheet[parent_key] = engine_data.Integer(
+                self.resource(set_key, int(parent.value), kind)
+            )
+        features = sheet.get(features_key)
+        font_key = str(_FEATURES["Font"]) if self.k.numbered else "Font"
+        font = (
+            features.get(font_key)
+            if kind is self.k.style_sheets and isinstance(features, engine_data.Dict)
+            else None
+        )
+        if isinstance(font, engine_data.Integer):
+            features[font_key] = engine_data.Integer(
+                self.resource(self.k.font_set, int(font.value), None)
+            )
+
+    def resource(
+        self, set_key: str, i: int, kind: tuple[str, str, str, str] | None
+    ) -> int:
+        """Return the destination's index of the source's resource ``i``."""
+        done = self.done.get((set_key, i))
+        if done is not None:
+            return done
+        source = _resource_items(self.source, self.k, set_key)
+        dest = _resource_items(self.dest, self.k, set_key)
+        if not 0 <= i < len(source):
+            raise ValueError(
+                f"a Txt2 story names {set_key} resource {i} of {len(source)}"
+            )
+        names = [self._name(item, kind) for item in dest]
+        name = self._name(source[i], kind)
+        if name is not None and name in names:
+            out = self.done[(set_key, i)] = names.index(name)
+            return out
+        out = self.done[(set_key, i)] = len(dest)
+        item = copy.deepcopy(source[i])
+        dest.append(item)
+        display = self.dest[self.k.resources][set_key].get(self.k.display)
+        if isinstance(display, engine_data.List):
+            entry = engine_data.Dict()
+            entry[self.k.item] = engine_data.Integer(out)
+            display.append(entry)
+        sheet = item.get(self.k.item)
+        if kind is not None and isinstance(sheet, engine_data.Dict):
+            self.sheet(sheet, kind)  # its parent and font come along too
+        return out
+
+    def _name(self, item: Any, kind: tuple[str, str, str, str] | None) -> str | None:
+        """Return a sheet's name, or a font's PostScript name."""
+        path = (self.k.item, self.k.name) if kind else self.k.font_name
+        node = item
+        for key in path:
+            node = node.get(key) if isinstance(node, engine_data.Dict) else None
+        return None if node is None else str(node.value)
 
 
 def _restyled(
@@ -559,6 +837,67 @@ def _restyled(
                     sheet[key] = value
             out.append((s0, s1, part))
     return out
+
+
+def add_font(
+    layer: TypeLayer,
+    name: str,
+    *,
+    font_type: int = 1,
+    script: int = 0,
+    synthetic: int = 0,
+) -> int:
+    """Add the face PostScript ``name`` to the layer's ``FontSet``.
+
+    Returns the face's index, the value a run's ``Font`` key holds. A face
+    already listed keeps its entry. ``font_type`` is Photoshop's outline
+    flag, ``1`` for TrueType and ``0`` for PostScript (CFF or Type 1);
+    ``script`` and ``synthetic`` are stored as given, ``0`` being Roman
+    and none. The face is appended, so no run changes font. The document
+    resources in the layer's EngineData list it too, and so does the
+    FontSet of the document's Txt2 block when the layer has a story.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("a font needs a PostScript name")
+    fonts = _font_set(layer.resource_dict)
+    if fonts is None:
+        raise ValueError("the layer's EngineData has no FontSet")
+    story = _story(layer)
+    add_to_story = (
+        story.font_adder(name, font_type, script, synthetic) if story else None
+    )
+    if add_to_story is not None:
+        add_to_story()
+    names = _font_names(fonts)
+    if name in names:
+        return names.index(name)
+    entry = _font_entry(name, font_type, script, synthetic)
+    shared = _font_set(layer.document_resources)
+    if shared is not None and name not in _font_names(shared):
+        shared.append(copy.deepcopy(entry))
+    fonts.append(entry)
+    layer.__dict__.pop("_typesetting", None)
+    return len(fonts) - 1
+
+
+def _font_set(resources: engine_data.Dict) -> engine_data.List | None:
+    fonts = resources.get("FontSet")
+    return fonts if isinstance(fonts, engine_data.List) else None
+
+
+def _font_names(fonts: engine_data.List | None) -> list[str]:
+    return [str(f["Name"].value) for f in fonts or ()]
+
+
+def _font_entry(
+    name: str, font_type: int, script: int, synthetic: int
+) -> engine_data.Dict:
+    entry = engine_data.Dict()
+    entry["Name"] = engine_data.String(name)
+    entry["Script"] = engine_data.Integer(int(script))
+    entry["FontType"] = engine_data.Integer(int(font_type))
+    entry["Synthetic"] = engine_data.Integer(int(synthetic))
+    return entry
 
 
 def _editor_text(layer: TypeLayer) -> str:
@@ -634,12 +973,11 @@ def _values(
     values: dict[str, Any] = {}
     for key, value in keys.items():
         if key == "Font" and isinstance(value, str):
-            names = [
-                str(f["Name"].value) for f in layer.resource_dict.get("FontSet", [])
-            ]
+            names = _font_names(_font_set(layer.resource_dict))
             if value not in names:
                 raise ValueError(
-                    f"font {value!r} is not in the layer's FontSet {names}"
+                    f"font {value!r} is not in the layer's FontSet {names}; "
+                    "add it with add_font()"
                 )
             value = names.index(value)
         values[key] = _element(value)

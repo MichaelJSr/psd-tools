@@ -50,6 +50,14 @@ each ``'\r'`` and each forced line break ``'\x03'``.
     layer.set_span_style(10, 14, fill=(0.8, 0.1, 0.1), FauxBold=True)
     layer.set_run_style(0, Tracking=20)
 
+A run's ``Font`` names a face in the layer's ``FontSet``.
+:py:meth:`~psd_tools.api.layers.TypeLayer.add_font` appends one, to the
+document's ``Txt2`` font set too, and returns its index; ``font_type`` is
+``1`` for TrueType outlines and ``0`` for PostScript (CFF or Type 1) ones::
+
+    layer.add_font("stoogedings-Regular")
+    layer.set_span_style(0, 6, Font="stoogedings-Regular")
+
 Edits never render. Until :py:meth:`~psd_tools.api.layers.TypeLayer.rasterize`
 runs, the layer's pixels, ``composite()`` and a saved file still show
 Photoshop's raster of the old text.
@@ -64,7 +72,30 @@ stale story and any edit of a story another layer shares raise
 :py:attr:`~psd_tools.api.layers.TypeLayer.story_text`
 reads the story and :py:meth:`~psd_tools.api.layers.TypeLayer.sync_story`
 brings a stale one (a file edited by an older version) back to the
-layer's text.
+layer's text. A type layer that
+:py:meth:`~psd_tools.api.layers.Layer.duplicate` or
+:py:meth:`~psd_tools.api.layers.Layer.copy_to` copies, or that moves into
+another document, gets a copy of its story and text frame under a new
+``TextIndex``; across documents the fonts and style sheets it names are
+matched by name or added. A story cannot go between a Photoshop CC file
+and an older one, whose ``Txt2`` keys are spelled differently.
+
+Fitting a line
+--------------
+
+:py:meth:`~psd_tools.api.layers.TypeLayer.fit_text` shrinks point text
+until its widest line fits a width in document pixels, as the layout
+measures it (advance widths, not ink). Every run's ``FontSize`` is scaled
+by one factor, rounded down to a hundredth of a point, in the layer and
+its story. It returns the factor, ``1.0`` when the text fits already, and
+refuses with ``ValueError``, changing nothing, below ``min_scale``::
+
+    layer.text = "Croissant Knight"
+    scale = layer.fit_text(660, min_scale=0.6, fonts=fonts)
+    layer.rasterize(fonts=fonts)
+
+Centred text keeps its centre, so the width for a name between two icons
+is twice the smaller distance from the text's anchor to either icon.
 
 Rendering
 ---------
