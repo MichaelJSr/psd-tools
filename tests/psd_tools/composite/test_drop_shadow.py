@@ -1848,7 +1848,7 @@ _PREVIEWS = [
     ("layer_effects.psd", (60, 215, 620, 296), 1e-5, 1e-3),
     ("masks.psb", None, 1e-6, 1.5e-4),
     ("layer_params.psb", (130, 230, 470, 560), 2.3e-4, 2e-2),
-    ("layer_comps.psb", None, 1.6e-3, 3e-3),
+    ("layer_comps.psb", None, 2.5e-4, 2e-3),
 ]
 
 
