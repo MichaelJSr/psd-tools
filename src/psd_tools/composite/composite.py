@@ -296,6 +296,29 @@ _UNREADABLE = (
 )
 
 
+import os as _os
+
+_CRIT_INFX = _os.environ.get("CRIT_INFX", "")
+_CRIT_INFX_FILL = "fill" in _CRIT_INFX
+_INTERIOR = ("ColorOverlay", "GradientOverlay", "PatternOverlay", "Satin", "InnerGlow", "InnerShadow")
+
+
+def _crit_infx_off(layer: Layer) -> bool:
+    if not _CRIT_INFX or isinstance(layer, AdjustmentLayer) or layer.is_group():
+        return False
+    if layer.blend_mode in (BlendMode.NORMAL, BlendMode.PASS_THROUGH):
+        return False
+    try:
+        tb = layer.tagged_blocks
+        if tb is not None and Tag.BLEND_INTERIOR_ELEMENTS in tb and tb.get_data(Tag.BLEND_INTERIOR_ELEMENTS):
+            return False
+        if not (layer.has_effects() and layer.effects.enabled):
+            return False
+        return any(e.enabled and type(e).__name__ in _INTERIOR for e in layer.effects)
+    except Exception:
+        return False
+
+
 def _has_enabled_effects(layer: Layer) -> bool:
     """Whether the layer carries a layer style Photoshop would draw."""
     try:
@@ -2609,6 +2632,37 @@ class Compositor:
         # and re-applied against this canvas (#707).
         self._apply_beneath_effects(layer)
         source = self._resolve_source(layer)
+        if _crit_infx_off(layer):
+            # CRIT_INFX: interior effects not blended as a group -- the layer
+            # with its own mode, then each effect with its own mode onto the
+            # canvas within the layer, then the layer opacity fades all.
+            opacity = source.opacity
+            if opacity <= 0.0:
+                return
+            color0, alpha0 = self._color, self._alpha
+            shape_g0, alpha_g0 = self._shape_g, self._alpha_g
+            if "v2" in _CRIT_INFX:
+                share = source.alpha
+                ones = np.ones_like(share)
+                whole = replace(source, alpha=ones, shape=ones, opacity=1.0, fill_opacity=1.0)
+                if "tg" not in _CRIT_INFX:
+                    whole = replace(whole, text_gamma=None, text_key=None)
+                canvas = _AdjustmentCanvas(self, ones)
+                self._composite_source(whole, layer.blend_mode)
+                outer = self._paint_effects(layer, canvas, source.shape, source.shape_mask)
+                self._apply_outer_effects(outer, None)
+                self._fade(share, color0, alpha0, shape_g0, alpha_g0)
+                return
+            perstep = "perstep" in _CRIT_INFX
+            whole = source if perstep else replace(source, alpha=utils.clip(source.alpha / opacity), opacity=1.0)
+            region = source.region * source.fill_opacity if _CRIT_INFX_FILL else source.region
+            canvas = _AdjustmentCanvas(self, region * opacity if perstep else region)
+            self._composite_source(whole, layer.blend_mode)
+            outer = self._paint_effects(layer, canvas, source.shape, source.shape_mask)
+            self._apply_outer_effects(outer, None)
+            if opacity < 1.0 and not perstep:
+                self._fade(opacity, color0, alpha0, shape_g0, alpha_g0)
+            return
         source, outer = self._compose_effects(layer, source)
         if outer and _composites_as_passthrough(source, layer.blend_mode):
             # A pass-through group is re-applied by interpolating this canvas
@@ -3743,6 +3797,10 @@ class Compositor:
         self, layer: Layer, color: np.ndarray, alpha: np.ndarray
     ) -> np.ndarray:
         # TODO: Consider Tag.BLEND_CLIPPING_ELEMENTS.
+        if _os.environ.get("CRIT_CLIP"):
+            # CRIT_CLIP: the clipped layers blend with the base's colour as if
+            # it were opaque; the base's alpha is the group's, applied after.
+            alpha = np.ones_like(alpha)
         compositor = Compositor(
             self._viewport,
             self._widen(color, self.channels),
