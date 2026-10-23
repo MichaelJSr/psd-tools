@@ -60,9 +60,9 @@ Changelog
 - [refactor] Compositing and opening are faster: a layer is composited on the
   box it can change instead of the whole canvas, stroke distance fields use
   the new compiled ``psd_tools.composite._distance`` (numpy where it is not
-  built), and engine data and binary fields parse with less overhead. Renders
-  are unchanged but for a level here and there where rounding on the smaller
-  box differs
+  built; both refuse a mask that is not 2-D), and engine data and binary
+  fields parse with less overhead. Renders are unchanged but for a level here
+  and there where rounding on the smaller box differs
 - [api] ``PSDImage.open(fp, lazy=True)`` leaves the layers' channel data, the
   merged image data and the embedded smart object and smart filter blocks in
   ``fp`` until something reads them; ``fp`` must stay open. Opening a card
@@ -73,6 +73,13 @@ Changelog
   ranges fetched on demand, e.g. HTTP Range requests
   (``RangeReader.from_url``): with a lazy open a PSD on a web server costs
   what is read, not the whole file
+- [api] ``psd_tools.composite.text.text_geometry()`` returns where a type
+  layer's lines and glyphs sit in document pixels, with the slice of the text
+  each one covers, without rendering. ``RenderReport.lines`` entries gain
+  ``start`` and ``end``
+- [api] ``TypeLayer.rasterize(keep=capture(layer))`` draws only the lines an
+  edit changed (or, with ``unit="glyph"``, the glyphs) and keeps Photoshop's
+  stored raster everywhere else; ``RenderReport.splice`` says what was kept
 - [fix] A Hue/Saturation adjustment no longer turns some near-white pixels
   black and some near-black ones bright: a pixel whose lightness rounds to 0
   or 1 reads as unsaturated instead of infinitely saturated. Only documents
@@ -225,13 +232,6 @@ Changelog
   writable, ``set_text()`` and ``set_span_style()`` edit text and styles, and
   ``rasterize()`` draws them into the layer's pixels with the new ``text``
   extra. ``composite()`` still uses the stored pixels (#25, #317, #468)
-- [api] ``psd_tools.composite.text.text_geometry()`` returns where a type
-  layer's lines and glyphs sit in document pixels, with the slice of the text
-  each one covers, without rendering. ``RenderReport.lines`` entries gain
-  ``start`` and ``end``
-- [api] ``TypeLayer.rasterize(keep=capture(layer))`` draws only the lines an
-  edit changed (or, with ``unit="glyph"``, the glyphs) and keeps Photoshop's
-  stored raster everywhere else; ``RenderReport.splice`` says what was kept
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a
