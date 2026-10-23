@@ -26,6 +26,7 @@ from psd_tools.composite import composite, paint, utils, vector
 from psd_tools.composite.composite import (
     Compositor,
     _content_bbox,
+    _held,
     _read_knockout,
     _stroke_reach,
     _vector_stroke_reach,
@@ -2561,7 +2562,7 @@ def test_a_traced_group_alpha_matches_the_one_it_composites_with(
 
 
 def test_a_traced_group_alpha_applies_the_groups_own_mask() -> None:
-    """The re-read is the group's alpha *through its mask*.
+    """The re-read is the group's alpha *through its mask*, at 8 bits.
 
     The object branch multiplies ``_get_object_shape()`` by ``_get_mask()``, and
     the group branch has to do the same or the stroke traces a boundary the
@@ -2584,7 +2585,9 @@ def test_a_traced_group_alpha_applies_the_groups_own_mask() -> None:
 
     assert not np.allclose(traced, unmasked), "the mask has to bite"
     assert traced.sum() < unmasked.sum()
-    assert np.array_equal(traced, unmasked * compositor._get_mask(group, wide))
+    assert psd.depth == 8
+    masked = unmasked * compositor._get_mask(group, wide)
+    assert np.array_equal(traced, _held(masked, psd.depth))
 
 
 def test_a_traced_artboard_keeps_its_frame_clip() -> None:
