@@ -54,9 +54,6 @@ _RULE_BYTES = 4 + 4 + 1
 #: The canvas: uint32 coverage sum, float32 RGB, uint8 winning coverage,
 #: float32 alpha and the float32 RGBA.
 _COMPOSE_BYTES = 4 + 12 + 1 + 4 + 16
-#: A colour glyph: its premultiplied float32 RGBA, a float32 coverage,
-#: a float32 RGBA paint and float64 working copies of an image's channels.
-_COLOR_GLYPH_BYTES = 16 + 4 + 16 + 32
 #: A resampled canvas: the warped premultiplied float32 RGBA, its alpha,
 #: the ink mask, the float32 RGB and the float32 RGBA; the axis-aligned
 #: render and its premultiplied copy come on top.
@@ -421,8 +418,8 @@ def _color_item(
     w, h = box[2] - box[0], box[3] - box[1]
     if w <= 0 or h <= 0:
         return None
-    _guard("glyph", w, h, w * h * _COLOR_GLYPH_BYTES, options, budget)
     grid = mode.color_alpha_grid
+    _guard("glyph", w, h, svg.peak_bytes(drawing, w, h, grid), options, budget)
     key = ("svg", g.face.key, g.gid, matrix, g.fill, grid)
     left, top, rgba = cache.get(key, lambda: svg.rasterize(drawing, matrix, grid))
     if not rgba.size:

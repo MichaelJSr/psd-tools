@@ -223,6 +223,175 @@ def test_oversized_images_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _table({1: IMAGE.format(gid=1)}).drawing(1) is not None
 
 
+def test_images_share_one_pixel_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    two = IMAGE.replace(
+        "</g>", IMAGE.split('<g id="glyph{gid}">')[1].split("</g>")[0] + "</g>"
+    )
+    monkeypatch.setattr(svg, "_MAX_IMAGE_PIXELS", 71)
+    assert _table({1: two.format(gid=1)}).drawing(1) is None
+    monkeypatch.setattr(svg, "_MAX_IMAGE_PIXELS", 72)
+    drawing = _table({1: two.format(gid=1)}).drawing(1)
+    assert drawing is not None and len(drawing.items) == 2
+
+
+def _image_doc(data: bytes) -> str:
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg"><g id="glyph1">'
+        '<image width="6" height="6" href="data:image/png;base64,'
+        f'{base64.b64encode(data).decode()}"/></g></svg>'
+    )
+
+
+def test_undecodable_images_are_not_drawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image  # noqa: PLC0415
+
+    png = base64.b64decode(_png(_ICON))
+    assert _table({1: _image_doc(png)}).drawing(1) is not None
+    assert _table({1: _image_doc(b"not an image")}).drawing(1) is None
+    assert _table({1: _image_doc(png[:-30])}).drawing(1) is None
+    # A decompression bomb is refused by Pillow before the size check.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 10)
+    assert _table({1: _image_doc(png)}).drawing(1) is None
+
+
+def test_a_corrupt_compressed_document_is_not_drawn() -> None:
+    table = _table({1: "x" * 40})
+    start = table._index[0][2]
+    table._data = table._data[:start] + b"\x1f\x8b\x08\x00" + b"\xff" * 36
+    assert table.document(1) is None
+    assert table.drawing(1) is None
+
+
+def test_deep_nesting_is_not_drawn() -> None:
+    body = "<g>" * 3000 + '<rect width="1" height="1"/>' + "</g>" * 3000
+    doc = f'<svg xmlns="http://www.w3.org/2000/svg">{body}</svg>'
+    assert _table({1: doc}).drawing(1) is None
+    doc = '<svg xmlns="http://www.w3.org/2000/svg"><g id="glyph1"/></svg>'
+    deep = doc.replace(
+        '<g id="glyph1"/>', "<g>" * 3000 + '<g id="glyph1"/>' + "</g>" * 3000
+    )
+    assert _table({1: deep}).drawing(1) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<rect width="1e999" height="1"/>',
+        '<rect x="1e9" width="1" height="1"/>',
+        '<path d="M0 0 H1e400 V1 Z"/>',
+        '<g transform="scale(1e999)"><rect width="1" height="1"/></g>',
+    ],
+)
+def test_non_finite_or_far_geometry_is_not_drawn(body: str) -> None:
+    doc = f'<svg xmlns="http://www.w3.org/2000/svg"><g id="glyph1">{body}</g></svg>'
+    assert _table({1: doc}).drawing(1) is None
+
+
+def test_style_sheets_are_not_drawn() -> None:
+    sheet = "<style>rect { fill: #f00 }</style>"
+    rect = '<rect class="a" width="1" height="1"/>'
+    doc = '<svg xmlns="http://www.w3.org/2000/svg"><g id="glyph1">{}</g></svg>'
+    assert _table({1: doc.format(sheet + rect)}).drawing(1) is None
+    assert _table({1: doc.format("<style/>" + rect)}).drawing(1) is not None
+
+
+def test_opacity_on_a_filled_stroke_is_not_drawn() -> None:
+    stroked = '<rect width="4" height="4" fill="#f00" stroke="#00f" stroke-width="1"'
+    doc = '<svg xmlns="http://www.w3.org/2000/svg"><g id="glyph1">{}</g></svg>'
+    assert _table({1: doc.format(stroked + ' opacity="0.5"/>')}).drawing(1) is None
+    group = '<g opacity="0.5">' + stroked + "/></g>"
+    assert _table({1: doc.format(group)}).drawing(1) is None
+    drawing = _table({1: doc.format(stroked + "/>")}).drawing(1)
+    assert drawing is not None and len(drawing.items) == 2
+    lone = '<rect width="4" height="4" fill="none" stroke="#00f" opacity="0.5"/>'
+    assert _table({1: doc.format(lone)}).drawing(1) is not None
+
+
+def _glyph_doc(outer: str, inner: str, body: str) -> str:
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg"{outer}><g{inner}>'
+        f'<g id="glyph1">{body}</g></g></svg>'
+    )
+
+
+def test_ancestors_pass_on_transform_and_opacity() -> None:
+    rect = _square("#ff0000", 0, 0, 2)
+    doc = _glyph_doc(' opacity="0.5"', ' transform="translate(3 1)"', rect)
+    drawing = _table({1: doc}).drawing(1)
+    assert drawing is not None
+    left, top, rgba = svg.rasterize(drawing, svg.IDENTITY)
+    assert (left, top, rgba.shape[:2]) == (3, 1, (2, 2))
+    assert rgba[..., 3] == pytest.approx(np.full((2, 2), 0.5))
+
+
+@pytest.mark.parametrize(
+    "outer, inner",
+    [(' opacity="0.5"', ""), ("", ' opacity="0.5"'), ("", ' clip-path="url(#c)"')],
+)
+def test_ancestors_of_a_group_glyph(outer: str, inner: str) -> None:
+    two = _square("#ff0000", 0, 0, 2) + _square("#00ff00", 1, 1, 2)
+    assert _table({1: _glyph_doc(outer, inner, two)}).drawing(1) is None
+
+
+def test_a_hidden_ancestor_draws_nothing() -> None:
+    doc = _glyph_doc("", ' display="none"', _square("#ff0000", 0, 0, 2))
+    assert _table({1: doc}).drawing(1) == svg.Drawing(())
+
+
+def test_arc_flags_may_run_together() -> None:
+    spaced = svg.parse_path("M0 10 a10 10 0 0 1 20 0 Z")
+    compact = svg.parse_path("M0 10 a10 10 0 0120 0 Z")
+    assert len(spaced) == len(compact) == 1
+    assert np.array_equal(spaced[0], compact[0])
+    with pytest.raises(svg.Unsupported):
+        svg.parse_path("M0 10 a10 10 0 2 1 20 0 Z")
+
+
+def test_object_bounding_box_is_the_tight_bounds() -> None:
+    drawing = _drawing('<path d="M0 0 C0 -10 10 -10 10 0 Z"/>')
+    (shape,) = drawing.items
+    assert isinstance(shape, svg.Shape)
+    # The curve peaks at t = 1/2, three quarters of the way to its handles.
+    assert shape.bbox == pytest.approx((0, -7.5, 10, 0))
+
+
+def test_a_singular_gradient_paints_nothing() -> None:
+    drawing = _drawing(
+        '<defs><linearGradient id="g" gradientTransform="scale(0)">'
+        '<stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/>'
+        '</linearGradient></defs><rect width="2" height="2" fill="url(#g)"/>'
+    )
+    _, _, rgba = svg.rasterize(drawing, svg.IDENTITY)
+    assert rgba.shape[:2] == (2, 2) and not rgba.any()
+
+
+@pytest.mark.parametrize("grid", [0, 4])
+def test_peak_bytes_bounds_the_allocations(grid: int) -> None:
+    import tracemalloc  # noqa: PLC0415
+
+    drawing = _table({1: BADGE.format(gid=1)}).drawing(1)
+    assert drawing is not None
+    m: svg.Affine = (0.25, 0.0, 0.0, 0.25, 0.3, 200.6)
+    box = svg.device_bbox(drawing, m)
+    assert box is not None
+    w, h = box[2] - box[0], box[3] - box[1]
+    tracemalloc.start()
+    try:
+        svg.rasterize(drawing, m, grid)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak <= svg.peak_bytes(drawing, w, h, grid)
+
+
+def test_peak_bytes_counts_images_and_the_alpha_grid() -> None:
+    drawing = _table({1: IMAGE.format(gid=1)}).drawing(1)
+    assert drawing is not None
+    plain = svg.Drawing(())
+    assert svg.peak_bytes(drawing, 10, 10) > svg.peak_bytes(plain, 10, 10)
+    assert svg.peak_bytes(plain, 10, 10, 4) > svg.peak_bytes(plain, 10, 10)
+
+
 def test_entities_are_refused() -> None:
     doc = (
         '<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY a "aaaa">]>'
@@ -394,6 +563,19 @@ def test_alpha_grid_follows_the_antialias_mode(color_face: Face) -> None:
     assert np.allclose(partial * 16, np.round(partial * 16), atol=1e-4)
     sharp_partial = sharp[..., 3][(sharp[..., 3] > 0) & (sharp[..., 3] < 1)]
     assert not np.allclose(sharp_partial * 16, np.round(sharp_partial * 16), atol=1e-4)
+
+
+def test_the_glyph_budget_counts_the_alpha_grid(color_face: Face) -> None:
+    glyph = _glyph(color_face, "A", 0.0, 100.0, 100.0)
+    drawing = color_face.svg.drawing(glyph.gid, (*RED, 1.0)) if color_face.svg else None
+    assert drawing is not None
+    w, h = 202, 102  # the badge's device box: 2 x 1 em and its stroke
+    budget = svg.peak_bytes(drawing, w, h, 0) * 2
+    assert budget < svg.peak_bytes(drawing, w, h, 4)
+    layout = Layout((glyph,), (), (), {}, ())
+    rasterize(layout, IDENTITY, SHARP, Options(), max_alloc_bytes=budget)
+    with pytest.raises(ValueError, match="over the configured budget"):
+        rasterize(layout, IDENTITY, STRONG, Options(), max_alloc_bytes=budget)
 
 
 def test_image_glyph_and_text_compose(color_face: Face) -> None:

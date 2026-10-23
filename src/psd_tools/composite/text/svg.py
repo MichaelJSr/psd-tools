@@ -4,9 +4,10 @@ Covers static SVG: ``path``, ``rect``, ``circle``, ``ellipse``, ``line``,
 ``polyline`` and ``polygon`` in groups with ``transform`` and ``opacity``,
 filled with a solid colour or a linear or radial gradient, rectangles also
 stroked, and embedded PNG or JPEG ``image`` elements. A glyph whose document
-uses anything else (``use``, clipping, masks, filters, text, a stroke on
-another shape) is unsupported: :meth:`SvgTable.drawing` returns ``None`` and
-the caller draws its outline instead.
+uses anything else (``use``, clipping, masks, filters, text, style sheets, a
+stroke on another shape) or that cannot be read is unsupported:
+:meth:`SvgTable.drawing` returns ``None`` and the caller draws its outline
+instead.
 
 Coordinates are font units, y down, with the glyph origin at ``(0, 0)``; a
 root ``viewBox`` is mapped onto the em square there.
@@ -39,12 +40,16 @@ IDENTITY: Affine = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 _PARSED_DOCS = 64
 #: Bytes a compressed document may inflate to.
 _MAX_DOCUMENT = 1 << 26
-#: Pixels an embedded image may decode to.
-_MAX_IMAGE_PIXELS = 1 << 24
+#: Pixels a document's embedded images may decode to, together.
+_MAX_IMAGE_PIXELS = 1 << 22
+#: Elements a document may nest.
+_MAX_DEPTH = 64
+#: Ems from the origin a glyph may reach.
+_MAX_EXTENT = 16
 _XLINK = "{http://www.w3.org/1999/xlink}href"
 _SHAPES = ("path", "rect", "circle", "ellipse", "line", "polyline", "polygon")
 #: Elements that draw nothing themselves and need no support.
-_INERT = ("title", "desc", "metadata", "style")
+_INERT = ("title", "desc", "metadata")
 _PAINT_KEYS = (
     "fill",
     "fill-opacity",
@@ -97,11 +102,11 @@ def compose(m: Affine, n: Affine) -> Affine:
     )
 
 
-def _invert(m: Affine) -> Affine:
+def _invert(m: Affine) -> Affine | None:
     a, b, c, d, e, f = m
     det = a * d - b * c
     if not det:
-        raise Unsupported("singular transform")
+        return None
     return (
         d / det,
         -b / det,
@@ -159,7 +164,7 @@ class Shape:
 class Picture:
     """An image: ``transform`` maps its pixel grid to user space."""
 
-    #: Straight ``float32`` HxWx4: a transparent pixel keeps its stored colour.
+    #: Straight ``uint8`` HxWx4: a transparent pixel keeps its stored colour.
     rgba: np.ndarray
     transform: Affine
     opacity: float
@@ -223,7 +228,10 @@ class SvgTable:
         doc = self._data[start : start + length]
         if doc[:2] == b"\x1f\x8b":
             inflate = zlib.decompressobj(47)
-            doc = inflate.decompress(doc, _MAX_DOCUMENT)
+            try:
+                doc = inflate.decompress(doc, _MAX_DOCUMENT)
+            except zlib.error:
+                return None
             if inflate.unconsumed_tail:
                 return None
         return doc
@@ -293,6 +301,13 @@ def _style(el: ET.Element) -> dict[str, str]:
     return out
 
 
+def _number(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise Unsupported(f"number {text!r}")
+    return value
+
+
 def _length(value: str | None, default: float = 0.0) -> float:
     if value is None or not value.strip():
         return default
@@ -301,7 +316,7 @@ def _length(value: str | None, default: float = 0.0) -> float:
         v = v[:-2]
     if not _NUMBER.fullmatch(v):
         raise Unsupported(f"length {value!r}")
-    return float(v)
+    return _number(v)
 
 
 def _fraction(value: str | None, default: float) -> float:
@@ -310,7 +325,7 @@ def _fraction(value: str | None, default: float) -> float:
         return default
     v = value.strip()
     if v.endswith("%"):
-        return float(v[:-1]) / 100
+        return _number(v[:-1]) / 100
     return _length(v)
 
 
@@ -338,10 +353,10 @@ def parse_color(value: str, context: RGBA) -> RGBA | None:
     if m:
         parts = [p.strip() for p in m.group(1).split(",")]
         rgb = [
-            float(p[:-1]) / 100 if p.endswith("%") else float(p) / 255
+            _number(p[:-1]) / 100 if p.endswith("%") else _number(p) / 255
             for p in parts[:3]
         ]
-        alpha = float(parts[3]) if len(parts) > 3 else 1.0
+        alpha = _number(parts[3]) if len(parts) > 3 else 1.0
         return (rgb[0], rgb[1], rgb[2], alpha)
     if v in _NAMED:
         r, g, b = _NAMED[v]
@@ -355,7 +370,7 @@ def parse_transform(value: str | None) -> Affine:
     if not value:
         return m
     for name, args in re.findall(r"([a-zA-Z]+)\s*\(([^)]*)\)", value):
-        a = [float(x) for x in _NUMBER.findall(args)]
+        a = [_number(x) for x in _NUMBER.findall(args)]
         if name == "matrix" and len(a) == 6:
             t: Affine = (a[0], a[1], a[2], a[3], a[4], a[5])
         elif name == "translate" and a:
@@ -497,7 +512,19 @@ def parse_path(d: str) -> list[np.ndarray]:
         if i >= len(toks) or toks[i].isalpha():
             raise Unsupported("path data")
         i += 1
-        return float(toks[i - 1])
+        return _number(toks[i - 1])
+
+    def flag() -> bool:
+        # A flag is one digit, and may run into what follows ("0110 10").
+        nonlocal i
+        if i >= len(toks) or toks[i][:1] not in ("0", "1"):
+            raise Unsupported("path data")
+        tok = toks[i]
+        if len(tok) > 1:
+            toks[i] = tok[1:]
+        else:
+            i += 1
+        return tok[0] == "1"
 
     def close() -> None:
         nonlocal segs
@@ -554,7 +581,7 @@ def parse_path(d: str) -> list[np.ndarray]:
             qc, cur = q1, p
         elif c == "A":
             rx, ry, phi = num(), num(), num()
-            large, sweep = num() != 0, num() != 0
+            large, sweep = flag(), flag()
             p = (ox + num(), oy + num())
             segs.extend(_arc(cur, rx, ry, phi, large, sweep, p))
             cur = p
@@ -629,18 +656,29 @@ def _rect_ring(
 
 
 def _points(value: str) -> list[tuple[float, float]]:
-    v = [float(x) for x in _NUMBER.findall(value)]
+    v = [_number(x) for x in _NUMBER.findall(value)]
     return list(zip(v[0::2], v[1::2], strict=False))
 
 
 def _bbox(contours: list[np.ndarray]) -> tuple[float, float, float, float]:
-    pts = np.concatenate([c.reshape(-1, 2) for c in contours])
-    return (
-        float(pts[:, 0].min()),
-        float(pts[:, 1].min()),
-        float(pts[:, 0].max()),
-        float(pts[:, 1].max()),
-    )
+    """The tight bounds of cubic contours: their ends and the curves' extrema."""
+    segs = np.concatenate(contours)
+    p0, p1, p2, p3 = segs[:, 0], segs[:, 1], segs[:, 2], segs[:, 3]
+    # Roots of B'(t) / 3 = a t^2 + b t + c per axis, in the stable form.
+    a = p3 - 3 * p2 + 3 * p1 - p0
+    b = 2 * (p2 - 2 * p1 + p0)
+    c = p1 - p0
+    disc = b * b - 4 * a * c
+    with np.errstate(divide="ignore", invalid="ignore"):
+        q = -0.5 * (b + np.copysign(np.sqrt(np.maximum(disc, 0.0)), b))
+        roots = np.stack([q / a, c / q])
+    keep = (disc >= 0) & np.isfinite(roots) & (roots > 0) & (roots < 1)
+    t = np.where(keep, roots, 0.0)
+    u = 1 - t
+    ext = u**3 * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t**3 * p3
+    lo = np.minimum(np.minimum(p0, p3).min(axis=0), ext.min(axis=(0, 1)))
+    hi = np.maximum(np.maximum(p0, p3).max(axis=0), ext.max(axis=(0, 1)))
+    return float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1])
 
 
 # -- parsing ---------------------------------------------------------------
@@ -655,26 +693,38 @@ class _Parser:
         self.root = root
         self.target = target if target is not None else root
         self.items: list[Item] = []
+        self.image_pixels = 0
 
     def drawing(self) -> Drawing:
         if _local(self.root.tag) != "svg":
             raise Unsupported("root")
-        # Ancestors of the glyph element pass on their transform and paint.
-        chain = self._chain(self.root, self.target) or [self.root]
-        m, style, opacity = self._viewbox(), self._inherited({}, self.root), 1.0
-        for el in chain[1:-1] if len(chain) > 1 else []:
-            m = compose(m, parse_transform(el.get("transform")))
-            style = self._inherited(style, el)
-            opacity *= _length(_style(el).get("opacity"), 1.0)
-        self._walk(self.target, m, style, opacity)
-        return Drawing(tuple(self.items))
+        # The glyph element's ancestors, the root first, pass on their
+        # transform, paint and opacity.
+        chain = self._chain()
+        m, opacity = self._viewbox(), 1.0
+        style: dict[str, str] = {}
+        for el in chain[:-1]:
+            if _local(el.tag) not in ("svg", "g", "a"):
+                raise Unsupported(f"glyph inside {_local(el.tag)}")
+            entered = self._enter(el, self.target, m, style, opacity)
+            if entered is None:
+                return Drawing(())
+            m, style, opacity = entered
+        self._walk(self.target, m, style, opacity, len(chain))
+        drawing = Drawing(tuple(self.items))
+        reach = _MAX_EXTENT * self.upem
+        for item in drawing.items:
+            box = _item_box(item, IDENTITY)
+            if not all(math.isfinite(v) and abs(v) <= reach for v in box):
+                raise Unsupported("extent")
+        return drawing
 
     def _viewbox(self) -> Affine:
         """A root ``viewBox`` mapped onto the em square at the glyph origin."""
         value = self.root.get("viewBox")
         if not value:
             return IDENTITY
-        box = [float(v) for v in _NUMBER.findall(value)]
+        box = [_number(v) for v in _NUMBER.findall(value)]
         if len(box) != 4 or box[2] <= 0 or box[3] <= 0:
             raise Unsupported("viewBox")
         x, y, w, h = box
@@ -691,14 +741,13 @@ class _Parser:
             )
         return (sx, 0.0, 0.0, sy, -x * sx, -y * sy)
 
-    def _chain(self, node: ET.Element, target: ET.Element) -> list[ET.Element] | None:
-        if node is target:
-            return [node]
-        for child in node:
-            path = self._chain(child, target)
-            if path is not None:
-                return [node, *path]
-        return None
+    def _chain(self) -> list[ET.Element]:
+        """The root, the target and the elements between them."""
+        parents = {child: parent for parent in self.root.iter() for child in parent}
+        chain = [self.target]
+        while chain[-1] is not self.root:
+            chain.append(parents[chain[-1]])
+        return chain[::-1]
 
     @staticmethod
     def _inherited(parent: dict[str, str], el: ET.Element) -> dict[str, str]:
@@ -709,34 +758,62 @@ class _Parser:
                 style[k] = own[k]
         return style
 
-    def _walk(
-        self, el: ET.Element, m: Affine, style: dict[str, str], opacity: float
-    ) -> None:
-        tag = _local(el.tag)
+    def _enter(
+        self,
+        el: ET.Element,
+        drawn: ET.Element,
+        m: Affine,
+        style: dict[str, str],
+        opacity: float,
+    ) -> tuple[Affine, dict[str, str], float] | None:
+        """``el``'s transform, paint and opacity on its parent's; ``None`` if hidden.
+
+        ``drawn`` is what ``el``'s opacity applies to: ``el`` itself, or the
+        glyph element below it.
+        """
         own = _style(el)
         if own.get("display") == "none" or own.get("visibility") == "hidden":
-            return
+            return None
         for k in ("clip-path", "mask", "filter"):
             if own.get(k, "none") != "none":
                 raise Unsupported(k)
-        m = compose(m, parse_transform(own.get("transform")))
-        style = self._inherited(style, el)
-        own_opacity = _length(own.get("opacity"), 1.0)
-        if tag == "svg" and el is not self.root:
+        if _local(el.tag) == "svg" and el is not self.root:
             raise Unsupported("nested svg")
-        if tag in ("svg", "g", "a") and own_opacity < 1 and _painters(el) > 1:
+        own_opacity = _length(own.get("opacity"), 1.0)
+        if own_opacity < 1 and _painters(drawn) > 1:
             # A group's opacity applies to the group composited as a whole.
             raise Unsupported("group opacity")
-        opacity *= own_opacity
+        m = compose(m, parse_transform(own.get("transform")))
+        return m, self._inherited(style, el), opacity * own_opacity
+
+    def _walk(
+        self,
+        el: ET.Element,
+        m: Affine,
+        style: dict[str, str],
+        opacity: float,
+        depth: int,
+    ) -> None:
+        if depth > _MAX_DEPTH:
+            raise Unsupported("nesting")
+        tag = _local(el.tag)
+        if tag in ("defs", "linearGradient", "radialGradient", *_INERT):
+            return
+        if tag == "style":
+            if (el.text or "").strip():
+                raise Unsupported("style sheet")
+            return
+        entered = self._enter(el, el, m, style, opacity)
+        if entered is None:
+            return
+        m, style, opacity = entered
         if tag in ("svg", "g", "a"):
             for child in el:
-                self._walk(child, m, style, opacity)
+                self._walk(child, m, style, opacity, depth + 1)
         elif tag in _SHAPES:
-            self._shape(tag, own, m, style, opacity)
+            self._shape(tag, _style(el), m, style, opacity)
         elif tag == "image":
-            self._image(el, own, m, opacity)
-        elif tag in ("defs", "linearGradient", "radialGradient", *_INERT):
-            return
+            self._image(el, _style(el), m, opacity)
         else:
             raise Unsupported(tag)
 
@@ -789,18 +866,21 @@ class _Parser:
         fill = self._paint(style.get("fill", "black"), bbox)
         fill_opacity = _length(style.get("fill-opacity"), 1.0)
         nonzero = style.get("fill-rule", "nonzero") != "evenodd"
+        paint = None
+        if stroked:
+            if rect is None:
+                raise Unsupported(f"stroked {tag}")
+            if _length(style.get("stroke-opacity"), 1.0) != 1.0:
+                raise Unsupported("stroke-opacity")
+            paint = self._paint(stroke, bbox)
+            if fill is not None and paint is not None and opacity < 1:
+                # The fill and the stroke are composited together first.
+                raise Unsupported("opacity on a filled stroke")
         if fill is not None:
             self.items.append(
                 Shape(tuple(contours), m, fill, opacity * fill_opacity, nonzero, bbox)
             )
-        if not stroked:
-            return
-        if rect is None:
-            raise Unsupported(f"stroked {tag}")
-        if _length(style.get("stroke-opacity"), 1.0) != 1.0:
-            raise Unsupported("stroke-opacity")
-        paint = self._paint(stroke, bbox)
-        if paint is not None:
+        if rect is not None and paint is not None:
             self.items.append(
                 Shape(_rect_ring(rect, width), m, paint, opacity, True, bbox)
             )
@@ -897,11 +977,17 @@ class _Parser:
         from PIL import Image  # noqa: PLC0415
 
         raw = base64.b64decode(href.strip()[hit.end() :])
-        with Image.open(io.BytesIO(raw)) as im:
-            if im.width * im.height > _MAX_IMAGE_PIXELS:
-                raise Unsupported("image size")
-            im.load()
-            rgba = np.asarray(im.convert("RGBA"), dtype=np.float32) / 255
+        try:
+            with Image.open(io.BytesIO(raw)) as im:
+                self.image_pixels += im.width * im.height
+                if self.image_pixels > _MAX_IMAGE_PIXELS:
+                    raise Unsupported("image size")
+                rgba = np.asarray(im.convert("RGBA"), dtype=np.uint8)
+        except Unsupported:
+            raise
+        except Exception as error:
+            # Pillow reports malformed data in several exception types.
+            raise Unsupported("image data") from error
         ih, iw = rgba.shape[:2]
         x, y = _length(a.get("x")), _length(a.get("y"))
         w, h = _length(a.get("width"), float(iw)), _length(a.get("height"), float(ih))
@@ -983,6 +1069,8 @@ def _paint_rgba(
             return np.zeros((h, w, 4), np.float32)
         to_user = compose((bx1 - bx0, 0.0, 0.0, by1 - by0, bx0, by0), to_user)
     inv = _invert(compose(compose(m, shape.transform), to_user))
+    if inv is None:
+        return np.zeros((h, w, 4), np.float32)
     ys, xs = np.mgrid[0:h, 0:w]
     px, py = xs + x0 + 0.5, ys + y0 + 0.5
     a, b, c, d, e, f = inv
@@ -1052,7 +1140,7 @@ def picture_layer(
     of transparent pixels (black, as a rule) darkens a soft edge.
     """
     full = compose(m, pic.transform)
-    src = pic.rgba.astype(np.float64)
+    src = (pic.rgba.astype(np.float32) / 255).astype(np.float64)
     ih, iw = src.shape[:2]
     if _axis_aligned(full):
         place, (rx0, ry0, rx1, ry1) = _snapped(full, iw, ih)
@@ -1066,7 +1154,10 @@ def picture_layer(
         layer = np.matmul(rows.transpose(0, 2, 1), wx.T).transpose(0, 2, 1)
     else:
         # Bilinear from pixel centres; no corpus glyph is rotated or skewed.
-        p, q, r, s, t, u = _invert(full)
+        inv = _invert(full)
+        if inv is None:
+            return np.zeros((h, w, 4), np.float32)
+        p, q, r, s, t, u = inv
         ys, xs = np.mgrid[0:h, 0:w]
         px, py = xs + x0 + 0.5, ys + y0 + 0.5
         sx, sy = p * px + r * py + t - 0.5, q * px + s * py + u - 0.5
@@ -1086,29 +1177,34 @@ def picture_layer(
     return layer
 
 
+def _item_box(item: Item, m: Affine) -> tuple[float, float, float, float]:
+    """Bounds of ``item``'s control points or image corners under ``m``."""
+    if isinstance(item, Shape):
+        pts = np.concatenate([c.reshape(-1, 2) for c in item.curves])
+        pts = _apply(compose(m, item.transform), pts)
+    else:
+        ih, iw = item.rgba.shape[:2]
+        corners = np.array([[0, 0], [iw, 0], [0, ih], [iw, ih]], np.float64)
+        pts = _apply(compose(m, item.transform), corners)
+    return (
+        float(pts[:, 0].min()),
+        float(pts[:, 1].min()),
+        float(pts[:, 0].max()),
+        float(pts[:, 1].max()),
+    )
+
+
 def device_bbox(drawing: Drawing, m: Affine) -> tuple[int, int, int, int] | None:
     """Integer pixel bounds of ``drawing`` under ``m``."""
     boxes = []
     for item in drawing.items:
-        if isinstance(item, Shape):
-            pts = np.concatenate([c.reshape(-1, 2) for c in item.curves])
-            pts = _apply(compose(m, item.transform), pts)
-        else:
+        full = compose(m, item.transform)
+        if isinstance(item, Picture) and _axis_aligned(full):
             ih, iw = item.rgba.shape[:2]
-            full = compose(m, item.transform)
-            if _axis_aligned(full):
-                boxes.append(_snapped(full, iw, ih)[1])
-                continue
-            corners = np.array([[0, 0], [iw, 0], [0, ih], [iw, ih]], np.float64)
-            pts = _apply(full, corners)
-        boxes.append(
-            (
-                math.floor(pts[:, 0].min()),
-                math.floor(pts[:, 1].min()),
-                math.ceil(pts[:, 0].max()),
-                math.ceil(pts[:, 1].max()),
-            )
-        )
+            boxes.append(_snapped(full, iw, ih)[1])
+            continue
+        x0, y0, x1, y1 = _item_box(item, m)
+        boxes.append((math.floor(x0), math.floor(y0), math.ceil(x1), math.ceil(y1)))
     if not boxes:
         return None
     return (
@@ -1158,13 +1254,55 @@ def _sampled_alpha(
         if not isinstance(item, Shape) or item.paint is None:
             continue
         # A cell's area coverage passes one half where its centre is inside.
-        inside = fill_coverage(
-            _device_contours(item, hi), w * n, h * n, nonzero=item.nonzero
+        inside = (
+            fill_coverage(
+                _device_contours(item, hi), w * n, h * n, nonzero=item.nonzero
+            )
+            >= 0.5
         )
+        if not inside.any():
+            continue
         alpha = _paint_rgba(item.paint, item, m, x0, y0, w, h)[..., 3] * item.opacity
-        alpha = np.repeat(np.repeat(alpha, n, axis=0), n, axis=1)
-        keep *= 1 - (inside >= 0.5) * alpha
+        if alpha.min() == alpha.max():
+            clear = np.float32(1 - alpha.flat[0])
+            np.multiply(keep, clear, out=keep, where=inside)
+        else:
+            grown = np.repeat(np.repeat(1 - alpha, n, axis=0), n, axis=1)
+            np.multiply(keep, grown, out=keep, where=inside)
     return 1 - keep.reshape(h, n, w, n).mean(axis=(1, 3))
+
+
+# Bytes :func:`rasterize` holds at its peak, counted from the arrays alive
+# at once, for an allocation budget.
+#: Per pixel: the float32 RGBA result and picture alpha, a shape's float32
+#: coverage and paint, and a gradient's float64 pixel grid, coordinates,
+#: parameter and channels.
+_RASTER_BYTES = 16 + 4 + 4 + 16 + 160
+#: Per point sample of the alpha grid: the float32 product, a shape's
+#: float32 coverage, the scanline's float64 sums and their even-odd fold,
+#: the inside mask and the grown float32 alpha.
+_SAMPLE_BYTES = 4 + 4 + 8 + 8 + 1 + 4
+#: Per pixel an image covers: the float64 resampled RGBA, its weights
+#: and, for a rotated image, the float64 sample coordinates.
+_PICTURE_BYTES = 32 + 32 + 128
+#: Per source pixel of an image: its float32 and float64 RGBA.
+_IMAGE_BYTES = 16 + 32
+#: Per source pixel of a row or column of an image, per output pixel along
+#: it: the float64 RGBA of the first pass and the area weights.
+_IMAGE_SPAN_BYTES = 32 + 8 * 4
+
+
+def peak_bytes(drawing: Drawing, w: int, h: int, alpha_grid: int = 0) -> int:
+    """Bytes :func:`rasterize` allocates at its peak for a ``w`` x ``h`` result."""
+    total = w * h * _RASTER_BYTES
+    if alpha_grid > 1:
+        total += w * h * alpha_grid * alpha_grid * _SAMPLE_BYTES
+    for item in drawing.items:
+        if isinstance(item, Picture):
+            ih, iw = item.rgba.shape[:2]
+            total += w * h * _PICTURE_BYTES + ih * iw * _IMAGE_BYTES
+            total += (h * iw + w * ih + w * iw) * _IMAGE_SPAN_BYTES
+    return total
 
 
 def rasterize(
