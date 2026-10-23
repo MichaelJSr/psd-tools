@@ -14,6 +14,7 @@ group around one, a blend mode) are forged.
 import copy
 import importlib
 import io
+import warnings
 from collections.abc import Iterator
 from typing import Any
 
@@ -32,7 +33,7 @@ from psd_tools.composite.text_blend import (
     to_text_space,
 )
 from psd_tools.composite.widen import make_widen
-from psd_tools.constants import BlendMode, ColorMode, Tag
+from psd_tools.constants import BlendMode, ColorMode, Compression, Tag
 from psd_tools.psd.descriptor import Double, Enumerated
 from psd_tools.terminology import Enum, Key
 
@@ -548,4 +549,112 @@ def test_an_edge_painted_over_is_settled_on_the_finished_canvas(
         veiled, force=True, text_preview=False, layer_text_gamma={name.layer_id: None}
     )
     assert settled == [True]
+    assert np.array_equal(color, expected)
+
+
+def _settles(seen: list[int], gamma: int = 120, straight: int = 100) -> bool:
+    """``_settles_straight`` on a row of edge pixels the preview shows as ``seen``.
+
+    The finished canvas holds ``gamma`` with the layer in the gamma and
+    ``straight`` with it straight, in 8-bit steps.
+    """
+    count = len(seen)
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    reference = np.repeat(np.array(seen, dtype=np.uint8)[None, :, None], 3, axis=2)
+    return compositing._settles_straight(
+        np.full((1, count, 3), gamma / 255, dtype=np.float32),
+        np.full((1, count, 3), straight / 255, dtype=np.float32),
+        np.ones((1, count, 1), dtype=np.float32),
+        (0, 0, count, 1),
+        reference,
+        (np.zeros(count, dtype=int), np.arange(count)),
+    )
+
+
+def test_straight_takes_a_clear_majority_a_close_fit_and_enough_pixels() -> None:
+    assert _settles([100] * 20)
+    assert not _settles([100] * 14 + [120] * 6)
+    assert not _settles([103] * 20)
+    assert not _settles([100] * 10)
+    # Pixels where the two mixes differ by rounding alone say nothing.
+    assert not _settles([100] * 20, gamma=102)
+
+
+def test_only_the_layers_that_settle_go_on_straight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both layers lean straight where they go on; only the name settles.
+
+    The leaning edges are tried over their own box, not the document.
+    """
+    psd, name, ability = _kept_raster()
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    evidence = compositing._edge_evidence
+
+    def leaning(*args: Any) -> Any:
+        found = evidence(*args)
+        return None if found is None else (1.0, 5.0 / 255.0, *found[2:])
+
+    tried: list[tuple[int, ...]] = []
+
+    def name_only(first: np.ndarray, second: np.ndarray, *args: Any) -> bool:
+        tried.append(first.shape[:2])
+        rows = args[-1][0]
+        return bool(name.bbox[1] <= rows.min() and rows.max() < name.bbox[3])
+
+    monkeypatch.setattr(compositing, "_edge_evidence", leaning)
+    monkeypatch.setattr(compositing, "_settles_straight", name_only)
+    color, _, _ = composite(psd, force=True)
+    assert len(tried) == 2
+    assert all(shape != (psd.height, psd.width) for shape in tried)
+    expected, _, _ = composite(
+        psd,
+        force=True,
+        layer_text_gamma={name.layer_id: None, ability.layer_id: TEXT_BLEND_GAMMA},
+    )
+    assert np.array_equal(color, expected)
+    both, _, _ = composite(
+        psd, force=True, layer_text_gamma={name.layer_id: None, ability.layer_id: None}
+    )
+    assert not np.array_equal(color, both)
+
+
+@pytest.mark.parametrize(
+    "filename", [_KEPT_RASTER, "16bit5x5.psd", "blend-modes/darken.psd"]
+)
+def test_the_preview_is_read_as_topil_reads_it(filename: str) -> None:
+    """8-bit at any depth, with the transparency Photoshop stored."""
+    psd = PSDImage.open(full_name(filename))
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    reference = compositing._text_reference(psd)
+    preview = psd.topil(apply_icc=False)
+    assert preview is not None and reference is not None
+    assert reference.dtype == np.uint8
+    assert np.array_equal(reference, np.asarray(preview))
+
+
+def test_the_preview_is_read_once_until_it_changes() -> None:
+    psd, _, _ = _kept_raster()
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    first = compositing._text_reference(psd)
+    assert compositing._text_reference(psd) is first
+    gray = Image.new("RGB", (psd.width, psd.height), (128, 128, 128))
+    psd.save(io.BytesIO(), preview=gray)
+    second = compositing._text_reference(psd)
+    assert second is not first and second is not None
+    assert np.all(second == 128)
+
+
+def test_a_preview_that_does_not_decode_is_not_read() -> None:
+    """Without a word: a decode warning is process-wide, so none is raised."""
+    psd, _, _ = _kept_raster()
+    image_data = psd._record.image_data
+    image_data.compression = Compression.ZIP
+    image_data.data = b"not a deflate stream"
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert compositing._text_reference(psd) is None
+    color, _, _ = composite(psd, force=True)
+    expected, _, _ = composite(psd, force=True, text_preview=False)
     assert np.array_equal(color, expected)

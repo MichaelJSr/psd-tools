@@ -4,6 +4,7 @@ import functools
 import logging
 import math
 import warnings
+import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple, Protocol, cast
@@ -40,6 +41,8 @@ from psd_tools.api.utils import (
     check_growth,
     check_pixel_size,
     get_color_channels,
+    get_transparency_index,
+    has_transparency,
 )
 from psd_tools.composite import paint, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
@@ -79,7 +82,7 @@ from psd_tools.composite.text_blend import (
     to_text_space,
 )
 from psd_tools.composite.widen import make_widen
-from psd_tools.compression import PSDDecompressionWarning
+from psd_tools.compression import _decompress
 from psd_tools.constants import (
     BevelDirection,
     BevelStyle,
@@ -1268,23 +1271,24 @@ def composite(
     overrides = dict(layer_text_gamma or {})
     reference: Callable[[], np.ndarray | None] | None = None
     if text_preview and isinstance(group, PSDImage) and text_gamma is not None:
-        document = group
-        reference = functools.cache(lambda: _text_reference(document))
+        reference = functools.partial(_text_reference, group)
 
     def composite_pass(
-        chosen: dict[int, bool],
+        chosen: dict[int, bool], box: tuple[int, int, int, int] = viewport
     ) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], _TextBlend]:
+        """One pass over ``box``, a part of the viewport, with ``chosen`` kept."""
+        on = _within(viewport, box)
         cache = _PassCache()
         cache.text.overrides = overrides
         cache.text.reference = reference
         cache.text.chosen = dict(chosen)
         compositor = Compositor(
-            viewport,
-            backdrop_color,
-            backdrop_alpha,
+            box,
+            backdrop_color[on],
+            backdrop_alpha[on],
             layer_filter,
             force,
-            document_backdrop=lambda: _document_backdrop(_psd, viewport),
+            document_backdrop=lambda: _document_backdrop(_psd, box),
             widen=_widen_fn,
             color_mode=_psd.color_mode,
             cache=cache,
@@ -1299,21 +1303,39 @@ def composite(
     reference_array = text.reference_array()
     if not leaning or reference_array is None:
         return result
-    # A layer that leaned straight where it went on is settled here, on the
-    # finished canvas, against the same composite with it straight.
-    tried, _ = composite_pass(text.chosen | dict.fromkeys(leaning, True))
+    # A layer that leaned straight where it went on is settled on the finished
+    # canvas, against the same composite with it straight: worked out only
+    # over its edge, then over the whole viewport if it does settle.
+    rows = np.concatenate([pixels[0] for pixels in leaning.values()])
+    columns = np.concatenate([pixels[1] for pixels in leaning.values()])
+    box = (
+        int(columns.min()),
+        int(rows.min()),
+        int(columns.max()) + 1,
+        int(rows.max()) + 1,
+    )
+    on = _within(viewport, box)
+    tried, _ = composite_pass(text.chosen | dict.fromkeys(leaning, True), box)
     settled = {
         key
         for key, pixels in leaning.items()
         if _settles_straight(
-            result[0], tried[0], result[2], viewport, reference_array, pixels
+            result[0][on], tried[0], result[2][on], box, reference_array, pixels
         )
     }
-    if settled == set(leaning):
-        return tried
     if not settled:
         return result
     return composite_pass(text.chosen | dict.fromkeys(settled, True))[0]
+
+
+def _within(
+    viewport: tuple[int, int, int, int], box: tuple[int, int, int, int]
+) -> tuple[slice, slice]:
+    """Where ``box``, on the document, falls on a canvas over ``viewport``."""
+    return (
+        slice(box[1] - viewport[1], box[3] - viewport[1]),
+        slice(box[0] - viewport[0], box[2] - viewport[0]),
+    )
 
 
 def paste(
@@ -1391,25 +1413,78 @@ def _excluded_channels(layer: Layer, channels: int) -> list[int]:
     return sorted({index for index in restricted if index < channels})
 
 
+# Each document's preview as _text_reference() read it, with the stored bytes
+# it was read from: a save that regenerates the preview replaces them.
+_KeptReference = tuple[bytes, np.ndarray | None]
+_TEXT_REFERENCES: weakref.WeakKeyDictionary[PSDImage, _KeptReference] = (
+    weakref.WeakKeyDictionary()
+)
+
+
 def _text_reference(psd: PSDImage) -> np.ndarray | None:
     """The document's stored preview, 8-bit, or None without one to read.
 
-    A side read: a preview that does not decode, or that the document's
-    allocation budget does not allow, is not read, and says nothing.
+    Read once and kept with the document until its stored preview changes.
     """
-    if psd.color_mode != ColorMode.RGB or psd.depth == 32 or not psd.has_preview():
-        return None
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        try:
-            preview = psd.topil(apply_icc=False)
-        except ValueError:
-            return None
-    if preview is None or any(
-        issubclass(warning.category, PSDDecompressionWarning) for warning in caught
+    stored = psd._record.image_data.data
+    kept = _TEXT_REFERENCES.get(psd)
+    if kept is not None and kept[0] is stored:
+        return kept[1]
+    array = _read_text_reference(psd)
+    _TEXT_REFERENCES[psd] = (stored, array)
+    return array
+
+
+def _read_text_reference(psd: PSDImage) -> np.ndarray | None:
+    """:py:meth:`PSDImage.topil` without the profile, as an array, or None.
+
+    A side read: a preview that does not decode, or that the document's
+    allocation budget does not allow, is not read, and says nothing. The
+    decode raises rather than warns, as a warning filter would be
+    process-global.
+    """
+    header = psd._record.header
+    if (
+        psd.color_mode != ColorMode.RGB
+        or psd.depth == 32
+        or header.channels < 3
+        or not psd.has_preview()
     ):
         return None
-    array = np.asarray(preview)
+    image_data = psd._record.image_data
+    try:
+        check_pixel_size(
+            psd.width,
+            psd.height,
+            psd.channels,
+            max_alloc_bytes=psd._max_alloc_bytes,
+            estimated_bytes=pil_io._image_data_peak_bytes(psd, None, False),
+            warn=False,
+        )
+        data = _decompress(
+            image_data.data,
+            image_data.compression,
+            header.width,
+            header.height * header.channels,
+            header.depth,
+            header.version,
+            strict=True,
+        )
+        plane = len(data) // header.channels
+        planes = [
+            pil_io._create_image(
+                (psd.width, psd.height),
+                data[index * plane : (index + 1) * plane],
+                psd.depth,
+            )
+            for index in range(header.channels)
+        ]
+        image = Image.merge("RGB", planes[:3])
+        if has_transparency(psd):
+            image.putalpha(planes[get_transparency_index(psd)])
+        array = np.asarray(pil_io._remove_white_background(image, psd.color_mode))
+    except ValueError:
+        return None
     if array.ndim != 3 or array.shape[:2] != (psd.height, psd.width):
         return None
     return array
