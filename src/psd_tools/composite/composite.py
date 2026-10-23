@@ -1887,6 +1887,46 @@ def _composites_as_passthrough(source: _Source, blend_mode: BlendMode) -> bool:
     return blend_mode == BlendMode.PASS_THROUGH and source.adjustment_isolated is False
 
 
+# The effects "Blend Interior Effects as Group" decides about, as ``_readable``
+# names them. Adobe names inner glow, satin and the colour and gradient
+# overlays "such as"; a pattern overlay and an inner shadow paint inside the
+# layer the same way, and no corpus layer tests them (#846).
+_INTERIOR_EFFECTS = (
+    "coloroverlay",
+    "gradientoverlay",
+    "patternoverlay",
+    "satin",
+    "innerglow",
+    "innershadow",
+)
+
+
+def _blends_interior_apart(layer: Layer, source: _Source) -> bool:
+    """Whether the layer's interior effects go on over it rather than into it.
+
+    "Blend Interior Effects as Group" off, Photoshop's default, puts them on
+    the layer once it is composited with its mode
+    (:py:meth:`Compositor._apply_apart`). Under Normal at full fill the two
+    ways agree, so only another mode or a lower fill takes this path.
+    """
+    if source.knockout or source.opacity <= 0.0:
+        return False
+    if _composites_as_passthrough(source, layer.blend_mode):
+        return False
+    if (
+        layer.blend_mode in _COVERS_BENEATH | {BlendMode.PASS_THROUGH}
+        and source.fill_opacity >= 1.0
+    ):
+        return False
+    if layer.tagged_blocks.get_data(Tag.BLEND_INTERIOR_ELEMENTS, 0):
+        # TODO: blended as a group, fill opacity fades the interior effects
+        # too, which _EffectCanvas does not do (#846).
+        return False
+    return _has_enabled_effects(layer) and any(
+        _readable(layer, name) for name in _INTERIOR_EFFECTS
+    )
+
+
 class _OuterEffect(NamedTuple):
     """What an effect paints *beside* the layer, held until the layer is ready.
 
@@ -2270,6 +2310,74 @@ class _AdjustmentCanvas:
         self.over(coverage, color, BlendMode.NORMAL, opacity)
 
 
+class _ApartCanvas(_AdjustmentCanvas):
+    """Where the effects of a layer not blended as a group paint.
+
+    Onto the compositor, over the layer's paint put on at full coverage, each
+    at the share of the region it covers: the layer's coverage and opacity
+    fade the lot once, afterwards (:py:meth:`Compositor._apply_apart`). What
+    paints beside the layer is not faded there, so it is drawn at the layer
+    opacity, as on an :py:class:`_EffectCanvas`.
+    """
+
+    def __init__(
+        self, compositor: "Compositor", region: np.ndarray, opacity: float
+    ) -> None:
+        super().__init__(compositor, region)
+        self._opacity = opacity
+
+    @property
+    def opacity(self) -> float:
+        """The layer opacity, which fades what paints beside the layer."""
+        return self._opacity
+
+    def over(
+        self,
+        coverage: np.ndarray,
+        color: np.ndarray,
+        blend_mode: BlendMode,
+        opacity: float | np.ndarray,
+        fades_source: bool = False,
+    ) -> None:
+        """Composite an effect onto the canvas at its share of the region."""
+        if not coverage.any():
+            return
+        faded = 1.0
+        if fades_source:
+            assert not isinstance(opacity, np.ndarray)
+            faded = opacity
+        self._compositor._apply_source(
+            color, coverage, coverage * opacity, blend_mode, faded=faded
+        )
+
+    knocks_out = True
+
+    def replace(
+        self, coverage: np.ndarray, color: np.ndarray, opacity: float | np.ndarray
+    ) -> None:
+        """Paint an effect in place of the layer and the effects under it.
+
+        A stroke is no interior effect, so it knocks out as on an
+        :py:class:`_EffectCanvas`: what ``coverage`` covers goes back to the
+        canvas the compositor was seeded with, and the effect goes on that.
+        """
+        if not coverage.any():
+            return
+        canvas = self._compositor
+        color = canvas._fit_source(color)
+        kept = 1.0 - coverage
+        alpha = coverage * opacity
+        premultiplied = (
+            kept * canvas._alpha * canvas._color
+            + (coverage - alpha) * canvas._alpha_0 * canvas._color_0
+            + alpha * color
+        )
+        canvas._shape_g = cast(np.ndarray, utils.union(canvas._shape_g, coverage))
+        canvas._alpha_g = kept * canvas._alpha_g + alpha
+        canvas._alpha = cast(np.ndarray, utils.union(canvas._alpha_0, canvas._alpha_g))
+        canvas._color = utils.clip(utils.divide(premultiplied, canvas._alpha))
+
+
 @dataclass
 class _Isolation:
     """How opaque an enclosing isolated group's content is, and what it stands on.
@@ -2609,6 +2717,9 @@ class Compositor:
         # and re-applied against this canvas (#707).
         self._apply_beneath_effects(layer)
         source = self._resolve_source(layer)
+        if _blends_interior_apart(layer, source):
+            self._apply_apart(layer, source)
+            return
         source, outer = self._compose_effects(layer, source)
         if outer and _composites_as_passthrough(source, layer.blend_mode):
             # A pass-through group is re-applied by interpolating this canvas
@@ -2756,15 +2867,6 @@ class Compositor:
             # An object's effects cover its shape, the redrawn stroke included.
             # A group with no style to draw never has its region read.
             region = shape
-
-        # TODO: Tag.BLEND_INTERIOR_ELEMENTS controls how inner effects apply,
-        # and is unread. There is a second thing riding on it now: the effect
-        # canvas hands back one source, which ``_composite_source()`` applies
-        # with the *layer's* blend mode, so an inner effect goes through that
-        # mode too -- which is what "Blend Interior Effects as Group" asks
-        # for, and Photoshop leaves it off by default. No fixture in the
-        # corpus pairs a non-normal layer blend mode with an effect that
-        # draws, so nothing here has measured which way is right (#846).
 
         text_gamma, text_key = self._text_blend(layer)
         return _Source(
@@ -3342,6 +3444,63 @@ class Compositor:
         self._apply_outer_effects(outer, None)
         if opacity < 1.0:
             self._fade(opacity, color, alpha, shape_g, alpha_g)
+
+    def _apply_apart(self, layer: Layer, source: _Source) -> None:
+        """Composite a layer whose interior effects are not blended as a group.
+
+        Photoshop puts the layer's paint on with its mode at full coverage,
+        faded by fill opacity alone, then each effect inside the layer onto
+        that with the effect's own mode, and draws the result back towards
+        the canvas by the layer's coverage and opacity once. That is built on
+        a compositor seeded with this canvas; what it adds goes on here
+        Normal, at the share of the pixel it holds, so a type layer's edge
+        mixes in the text gamma and what paints beside the layer is
+        attenuated as :py:meth:`_apply_outer_effects` expects.
+        """
+        region = source.region
+        paint = utils.clip(
+            utils.divide(source.alpha, region * source.opacity, fill=0.0)
+            * source.fill_opacity
+        )
+        scratch = Compositor(
+            self._viewport,
+            self._color,
+            self._alpha,
+            self._layer_filter,
+            self._force,
+            widen=self._widen,
+            color_mode=self._color_mode,
+            cache=self._cache,
+            text_gamma=None,
+        )
+        scratch._apply_source(source.color, paint, paint, layer.blend_mode)
+        outer = scratch._paint_effects(
+            layer,
+            _ApartCanvas(scratch, region, source.opacity),
+            source.shape,
+            source.shape_mask,
+        )
+        # The scratch canvas is ``own`` of what went on over ``1 - own`` of
+        # this one; taking that back out leaves what went on.
+        own = scratch._alpha_g
+        color = utils.clip(
+            utils.divide(
+                scratch._alpha * scratch._color
+                - (1.0 - own) * self._alpha * self._color,
+                own,
+                fill=scratch._color,
+            )
+        )
+        alpha = source.alpha * own
+        self._apply_outer_effects(outer, alpha)
+        self._apply_source(
+            color,
+            utils.clip(region * scratch._shape_g),
+            alpha,
+            BlendMode.NORMAL,
+            text_gamma=source.text_gamma,
+            text_key=source.text_key,
+        )
 
     def _fade(
         self,
