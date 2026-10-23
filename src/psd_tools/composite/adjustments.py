@@ -947,12 +947,14 @@ def apply_colorbalance(
     # A midtone amount is a per-channel gamma. A shadow or highlight amount
     # adds up to that many levels, weighted toward its own end of the range and
     # zero at black and white; that weight is a shape choice, not a fit.
-    # Preserve Luminosity centres each range's three amounts on their mean, so
-    # that a shift toward one primary darkens the other two instead of
-    # brightening the pixel.
+    # Preserve Luminosity keeps every channel a curve of its own: Photoshop
+    # takes the midrange of the three midtone amounts off each, so that a shift
+    # toward one primary darkens the other two. Shadows and highlights lose
+    # their mean, a stand-in.
     amounts = np.array([shadows, midtones, highlights], dtype=np.float32)
     if layer.luminosity:
         amounts -= amounts.mean(axis=1, keepdims=True)
+        amounts[1] = midtones - np.float32((max(midtones) + min(midtones)) / 2)
     lows, gammas, highs = amounts[0] / _255, amounts[1] / _100, amounts[2] / _255
     level = _lut_domain(_get_lut_size(layer))
     luts: dict[int, NDArray[np.float32]] = {}
@@ -964,18 +966,34 @@ def apply_colorbalance(
         if highs[channel]:
             weight = _colorbalance_shadows(_1 - value)
             value = np.clip(value + highs[channel] * weight, _0, _1)
-        value = value ** np.exp2(-gammas[channel])
+        value = _colorbalance_midtones(value, float(gammas[channel]))
         luts[channel + 1] = value.astype(np.float32, copy=False)
     return _apply_luts(luts, img, colormode)
 
 
 # ``t * (1 - t) ** 2`` peaks at t = 1/3 with 4/27.
 _COLORBALANCE_PEAK = np.float32(27 / 4)
+# A brightening midtone gamma leaves black on a parabola instead of the power
+# curve's vertical tangent, and joins the curve where its slope falls to this.
+_COLORBALANCE_TOE_SLOPE = 1.4
 
 
 def _colorbalance_shadows(level: np.ndarray) -> np.ndarray:
     """How much of a shadow shift reaches a level; a highlight shift mirrors it."""
     return _COLORBALANCE_PEAK * level * (_1 - level) ** 2
+
+
+def _colorbalance_midtones(level: np.ndarray, amount: float) -> np.ndarray:
+    """``level ** 2 ** -amount``; a brightening one starts from black on a parabola."""
+    exponent = 2.0**-amount
+    out = level**exponent
+    if exponent >= 1:
+        return out
+    slope = _COLORBALANCE_TOE_SLOPE
+    join = (slope / exponent) ** (1 / (exponent - 1))
+    bend = (slope * join - join**exponent) / join**2
+    toe = (slope - 2 * bend * join + bend * level) * level
+    return np.where(level < join, toe, out)
 
 
 @_preserve_alpha
@@ -1003,8 +1021,8 @@ def apply_vibrance(
 # spares bright, very dark and reddish (skin) ones; its saturation is measured
 # on the encoded values. A negative amount pulls pale pixels furthest; its gray
 # climbs with saturation and brightness, and toward the brightest channel in
-# near-black pixels. The saturation slider then scales chroma about the
-# luminance.
+# near-black pixels. The saturation slider then scales chroma about
+# 0.288 R + 0.712 G, Photoshop's gray for it: blue has no say.
 _VIBRANCE_BOOST = 2.44
 _VIBRANCE_BOOST_CURVE = 2.6
 _VIBRANCE_BOOST_TAIL = 0.25
@@ -1024,7 +1042,7 @@ _VIBRANCE_GRAY_RISE = 1.58
 _VIBRANCE_GRAY_BRIGHT = 1.86
 _VIBRANCE_GRAY_DARK = 1.59
 _VIBRANCE_GRAY_DARK_SCALE = 0.015
-_LINEAR_LUMINANCE = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+_VIBRANCE_GRAY_WEIGHTS = np.array([0.288, 0.712, 0.0], dtype=np.float32)
 
 
 def _vibrance(img: np.ndarray, vibrance: float, saturation: float) -> np.ndarray:
@@ -1052,8 +1070,8 @@ def _vibrance(img: np.ndarray, vibrance: float, saturation: float) -> np.ndarray
         out = out + weight * (gray - out)
     out = np.clip(out, _0, _1)
     if saturation:
-        luminance = out @ _LINEAR_LUMINANCE
-        out = luminance[..., None] + (out - luminance[..., None]) * (_1 + saturation)
+        gray = out @ _VIBRANCE_GRAY_WEIGHTS
+        out = gray[..., None] + (out - gray[..., None]) * (_1 + saturation)
         out = np.clip(out, _0, _1)
     return out
 
