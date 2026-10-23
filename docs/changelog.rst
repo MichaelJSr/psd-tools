@@ -36,11 +36,11 @@ Changelog
   Photoshop draws it on pixel, smart object and fill layers, instead of being
   stretched to put its end stops on the end pixels: the last pixel now falls
   one pixel short of the far stop. Gradient overlays, fill layers and strokes
-  move by up to a pixel along the ramp. Type layers' overlays move the same
-  way, unconfirmed against Photoshop
-- [fix] A gradient overlay on a pixel or smart object layer is laid out on the
-  bounds of the layer's pixels over half opaque, as Photoshop does, instead of
-  on the layer's box, so a soft edge no longer stretches the ramp
+  move by up to a pixel along the ramp
+- [fix] A gradient overlay on a pixel, smart object or type layer is laid out
+  on the bounds of the layer's pixels over half opaque, as Photoshop does,
+  instead of on the layer's box, so a soft edge or a glyph's antialiased rim
+  no longer stretches the ramp
 - [fix] ``BrightnessContrast.automatic`` reads the ``Auto`` key Photoshop
   writes, so it is True for an adjustment set with Auto
 - [fix] A smart object whose smart filters have a painted filter mask is

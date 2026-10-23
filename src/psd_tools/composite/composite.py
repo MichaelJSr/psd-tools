@@ -419,13 +419,14 @@ def _draw_pattern_overlay(
 
 
 def _opaque_bounds(layer: Layer, layout: _Box) -> _Box:
-    """The box of a pixel or smart object layer's pixels over half opaque.
+    """The box of a pixel, smart object or type layer's pixels over half opaque.
 
     Photoshop lays such a layer's gradient overlay out on it, so a soft edge
-    does not stretch the ramp. Masks are not read. Any other layer, one with
-    no pixel that opaque, and one whose pixels cannot be read keep ``layout``.
+    or a glyph's antialiased rim does not stretch the ramp. Masks are not
+    read. Any other layer, one with no pixel that opaque, and one whose pixels
+    cannot be read keep ``layout``.
     """
-    if not isinstance(layer, (PixelLayer, SmartObjectLayer)):
+    if not isinstance(layer, (PixelLayer, SmartObjectLayer, TypeLayer)):
         return layout
     try:
         shape = layer.numpy("shape")
