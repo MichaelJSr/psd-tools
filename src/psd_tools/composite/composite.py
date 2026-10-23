@@ -877,16 +877,15 @@ _LOCAL_SHARE = float(_os.environ.get("PSD_LOCAL_SHARE", "0.6"))
 
 
 def _box_safe(layer: Layer, cache: "_PassCache") -> bool:
-    """Whether everything ``layer`` paints stays inside its paint box.
+    """Whether everything ``layer`` changes stays inside :py:func:`_change_bbox`.
 
-    An adjustment rewrites the canvas wherever its mask reaches, and a
-    knockout reads a backdrop; a group holding either is composited whole.
+    A knockout reads a backdrop; a group holding one is composited whole.
     """
     memo = cache.__dict__.setdefault("box_safe", {})
     known = memo.get(id(layer))
     if known is not None:
         return known
-    if isinstance(layer, AdjustmentLayer) or _read_knockout(layer):
+    if _read_knockout(layer):
         safe = False
     elif layer.is_group():
         safe = all(_box_safe(child, cache) for child in cast(GroupMixin, layer))
@@ -894,6 +893,28 @@ def _box_safe(layer: Layer, cache: "_PassCache") -> bool:
         safe = True
     memo[id(layer)] = safe
     return safe
+
+
+def _change_bbox(layer: Layer, cache: "_PassCache") -> tuple[int, int, int, int]:
+    """Every box ``layer`` can change the canvas in.
+
+    Its paint box, plus for an adjustment the box its mask reveals (the
+    adjustments are pointwise), and for a pass-through group the boxes its
+    children change, since an adjustment in it reaches the canvas beneath.
+    """
+    memo = cache.__dict__.setdefault("change_bbox", {})
+    known = memo.get(id(layer))
+    if known is not None:
+        return known
+    bbox = _paint_bbox(layer, cache.content_bboxes)
+    if isinstance(layer, AdjustmentLayer):
+        bbox = utils.union_bbox(bbox, _style_bbox(layer))
+    elif layer.is_group() and layer.blend_mode == BlendMode.PASS_THROUGH:
+        for child in cast(GroupMixin, layer):
+            if isinstance(child, AdjustmentLayer) or child.is_group():
+                bbox = utils.union_bbox(bbox, _change_bbox(child, cache))
+    memo[id(layer)] = bbox
+    return bbox
 
 
 def composite_pil(
@@ -2297,11 +2318,9 @@ class Compositor:
     # PROTO(speed): composite a layer on the box it can paint, not the viewport.
     def _local_box(self, layer: Layer) -> tuple[int, int, int, int] | None:
         """The box ``layer`` paints within, when compositing it there is safe."""
-        if isinstance(layer, AdjustmentLayer) or not _box_safe(layer, self._cache):
+        if not _box_safe(layer, self._cache):
             return None
-        box = utils.intersect(
-            self._viewport, _paint_bbox(layer, self._cache.content_bboxes)
-        )
+        box = utils.intersect(self._viewport, _change_bbox(layer, self._cache))
         if box == (0, 0, 0, 0):
             return None
         area = (box[2] - box[0]) * (box[3] - box[1])
