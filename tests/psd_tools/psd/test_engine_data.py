@@ -3,6 +3,7 @@ import os
 import pytest
 
 from psd_tools.psd.engine_data import (
+    _TOKEN_CANDIDATES,
     EngineData,
     EngineData2,
     EngineToken,
@@ -173,3 +174,23 @@ def test_string(fixture: bytes) -> None:
 def test_engine_data_property_without_a_value_raises_value_error() -> None:
     with pytest.raises(ValueError):
         EngineData2.frombytes(b"<< /A")
+
+
+def test_the_first_byte_names_the_same_token_type_as_every_pattern() -> None:
+    """Dispatch on a token's first byte picks the type the declaration order does."""
+    tokens = {b"", b"\n"}
+    for filename in sorted(os.listdir(os.path.join(TEST_ROOT, "engine_data"))):
+        with open(os.path.join(TEST_ROOT, "engine_data", filename), "rb") as f:
+            data = f.read()
+        tokens.update(token for token, _ in Tokenizer(data))
+    tails = [b"", b"0", b"1.5", b".5", b"x", b"_1", b"rue", b"alse", b">", b">\x00"]
+    tails += [b"<", b"]", b"\n", b"ab)", b"\xfe\xff)", b"-(.-0", b"(.-0", b")"]
+    tokens.update(bytes([byte]) + tail for byte in range(256) for tail in tails)
+
+    for token in tokens:
+        expected = next((t for t in EngineToken if t.value.search(token)), None)
+        dispatched = next(
+            (t for t, pattern in _TOKEN_CANDIDATES[token[:1]] if pattern.search(token)),
+            None,
+        )
+        assert dispatched == expected, token
