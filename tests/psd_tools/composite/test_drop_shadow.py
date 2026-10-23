@@ -30,6 +30,7 @@ from psd_tools.composite.composite import (
     _content_bbox,
     _covers_beneath,
     _effect_reach,
+    _held,
     paste,
 )
 from psd_tools.constants import BevelStyle, BlendMode, Resource, Tag
@@ -1228,6 +1229,76 @@ def test_a_groups_knockout_traces_its_stroke_from_the_groups_alpha() -> None:
     inside = binary_erosion(icons, iterations=3)
     assert inside.any(), "no icon interior"
     assert np.allclose(knockout[inside], 1.0, atol=1e-5)
+
+
+def _faint_tailed_group() -> tuple[PSDImage, Group]:
+    """A white square casting a faint soft shadow, in a group with a 3 px stroke.
+
+    The shadow is 6% opaque and 8 px soft, straight under the square, so its
+    tail runs on below half a level of 8-bit alpha. The square's own stroke
+    and the group's shadow are switched off.
+    """
+    psd = PSDImage.new("RGB", (80, 80))
+    child = psd.create_pixel_layer(
+        Image.new("RGBA", (20, 20), (255, 255, 255, 255)), top=30, left=30
+    )
+    group = psd.create_group([child])
+    block = _forge_header_effects(child)
+    block[Klass.FrameFX][Key.Enabled] = False
+    shadow = block[Klass.DropShadow]
+    shadow[Key.UseGlobalAngle] = False
+    shadow[Key.LocalLightingAngle] = Double(90.0)
+    for key, value in (
+        (Key.Blur, 8.0),
+        (Key.ChokeMatte, 0.0),
+        (Key.Distance, 0.0),
+        (Key.Opacity, 6.0),
+    ):
+        shadow[key] = Double(value)
+    block = _forge_header_effects(group)
+    block[Klass.DropShadow][Key.Enabled] = False
+    stroke = block[Klass.FrameFX]
+    stroke[Key.Opacity] = Double(100.0)
+    stroke[Key.SizeKey] = Double(3.0)
+    stroke[Key.Style] = Enumerated(typeID=Type.FrameStyle, enum=Enum.OutsetFrame)
+    return psd, group
+
+
+def test_a_groups_stroke_traces_the_group_at_8_bits() -> None:
+    """A tail fainter than half a level is not there for the group's stroke.
+
+    Photoshop composites the group at the document's depth before its style
+    reads it. Each partial pixel states a boundary, so on the float canvas the
+    shadow's last faint pixel would carry the band a pixel further out.
+    """
+    psd, group = _faint_tailed_group()
+    viewport = psd.viewbox
+    compositor = Compositor(
+        viewport,
+        np.ones((80, 80, 3), dtype=np.float32),
+        np.zeros((80, 80, 1), dtype=np.float32),
+    )
+    row = compositor._get_group_alpha(group, viewport)[40, :, 0] * 255.0
+    held = np.flatnonzero(row >= 0.5).max()
+    assert np.flatnonzero(row > 0.0).max() > held, "a tail below half a level"
+
+    traced = compositor._read_traced(group, viewport, traces_mask=False)
+    assert np.array_equal(traced * 255.0, np.round(traced * 255.0))
+    assert np.array_equal(compositor._cast_shape(group, viewport), traced)
+
+    # The last held pixel states the boundary at its inner edge: the 3 px
+    # band covers the three pixels from it and stops there.
+    alpha = _alone(group, viewport)[40, :, 0]
+    assert np.all(alpha[held : held + 3] == pytest.approx(1.0, abs=1e-2))
+    assert float(alpha[held + 3]) < 1e-2
+
+
+def test_only_an_8_bit_document_is_held_at_its_levels() -> None:
+    """Half a level rounds up and less rounds to nothing, at 8 bits alone."""
+    alpha = np.array([0.0, 0.4, 0.5, 1.6, 254.6], dtype=np.float32) / 255.0
+    assert np.array_equal(_held(alpha, 8) * 255.0, [0.0, 0.0, 1.0, 2.0, 255.0])
+    assert _held(alpha, 16) is alpha
+    assert _held(alpha, 32) is alpha
 
 
 def _strokes(layer: Layer) -> list[Stroke]:
