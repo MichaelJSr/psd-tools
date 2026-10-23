@@ -1,9 +1,10 @@
 """Adjustment layer operations for the compositor."""
 
 import functools
+import math
 import logging
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Literal, TypeVar, cast
 
 import numpy as np
@@ -35,6 +36,7 @@ from psd_tools.composite.blend import (
     rgb2hsl,
 )
 from psd_tools.constants import ColorMode, Resource
+from psd_tools.psd.adjustments import LevelRecord
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +77,12 @@ _SRGB_COLOR_GAMMA = np.float32(2.2)
 # Gamma values lower and upper bounds.
 _GAMMA_LOWER = np.float32(0.01)
 _GAMMA_UPPER = np.float32(9.99)
+
+# Photoshop's Levels gamma above 1 leaves black at a slope of 2 ** gamma and
+# joins the power curve, slope and all, at 2 ** -(gamma + 1 / (gamma - 1)),
+# twice where that line meets the curve, along a cubic. Read off ramps put
+# through Levels at gammas 1.05 to 9.99 in 8 and 16 bits.
+_LEVELS_TOE_BASE = 2.0
 
 # LUT of the f(x,y) function that blends two color range saturation vectors x, y to a new saturation vector.
 # Uses empirical values tested using the regular grid (-100, -90, ... , 90, 100)^2.
@@ -279,25 +287,30 @@ def apply_levels(
     t = _lut_domain(lut_size)
 
     luts: dict[int, NDArray[np.float32]] = {}
+    # A master record that only sets a gamma multiplies into each channel's
+    # gamma, one curve rather than two in a row.
+    folded = _master_gamma(levels_data, colormode)
 
     for channel_id, channel_data in enumerate(levels_data):
+        if channel_id == 0 and folded != 1.0:
+            continue
         in_black = np.float32(channel_data.input_floor) / _255
         in_white = np.float32(channel_data.input_ceiling) / _255
-        gamma = min(
-            max(_GAMMA_LOWER, np.float32(channel_data.gamma / _100)), _GAMMA_UPPER
-        )  # photoshop clamps gamma values into [0.01, 9.99]
+        gamma = _record_gamma(channel_data) * (folded if channel_id else 1.0)
         out_black = np.float32(channel_data.output_floor) / _255
         out_white = np.float32(channel_data.output_ceiling) / _255
 
-        # input adjustments
+        # input adjustments, to the LUT's own levels
         scale = (
             (in_white - in_black) if abs(in_white - in_black) > _FLOAT_EPSILON else _1
         )
         out = (t - in_black) / scale
         np.clip(out, _0, _1, out=out)
+        steps = np.float32(lut_size - 1)
+        out = np.floor(out * steps + np.float32(0.5)) / steps
 
         # gamma midtone adjustment
-        out = np.power(out, _1 / gamma, dtype=np.float32)
+        out = _levels_gamma(out, float(gamma), lut_size)
         np.clip(out, _0, _1, out=out)
 
         # output adjustments
@@ -305,6 +318,56 @@ def apply_levels(
         luts[channel_id] = lut.clip(_0, _1)
 
     return _apply_luts(luts, img, colormode)
+
+
+def _record_gamma(record: LevelRecord) -> float:
+    """A Levels record's gamma, held to [0.01, 9.99] as Photoshop holds it."""
+    return float(min(max(_GAMMA_LOWER, np.float32(record.gamma / _100)), _GAMMA_UPPER))
+
+
+def _master_gamma(records: Sequence[LevelRecord], colormode: ColorMode) -> float:
+    """The gamma of a master record that sets nothing else, else 1.
+
+    Only where every colour channel has its own record to carry it.
+    """
+    if colormode == ColorMode.GRAYSCALE or len(records) <= ColorMode.channels(
+        colormode
+    ):
+        return 1.0
+    master = records[0]
+    if (master.input_floor, master.input_ceiling) != (0, 255) or (
+        master.output_floor,
+        master.output_ceiling,
+    ) != (0, 255):
+        return 1.0
+    return _record_gamma(master)
+
+
+def _levels_gamma(
+    values: NDArray[np.float32], gamma: float, lut_size: int
+) -> NDArray[np.float32]:
+    """``values`` raised to ``1 / gamma``, with Photoshop's toe above gamma 1.
+
+    The toe is a cubic from black, at a slope of ``2 ** gamma``, to the point
+    where it joins the power curve at the curve's own slope; that point falls
+    on the LUT's levels.
+    """
+    power = np.power(values, np.float32(1.0 / gamma), dtype=np.float32)
+    if gamma <= 1.0:
+        return power
+    steps = lut_size - 1
+    join = math.floor(_LEVELS_TOE_BASE ** -(gamma + 1.0 / (gamma - 1.0)) * steps + 0.5)
+    if join < 1:
+        return power
+    end = join / steps
+    rise = end ** (1.0 / gamma)
+    t = values.astype(np.float64) / end
+    toe = (
+        _LEVELS_TOE_BASE**gamma * end * (t**3 - 2.0 * t**2 + t)
+        + rise * (3.0 * t**2 - 2.0 * t**3)
+        + rise / gamma * (t**3 - t**2)
+    )
+    return np.where(values < end, toe, power).astype(np.float32)
 
 
 @require_scipy

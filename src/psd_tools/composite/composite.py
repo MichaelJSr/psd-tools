@@ -52,7 +52,9 @@ from psd_tools.composite.effects import (
     bevel_beside,
     bevel_geometry,
     bevel_inside,
+    BevelShape,
     bevel_reach,
+    bevel_smooth_inner,
     cast_reach,
     contour_table,
     draw_bevel,
@@ -4759,8 +4761,21 @@ class Compositor:
                 continue
             if utils.intersect(self._viewport, bbox) == (0, 0, 0, 0):
                 continue
+            bevel_shape = None
             if bevel.use_shape:
-                logger.debug("The shape contour of a bevel of %s is not applied", layer)
+                if bevel_smooth_inner(style, technique):
+                    try:
+                        bevel_shape = BevelShape(
+                            contour_table(bevel.descriptor.get(Key.MappingShape)),
+                            float(bevel.descriptor.get(Key.InputRange, 50.0)),
+                            bool(bevel.descriptor.get(Key.AntiAlias, False)),
+                        )
+                    except _UNREADABLE as error:
+                        logger.debug("Cannot read a bevel's shape of %s: %s", layer, error)
+                else:
+                    logger.debug(
+                        "The shape contour of a bevel of %s is not applied", layer
+                    )
             texture = None
             if bevel.use_texture:
                 texture = self._bevel_texture(layer, bevel, bbox, size)
@@ -4780,6 +4795,7 @@ class Compositor:
                     contour=contour,
                     anti_aliased=anti_aliased,
                     texture=texture,
+                    bevel_shape=bevel_shape,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a bevel of %s: %s", layer, error)
