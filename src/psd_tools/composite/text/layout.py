@@ -33,6 +33,8 @@ class PlacedGlyph:
     faux_bold: bool
     faux_italic: bool
     run: int
+    cluster: int = -1  #: ``str`` index of the first character it draws
+    advance: float = 0.0  #: pen advance in pt, justification stretch included
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,8 @@ class LineInfo:
     stretch: float
     decision: Decision
     drawn: bool = True  #: ``False`` for a line below the box (``overflow``)
+    start: int = 0  #: ``str`` index of the line's first character
+    end: int = 0  #: ``str`` index past its last, the break character excluded
 
 
 @dataclass(frozen=True, eq=False)
@@ -265,6 +269,8 @@ def layout(
                     line.stretch,
                     line.decision,
                     drawn,
+                    line.start,
+                    line.end,
                 )
             )
             if not drawn:
@@ -276,6 +282,9 @@ def layout(
                 style = model.runs[g.run].style
                 em = rendered_em(style, model.sub_size)
                 base = y + baseline_shift(style, model)
+                advance = g.adv + (
+                    line.stretch if g.cluster in shaped.space_adv else 0.0
+                )
                 glyphs.append(
                     PlacedGlyph(
                         face=g.face,
@@ -288,13 +297,12 @@ def layout(
                         faux_bold=style.faux_bold,
                         faux_italic=style.faux_italic,
                         run=g.run,
+                        cluster=g.cluster,
+                        advance=advance,
                     )
                 )
                 if g.run != span_run:
                     span_start, span_run = pen, g.run
-                advance = g.adv + (
-                    line.stretch if g.cluster in shaped.space_adv else 0.0
-                )
                 pen += advance
                 last_of_run = (
                     k + 1 == len(line_glyphs) or line_glyphs[k + 1].run != g.run

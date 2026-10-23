@@ -21,6 +21,7 @@ from psd_tools.compression import (
 from psd_tools.constants import Compression
 from psd_tools.psd.base import BaseElement
 from psd_tools.psd.bin_utils import (
+    _remaining_bytes,
     pack,
     read_fmt,
     read_remaining,
@@ -28,6 +29,7 @@ from psd_tools.psd.bin_utils import (
     write_fmt,
 )
 from psd_tools.psd.header import FileHeader
+from psd_tools.psd.lazy import LazyPayload, Span, defer
 from psd_tools.validators import in_
 
 logger = logging.getLogger(__name__)
@@ -52,8 +54,8 @@ def _solid_bitmap_plane(color: object, width: int, height: int) -> bytes:
     return row * height
 
 
-@define(repr=False)
-class ImageData(BaseElement):
+@define(repr=False, eq=False)
+class ImageData(LazyPayload, BaseElement):
     """
     Merged channel image data.
 
@@ -64,23 +66,33 @@ class ImageData(BaseElement):
     .. py:attribute:: data
 
         `bytes` as compressed in the `compression` flag.
+
+    A lazy read (:py:mod:`psd_tools.psd.lazy`) reads both from the file on
+    first access.
     """
 
-    compression: Compression = field(
+    _compression: Compression = field(
         default=Compression.RAW,
         converter=Compression,
         validator=in_(tuple(Compression)),
     )
-    data: bytes = b""
+    _data: bytes = b""
+    _span: Span | None = field(default=None, init=False)
 
     @classmethod
     def read(cls, fp: IO[bytes], **kwargs: Any) -> Self:
         """Read the structure from a file-like object."""
         start_pos = fp.tell()
-        compression = Compression(read_fmt("H", fp)[0])
-        data = read_remaining(fp)
+        remaining = _remaining_bytes(fp)
+        span = defer(fp, remaining) if remaining > 2 else None
+        if span is not None:
+            self = cls()
+            self._span = span
+        else:
+            compression = Compression(read_fmt("H", fp)[0])
+            self = cls(compression, read_remaining(fp))
         logger.debug("  read image data, len=%d" % (fp.tell() - start_pos))
-        return cls(compression, data)
+        return self
 
     def write(self, fp: IO[bytes], **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""

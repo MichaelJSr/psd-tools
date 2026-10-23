@@ -20,6 +20,12 @@ Composite Functions
 
 .. autofunction:: psd_tools.composite.composite_pil
 
+Render Cache
+------------
+
+.. automodule:: psd_tools.composite.rcache
+    :members: RenderCache, CacheMismatch
+
 Blend Modes
 -----------
 

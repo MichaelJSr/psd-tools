@@ -277,6 +277,20 @@ A layer can change its order within its group::
     layer.move_up() # Will send the layer upward in the group
     layer.move_down() # Will send the layer downward in the group
 
+Copy a layer's effects onto another layer, replacing its own, as Photoshop's
+Copy and Paste Layer Style do without the blending options, or remove them.
+The source may be in another document; the patterns its effects use come
+with them::
+
+    target.copy_effects_from(source)
+    source.clear_effects()
+
+Move a pixel mask, keeping its size and pixels, while the layer stays put. A
+pixel mask combined with a vector mask cannot be moved this way::
+
+    layer.mask.offset = (120, 340)
+    layer.mask.top += 10
+
 A layer removed from its document keeps its properties and pixels, can be
 composited, and can be added back. ``move_up()``, ``move_down()`` and
 ``delete_layer()`` raise ``ValueError`` on it, and on any layer inside a removed
@@ -389,6 +403,33 @@ option::
       multichannel document that has layers does not reproduce what Photoshop
       shows for the same file. Use
       :py:meth:`~psd_tools.api.psd_image.PSDImage.topil` for the merged data.
+
+Rendering again after an edit
+-----------------------------
+
+Renders of one document before an edit, after it and once the file is saved
+and reopened can share work through a render cache::
+
+    from psd_tools.composite.rcache import RenderCache
+
+    with RenderCache():
+        before = psd.composite(viewport=region)
+        layer.visible = False
+        after = psd.composite(viewport=region)
+
+A render resumes after the bottom layers it has already composited, and reuses
+the group alphas and stroke effects of layers that did not change. Entries are
+keyed by what the layers hold, not by which objects they are, so an edit needs
+no invalidation and a reopened copy of the same file hits too. The cache keeps
+512 MB at most (``RenderCache(max_bytes=...)``) and serves only the default
+``layer_filter``; a document that links an external file is not cached.
+A whole-document render that reads its preview for how type layers blend
+(``text_preview``, the default) resumes no higher than the first top-level
+layer holding a type layer that is not pinned in ``layer_text_gamma``.
+
+``PSD_RCACHE_VERIFY=1`` renders every cached pass again without the cache and
+raises :py:class:`~psd_tools.composite.rcache.CacheMismatch` if the two
+differ. ``tools/rcache_verify.py`` runs that over a folder of cards.
 
 Exporting data to NumPy
 -----------------------

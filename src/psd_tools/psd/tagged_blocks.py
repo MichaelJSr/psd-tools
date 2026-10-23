@@ -37,6 +37,7 @@ from psd_tools.psd.bin_utils import (
     read_exact,
     read_fmt,
     read_length_block,
+    read_padding,
     read_pascal_string,
     trimmed_repr,
     write_bytes,
@@ -50,6 +51,7 @@ from psd_tools.psd.descriptor import DescriptorBlock, DescriptorBlock2
 from psd_tools.psd.effects_layer import EffectsLayer
 from psd_tools.psd.engine_data import EngineData, EngineData2
 from psd_tools.psd.filter_effects import FilterEffects
+from psd_tools.psd.lazy import Span, defer
 from psd_tools.psd.linked_layer import LinkedLayers
 from psd_tools.psd.parse_limits import ParseLimitError
 from psd_tools.psd.patterns import Patterns
@@ -225,7 +227,7 @@ class TaggedBlocks(DictElement):
             p.breakable("")
 
 
-@define(repr=False)
+@define(repr=False, eq=False)
 class TaggedBlock(BaseElement):
     """
     Layer tagged block with extra info.
@@ -236,7 +238,9 @@ class TaggedBlock(BaseElement):
 
     .. py:attribute:: data
 
-        Data.
+        Data. A lazy read (:py:mod:`psd_tools.psd.lazy`) leaves the payload
+        blocks (``_LAZY_KEYS``: embedded smart object files, smart filter
+        pixels) in the file and reads and parses one on first access.
     """
 
     _SIGNATURES = (b"8BIM", b"8B64")
@@ -274,9 +278,48 @@ class TaggedBlock(BaseElement):
         Tag.NESTED_SECTION_DIVIDER_SETTING,
     }
 
+    # Payloads nothing reads while a document opens: read on first access.
+    _LAZY_KEYS = {
+        Tag.LINKED_LAYER1,
+        Tag.LINKED_LAYER2,
+        Tag.LINKED_LAYER3,
+        Tag.LINKED_LAYER_EXTERNAL,
+        Tag.FILTER_EFFECTS1,
+        Tag.FILTER_EFFECTS2,
+        Tag.FILTER_EFFECTS3,
+    }
+
     signature: bytes = field(default=b"8BIM", repr=False, validator=in_(_SIGNATURES))
     key: bytes = b""
-    data: bytes = field(default=b"", repr=True)
+    _data: Any = field(default=b"", repr=True)
+    _span: "tuple[Span, int] | None" = field(default=None, init=False)
+
+    def _load(self) -> None:
+        if self._span is not None:
+            span, version = self._span
+            self._data, self._span = self._parse(self.key, span.read(), version), None
+
+    @property
+    def data(self) -> Any:
+        """The parsed block, or its bytes."""
+        self._load()
+        return self._data
+
+    @data.setter
+    def data(self, value: Any) -> None:
+        self._data, self._span = value, None
+
+    def __eq__(self, other: object) -> bool:
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        assert isinstance(other, TaggedBlock)
+        return (self.signature, self.key, self.data) == (
+            other.signature,
+            other.key,
+            other.data,
+        )
+
+    __hash__ = None  # type: ignore[assignment]
 
     @classmethod
     def read(
@@ -301,11 +344,27 @@ class TaggedBlock(BaseElement):
             logger.warning(message)
 
         fmt = cls._length_format(key, version)
-        raw_data = read_length_block(fp, fmt=fmt, padding=padding)
+        if key in cls._LAZY_KEYS:
+            length = read_fmt(fmt, fp)[0]
+            span = defer(fp, length)
+            if span is not None:
+                read_padding(fp, length, padding)
+                self = cls(signature, key)
+                self._span = (span, version)
+                return self
+            raw_data = read_exact(fp, length)
+            read_padding(fp, length, padding)
+        else:
+            raw_data = read_length_block(fp, fmt=fmt, padding=padding)
+        return cls(signature, key, cls._parse(key, raw_data, version))
+
+    @classmethod
+    def _parse(cls, key: Any, raw_data: bytes, version: int) -> Any:
+        """Parse the bytes with the key's handler; keep the bytes without one."""
         kls = TYPES.get(key)
         if kls:
             try:
-                data = kls.frombytes(raw_data, version=version)
+                return kls.frombytes(raw_data, version=version)
             except ParseLimitError:
                 raise
             except (OSError, ValueError) as e:
@@ -314,12 +373,10 @@ class TaggedBlock(BaseElement):
                 # Fallback to raw data.
                 message = f"Failed to read tagged block {key!r}: {e}"
                 logger.error(message)
-                data = raw_data
-        else:
-            message = f"Unknown tagged block: {key!r}, {trimmed_repr(raw_data)}"
-            logger.debug(message)
-            data = raw_data
-        return cls(signature, key, data)
+                return raw_data
+        message = f"Unknown tagged block: {key!r}, {trimmed_repr(raw_data)}"
+        logger.debug(message)
+        return raw_data
 
     def write(
         self, fp: IO[bytes], version: int = 1, padding: int = 1, **kwargs: Any

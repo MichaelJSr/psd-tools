@@ -13,6 +13,7 @@ from psd_tools.constants import Tag
 from psd_tools.psd.base import DictElement, ListElement
 from psd_tools.psd.descriptor import String
 from psd_tools.psd.layer_and_mask import LayerRecord
+from psd_tools.psd.lazy import load
 from psd_tools.psd.tagged_blocks import TaggedBlocks
 from psd_tools.terminology import Enum, Key
 
@@ -48,6 +49,7 @@ def _descriptors(node: Any) -> Iterator[DictElement]:
         elif isinstance(node, (list, tuple)):
             stack.extend(node)
         elif attrs.has(type(node)):
+            load(node)
             stack.extend(getattr(node, f.name) for f in attrs.fields(type(node)))
 
 
@@ -72,22 +74,25 @@ class ResourceTransfer:
     def add(self, source: PSDProtocol, records: Iterable[LayerRecord]) -> None:
         """Carry what *records* reference from *source*, rewriting their ids."""
         for record in records:
-            blocks = record.tagged_blocks
-            for tag in list(blocks.keys()):
-                data = blocks.get_data(tag)
-                if data is None or tag in _PLACED_TAGS:
-                    continue
-                if tag in _SMART_OBJECT_TAGS:
-                    self._remap(source, "linked", getattr(data, "data", None))
-                for descriptor in _descriptors(data):
-                    pattern = descriptor.get(Enum.Pattern)
-                    if isinstance(pattern, DictElement):
-                        self._remap(source, "pattern", pattern)
-            for tag in _PLACED_TAGS:
-                placed = blocks.get_data(tag)
-                if placed is not None:
-                    key = (id(source), "linked", placed.uuid.decode().rstrip("\x00"))
-                    placed.uuid = self._ids.get(key, key[2]).encode()
+            self.add_blocks(source, record.tagged_blocks)
+
+    def add_blocks(self, source: PSDProtocol, blocks: TaggedBlocks) -> None:
+        """Carry what one record's *blocks* reference from *source*."""
+        for tag in list(blocks.keys()):
+            data = blocks.get_data(tag)
+            if data is None or tag in _PLACED_TAGS:
+                continue
+            if tag in _SMART_OBJECT_TAGS:
+                self._remap(source, "linked", getattr(data, "data", None))
+            for descriptor in _descriptors(data):
+                pattern = descriptor.get(Enum.Pattern)
+                if isinstance(pattern, DictElement):
+                    self._remap(source, "pattern", pattern)
+        for tag in _PLACED_TAGS:
+            placed = blocks.get_data(tag)
+            if placed is not None:
+                key = (id(source), "linked", placed.uuid.decode().rstrip("\x00"))
+                placed.uuid = self._ids.get(key, key[2]).encode()
 
     def _remap(self, source: PSDProtocol, kind: str, holder: Any) -> None:
         if not isinstance(holder, DictElement):

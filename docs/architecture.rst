@@ -24,7 +24,10 @@ The package has two layers and two supporting subpackages.
 
 :py:mod:`psd_tools.composite`
     The rendering engine: blend modes, layer effects and vector rasterization
-    on NumPy arrays. It needs the optional ``composite`` extra.
+    on NumPy arrays. It needs the optional ``composite`` extra. The stroke
+    distance fields have a Cython implementation (``_distance.pyx``) with the
+    NumPy code as the fallback; the two are bit-identical only when the C
+    compiler does not contract into FMA, hence ``-ffp-contract=off``.
 
 :py:mod:`psd_tools.compression`
     Raw, RLE and ZIP codecs. RLE has a Cython implementation (``_rle.pyx``)
@@ -120,6 +123,19 @@ with zeros. Code that needs coverage outside the viewport, such as a stroke
 effect traced past the canvas edge, cannot recover it by cropping; it must read
 the layer again on the larger box. A group has no stored coverage to re-read,
 so its contents are composited again on that box.
+
+Local boxes
+^^^^^^^^^^^
+
+``Compositor.apply()`` composites a layer on the box it can change
+(``_change_bbox()``) rather than the whole viewport when that box is small,
+through views of the canvases. Whatever a layer paints must stay inside that
+box: its effects as the bbox functions measure them, a redrawn path as
+``vector.drawn_bbox()`` does. A layer that knocks out, or a group holding one,
+reads its backdrop and is composited whole. A change that lets a layer paint
+further must grow ``_change_bbox()`` with it; ``_LOCAL_BOXES = False`` turns
+the boxes off, and ``tests/psd_tools/composite/test_local_boxes.py`` compares
+the two.
 
 Artboards
 ^^^^^^^^^

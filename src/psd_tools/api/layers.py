@@ -102,7 +102,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from psd_tools.api.typesetting import TypeSetting
-    from psd_tools.composite.text import FontMap, Options, RenderReport
+    from psd_tools.composite.text import Before, FontMap, Options, RenderReport
 
 import numpy as np
 from PIL import Image, ImageChops
@@ -110,7 +110,7 @@ from PIL import Image, ImageChops
 import psd_tools.psd.engine_data as engine_data
 from psd_tools.api import numpy_io, pil_io, text_edit
 from psd_tools.api._resources import ResourceTransfer
-from psd_tools.api.effects import Effects
+from psd_tools.api.effects import _EFFECTS_TAGS, Effects
 from psd_tools.api.mask import Mask
 from psd_tools.api.protocols import GroupMixinProtocol, LayerProtocol, PSDProtocol
 from psd_tools.api.shape import Origination, Stroke, VectorMask
@@ -618,7 +618,7 @@ class Layer(LayerProtocol):
         :return: `bool`
         """
         return any(
-            ci.id >= 0 and cd.data and len(cd.data) > 0
+            ci.id >= 0 and cd._length > 2  # unread when lazy
             for ci, cd in zip(self._record.channel_info, self._channels, strict=False)
         )
 
@@ -1168,6 +1168,49 @@ class Layer(LayerProtocol):
         """
         return Effects(self)
 
+    def copy_effects_from(self, source: "Layer") -> None:
+        """
+        Replace this layer's effects with a copy of ``source``'s.
+
+        As Photoshop's Copy and Paste Layer Style, without the blending
+        options: every effects block of ``source`` is deep-copied, master
+        switch and disabled entries included, and this layer's own are
+        dropped, so a source with no effects clears them. ``source`` may be
+        in another document; the patterns its effects use are copied into
+        this one, as :py:meth:`copy_to` does.
+
+        :param source: The layer whose effects are copied.
+        :raises TypeError: If ``source`` is not a layer.
+        """
+        if not isinstance(source, Layer):
+            raise TypeError(f"Expected a layer, got {type(source).__name__}")
+        if source is self:
+            return
+        copies = TaggedBlocks()
+        for tag in _EFFECT_BLOCK_TAGS:
+            if tag in source.tagged_blocks:
+                copies[tag] = deepcopy(source.tagged_blocks[tag])
+        if source._psd is not self._psd:
+            ResourceTransfer(self._psd).add_blocks(source._psd, copies)
+        self._replace_effect_blocks(copies)
+
+    def clear_effects(self) -> None:
+        """Remove this layer's effects blocks, as Photoshop's Clear Layer Style."""
+        self._replace_effect_blocks(TaggedBlocks())
+
+    def _replace_effect_blocks(self, copies: TaggedBlocks) -> None:
+        blocks = self.tagged_blocks
+        stale = [tag for tag in _EFFECT_BLOCK_TAGS if tag in blocks]
+        if not (stale or len(copies)):
+            return
+        for tag in stale:
+            if tag not in copies:
+                del blocks[tag]
+        # An existing block is replaced where it stands.
+        for tag in copies:
+            blocks[tag] = copies[tag]
+        self._psd.mark_updated()
+
     @property
     def tagged_blocks(self) -> TaggedBlocks:
         """
@@ -1315,9 +1358,10 @@ class Layer(LayerProtocol):
         Deep-copy this layer, including a group's descendants, in its document.
 
         The copy retains its layer type, channels, masks and layer metadata,
-        with fresh layer IDs. Document resources such as smart-object contents
-        remain shared. No cached API wrappers are copied. An artboard's copy
-        keeps its rectangle and so overlaps the source.
+        with fresh layer IDs. A type layer's copy gets its own ``Txt2`` story.
+        Document resources such as smart-object contents remain shared. No
+        cached API wrappers are copied. An artboard's copy keeps its rectangle
+        and so overlaps the source.
 
         :param parent: Destination group or document. Defaults to this layer's
             parent. A detached layer requires an explicit destination.
@@ -1369,6 +1413,7 @@ class Layer(LayerProtocol):
         copies: list[Layer] = [duplicate]
         if isinstance(duplicate, Group):
             copies.extend(duplicate.descendants())
+        stories = _carry_stories(copies, self._psd, self._psd)
         sources = [*self._psd.descendants(), *originals]
         seed_resource = _issue_layer_ids(self._psd, sources, copies)
         # A copy pairs with its source's FEid item (SmartObject.filter_effect()).
@@ -1384,6 +1429,8 @@ class Layer(LayerProtocol):
             if parent is self.parent and index == parent.index(self) + 1
             else []
         )
+        for write in stories:
+            write()
         parent.insert(index, duplicate)
         self._psd.image_resources[Resource.IDS_SEED_NUMBER] = seed_resource
         for layer in clip_layers:
@@ -1399,9 +1446,10 @@ class Layer(LayerProtocol):
         converted to the destination's colour mode, depth and file version;
         narrowing a 32-bit layer tone-maps as Photoshop does. The patterns and
         linked smart objects it uses are copied into the destination document,
-        patterns unconverted to its colour mode. Clipping is positional: the
-        layers clipped to this one are not copied, and a copy keeps its own
-        clipping flag.
+        patterns unconverted to its colour mode, and a type layer's ``Txt2``
+        story comes as the copy's own. Clipping is positional: the layers
+        clipped to this one are not copied, and a copy keeps its own clipping
+        flag.
 
         :param group: The destination :py:class:`~psd_tools.api.layers.Group` or
             document.
@@ -1413,8 +1461,9 @@ class Layer(LayerProtocol):
         :raises ValueError: If ``group`` is a removed group or in a Bitmap,
             Indexed or Multichannel document, which cannot hold layers; an
             :py:class:`~psd_tools.api.layers.Artboard` is not going to the
-            document root; or the layer cannot be converted to the
-            destination's colour mode.
+            document root; the layer cannot be converted to the
+            destination's colour mode; or a type layer's story cannot go
+            between a Photoshop CC file's ``Txt2`` and an older one's.
         :raises IndexError: If ``index`` is out of range.
         :return: The inserted copy.
         """
@@ -1440,6 +1489,7 @@ class Layer(LayerProtocol):
         if isinstance(self, Group) and isinstance(copy_, Group):
             sources.extend(self.descendants())
             copies.extend(copy_.descendants())
+        stories = _carry_stories(copies, self._psd, group._psd)
         for source, target in zip(sources, copies, strict=False):
             if (converted := source._reencode(group)) is not None:
                 target._apply_reencoded(converted)
@@ -1447,6 +1497,8 @@ class Layer(LayerProtocol):
         transfer = ResourceTransfer(group._psd)
         for node in copies:
             transfer.add(self._psd, _layer_records(node))
+        for write in stories:
+            write()
         group.insert(position, copy_)
         group._psd.image_resources[Resource.IDS_SEED_NUMBER] = seed_resource
         return copy_
@@ -1580,6 +1632,7 @@ class Layer(LayerProtocol):
 
 
 _LAYERLESS_MODES = (ColorMode.BITMAP, ColorMode.INDEXED, ColorMode.MULTICHANNEL)
+_EFFECT_BLOCK_TAGS = (*_EFFECTS_TAGS, Tag.EFFECTS_LAYER)
 
 
 def _insertion_index(parent: "GroupMixin", index: Any) -> int:
@@ -1623,6 +1676,22 @@ def _issue_layer_ids(
         key=Resource.IDS_SEED_NUMBER,
         data=Integer(seed if seed < 0x80000000 else seed - 0x100000000),  # type: ignore[arg-type]
     )
+
+
+def _carry_stories(
+    layers: Iterable[LayerProtocol], source: PSDProtocol, dest: PSDProtocol
+) -> list[Callable[[], None]]:
+    """Check that each type layer's Txt2 story can go along; return the writes.
+
+    ``layers`` still hold the ``TextIndex`` of their story in ``source``.
+    """
+    writes = []
+    for layer in layers:
+        if isinstance(layer, TypeLayer) and layer._type_data is not None:
+            write = text_edit.carry_story(layer, source, dest)
+            if write is not None:
+                writes.append(write)
+    return writes
 
 
 def _layer_records(layer: LayerProtocol) -> Iterator[LayerRecord]:
@@ -2132,7 +2201,8 @@ class GroupMixin(GroupMixinProtocol, Protocol):
         """Re-encode every moved layer, and its descendants, for this document.
 
         Run before either tree changes, so a conversion that raises leaves both
-        documents as they were. Keyed by ``id(layer)``.
+        documents as they were; so does a type layer's story that cannot come
+        along. Keyed by ``id(layer)``.
         """
         converted: dict[int, tuple[LayerRecord, ChannelDataList]] = {}
         for layer in layers:
@@ -2144,6 +2214,7 @@ class GroupMixin(GroupMixinProtocol, Protocol):
                     result = node._reencode(self)
                     if result is not None:
                         converted[id(node)] = result
+                    _carry_stories([node], node._psd, self._psd)
         return converted
 
     def _update_children(
@@ -2161,6 +2232,8 @@ class GroupMixin(GroupMixinProtocol, Protocol):
             if layer._psd != self._psd:
                 if id(layer) in converted:
                     layer._apply_reencoded(converted[id(layer)])
+                for write in _carry_stories([layer], layer._psd, self._psd):
+                    write()
                 transfer.add(layer._psd, _layer_records(layer))
                 layer.__dict__.pop("_smart_object", None)
                 layer._psd = self._psd
@@ -3162,11 +3235,35 @@ class TypeLayer(Layer):
 
         ``keys`` are ``StyleSheetData`` names with plain values, such as
         ``FauxBold=True``, ``Tracking=50`` or ``FontSize=20.0``; ``Font``
-        takes a PostScript name already in the layer's ``FontSet``. ``fill``
-        is an RGB triple in 0..1. Runs are split at the span's ends and
-        equal neighbours merged.
+        takes a PostScript name in the layer's ``FontSet``, which
+        :py:meth:`add_font` extends. ``fill`` is an RGB triple in 0..1.
+        Runs are split at the span's ends and equal neighbours merged.
         """
         text_edit.set_span_style(self, start, end, fill=fill, **keys)
+
+    def add_font(
+        self,
+        name: str,
+        *,
+        font_type: int = 1,
+        script: int = 0,
+        synthetic: int = 0,
+    ) -> int:
+        """
+        Add the face PostScript ``name`` to the layer's ``FontSet``.
+
+        Returns the face's index; a face already listed keeps its entry.
+        The document's Txt2 FontSet gains it too when the layer has a
+        story. ``font_type`` is ``1`` for TrueType outlines and ``0`` for
+        PostScript (CFF or Type 1) ones. No run changes font until
+        :py:meth:`set_span_style` sets ``Font`` to ``name``.
+
+        :raises ValueError: If ``name`` is empty or the layer's EngineData
+            has no ``FontSet``.
+        """
+        return text_edit.add_font(
+            self, name, font_type=font_type, script=script, synthetic=synthetic
+        )
 
     def set_run_style(
         self,
@@ -3197,8 +3294,36 @@ class TypeLayer(Layer):
         """
         return text_edit.sync_story(self)
 
+    def fit_text(
+        self, max_width: float, min_scale: float, fonts: "FontMap | None" = None
+    ) -> float:
+        """
+        Shrink the type until its widest line fits ``max_width`` pixels.
+
+        Requires the ``text`` extra; see
+        :py:func:`psd_tools.composite.text.fit_text`. Every run's font size
+        is scaled by one factor, which is returned, ``1.0`` when the text
+        fits already. Point text only.
+
+        :raises ValueError: if the factor would fall below ``min_scale``;
+            the layer is left as it was.
+        """
+        try:
+            from psd_tools.composite.text import fit_text  # noqa: PLC0415
+        except ImportError as e:
+            raise ImportError(
+                "Measuring type requires: uharfbuzz, freetype-py\n\n"
+                "Install with:\n"
+                "    pip install 'psd-tools[text]'"
+            ) from e
+        return fit_text(self, max_width, min_scale, fonts=fonts)
+
     def rasterize(
-        self, fonts: "FontMap | None" = None, options: "Options | None" = None
+        self,
+        fonts: "FontMap | None" = None,
+        options: "Options | None" = None,
+        keep: "Before | None" = None,
+        unit: Literal["line", "glyph"] = "line",
     ) -> "RenderReport":
         """
         Render the text into the layer's pixels.
@@ -3212,20 +3337,36 @@ class TypeLayer(Layer):
         colours as written, not linearised. Other colour modes convert
         through PIL at 8 bits.
 
+        With ``keep``, :py:func:`~psd_tools.composite.text.capture` of the
+        layer before the edit, only the changed lines (``unit="line"``) or
+        glyphs (``"glyph"``) are drawn and the stored pixels stay elsewhere.
+        When no inked glyph changed (a trailing space, say) the channels and
+        the TySh bounds are left as they are. ``report.splice`` says what was
+        kept.
+
         :param fonts: :py:class:`~psd_tools.composite.text.FontMap`; the
             default scans ``PSD_TOOLS_FONT_DIRS`` and the platform fonts.
         :param options: :py:class:`~psd_tools.composite.text.Options`.
+        :param keep: :py:class:`~psd_tools.composite.text.Before`.
+        :param unit: what a change redraws with ``keep``.
         :return: :py:class:`~psd_tools.composite.text.RenderReport`.
         """
         try:
             from psd_tools.composite.text import render  # noqa: PLC0415
+            from psd_tools.composite.text.splice import splice  # noqa: PLC0415
         except ImportError as e:
             raise ImportError(
                 "Type layer rendering requires: uharfbuzz, freetype-py\n\n"
                 "Install with:\n"
                 "    pip install 'psd-tools[text]'"
             ) from e
-        result = render(self, fonts=fonts, options=options)
+        if keep is None:
+            result = render(self, fonts=fonts, options=options)
+        else:
+            result = splice(self, keep, fonts=fonts, options=options, unit=unit)
+            info = result.report.splice
+            if info is not None and info.zone is None and info.fallback is None:
+                return result.report
         self._store_raster(result.rgba, result.bbox)
         self._rewrite_text_bounds(result.bbox, result.report)
         self._invalidate_bbox()
