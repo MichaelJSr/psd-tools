@@ -78,6 +78,23 @@ another document, gets a copy of its story and text frame under a new
 matched by name or added. A story cannot go between a Photoshop CC file
 and an older one, whose ``Txt2`` keys are spelled differently.
 
+Fitting a line
+--------------
+
+:py:meth:`~psd_tools.api.layers.TypeLayer.fit_text` shrinks point text
+until its widest line fits a width in document pixels, as the layout
+measures it (advance widths, not ink). Every run's ``FontSize`` is scaled
+by one factor, rounded down to a hundredth of a point, in the layer and
+its story. It returns the factor, ``1.0`` when the text fits already, and
+refuses with ``ValueError``, changing nothing, below ``min_scale``::
+
+    layer.text = "Croissant Knight"
+    scale = layer.fit_text(660, min_scale=0.6, fonts=fonts)
+    layer.rasterize(fonts=fonts)
+
+Centred text keeps its centre, so the width for a name between two icons
+is twice the smaller distance from the text's anchor to either icon.
+
 Rendering
 ---------
 

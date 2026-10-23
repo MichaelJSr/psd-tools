@@ -12,6 +12,9 @@ Changelog
   mask, shape layers included, raises ``ValueError``.
 - [api] ``TypeLayer.add_font()`` adds a face to the layer's ``FontSet``, and
   to the document's ``Txt2`` font set, for ``set_span_style(Font=...)``.
+- [api] ``TypeLayer.fit_text()`` and ``psd_tools.composite.text.fit_text()``
+  shrink point text until its widest line fits a width, refusing below a
+  minimum scale. Requires the ``text`` extra.
 - [fix] A type layer copied by ``duplicate()`` or ``copy_to()``, or moved into
   another document, gets its own ``Txt2`` story under a new ``TextIndex``
   instead of sharing, or pointing at another layer's, story. Copying a type
