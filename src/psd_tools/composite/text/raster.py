@@ -25,7 +25,7 @@ from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite.scanline import fill_coverage
 from psd_tools.composite.text import svg
 from psd_tools.composite.text.constants import (
-    COLOR_ALPHA_GRID,
+    COVERAGE_SAMPLES,
     CRISP_SUBPIXEL_X,
     FAUX_BOLD_EM,
     FAUX_ITALIC_SHEAR,
@@ -49,6 +49,9 @@ Glyph = tuple[int, int, np.ndarray]
 # alive at once, for the allocation budget.
 #: A glyph: FreeType's bitmap and its copy, both uint8.
 _GLYPH_BYTES = 1 + 1
+#: A point-sampled glyph, per pixel of its large render: the uint16 hits
+#: and the inside mask.
+_SAMPLED_BYTES = 2 + 1
 #: A rule: the float32 coverage, its scaling and the uint8 result.
 _RULE_BYTES = 4 + 4 + 1
 #: The canvas: uint32 coverage sum, float32 RGB, uint8 winning coverage,
@@ -87,6 +90,9 @@ class Options:
     max_canvas_pixels: int = MAX_CANVAS_PIXELS
     #: Draw the glyphs of a colour (``SVG ``) font in colour.
     color_glyphs: bool = True
+    #: Coverage of Crisp, Strong and Smooth text: Photoshop's point samples,
+    #: or the exact area under the outline.
+    coverage: Literal["samples", "area"] = "samples"
 
 
 #: Where a glyph origin lands: as computed, on whole pixels, or (Crisp) on
@@ -103,16 +109,16 @@ class _Mode:
     embolden: int  #: 26.6 total widening in x and in y
     origin: _Origin
     threshold: float | None  #: binarise the final coverage above this
-    color_alpha_grid: int = 0  #: point samples a side for a colour glyph's alpha
+    samples: int = 1  #: point samples a side per pixel; 1 is the exact area
 
     def snaps(self, general: bool) -> bool:
         return self.origin == "integer" or (self.origin == "crisp" and not general)
 
 
-_STRONG = _Mode(_UNHINTED, STRONG_EMBOLDEN_26_6, "fractional", None, COLOR_ALPHA_GRID)
+_STRONG = _Mode(_UNHINTED, STRONG_EMBOLDEN_26_6, "fractional", None, COVERAGE_SAMPLES)
 _MODES: dict[int, _Mode] = {
     0: _Mode(_UNHINTED, 0, "fractional", NONE_THRESHOLD),
-    1: _Mode(_UNHINTED, 0, "crisp", None, COLOR_ALPHA_GRID),
+    1: _Mode(_UNHINTED, 0, "crisp", None, COVERAGE_SAMPLES),
     2: _STRONG,
     3: _STRONG,
     4: _Mode(_LIGHT, 0, "integer", None),
@@ -305,6 +311,30 @@ def _render_glyph(
         return slot.bitmap_left, slot.bitmap_top, _bitmap(slot)
 
 
+def _samples(mode: _Mode, options: Options) -> int:
+    return mode.samples if options.coverage == "samples" else 1
+
+
+def _point_sampled(glyph: Glyph, n: int) -> Glyph:
+    """``glyph`` rendered at ``n`` times the size, as ``n`` x ``n`` point samples.
+
+    A pixel of the large render holds a sample where its centre is inside,
+    which is where its coverage reaches one half.
+    """
+    left, top, cov = glyph
+    if n == 1 or not cov.size:
+        return glyph
+    h, w = cov.shape
+    x0, y0 = left // n, -top // n
+    x1, y1 = -(-(left + w) // n), -(-(h - top) // n)
+    hits = np.zeros(((y1 - y0) * n, (x1 - x0) * n), np.uint16)
+    hits[-top - y0 * n : -top - y0 * n + h, left - x0 * n : left - x0 * n + w] = (
+        cov >= 128
+    )
+    count = hits.reshape(y1 - y0, n, x1 - x0, n).sum(axis=(1, 3))
+    return x0, -y0, ((count * 255 + n * n // 2) // (n * n)).astype(np.uint8)
+
+
 def _fixed(v: float) -> int:
     return int(round(v * 0x10000))
 
@@ -332,6 +362,7 @@ def _glyph_items(
     # Text space is y-down and FreeType y-up, so the two off-diagonals flip sign.
     base = (xx / cx, -yx / cy, -xy / cx, yy / cy)
     snap = mode.snaps(is_general(transform))
+    n = _samples(mode, options)
     items: list[_Item] = []
     for g in glyphs:
         color = _is_color(g)
@@ -344,12 +375,14 @@ def _glyph_items(
         if color and not options.monochrome_emoji:
             continue
         px_w, px_h = g.em_w * cx, g.em_h * cy
-        k = strike_scale(px_h, g.face.metrics.strikes)
-        size66 = (round(64 * px_w * k), round(64 * px_h * k))
+        # Point samples come from a render at n times the size.
+        k = strike_scale(px_h * n, g.face.metrics.strikes)
+        size66 = (round(64 * px_w * n * k), round(64 * px_h * n * k))
         if not size66[0] or not size66[1]:
             continue
-        w, h = math.ceil(px_w), math.ceil(px_h)
-        _guard("glyph", w, h, w * h * _GLYPH_BYTES, options, budget)
+        w, h = math.ceil(px_w * n), math.ceil(px_h * n)
+        per_pixel = _GLYPH_BYTES + (_SAMPLED_BYTES if n > 1 else 0)
+        _guard("glyph", w, h, w * h * per_pixel, options, budget)
         m = base
         if g.faux_italic:
             s = FAUX_ITALIC_SHEAR
@@ -363,7 +396,7 @@ def _glyph_items(
         x = xx * g.x + yx * g.y + tx
         y = xy * g.x + yy * g.y + ty
         if snap:
-            steps = crisp_x_steps(size66[1] // k) if mode.origin == "crisp" else 1
+            steps = crisp_x_steps(size66[1] // (k * n)) if mode.origin == "crisp" else 1
             x, y = round(x * steps) / steps, float(round(y))
         ix, iy = math.floor(x), math.floor(y)
         dx, dy = round((x - ix) * 64), round((y - iy) * 64)
@@ -375,11 +408,15 @@ def _glyph_items(
         if g.faux_bold:
             ex += round(64 * px_w * FAUX_BOLD_EM)
             ey += round(64 * px_h * FAUX_BOLD_EM)
-        key = (g.face.key, g.gid, size66, matrix, dx, -dy, mode.flags, ex, ey)
+        delta = (dx * n, -dy * n)
+        key = (g.face.key, g.gid, size66, matrix, delta, mode.flags, ex, ey, n)
         left, top, cov = cache.get(
             key,
-            lambda: _render_glyph(
-                g.face, g.gid, size66, matrix, (dx, -dy), mode.flags, (ex, ey)
+            lambda: _point_sampled(
+                _render_glyph(
+                    g.face, g.gid, size66, matrix, delta, mode.flags, (ex * n, ey * n)
+                ),
+                n,
             ),
         )
         if cov.size:
@@ -418,7 +455,7 @@ def _color_item(
     w, h = box[2] - box[0], box[3] - box[1]
     if w <= 0 or h <= 0:
         return None
-    grid = mode.color_alpha_grid
+    grid = _samples(mode, options)
     _guard("glyph", w, h, svg.peak_bytes(drawing, w, h, grid), options, budget)
     key = ("svg", g.face.key, g.gid, matrix, g.fill, grid)
     left, top, rgba = cache.get(key, lambda: svg.rasterize(drawing, matrix, grid))
