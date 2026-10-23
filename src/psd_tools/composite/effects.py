@@ -1698,13 +1698,14 @@ _BEVEL_DEFAULT = 0.0
 # The styles whose surface stands beside the layer.
 _BEVEL_BESIDE = (BevelStyle.OUTER_BEVEL, BevelStyle.EMBOSS, BevelStyle.PILLOW_EMBOSS)
 
-# A smooth inner bevel, read off Photoshop renders: the narrowest band it
-# rounds, in pixels (a size of one draws as two); the least it stands above
-# the flat layer, in pixels, whatever the depth; the narrowest range of its
-# shape contour; and where in each pixel an anti-aliased shape contour is
-# lit, along each axis, the lighting averaged over every pair.
-_SMOOTH_INNER_MIN_WIDTH = 2.0
-_SMOOTH_INNER_MIN_HEIGHT = 1.0
+# A smooth bevel, read off Photoshop renders: the narrowest band it rounds,
+# in pixels (a size of one draws as two, an emboss's half band as well); the
+# least it stands above the flat layer, in pixels, whatever the depth; and,
+# for an inner bevel, the narrowest range of its shape contour and where in
+# each pixel an anti-aliased one is lit, along each axis, the lighting
+# averaged over every pair.
+_SMOOTH_MIN_WIDTH = 2.0
+_SMOOTH_MIN_HEIGHT = 1.0
 _SHAPE_RANGE_FLOOR = 1.0 / 255.0
 _SHAPE_AA_SAMPLES = (0.0, 1.0 / 3.0, 2.0 / 3.0)
 
@@ -1877,12 +1878,17 @@ def bevel_inside(style: bytes) -> bool:
     return style != BevelStyle.OUTER_BEVEL
 
 
-def bevel_smooth_inner(style: bytes, technique: bytes) -> bool:
-    """Whether a bevel is a smooth inner bevel, the one read off Photoshop renders."""
-    return style == BevelStyle.INNER_BEVEL and technique not in (
+def _smooth(technique: bytes) -> bool:
+    """Whether a bevel technique is the smooth one."""
+    return technique not in (
         BevelTechnique.PRECISE_MATTE,
         BevelTechnique.SLOPE_LIMIT_MATTE,
     )
+
+
+def bevel_smooth_inner(style: bytes, technique: bytes) -> bool:
+    """Whether a bevel is a smooth inner bevel, whose shape contour is drawn."""
+    return style == BevelStyle.INNER_BEVEL and _smooth(technique)
 
 
 class BevelShape:
@@ -1924,29 +1930,46 @@ def _sampled(values: np.ndarray, down: float, across: float) -> np.ndarray:
     return (1.0 - across) * rows[:, :-1] + across * rows[:, 1:]
 
 
-def _smooth_inner_surface(alpha: np.ndarray, size: float) -> np.ndarray:
-    """A smooth inner bevel's surface, from 0 to 1.
+def _smooth_band(style: bytes, size: float) -> float:
+    """How wide a smooth bevel's band is, in pixels: 0 at size 0.
 
-    The silhouette blurred across a band at least two pixels wide, or at
-    size 0 the silhouette itself.
+    An emboss and a pillow emboss split it, half on each side of the edge.
     """
     if size <= 0.0:
-        return alpha.astype(np.float32)
-    width = max(size, _SMOOTH_INNER_MIN_WIDTH)
-    # The blur reaches a pixel short of the band, as _bevel_height's does.
-    return _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
+        return 0.0
+    if style in (BevelStyle.EMBOSS, BevelStyle.PILLOW_EMBOSS):
+        size /= 2.0
+    return max(size, _SMOOTH_MIN_WIDTH)
 
 
-def _smooth_inner_rise(size: float, depth: float) -> float:
-    """How many pixels a smooth inner bevel's surface stands at its top.
+def _smooth_surface(alpha: np.ndarray, style: bytes, size: float) -> np.ndarray:
+    """A smooth bevel's surface, from 0 to 1.
 
-    ``size`` x ``depth``, but never less than a pixel unless the depth is 0,
-    so a shallow bevel lights its edge as one of depth ``100 / size`` does
-    and one of size 0 does whatever its depth.
+    The silhouette blurred across the band, or at size 0 the silhouette
+    itself. A pillow emboss rises away from the edge on both sides, which
+    sinks the edge into what lies under it.
     """
-    width = max(size, _SMOOTH_INNER_MIN_WIDTH) if size > 0.0 else 0.0
-    rise = width * depth / 100.0 * _BEVEL_SLOPE_PER_DEPTH
-    return max(rise, _SMOOTH_INNER_MIN_HEIGHT) if depth > 0.0 else rise
+    width = _smooth_band(style, size)
+    if width <= 0.0:
+        surface = alpha.astype(np.float32)
+    else:
+        # The blur reaches a pixel short of the band, so that the band's
+        # width counts the edge pixel.
+        surface = _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
+    if style == BevelStyle.PILLOW_EMBOSS:
+        surface = np.where(alpha >= 0.5, surface, 1.0 - surface)
+    return surface
+
+
+def _smooth_rise(style: bytes, size: float, depth: float) -> float:
+    """How many pixels a smooth bevel's surface stands at its top.
+
+    The band's width x ``depth``, but never less than a pixel unless the
+    depth is 0, so a shallow bevel lights its edge as one of depth
+    ``100 / width`` does and one of size 0 does whatever its depth.
+    """
+    rise = _smooth_band(style, size) * depth / 100.0 * _BEVEL_SLOPE_PER_DEPTH
+    return max(rise, _SMOOTH_MIN_HEIGHT) if depth > 0.0 else rise
 
 
 def _bevel_height(
@@ -1962,23 +1985,12 @@ def _bevel_height(
 
     A chisel hard bevel climbs that band at a constant slope along the
     signed distance to the edge; a chisel soft one is the same surface
-    rounded off. A smooth bevel is the silhouette blurred across the band,
-    so it is steepest at the edge and flattens away from it.
+    rounded off. The smooth technique is :py:func:`_smooth_surface`'s.
     """
     half = style in (BevelStyle.EMBOSS, BevelStyle.PILLOW_EMBOSS)
     width = size / 2.0 if half else size
     if width <= 0.0:
         return np.zeros(alpha.shape, dtype=np.float32)
-    if technique not in (
-        BevelTechnique.PRECISE_MATTE,
-        BevelTechnique.SLOPE_LIMIT_MATTE,
-    ):
-        # The blur reaches a pixel short of the band, so that the band's
-        # width counts the edge pixel.
-        height = _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
-        if style == BevelStyle.PILLOW_EMBOSS:
-            height = np.where(alpha >= 0.5, height, 1.0 - height)
-        return (height * width).astype(np.float32)
 
     distance = _signed_distance(alpha, size + 1.0)
     if style == BevelStyle.OUTER_BEVEL:
@@ -2082,12 +2094,11 @@ def draw_bevel(
     the surface before it is lit, so the bevel's faces and the flat layer
     alike carry its bumps.
 
-    A smooth inner bevel's surface is :py:func:`_smooth_inner_surface`'s,
-    :py:func:`_smooth_inner_rise` pixels high at its top, and ``depth`` is in
-    that height. ``bevel_shape`` (its shape contour) remaps the surface, and
-    an anti-aliased one is lit at ``_SHAPE_AA_SAMPLES`` within each pixel,
-    the lighting averaged before the split. Other bevels leave the shape
-    contour out.
+    A smooth bevel's surface is :py:func:`_smooth_surface`'s,
+    :py:func:`_smooth_rise` pixels high at its top, and ``depth`` is in that
+    height. ``bevel_shape`` (an inner bevel's shape contour) remaps the
+    surface, and an anti-aliased one is lit at ``_SHAPE_AA_SAMPLES`` within
+    each pixel, the lighting averaged before the split.
 
     Both results are ``(height, width, 1)`` over the whole canvas; the caller
     keeps the parts the style paints, inside the silhouette and beside it,
@@ -2116,9 +2127,9 @@ def draw_bevel(
     lx = math.cos(phi) * math.cos(theta)
     ly = -math.cos(phi) * math.sin(theta)
     lz = math.sin(phi)
-    if bevel_smooth_inner(style, technique):
-        surface = _smooth_inner_surface(alpha, size)
-        rise = _smooth_inner_rise(size, depth)
+    if _smooth(technique):
+        surface = _smooth_surface(alpha, style, size)
+        rise = _smooth_rise(style, size, depth)
         if bumps is not None:
             bumps = bumps * slope
         samples = (0.0,)

@@ -4,11 +4,11 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
-- [fix] Smooth inner bevels follow Photoshop's renders: a size of 1 draws as
-  2, the bevel stands at least a pixel high however shallow, so size 0 lights
-  the edge pixels, and the shape contour (``useShape``) is applied, its range
-  steepening the bevel and anti-aliasing lighting it within each pixel.
-  **Rendering change** for those bevels; other styles are unchanged
+- [fix] Smooth bevels follow Photoshop's renders: a band of 1 px draws as 2,
+  and the bevel stands at least a pixel high however shallow, so size 0
+  lights the edge pixels. An inner bevel's shape contour (``useShape``) is
+  applied, its range steepening the bevel and anti-aliasing lighting it
+  within each pixel. **Rendering change** for small or shallow smooth bevels
 - [fix] Levels gammas above 1 start from black on Photoshop's straight toe
   instead of the power curve's vertical slope, input levels round to the
   document's own, and a master gamma folds into each channel's

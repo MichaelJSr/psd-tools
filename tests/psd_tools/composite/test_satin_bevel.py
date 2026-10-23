@@ -935,8 +935,8 @@ def test_smooth_inner_bevels_render_to_photoshops_composite() -> None:
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("_SMOOTH_INNER_MIN_WIDTH", 1.0),
-        ("_SMOOTH_INNER_MIN_HEIGHT", 0.0),
+        ("_SMOOTH_MIN_WIDTH", 1.0),
+        ("_SMOOTH_MIN_HEIGHT", 0.0),
         ("_SHAPE_RANGE_FLOOR", 1.0 / 64.0),
         ("_SHAPE_AA_SAMPLES", (0.0,)),
         ("_SHAPE_AA_SAMPLES", (-1.0 / 3.0, 0.0, 1.0 / 3.0)),
@@ -1037,3 +1037,26 @@ def test_an_unreadable_shape_range_draws_the_bevel_without_it(
         color, _, _ = composite(psd)
     assert "Cannot read a bevel's shape" in caplog.text
     assert np.array_equal(color, composite(plain)[0])
+
+
+# effects/bevel-smooth-outer-emboss.psd: as the fixture above, with smooth
+# outer bevels on the first row and embosses on the second, at sizes and
+# depths 0/1, 1/30, 2/1, 5/10 and 2/100.
+_STYLES_FIXTURE = "effects/bevel-smooth-outer-emboss.psd"
+
+
+def test_smooth_outer_bevels_and_embosses_render_to_photoshops_composite() -> None:
+    """The size and depth laws hold beside the layer as inside it."""
+    psd = PSDImage.open(full_name(_STYLES_FIXTURE))
+    color, _, _ = composite(psd)
+    off = np.abs(color[..., :3] - psd.numpy()[..., :3]).max(axis=2) * 255 > 24
+    names = []
+    for layer in psd:
+        if not any(layer.effects.find("bevelemboss")):
+            continue
+        left, top, right, bottom = layer.bbox
+        reach = 7
+        cell = off[top - reach : bottom + reach, left - reach : right + reach]
+        assert int(cell.sum()) <= _SMOOTH_STRAY, layer.name
+        names.append(layer.name)
+    assert len(names) == 10
