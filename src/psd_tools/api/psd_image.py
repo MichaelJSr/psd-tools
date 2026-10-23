@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import IO, Any, Literal, Self
 
 import numpy as np
@@ -444,6 +444,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         ignore_preview: bool = False,
         apply_icc: bool = True,
         text_gamma: float | None = TEXT_BLEND_GAMMA,
+        layer_text_gamma: Mapping[int, float | None] | None = None,
+        text_preview: bool = True,
     ) -> Image.Image:
         """
         Composite the PSD image.
@@ -465,6 +467,13 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             blended in, as Photoshop's "Blend Text Colors Using Gamma"
             preference. ``None`` mixes them in the document's encoding like
             any other layer.
+        :param layer_text_gamma: Per type layer, by layer ID, the gamma its
+            edges blend in, or ``None`` to mix them straight. Overrides
+            ``text_gamma`` and the preview.
+        :param text_preview: Read off the stored preview, where there is one,
+            which type layers Photoshop mixed straight rather than in
+            ``text_gamma``. It does that for a layer whose raster it kept as
+            pixels, which the file does not record.
         :return: :py:class:`PIL.Image`.
         """
         from psd_tools.composite import composite_pil  # noqa: PLC0415
@@ -487,6 +496,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             force,
             apply_icc=apply_icc,
             text_gamma=text_gamma,
+            layer_text_gamma=layer_text_gamma,
+            text_preview=text_preview,
         )
         if result is None:
             raise ValueError("Failed to composite PSD image")

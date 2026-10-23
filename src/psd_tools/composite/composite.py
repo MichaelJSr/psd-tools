@@ -1,9 +1,11 @@
 """Composite implementation for layer rendering and blending."""
 
+import functools
 import logging
 import math
 import warnings
-from collections.abc import Callable, Iterator, Sequence
+import weakref
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple, Protocol, cast
 
@@ -39,6 +41,8 @@ from psd_tools.api.utils import (
     check_growth,
     check_pixel_size,
     get_color_channels,
+    get_transparency_index,
+    has_transparency,
 )
 from psd_tools.composite import paint, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
@@ -78,6 +82,7 @@ from psd_tools.composite.text_blend import (
     to_text_space,
 )
 from psd_tools.composite.widen import make_widen
+from psd_tools.compression import _decompress
 from psd_tools.constants import (
     BevelDirection,
     BevelStyle,
@@ -769,6 +774,38 @@ _GroupAlphas = dict[tuple[int, tuple[int, int, int, int]], np.ndarray]
 
 
 @dataclass
+class _TextBlend:
+    """How each type layer's edge blends, settled once per composite pass.
+
+    ``overrides`` pins a layer, by layer ID, to a gamma, or to None for the
+    document's encoding. Any other type layer blends in the pass's text gamma
+    unless ``reference`` -- Photoshop's own composite of the document, read
+    lazily -- shows its edge mixed straight: Photoshop composites a type layer
+    straight when it keeps the layer's stored raster as pixels, and nothing
+    in the file says which layers it kept. ``chosen`` holds, by ``id()``,
+    whether each layer went on straight, so every compositor in the pass
+    agrees. A layer whose edge only leans straight where it goes on --
+    something composited later still changes it -- goes on in the gamma and
+    waits in ``leaning``, by ``id()``, with its edge pixels on the document's
+    canvas, for :py:func:`composite` to settle on the finished canvas.
+    """
+
+    overrides: Mapping[int, float | None] = field(default_factory=dict)
+    reference: Callable[[], np.ndarray | None] | None = None
+    chosen: dict[int, bool] = field(default_factory=dict)
+    leaning: dict[int, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
+    _array: np.ndarray | None = None
+    _read: bool = False
+
+    def reference_array(self) -> np.ndarray | None:
+        """The reference on the document's canvas, or None."""
+        if not self._read:
+            self._read = True
+            self._array = None if self.reference is None else self.reference()
+        return self._array
+
+
+@dataclass
 class _PassCache:
     """What one composite pass measures once and then reuses.
 
@@ -813,6 +850,7 @@ class _PassCache:
     group_alphas: _GroupAlphas = field(default_factory=dict)
     scipy_warned: bool = False
     unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
+    text: _TextBlend = field(default_factory=_TextBlend)
 
 
 def _paint_bbox(layer: Layer, memo: _ContentBBoxes) -> tuple[int, int, int, int]:
@@ -878,6 +916,8 @@ def composite_pil(
     as_layer: bool = False,
     apply_icc: bool = True,
     text_gamma: float | None = TEXT_BLEND_GAMMA,
+    layer_text_gamma: Mapping[int, float | None] | None = None,
+    text_preview: bool = True,
 ) -> Image.Image | None:
     """
     Composite layers and return a PIL Image.
@@ -898,6 +938,11 @@ def composite_pil(
         text_gamma: The gamma a type layer's anti-aliased edges are blended in,
             as Photoshop's "Blend Text Colors Using Gamma" preference; None
             mixes them in the document's encoding like any other layer
+        layer_text_gamma: Per type layer, by layer ID, the gamma its edges
+            blend in, or None to mix them straight; overrides ``text_gamma``
+            and the preview
+        text_preview: Read off the document's stored preview which type
+            layers Photoshop mixed straight rather than in ``text_gamma``
 
     Returns:
         PIL Image with composited result, or None if viewport is empty
@@ -943,6 +988,8 @@ def composite_pil(
         force=force,
         as_layer=as_layer,
         text_gamma=text_gamma,
+        layer_text_gamma=layer_text_gamma,
+        text_preview=text_preview,
     )
 
     mode = pil_io.get_pil_mode(color_mode)
@@ -1056,6 +1103,8 @@ def composite(
     force: bool = False,
     as_layer: bool = False,
     text_gamma: float | None = TEXT_BLEND_GAMMA,
+    layer_text_gamma: Mapping[int, float | None] | None = None,
+    text_preview: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Composite layers and return NumPy arrays.
@@ -1077,6 +1126,13 @@ def composite(
         text_gamma: The gamma a type layer's anti-aliased edges are blended in,
             as Photoshop's "Blend Text Colors Using Gamma" preference; None
             mixes them in the document's encoding like any other layer
+        layer_text_gamma: Per type layer, by layer ID, the gamma its edges
+            blend in, or None to mix them straight; overrides ``text_gamma``
+            and the preview
+        text_preview: When compositing a whole document that has a stored
+            preview, read off it which type layers Photoshop mixed straight
+            rather than in ``text_gamma`` -- it does so for a layer whose
+            raster it kept as pixels, which the file does not record
 
     Returns:
         Tuple of (color, shape, alpha) as float32 ndarrays with shape (height, width, channels):
@@ -1211,21 +1267,75 @@ def composite(
 
     layer_filter = layer_filter or Layer.is_visible
 
-    compositor = Compositor(
-        viewport,
-        backdrop_color,
-        backdrop_alpha,
-        layer_filter,
-        force,
-        document_backdrop=lambda: _document_backdrop(_psd, viewport),
-        widen=_widen_fn,
-        color_mode=_psd.color_mode,
-        text_gamma=text_gamma,
-    )
     target_group = group if isinstance(group, GroupMixin) and not as_layer else [group]
-    for layer in target_group:  # type: ignore
-        compositor.apply(layer)  # type: ignore[arg-type]
-    return compositor.finish()
+    overrides = dict(layer_text_gamma or {})
+    reference: Callable[[], np.ndarray | None] | None = None
+    if text_preview and isinstance(group, PSDImage) and text_gamma is not None:
+        reference = functools.partial(_text_reference, group)
+
+    def composite_pass(
+        chosen: dict[int, bool], box: tuple[int, int, int, int] = viewport
+    ) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], _TextBlend]:
+        """One pass over ``box``, a part of the viewport, with ``chosen`` kept."""
+        on = _within(viewport, box)
+        cache = _PassCache()
+        cache.text.overrides = overrides
+        cache.text.reference = reference
+        cache.text.chosen = dict(chosen)
+        compositor = Compositor(
+            box,
+            backdrop_color[on],
+            backdrop_alpha[on],
+            layer_filter,
+            force,
+            document_backdrop=lambda: _document_backdrop(_psd, box),
+            widen=_widen_fn,
+            color_mode=_psd.color_mode,
+            cache=cache,
+            text_gamma=text_gamma,
+        )
+        for layer in target_group:  # type: ignore
+            compositor.apply(layer)  # type: ignore[arg-type]
+        return compositor.finish(), cache.text
+
+    result, text = composite_pass({})
+    leaning = text.leaning
+    reference_array = text.reference_array()
+    if not leaning or reference_array is None:
+        return result
+    # A layer that leaned straight where it went on is settled on the finished
+    # canvas, against the same composite with it straight: worked out only
+    # over its edge, then over the whole viewport if it does settle.
+    rows = np.concatenate([pixels[0] for pixels in leaning.values()])
+    columns = np.concatenate([pixels[1] for pixels in leaning.values()])
+    box = (
+        int(columns.min()),
+        int(rows.min()),
+        int(columns.max()) + 1,
+        int(rows.max()) + 1,
+    )
+    on = _within(viewport, box)
+    tried, _ = composite_pass(text.chosen | dict.fromkeys(leaning, True), box)
+    settled = {
+        key
+        for key, pixels in leaning.items()
+        if _settles_straight(
+            result[0][on], tried[0], result[2][on], box, reference_array, pixels
+        )
+    }
+    if not settled:
+        return result
+    return composite_pass(text.chosen | dict.fromkeys(settled, True))[0]
+
+
+def _within(
+    viewport: tuple[int, int, int, int], box: tuple[int, int, int, int]
+) -> tuple[slice, slice]:
+    """Where ``box``, on the document, falls on a canvas over ``viewport``."""
+    return (
+        slice(box[1] - viewport[1], box[3] - viewport[1]),
+        slice(box[0] - viewport[0], box[2] - viewport[0]),
+    )
 
 
 def paste(
@@ -1301,6 +1411,83 @@ def _excluded_channels(layer: Layer, channels: int) -> list[int]:
     if not restricted:
         return []
     return sorted({index for index in restricted if index < channels})
+
+
+# Each document's preview as _text_reference() read it, with the stored bytes
+# it was read from: a save that regenerates the preview replaces them.
+_KeptReference = tuple[bytes, np.ndarray | None]
+_TEXT_REFERENCES: weakref.WeakKeyDictionary[PSDImage, _KeptReference] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _text_reference(psd: PSDImage) -> np.ndarray | None:
+    """The document's stored preview, 8-bit, or None without one to read.
+
+    Read once and kept with the document until its stored preview changes.
+    """
+    stored = psd._record.image_data.data
+    kept = _TEXT_REFERENCES.get(psd)
+    if kept is not None and kept[0] is stored:
+        return kept[1]
+    array = _read_text_reference(psd)
+    _TEXT_REFERENCES[psd] = (stored, array)
+    return array
+
+
+def _read_text_reference(psd: PSDImage) -> np.ndarray | None:
+    """:py:meth:`PSDImage.topil` without the profile, as an array, or None.
+
+    A side read: a preview that does not decode, or that the document's
+    allocation budget does not allow, is not read, and says nothing. The
+    decode raises rather than warns, as a warning filter would be
+    process-global.
+    """
+    header = psd._record.header
+    if (
+        psd.color_mode != ColorMode.RGB
+        or psd.depth == 32
+        or header.channels < 3
+        or not psd.has_preview()
+    ):
+        return None
+    image_data = psd._record.image_data
+    try:
+        check_pixel_size(
+            psd.width,
+            psd.height,
+            psd.channels,
+            max_alloc_bytes=psd._max_alloc_bytes,
+            estimated_bytes=pil_io._image_data_peak_bytes(psd, None, False),
+            warn=False,
+        )
+        data = _decompress(
+            image_data.data,
+            image_data.compression,
+            header.width,
+            header.height * header.channels,
+            header.depth,
+            header.version,
+            strict=True,
+        )
+        plane = len(data) // header.channels
+        planes = [
+            pil_io._create_image(
+                (psd.width, psd.height),
+                data[index * plane : (index + 1) * plane],
+                psd.depth,
+            )
+            for index in range(header.channels)
+        ]
+        image = Image.merge("RGB", planes[:3])
+        if has_transparency(psd):
+            image.putalpha(planes[get_transparency_index(psd)])
+        array = np.asarray(pil_io._remove_white_background(image, psd.color_mode))
+    except ValueError:
+        return None
+    if array.ndim != 3 or array.shape[:2] != (psd.height, psd.width):
+        return None
+    return array
 
 
 def _document_backdrop(
@@ -1537,6 +1724,9 @@ class _Source:
     # The gamma a type layer's edge coverage blends in, or None to blend in
     # the document's encoding like every other source.
     text_gamma: float | None = None
+    # The type layer's ``id()`` while its blend is still to be read off the
+    # reference: see :py:class:`_TextBlend`.
+    text_key: int | None = None
 
 
 def _blends_in_text_space(layer: Layer, color_mode: ColorMode | None) -> bool:
@@ -1557,6 +1747,134 @@ def _blends_in_text_space(layer: Layer, color_mode: ColorMode | None) -> bool:
         return False
     text_data = layer._type_data.text_data
     return b"bounds" in text_data and not text_data.get(b"substitutesUsed", False)
+
+
+# A type layer's edge pixel counts where the straight and gamma mixes differ by
+# more than this, and only a layer with at least the count of them is read.
+# Straight wins on that share of them with a median miss within the fit (the
+# reference is 8-bit); a layer that only leans straight, on the lean's share,
+# is settled on the finished canvas instead.
+_TEXT_DECISIVE = 3.0 / 255.0
+_TEXT_MIN_PIXELS = 16
+_TEXT_STRAIGHT_SHARE = 0.9
+_TEXT_FIT = 2.0 / 255.0
+_TEXT_LEAN_SHARE = 0.5
+
+
+def _favours_straight(
+    gamma: np.ndarray, straight: np.ndarray, reference: np.ndarray
+) -> tuple[float, float]:
+    """How the reference splits between two mixes of the same edge pixels.
+
+    Returns the share of pixels the straight mix is nearer on, and its median
+    miss. All three are ``(pixels, channels)``.
+    """
+    miss_gamma = np.abs(gamma - reference).max(axis=1)
+    miss_straight = np.abs(straight - reference).max(axis=1)
+    return float((miss_straight < miss_gamma).mean()), float(np.median(miss_straight))
+
+
+def _edge_evidence(
+    viewport: tuple[int, int, int, int],
+    box: tuple[int, int, int, int],
+    reference: np.ndarray,
+    mixed: np.ndarray,
+    canvas: np.ndarray,
+    color: np.ndarray,
+    shape: np.ndarray,
+    alpha: np.ndarray,
+    alpha_previous: np.ndarray,
+    alpha_new: np.ndarray,
+    color_b: np.ndarray,
+    alpha_b: np.ndarray,
+    blend_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+) -> tuple[float, float, np.ndarray, np.ndarray] | None:
+    """How ``reference`` splits between a type layer's two mixes, where it goes on.
+
+    ``mixed`` is the canvas with the layer's edge mixed in the text gamma; the
+    straight mix is worked out beside it on ``box``, (top, left, bottom,
+    right) on the canvas, which stands at ``viewport`` on the reference.
+    Returns :py:func:`_favours_straight`'s share and fit, and the rows and
+    columns on the document of the pixels read; None for too few of them.
+    """
+    top, left, bottom, right = box
+    height, width = reference.shape[:2]
+    top = max(top, -viewport[1])
+    left = max(left, -viewport[0])
+    bottom = min(bottom, height - viewport[1])
+    right = min(right, width - viewport[0])
+    if top >= bottom or left >= right:
+        return None
+    on = (slice(top, bottom), slice(left, right))
+    seen = (
+        reference[
+            top + viewport[1] : bottom + viewport[1],
+            left + viewport[0] : right + viewport[0],
+        ]
+        / 255.0
+    )
+    channels = canvas.shape[2]
+    edge = (alpha[on][..., 0] > 0.0) & (alpha[on][..., 0] < 1.0)
+    edge &= alpha_new[on][..., 0] > 0.99
+    if seen.shape[2] > channels:
+        edge &= seen[..., channels] > 0.99
+    if not edge.any():
+        return None
+    backdrop = color_b[on]
+    shape_on, alpha_on, alpha_b_on = shape[on], alpha[on], alpha_b[on]
+    lerped = (shape_on - alpha_on) * alpha_b_on * backdrop + alpha_on * (
+        (1.0 - alpha_b_on) * color[on] + alpha_b_on * blend_fn(backdrop, color[on])
+    )
+    lerped = utils.clip(
+        utils.divide(
+            (1.0 - shape_on) * alpha_previous[on] * canvas[on] + lerped, alpha_new[on]
+        )
+    )
+    gamma = mixed[on]
+    read = edge & (np.abs(gamma - lerped).max(axis=2) > _TEXT_DECISIVE)
+    if int(read.sum()) < _TEXT_MIN_PIXELS:
+        return None
+    share, fit = _favours_straight(
+        gamma[read], lerped[read], seen[..., :channels][read]
+    )
+    rows, columns = np.nonzero(read)
+    return share, fit, rows + top + viewport[1], columns + left + viewport[0]
+
+
+def _settles_straight(
+    first: np.ndarray,
+    second: np.ndarray,
+    alpha: np.ndarray,
+    viewport: tuple[int, int, int, int],
+    reference: np.ndarray,
+    pixels: tuple[np.ndarray, np.ndarray],
+) -> bool:
+    """Whether the finished canvas shows a leaning layer's edge straight.
+
+    ``first`` is the canvas with the layer in the gamma, ``second`` with it
+    straight, both on ``viewport``; ``pixels`` are its edge pixels on the
+    document.
+    """
+    rows, columns = pixels[0] - viewport[1], pixels[1] - viewport[0]
+    inside = (
+        (rows >= 0)
+        & (rows < first.shape[0])
+        & (columns >= 0)
+        & (columns < first.shape[1])
+    )
+    rows, columns = rows[inside], columns[inside]
+    channels = first.shape[2]
+    seen = reference[rows + viewport[1], columns + viewport[0]] / 255.0
+    gamma, straight = first[rows, columns], second[rows, columns]
+    read = (alpha[rows, columns, 0] > 0.99) & (
+        np.abs(gamma - straight).max(axis=1) > _TEXT_DECISIVE
+    )
+    if seen.shape[1] > channels:
+        read &= seen[:, channels] > 0.99
+    if int(read.sum()) < _TEXT_MIN_PIXELS:
+        return False
+    share, fit = _favours_straight(gamma[read], straight[read], seen[read, :channels])
+    return share >= _TEXT_STRAIGHT_SHARE and fit <= _TEXT_FIT
 
 
 def _composites_as_passthrough(source: _Source, blend_mode: BlendMode) -> bool:
@@ -2449,6 +2767,7 @@ class Compositor:
         # corpus pairs a non-normal layer blend mode with an effect that
         # draws, so nothing here has measured which way is right (#846).
 
+        text_gamma, text_key = self._text_blend(layer)
         return _Source(
             color=color,
             shape=shape,
@@ -2461,12 +2780,79 @@ class Compositor:
             adjustment_isolated=adjustment_isolated,
             knockout_shape=shape,
             region=region,
-            text_gamma=(
-                self._text_gamma
-                if _blends_in_text_space(layer, self._color_mode)
-                else None
-            ),
+            text_gamma=text_gamma,
+            text_key=text_key,
         )
+
+    def _text_blend(self, layer: Layer) -> tuple[float | None, int | None]:
+        """The gamma ``layer``'s edge blends in, and its key while undecided.
+
+        The key is set only while the pass's reference is still to decide
+        between the text gamma and straight; see :py:class:`_TextBlend`.
+        """
+        if not _blends_in_text_space(layer, self._color_mode):
+            return None, None
+        blend = self._cache.text
+        layer_id = layer.layer_id
+        if layer_id in blend.overrides:
+            return blend.overrides[layer_id], None
+        if self._text_gamma is None:
+            return None, None
+        straight = blend.chosen.get(id(layer))
+        if straight is not None:
+            return (None if straight else self._text_gamma), None
+        if blend.reference is None:
+            return self._text_gamma, None
+        return self._text_gamma, id(layer)
+
+    def _mixes_straight(
+        self,
+        key: int,
+        mixed: np.ndarray,
+        color: np.ndarray,
+        shape: np.ndarray,
+        alpha: np.ndarray,
+        alpha_previous: np.ndarray,
+        color_b: np.ndarray,
+        alpha_b: np.ndarray,
+        blend_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    ) -> bool:
+        """Whether the reference shows this type layer's edge mixed straight.
+
+        ``mixed`` is the canvas with the edge mixed in the text gamma. Straight
+        needs a clear majority of the edge and a close fit where the layer
+        goes on; a layer that only leans straight there is left in the gamma
+        for :py:func:`composite` to settle. The answer is kept for the pass.
+        """
+        blend = self._cache.text
+        reference = blend.reference_array()
+        rows = np.flatnonzero(shape.any(axis=(1, 2)))
+        columns = np.flatnonzero(shape.any(axis=(0, 2)))
+        evidence = None
+        if reference is not None and len(rows) and len(columns):
+            evidence = _edge_evidence(
+                self._viewport,
+                (rows[0], columns[0], rows[-1] + 1, columns[-1] + 1),
+                reference,
+                mixed,
+                self._color,
+                color,
+                shape,
+                alpha,
+                alpha_previous,
+                self._alpha,
+                color_b,
+                alpha_b,
+                blend_fn,
+            )
+        straight = False
+        if evidence is not None:
+            share, fit, edge_rows, edge_columns = evidence
+            straight = share >= _TEXT_STRAIGHT_SHARE and fit <= _TEXT_FIT
+            if not straight and share >= _TEXT_LEAN_SHARE:
+                blend.leaning[key] = (edge_rows, edge_columns)
+        blend.chosen[key] = straight
+        return straight
 
     def _composite_source(self, source: _Source, blend_mode: BlendMode) -> None:
         """Composite a resolved source into this compositor's canvases."""
@@ -2492,6 +2878,7 @@ class Compositor:
             blend_mode,
             source.knockout,
             text_gamma=source.text_gamma,
+            text_key=source.text_key,
         )
 
     def _compose_effects(
@@ -2701,6 +3088,7 @@ class Compositor:
         knockout: Knockout = Knockout.NONE,
         text_gamma: float | None = None,
         faded: float = 1.0,
+        text_key: int | None = None,
     ) -> None:
         """Put a source on the canvases.
 
@@ -2733,7 +3121,7 @@ class Compositor:
             get_blend_func(blend_mode, self._color_mode), blend_mode, faded
         )
         if text_gamma is not None:
-            self._color = self._mix_in_text_space(
+            mixed = self._mix_in_text_space(
                 color,
                 shape,
                 alpha,
@@ -2745,7 +3133,19 @@ class Compositor:
                 text_gamma,
                 isolated=self._text_isolated and not knockout,
             )
-            return
+            if text_key is None or not self._mixes_straight(
+                text_key,
+                mixed,
+                color,
+                shape,
+                alpha,
+                alpha_previous,
+                color_b,
+                alpha_b,
+                blend_fn,
+            ):
+                self._color = mixed
+                return
         color_t = (shape - alpha) * alpha_b * color_b + alpha * (
             (1.0 - alpha_b) * color + alpha_b * blend_fn(color_b, color)
         )
