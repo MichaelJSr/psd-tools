@@ -121,7 +121,12 @@ def _format(fmt: str) -> tuple[struct.Struct, int, int]:
 def read_fmt(fmt: str, fp: IO[bytes]) -> tuple[Any, ...]:
     """Read data from ``fp`` according to ``fmt``."""
     packer, fmt_size, objects = _format(fmt)
-    remaining = _remaining_bytes(fp)
+    # _remaining_bytes() inlined: this is the parser's hottest call.
+    position = fp.tell()
+    try:
+        remaining = fp.seek(0, 2) - position
+    finally:
+        fp.seek(position)
     if fmt_size > remaining:
         raise OSError(
             "Failed to read data section: read=%d, expected=%d. "
@@ -129,7 +134,6 @@ def read_fmt(fmt: str, fp: IO[bytes]) -> tuple[Any, ...]:
         )
     consume_objects(objects)
     consume_bytes(fmt_size)
-    position = fp.tell()
     data = fp.read(fmt_size)
     if len(data) != fmt_size:
         fp.seek(position)
