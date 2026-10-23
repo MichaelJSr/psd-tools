@@ -60,7 +60,7 @@ def test_brightness_contrast_reads_the_auto_flag(
 ) -> None:
     layer = psd[4]
     assert isinstance(layer, adjustments.BrightnessContrast)
-    assert b"Auto" in layer._data  # Photoshop's spelling
+    assert layer._data is not None and b"Auto" in layer._data  # Photoshop's key
     data = Descriptor(items={b"Auto": Bool(flag)})  # type: ignore[arg-type]
     monkeypatch.setattr(layer, "_data", data)
     assert layer.automatic is flag
