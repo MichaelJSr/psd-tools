@@ -390,6 +390,30 @@ option::
       shows for the same file. Use
       :py:meth:`~psd_tools.api.psd_image.PSDImage.topil` for the merged data.
 
+Rendering again after an edit
+-----------------------------
+
+Renders of one document before an edit, after it and once the file is saved
+and reopened can share work through a render cache::
+
+    from psd_tools.composite.rcache import RenderCache
+
+    with RenderCache():
+        before = psd.composite(viewport=region)
+        layer.visible = False
+        after = psd.composite(viewport=region)
+
+A render resumes after the bottom layers it has already composited, and reuses
+the group alphas and stroke effects of layers that did not change. Entries are
+keyed by what the layers hold, not by which objects they are, so an edit needs
+no invalidation and a reopened copy of the same file hits too. The cache keeps
+512 MB at most (``RenderCache(max_bytes=...)``) and serves only the default
+``layer_filter``; a document that links an external file is not cached.
+
+``PSD_RCACHE_VERIFY=1`` renders every cached pass again without the cache and
+raises :py:class:`~psd_tools.composite.rcache.CacheMismatch` if the two
+differ. ``tools/rcache_verify.py`` runs that over a folder of cards.
+
 Exporting data to NumPy
 -----------------------
 

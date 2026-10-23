@@ -4,6 +4,11 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [api] ``psd_tools.composite.rcache.RenderCache``: inside ``with
+  RenderCache():`` composite passes share their intermediates, so a render
+  after an edit resumes below the edited layer and a reopened file renders
+  from the cache. ``PSD_RCACHE_VERIFY=1`` checks every cached pass against an
+  uncached one. Renders without it are unchanged
 - [refactor] Compositing and opening are faster: a layer is composited on the
   box it can change instead of the whole canvas, stroke distance fields use
   the new compiled ``psd_tools.composite._distance`` (numpy where it is not
