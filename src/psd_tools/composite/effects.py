@@ -1701,12 +1701,12 @@ _BEVEL_BESIDE = (BevelStyle.OUTER_BEVEL, BevelStyle.EMBOSS, BevelStyle.PILLOW_EM
 # A smooth inner bevel, read off Photoshop renders: the narrowest band it
 # rounds, in pixels (a size of one draws as two); the least it stands above
 # the flat layer, in pixels, whatever the depth; the narrowest range of its
-# shape contour; and how far an anti-aliased shape contour moves the surface
-# toward the right and the bottom, in pixels.
+# shape contour; and where in each pixel an anti-aliased shape contour is
+# lit, along each axis, the lighting averaged over every pair.
 _SMOOTH_INNER_MIN_WIDTH = 2.0
 _SMOOTH_INNER_MIN_HEIGHT = 1.0
 _SHAPE_RANGE_FLOOR = 1.0 / 255.0
-_SHAPE_AA_SHIFT = 0.3
+_SHAPE_AA_SAMPLES = (0.0, 1.0 / 3.0, 2.0 / 3.0)
 
 
 def _finite(what: str, **values: float) -> None:
@@ -1892,7 +1892,8 @@ class BevelShape:
     surface ``range`` of the way below the top as its bottom, so a narrower
     range makes the bevel steeper, and a Linear one keeps rising past it. A
     curve reads its own shape inside and holds its ends' slope past them.
-    Anti-aliased, the surface moves a fraction of a pixel up and to the left.
+    Anti-aliased, :py:func:`draw_bevel` lights the surface at several points
+    in each pixel (``_SHAPE_AA_SAMPLES``).
     """
 
     def __init__(
@@ -1910,46 +1911,42 @@ class BevelShape:
             inside = np.clip(reach, 0.0, 1.0)
             grid = np.linspace(0.0, 1.0, len(self.table))
             reach = np.interp(inside, grid, self.table) + (reach - inside)
-        if self.anti_aliased:
-            reach = _moved_up_left(reach, _SHAPE_AA_SHIFT)
         return reach.astype(np.float32)
 
 
-def _moved_up_left(values: np.ndarray, fraction: float) -> np.ndarray:
-    """``values`` moved ``fraction`` of a pixel up and left; the edges repeat."""
+def _sampled(values: np.ndarray, down: float, across: float) -> np.ndarray:
+    """``values`` read ``down`` and ``across`` a pixel on.
+
+    Read between pixels linearly; the last row and column repeat.
+    """
     padded = np.pad(values, ((0, 1), (0, 1)), mode="edge")
-    rows = (1.0 - fraction) * padded[:-1] + fraction * padded[1:]
-    return (1.0 - fraction) * rows[:, :-1] + fraction * rows[:, 1:]
+    rows = (1.0 - down) * padded[:-1] + down * padded[1:]
+    return (1.0 - across) * rows[:, :-1] + across * rows[:, 1:]
 
 
-def _smooth_inner_height(
-    alpha: np.ndarray,
-    size: float,
-    depth: float,
-    shape: BevelShape | None,
-) -> np.ndarray:
-    """A smooth inner bevel's surface over the canvas, in pixels of height.
+def _smooth_inner_surface(alpha: np.ndarray, size: float) -> np.ndarray:
+    """A smooth inner bevel's surface, from 0 to 1.
 
-    The silhouette blurred across a band at least two pixels wide; at size 0
-    the silhouette itself. It stands ``size`` x ``depth`` pixels high, but
-    never less than a pixel unless the depth is 0, so a shallow bevel lights
-    its edge as one of depth ``100 / size`` does and one of size 0 does
-    whatever its depth.
-    ``shape`` (:py:class:`BevelShape`) remaps the surface below its top.
+    The silhouette blurred across a band at least two pixels wide, or at
+    size 0 the silhouette itself.
     """
     if size <= 0.0:
-        surface = alpha.astype(np.float32)
-        width = 0.0
-    else:
-        width = max(size, _SMOOTH_INNER_MIN_WIDTH)
-        # The blur reaches a pixel short of the band, as _bevel_height's does.
-        surface = _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
-    if shape is not None:
-        surface = shape.apply(surface)
+        return alpha.astype(np.float32)
+    width = max(size, _SMOOTH_INNER_MIN_WIDTH)
+    # The blur reaches a pixel short of the band, as _bevel_height's does.
+    return _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
+
+
+def _smooth_inner_rise(size: float, depth: float) -> float:
+    """How many pixels a smooth inner bevel's surface stands at its top.
+
+    ``size`` x ``depth``, but never less than a pixel unless the depth is 0,
+    so a shallow bevel lights its edge as one of depth ``100 / size`` does
+    and one of size 0 does whatever its depth.
+    """
+    width = max(size, _SMOOTH_INNER_MIN_WIDTH) if size > 0.0 else 0.0
     rise = width * depth / 100.0 * _BEVEL_SLOPE_PER_DEPTH
-    if depth > 0.0:
-        rise = max(rise, _SMOOTH_INNER_MIN_HEIGHT)
-    return (surface * rise).astype(np.float32)
+    return max(rise, _SMOOTH_INNER_MIN_HEIGHT) if depth > 0.0 else rise
 
 
 def _bevel_height(
@@ -2040,6 +2037,16 @@ def _slopes(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return gy, gx
 
 
+def _lit(
+    height: np.ndarray, slope: float, lx: float, ly: float, lz: float
+) -> np.ndarray:
+    """How lit each face of ``height`` is, its slope scaled by ``slope``."""
+    gy, gx = _slopes(height)
+    nx, ny = -slope * gx, -slope * gy
+    norm = np.sqrt(nx * nx + ny * ny + 1.0)
+    return ((nx * lx + ny * ly + lz) / norm).astype(np.float32)
+
+
 def draw_bevel(
     viewport: tuple[int, int, int, int],
     shape: np.ndarray,
@@ -2075,9 +2082,12 @@ def draw_bevel(
     the surface before it is lit, so the bevel's faces and the flat layer
     alike carry its bumps.
 
-    A smooth inner bevel's surface is :py:func:`_smooth_inner_height`'s,
-    which ``bevel_shape`` (its shape contour) remaps; the other bevels
-    leave the shape contour out.
+    A smooth inner bevel's surface is :py:func:`_smooth_inner_surface`'s,
+    :py:func:`_smooth_inner_rise` pixels high at its top, and ``depth`` is in
+    that height. ``bevel_shape`` (its shape contour) remaps the surface, and
+    an anti-aliased one is lit at ``_SHAPE_AA_SAMPLES`` within each pixel,
+    the lighting averaged before the split. Other bevels leave the shape
+    contour out.
 
     Both results are ``(height, width, 1)`` over the whole canvas; the caller
     keeps the parts the style paints, inside the silhouette and beside it,
@@ -2096,27 +2106,45 @@ def draw_bevel(
     )
     alpha = shape[:, :, 0].astype(np.float32)
     size = max(float(size), 0.0)
-    slope = max(float(depth), 0.0) / 100.0 * _BEVEL_SLOPE_PER_DEPTH
-    if bevel_smooth_inner(style, technique):
-        # The depth is in the surface's height.
-        height = _smooth_inner_height(alpha, size, max(float(depth), 0.0), bevel_shape)
-        scale, slope = slope, 1.0
-    else:
-        height = _bevel_height(alpha, style, technique, size)
-        scale = 1.0
+    depth = max(float(depth), 0.0)
+    slope = depth / 100.0 * _BEVEL_SLOPE_PER_DEPTH
+    bumps = None
     if texture is not None:
         _finite("Bevel", texture=float(np.abs(texture).max()) if texture.size else 0.0)
-        height = height + texture.reshape(height.shape).astype(np.float32) * scale
-    if not up:
-        slope = -slope
-    gy, gx = _slopes(height)
-    nx, ny = -slope * gx, -slope * gy
-    norm = np.sqrt(nx * nx + ny * ny + 1.0)
+        bumps = texture.reshape(alpha.shape).astype(np.float32)
     theta, phi = math.radians(angle), math.radians(min(max(altitude, 0.0), 90.0))
     lx = math.cos(phi) * math.cos(theta)
     ly = -math.cos(phi) * math.sin(theta)
     lz = math.sin(phi)
-    light = ((nx * lx + ny * ly + lz) / norm).astype(np.float32)
+    if bevel_smooth_inner(style, technique):
+        surface = _smooth_inner_surface(alpha, size)
+        rise = _smooth_inner_rise(size, depth)
+        if bumps is not None:
+            bumps = bumps * slope
+        samples = (0.0,)
+        if bevel_shape is not None and bevel_shape.anti_aliased:
+            samples = _SHAPE_AA_SAMPLES
+        light = np.zeros(alpha.shape, dtype=np.float32)
+        for down in samples:
+            for across in samples:
+                sample = surface
+                if down or across:
+                    sample = _sampled(surface, down, across)
+                if bevel_shape is not None:
+                    sample = bevel_shape.apply(sample)
+                height = sample * rise
+                if bumps is not None:
+                    height = height + bumps
+                lit = _lit(height, 1.0 if up else -1.0, lx, ly, lz)
+                if len(samples) > 1:
+                    lit = np.clip(lit, 0.0, 1.0)
+                light += lit
+        light /= len(samples) ** 2
+    else:
+        height = _bevel_height(alpha, style, technique, size)
+        if bumps is not None:
+            height = height + bumps
+        light = _lit(height, slope if up else -slope, lx, ly, lz)
     soften = max(float(soften), 0.0)
     sigma = soften * _SOFTEN_SIGMA_PER_SIZE
     if sigma > 1e-3 and soften >= 1.0:

@@ -49,10 +49,10 @@ from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
 from psd_tools.composite.blend import fade_source, get_blend_func, normal
 from psd_tools.composite.effects import (
+    BevelShape,
     bevel_beside,
     bevel_geometry,
     bevel_inside,
-    BevelShape,
     bevel_reach,
     bevel_smooth_inner,
     cast_reach,
@@ -4771,7 +4771,9 @@ class Compositor:
                             bool(bevel.descriptor.get(Key.AntiAlias, False)),
                         )
                     except _UNREADABLE as error:
-                        logger.debug("Cannot read a bevel's shape of %s: %s", layer, error)
+                        logger.debug(
+                            "Cannot read a bevel's shape of %s: %s", layer, error
+                        )
                 else:
                     logger.debug(
                         "The shape contour of a bevel of %s is not applied", layer

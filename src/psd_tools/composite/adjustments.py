@@ -1,8 +1,8 @@
 """Adjustment layer operations for the compositor."""
 
 import functools
-import math
 import logging
+import math
 import struct
 from collections.abc import Callable, Sequence
 from typing import Literal, TypeVar, cast
