@@ -618,7 +618,7 @@ class Layer(LayerProtocol):
         :return: `bool`
         """
         return any(
-            ci.id >= 0 and cd.data and len(cd.data) > 0
+            ci.id >= 0 and cd._length > 2  # unread when lazy
             for ci, cd in zip(self._record.channel_info, self._channels, strict=False)
         )
 
