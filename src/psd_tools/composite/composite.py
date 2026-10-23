@@ -5132,9 +5132,13 @@ class Compositor:
             if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
                 continue
             shape_in_bbox = self._trace_shape(layer, bbox, shape, traces_mask)
+            # Photoshop lays a group's stroke gradient out on the document,
+            # whatever the group's blend mode, and anything else's on its
+            # silhouette.
+            extent = layer._psd.viewbox if layer.is_group() else None
             try:
                 color, mask_in_bbox, inside_in_bbox = draw_stroke_effect_split(
-                    bbox, shape_in_bbox, effect.descriptor, layer._psd
+                    bbox, shape_in_bbox, effect.descriptor, layer._psd, extent
                 )
                 opacity = effect.opacity / 100.0
                 blend_mode = effect.blend_mode
