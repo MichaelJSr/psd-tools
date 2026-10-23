@@ -95,8 +95,8 @@ from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key
 
-try:  # PROTO(speed): compiled loops, bit-identical to the numpy ones below
-    from psd_tools.composite import _distance as _cdistance
+try:  # Compiled loops, bit-identical to the numpy ones below.
+    from . import _distance as _cdistance  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover
     _cdistance = None
 

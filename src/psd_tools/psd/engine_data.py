@@ -147,8 +147,10 @@ class Tokenizer:
 _TOKEN_PATTERNS = tuple((token_type, token_type.value) for token_type in EngineToken)
 
 
-def _token_candidates() -> dict[bytes, tuple[tuple[EngineToken, re.Pattern[bytes]], ...]]:
-    """The patterns a token starting with each byte can match, in declaration order.
+def _token_candidates() -> dict[
+    bytes, tuple[tuple[EngineToken, re.Pattern[bytes]], ...]
+]:
+    """Map each first byte to the patterns a token can then match, in declaration order.
 
     Every pattern is anchored at its first byte, so the others cannot match.
     """
@@ -173,7 +175,8 @@ def _token_candidates() -> dict[bytes, tuple[tuple[EngineToken, re.Pattern[bytes
         table[key] = tuple(
             (token_type, pattern)
             for token_type, pattern in _TOKEN_PATTERNS
-            if key in [first[token_type][i : i + 1] for i in range(len(first[token_type]))]
+            if key
+            in [first[token_type][i : i + 1] for i in range(len(first[token_type]))]
         )
     table[b""] = tuple(
         (token_type, pattern)

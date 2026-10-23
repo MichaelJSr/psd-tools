@@ -113,7 +113,7 @@ def _format_objects(fmt: str) -> int:
 
 @functools.lru_cache(maxsize=4096)
 def _format(fmt: str) -> tuple[struct.Struct, int, int]:
-    """The big-endian packer of ``fmt``, its size and its object count."""
+    """Return the big-endian packer of ``fmt``, its size and its object count."""
     packer = struct.Struct(">" + fmt)
     return packer, packer.size, _format_objects(">" + fmt)
 
@@ -138,8 +138,7 @@ def read_fmt(fmt: str, fp: IO[bytes]) -> tuple[Any, ...]:
     if len(data) != fmt_size:
         fp.seek(position)
         raise OSError(
-            "Failed to read data section: read=%d, expected=%d."
-            % (len(data), fmt_size)
+            "Failed to read data section: read=%d, expected=%d." % (len(data), fmt_size)
         )
     return packer.unpack(data)
 

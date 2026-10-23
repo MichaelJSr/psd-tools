@@ -868,12 +868,10 @@ def _content_bbox(
     return bbox
 
 
-# PROTO(speed): local-box compositing switch and the largest share of the
-# viewport a box may cover before the layer goes on the whole viewport.
-import os as _os
-
-_LOCAL_BOXES = _os.environ.get("PSD_LOCAL_BOXES", "1") == "1"
-_LOCAL_SHARE = float(_os.environ.get("PSD_LOCAL_SHARE", "0.6"))
+# Whether a layer is composited on the box it changes rather than the whole
+# viewport, and the largest share of the viewport such a box may cover.
+_LOCAL_BOXES = True
+_LOCAL_SHARE = 0.6
 
 
 def _box_safe(layer: Layer, cache: "_PassCache") -> bool:
@@ -2339,7 +2337,14 @@ class Compositor:
         sub = object.__new__(Compositor)
         sub.__dict__.update(self.__dict__)
         sub._viewport = box
-        for name in ("_color_0", "_alpha_0", "_color", "_alpha", "_alpha_g", "_shape_g"):
+        for name in (
+            "_color_0",
+            "_alpha_0",
+            "_color",
+            "_alpha",
+            "_alpha_g",
+            "_shape_g",
+        ):
             setattr(sub, name, getattr(self, name)[sl])
         if self._enclosing is not None:
             sub._enclosing = _Isolation(
@@ -2356,7 +2361,10 @@ class Compositor:
         sub._document_backdrop_fn = document_backdrop
         sub._document_backdrop_resolved = False
         sub._document_backdrop = None
-        before = {name: getattr(sub, name) for name in ("_color", "_alpha", "_alpha_g", "_shape_g")}
+        before = {
+            name: getattr(sub, name)
+            for name in ("_color", "_alpha", "_alpha_g", "_shape_g")
+        }
         sub._apply_layer(layer)
         for name, old in before.items():
             new = getattr(sub, name)
