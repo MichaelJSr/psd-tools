@@ -906,7 +906,11 @@ def _change_bbox(layer: Layer, cache: "_PassCache") -> tuple[int, int, int, int]
     known = memo.get(id(layer))
     if known is not None:
         return known
-    bbox = _paint_bbox(layer, cache.content_bboxes)
+    # _paint_bbox() spelled out: the content box is the pass's memo, so no
+    # layer is measured twice.
+    bbox = _effect_reach(layer, cache.content_bboxes)
+    if isinstance(layer, GroupMixin):
+        bbox = utils.union_bbox(bbox, _content_bbox(layer, cache.content_bboxes))
     if isinstance(layer, AdjustmentLayer):
         bbox = utils.union_bbox(bbox, _style_bbox(layer))
     elif layer.is_group() and layer.blend_mode == BlendMode.PASS_THROUGH:
