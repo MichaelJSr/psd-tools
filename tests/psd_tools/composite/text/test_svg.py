@@ -31,7 +31,7 @@ from psd_tools.composite.text.raster import (
 
 from .conftest import build_font
 
-STRONG, SHARP = 2, 4
+NONE, STRONG, SHARP = 0, 2, 4
 IDENTITY: Transform = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 RED: RGB = (1.0, 0.0, 0.0)
 TOP, BOTTOM, STROKE = "#4f86f7", "#2563eb", "#1e3a8a"
@@ -606,6 +606,16 @@ def test_the_glyph_budget_counts_the_alpha_grid(color_face: Face) -> None:
     rasterize(layout, IDENTITY, SHARP, Options(), max_alloc_bytes=budget)
     with pytest.raises(ValueError, match="over the configured budget"):
         rasterize(layout, IDENTITY, STRONG, Options(), max_alloc_bytes=budget)
+
+
+def test_area_coverage_keeps_exact_alpha(color_face: Face) -> None:
+    glyphs = [_glyph(color_face, "A", 0.3, 100.0, 50.0)]
+    exact, _ = _render(glyphs, STRONG, Options(coverage="area"))
+    # None samples nothing and places a colour glyph as Strong does.
+    plain, _ = _render(glyphs, NONE)
+    assert np.array_equal(exact, plain)
+    sampled, _ = _render(glyphs, STRONG)
+    assert not np.array_equal(exact, sampled)
 
 
 def test_image_glyph_and_text_compose(color_face: Face) -> None:

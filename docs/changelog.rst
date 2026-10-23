@@ -4,6 +4,10 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] Crisp, Strong and Smooth text is antialiased from a 4 x 4 grid of
+  point samples per pixel, as Photoshop stores it, instead of the exact area
+  under the outline: every rendered type layer changes slightly.
+  ``Options(coverage="area")`` keeps the exact area
 - [fix] The text engine draws OpenType-SVG colour glyphs (emoji, icon fonts)
   in colour as Photoshop does: paths and shapes with solid or gradient fills,
   stroked rectangles and embedded PNG or JPEG images. A glyph whose SVG uses
