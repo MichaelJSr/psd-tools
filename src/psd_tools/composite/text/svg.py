@@ -1121,8 +1121,60 @@ def _linear_weights(n_out: int, n_in: int, scale: float, offset: float) -> np.nd
     return np.clip(1.0 - np.abs(u[:, None] - src[None, :]), 0.0, None)
 
 
-def _enlarged(scale: float) -> bool:
-    return scale > 1.0 + 1e-9
+def _nearest_weights(n_out: int, n_in: int, scale: float, offset: float) -> np.ndarray:
+    """``(n_out, n_in)`` weights picking the source pixel under each output centre.
+
+    ``out = scale * in + offset``; past the outer pixels the edge pixels hold.
+    """
+    u = np.clip(np.floor((np.arange(n_out) + 0.5 - offset) / scale), 0, n_in - 1)
+    return (u[:, None] == np.arange(n_in)[None, :]).astype(np.float64)
+
+
+#: Photoshop enlarges an image by less than this by nearest neighbour.
+_NEAREST_BELOW = 1.01
+#: Such an image that grows by less than this many pixels is copied unscaled.
+_COPY_GROWTH = 0.49
+
+
+def _kind(scale: float, n: int) -> str:
+    """How Photoshop resamples ``n`` image pixels to ``scale`` times their size.
+
+    Measured on stoogedings' halos (133-161 px) in Photoshop 2023: enlarged
+    by under 1 % by nearest neighbour, or copied while it grows by under
+    :py:data:`_COPY_GROWTH` px; reduced to whole pixels (``ceil``), copied
+    at its own size and by nearest neighbour a pixel smaller. Smaller still
+    it is ``reduced``, and so is a reduced other axis (:py:func:`_kinds`).
+    """
+    if scale > 1.0 + 1e-9:
+        if scale >= _NEAREST_BELOW:
+            return "linear"
+        return "copy" if scale * n - n < _COPY_GROWTH else "nearest"
+    size = max(1, math.ceil(scale * n - 1e-6))
+    if size >= n:
+        return "copy"
+    return "nearest" if size == n - 1 else "reduced"
+
+
+def _kinds(sx: float, sy: float, iw: int, ih: int) -> tuple[str, str]:
+    """:py:func:`_kind` of both axes.
+
+    A reduction by two pixels or more filters a reduced other axis too.
+    """
+    kinds = _kind(sx, iw), _kind(sy, ih)
+    if "reduced" in kinds:
+        return (
+            kinds[0] if sx > 1.0 + 1e-9 else "reduced",
+            kinds[1] if sy > 1.0 + 1e-9 else "reduced",
+        )
+    return kinds
+
+
+_WEIGHTS = {
+    "reduced": _area_weights,
+    "linear": _linear_weights,
+    "nearest": _nearest_weights,
+    "copy": _nearest_weights,
+}
 
 
 def _box_coverage(n: int, start: int, lo: float, hi: float) -> np.ndarray:
@@ -1137,39 +1189,63 @@ def _box_coverage(n: int, start: int, lo: float, hi: float) -> np.ndarray:
 
 
 def _axis(
-    scale: float, origin: float, n: int, lo: float, hi: float
-) -> tuple[float, float, int, int]:
-    """One axis of an axis-aligned image: its scale, offset, first pixel and end.
+    scale: float,
+    origin: float,
+    n: int,
+    lo: float,
+    hi: float,
+    nudge: float = 0.0,
+    kind: str | None = None,
+) -> tuple[str, float, float, int, int]:
+    """One axis of an axis-aligned image: its kind, scale, offset, first pixel and end.
 
-    As Photoshop draws it. An enlarged image keeps its exact place, is
-    interpolated between pixel centres (:py:func:`_linear_weights`), its
-    edge pixels held out to its ``<image>`` box ``[lo, hi)`` (image pixels),
-    and reaches every pixel the box covers (:py:func:`_box_coverage`).
-    Otherwise its size rounds up, it keeps its centre with its corner
-    rounded to the nearest pixel, and source pixel ``i`` is sampled at ``i``
-    rather than ``i + 1/2``.
+    As Photoshop draws it, by :py:func:`_kind`. A ``linear`` image keeps
+    its exact place, is interpolated between pixel centres
+    (:py:func:`_linear_weights`), its edge pixels held out to its
+    ``<image>`` box ``[lo, hi)`` (image pixels), and reaches every pixel
+    the box covers (:py:func:`_box_coverage`). A ``nearest`` image keeps
+    its exact place and fills the pixels whose centres it covers. A
+    ``copy`` keeps its centre, rounded to a whole pixel. Otherwise the size
+    rounds up, the image keeps its centre with its corner rounded to the
+    nearest pixel, and source pixel ``i`` is sampled at ``i`` rather than
+    ``i + 1/2``. ``nudge`` moves ``origin`` to the exact place for the
+    ``nearest`` and ``copy`` kinds only (see :py:func:`rasterize`).
     """
-    if _enlarged(scale):
+    kind = kind or _kind(scale, n)
+    if kind in ("nearest", "copy"):
+        origin += nudge
+    if kind == "linear":
         first = math.floor(origin + scale * lo + 1e-6)
-        return scale, origin, first, math.ceil(origin + scale * hi - 1e-6)
+        return kind, scale, origin, first, math.ceil(origin + scale * hi - 1e-6)
+    if kind == "nearest":
+        first = math.floor(origin + 0.5)
+        return kind, scale, origin, first, math.floor(origin + scale * n + 0.5)
+    if kind == "copy":
+        first = math.floor(origin + (scale * n - n) / 2 + 0.5)
+        return kind, 1.0, float(first), first, first + n
     size = max(1, math.ceil(scale * n - 1e-6))
     first = math.floor(origin + (scale * n - size) / 2 + 0.5)
     k = size / n
-    return k, first - k / 2, first, first + size
+    return kind, k, first - k / 2, first, first + size
 
 
 def _snapped(
-    full: Affine, iw: int, ih: int, box: tuple[float, float, float, float] | None
-) -> tuple[Affine, tuple[int, int, int, int]]:
-    """The placement of an axis-aligned image on the pixel grid, and its rect.
+    full: Affine,
+    iw: int,
+    ih: int,
+    box: tuple[float, float, float, float] | None,
+    nudge: tuple[float, float] = (0.0, 0.0),
+) -> tuple[tuple[str, str], Affine, tuple[int, int, int, int]]:
+    """The kinds and placement of an axis-aligned image on the pixel grid, and its rect.
 
     See :py:func:`_axis`.
     """
     a, _, _, d, e, f = full
     bx0, by0, bx1, by1 = box or (0.0, 0.0, float(iw), float(ih))
-    sx, ex, x0, x1 = _axis(a, e, iw, bx0, bx1)
-    sy, ey, y0, y1 = _axis(d, f, ih, by0, by1)
-    return (sx, 0.0, 0.0, sy, ex, ey), (x0, y0, x1, y1)
+    kx, ky = _kinds(a, d, iw, ih)
+    kx, sx, ex, x0, x1 = _axis(a, e, iw, bx0, bx1, nudge[0], kx)
+    ky, sy, ey, y0, y1 = _axis(d, f, ih, by0, by1, nudge[1], ky)
+    return (kx, ky), (sx, 0.0, 0.0, sy, ex, ey), (x0, y0, x1, y1)
 
 
 def _axis_aligned(m: Affine) -> bool:
@@ -1177,7 +1253,13 @@ def _axis_aligned(m: Affine) -> bool:
 
 
 def picture_layer(
-    pic: Picture, m: Affine, x0: int, y0: int, w: int, h: int
+    pic: Picture,
+    m: Affine,
+    x0: int,
+    y0: int,
+    w: int,
+    h: int,
+    nudge: tuple[float, float] = (0.0, 0.0),
 ) -> np.ndarray:
     """``pic`` resampled onto a ``w`` x ``h`` window at ``(x0, y0)``, premultiplied.
 
@@ -1188,13 +1270,13 @@ def picture_layer(
     src = (pic.rgba.astype(np.float32) / 255).astype(np.float64)
     ih, iw = src.shape[:2]
     if _axis_aligned(full):
-        place, (rx0, ry0, rx1, ry1) = _snapped(full, iw, ih, pic.box)
+        (kx, ky), place, (rx0, ry0, rx1, ry1) = _snapped(full, iw, ih, pic.box, nudge)
         a, _, _, d, e, f = place
         bx0, by0, bx1, by1 = pic.box or (0.0, 0.0, float(iw), float(ih))
-        cx = _box_coverage(w, x0, e + a * bx0, e + a * bx1) if _enlarged(a) else None
-        cy = _box_coverage(h, y0, f + d * by0, f + d * by1) if _enlarged(d) else None
-        wx = (_linear_weights if _enlarged(a) else _area_weights)(w, iw, a, e - x0)
-        wy = (_linear_weights if _enlarged(d) else _area_weights)(h, ih, d, f - y0)
+        cx = _box_coverage(w, x0, e + a * bx0, e + a * bx1) if kx == "linear" else None
+        cy = _box_coverage(h, y0, f + d * by0, f + d * by1) if ky == "linear" else None
+        wx = _WEIGHTS[kx](w, iw, a, e - x0)
+        wy = _WEIGHTS[ky](h, ih, d, f - y0)
         # The rect clips what the half-pixel shift or a held edge reaches past it.
         wx[(np.arange(w) + x0 < rx0) | (np.arange(w) + x0 >= rx1)] = 0
         wy[(np.arange(h) + y0 < ry0) | (np.arange(h) + y0 >= ry1)] = 0
@@ -1247,14 +1329,16 @@ def _item_box(item: Item, m: Affine) -> tuple[float, float, float, float]:
     )
 
 
-def device_bbox(drawing: Drawing, m: Affine) -> tuple[int, int, int, int] | None:
-    """Integer pixel bounds of ``drawing`` under ``m``."""
+def device_bbox(
+    drawing: Drawing, m: Affine, nudge: tuple[float, float] = (0.0, 0.0)
+) -> tuple[int, int, int, int] | None:
+    """Integer pixel bounds of ``drawing`` under ``m`` (``nudge``: see :py:func:`rasterize`)."""
     boxes = []
     for item in drawing.items:
         full = compose(m, item.transform)
         if isinstance(item, Picture) and _axis_aligned(full):
             ih, iw = item.rgba.shape[:2]
-            boxes.append(_snapped(full, iw, ih, item.box)[1])
+            boxes.append(_snapped(full, iw, ih, item.box, nudge)[2])
             continue
         x0, y0, x1, y1 = _item_box(item, m)
         boxes.append((math.floor(x0), math.floor(y0), math.ceil(x1), math.ceil(y1)))
@@ -1359,7 +1443,10 @@ def peak_bytes(drawing: Drawing, w: int, h: int, alpha_grid: int = 0) -> int:
 
 
 def rasterize(
-    drawing: Drawing, m: Affine, alpha_grid: int = 0
+    drawing: Drawing,
+    m: Affine,
+    alpha_grid: int = 0,
+    nudge: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[int, int, np.ndarray]:
     """``(left, top, premultiplied float32 HxWx4)`` of ``drawing`` under ``m``.
 
@@ -1367,9 +1454,11 @@ def rasterize(
     interpolated in sRGB and composited in linear light, as Photoshop does.
     With ``alpha_grid`` the shapes' alpha comes from that many point samples
     a side per pixel, as Photoshop's Crisp, Strong and Smooth text has it,
-    while their colours keep the exact coverage.
+    while their colours keep the exact coverage. ``nudge`` is what the exact
+    place adds to ``m``'s translation where the caller rounded it: images
+    Photoshop draws by nearest neighbour or copies take it.
     """
-    box = device_bbox(drawing, m)
+    box = device_bbox(drawing, m, nudge)
     if box is None or box[2] <= box[0] or box[3] <= box[1]:
         return 0, 0, np.zeros((0, 0, 4), np.float32)
     x0, y0, x1, y1 = box
@@ -1378,7 +1467,7 @@ def rasterize(
     pictures = np.ones((h, w, 1), np.float32)
     for item in drawing.items:
         if isinstance(item, Picture):
-            layer = picture_layer(item, m, x0, y0, w, h)
+            layer = picture_layer(item, m, x0, y0, w, h, nudge)
             _encode(layer, decode=True)
             out *= 1 - layer[..., 3:]
             out += layer

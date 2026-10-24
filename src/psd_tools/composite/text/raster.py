@@ -474,7 +474,9 @@ def _color_item(
     ix, iy = math.floor(x), math.floor(y)
     dx, dy = round((x - ix) * 64) / 64, round((y - iy) * 64) / 64
     matrix: svg.Affine = (a, b, c, d, dx, dy)
-    box = svg.device_bbox(drawing, matrix)
+    # Nearest-neighbour images keep the exact place (svg.rasterize).
+    nudge = (x - ix - dx, y - iy - dy)
+    box = svg.device_bbox(drawing, matrix, nudge)
     if box is None:
         return None
     w, h = box[2] - box[0], box[3] - box[1]
@@ -482,8 +484,10 @@ def _color_item(
         return None
     grid = _samples(mode, options)
     _guard("glyph", w, h, svg.peak_bytes(drawing, w, h, grid), options, budget)
-    key = ("svg", g.face.key, g.gid, matrix, g.fill, grid)
-    left, top, rgba = cache.get(key, lambda: svg.rasterize(drawing, matrix, grid))
+    key = ("svg", g.face.key, g.gid, matrix, nudge, g.fill, grid)
+    left, top, rgba = cache.get(
+        key, lambda: svg.rasterize(drawing, matrix, grid, nudge)
+    )
     if not rgba.size:
         return None
     return ix + left, iy + top, rgba, None

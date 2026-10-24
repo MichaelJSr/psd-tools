@@ -499,22 +499,33 @@ def test_gradient_in_object_bounding_box_units() -> None:
 
 
 def test_image_snaps_to_whole_pixels() -> None:
-    """An image fills ``ceil(size)`` whole pixels about its rounded centre."""
+    """A reduced image fills ``ceil(size)`` whole pixels about its rounded centre."""
+    s = 4 / 600
+    m: svg.Affine = (s, 0.0, 0.0, s, 10.3, 20.0)
+    drawing = _table({1: IMAGE.format(gid=1)}).drawing(1)
+    assert drawing is not None
+    left, top, rgba = svg.rasterize(drawing, m)
+    # 600 units at 4/600 px: 4 x 4 px from (10.3, 16.0), 1.5 source pixels
+    # a device pixel, drawn into the whole pixels from (10, 16) and sampled
+    # half a source pixel up and left.
+    assert (left, top) == (10, 16)
+    assert rgba.shape[:2] == (4, 4)
+    assert rgba[1, :, 3] == pytest.approx([2 / 3, 1, 1, 0])
+    assert rgba[:, 1, 3] == pytest.approx([2 / 3, 1, 1, 0])
+    # Colour and alpha are resampled apart: the transparent black ring
+    # darkens the edge pixel's colour to two thirds of its blue.
+    edge = rgba[1, 0]
+    assert edge[2] / edge[3] == pytest.approx(2 / 3)
+
+
+def test_image_at_its_size_is_copied() -> None:
+    """An image drawn at its own size is copied whole about its rounded centre."""
     m: svg.Affine = (0.01, 0.0, 0.0, 0.01, 10.3, 20.0)
     drawing = _table({1: IMAGE.format(gid=1)}).drawing(1)
     assert drawing is not None
     left, top, rgba = svg.rasterize(drawing, m)
-    # 600 units at 0.01 px: 6 x 6 px from (10.3, 14.0), one source pixel per
-    # device pixel, drawn into the whole pixels from (10, 14) and sampled
-    # half a source pixel up and left.
     assert (left, top) == (10, 14)
-    assert rgba.shape[:2] == (6, 6)
-    assert rgba[2, :, 3] == pytest.approx([0.5, 1, 1, 1, 0.5, 0])
-    assert rgba[:, 2, 3] == pytest.approx([0.5, 1, 1, 1, 0.5, 0])
-    # Colour and alpha are resampled apart: the transparent black ring
-    # darkens the edge pixel's colour to half its blue.
-    edge = rgba[2, 0]
-    assert edge[2] / edge[3] == pytest.approx(0.5)
+    assert np.array_equal(rgba[..., 3], _ICON[..., 3] / 255)
 
 
 @pytest.mark.parametrize(
@@ -639,9 +650,13 @@ def test_glow_halo_matches_photoshop(case: str) -> None:
     120 px, or 40 px scaled 3x): the halo picture, its place in document
     px and Photoshop's alpha on the ring only the halo covers, its box
     grown by 3 px on every side less the icon. Enlarged halos (card text)
-    match to a level, and on the box's edge and past it a pixel is drawn
+    match to a level, and on the box's edge and past it these draw a pixel
     exactly where Photoshop draws one: a stroked Text group outlines every
-    bit of it. Reduced ones keep the snapped placement's few levels.
+    bit of it. Not every interpolated halo does: 5 of the 232 outer lines
+    of their boxes in the review fixtures differ, by a level, so there the
+    disc steps a pixel along that line (see
+    :py:func:`test_halo_near_its_size_matches_photoshop`). Reduced ones
+    keep the snapped placement's few levels.
     """
     want, mask = HALO[case + "_photoshop"].astype(float), HALO[case + "_mask"]
     got = _placed_alpha(HALO, case, want.shape)
@@ -719,6 +734,136 @@ def test_stroked_picture_matches_photoshop(case: str) -> None:
     assert np.abs(off).max() <= 2
     assert np.mean(off[:, 0] != 0) <= 0.15
     assert np.mean(off[:, 1] != 0) <= 0.15
+
+
+with np.load(full_name("text-halo-near-unity.npz")) as _near:
+    NEAR = {k: _near[k] for k in _near.files}
+
+#: Photoshop also holds these copies' last line one line past them, at
+#: alpha 1, as a few copies in the review fixtures do.
+COPY_FRINGE = ("undead_glow_copy_fringe", "electric_glow_s0_993")
+
+
+def _kinds(data: dict, case: str) -> tuple[str, str]:
+    ih, iw = data[str(data[case + "_image"]) + "_alpha"].shape
+    a, d = (float(v) for v in data[case + "_place"][:2])
+    return svg._kinds(a, d, iw, ih)
+
+
+@pytest.mark.parametrize("case", [str(c) for c in NEAR["cases"]])
+def test_halo_near_its_size_matches_photoshop(case: str) -> None:
+    """Halos near their own size against Photoshop 2023's pixels.
+
+    Card tokens at 82-86 px draw their halo at 0.985-1.03 times its size.
+    Photoshop enlarges an image by under 1 % by nearest neighbour at its
+    exact place, or copies it unscaled about its rounded centre where it
+    grows by under 0.49 px; it copies one it reduces to its own size in
+    whole pixels and takes a pixel off by nearest neighbour. These match to
+    the level (but for :py:data:`COPY_FRINGE`). From 1 % up it
+    interpolates; those match to a level, and at most one outer line of the
+    box differs in which pixels are drawn (panda_glow_140,
+    dark_darkglow_330: a line Photoshop leaves empty). Two pixels smaller
+    it filters (``reduced``), a few levels off.
+    """
+    want, mask = NEAR[case + "_photoshop"].astype(float), NEAR[case + "_mask"]
+    got = _placed_alpha(NEAR, case, want.shape)
+    diff = np.abs(got - want) * mask
+    xs, ys = _pixels(NEAR, case, want.shape)
+    kinds = _kinds(NEAR, case)
+    if "reduced" in kinds:
+        assert diff.max() <= 4.0
+        return
+    if "linear" not in kinds:
+        if case in COPY_FRINGE:
+            assert diff.max() == 1
+            assert len(set(ys[diff > 0])) == 1 or len(set(xs[diff > 0])) == 1
+        else:
+            assert diff.max() == 0
+        return
+    assert diff.max() <= 1.0
+    assert np.sqrt((diff[mask] ** 2).mean()) < 0.2
+    x0, y0, x1, y1 = _box_edges(NEAR, case)
+    inside = (xs >= x0) & (xs + 1 <= x1) & (ys >= y0) & (ys + 1 <= y1)
+    off = mask & ~inside & ((got > 0) != (want > 0))
+    assert len(set(ys[off])) <= 1 or len(set(xs[off])) <= 1
+
+
+@pytest.mark.parametrize("case", [str(c) for c in NEAR["stroked"]])
+def test_stroked_halo_near_its_size_matches_photoshop(case: str) -> None:
+    """In a stroked Text group the disc round those halos is Photoshop's.
+
+    Each case is a token alone in a Photoshop 2023 group with a 7 px black
+    outside stroke: Photoshop's first and last pixel darker than 128 on
+    each row and column of the halo's box, against the fork's stroke round
+    the halo (see :py:func:`test_stroked_picture_matches_photoshop`). The
+    nearest-neighbour and copied halos match on every line, but the copy
+    fringes' lines end a pixel short; the interpolated and filtered ones
+    are a pixel off on a few lines.
+    """
+    shape = tuple(int(v) for v in NEAR[case + "_shape"])
+    data = dict(NEAR)
+    data[case + "_origin"] = NEAR[case + "_stroke_origin"]
+    alpha = _placed_alpha(data, case, shape) / 255
+    viewport = (0, 0, shape[1], shape[0])
+    cov, _ = effects.stroke_band(
+        viewport, alpha[..., None].astype(np.float32), _black_stroke(7.0)
+    )
+    dark = cov[..., 0] > 0.5
+    offs = []
+    for want, lines in ((NEAR[case + "_rows"], dark), (NEAR[case + "_cols"], dark.T)):
+        idx = [i for i in range(len(want)) if want[i, 0] >= 0]
+        assert all(lines[i].any() for i in idx)
+        got = np.array([np.flatnonzero(lines[i])[[0, -1]] for i in idx])
+        offs.append(got - want[idx])
+    rows, cols = offs
+    kinds = set(_kinds(NEAR, case))
+    if {"linear", "reduced"} & kinds:
+        share = 0.2 if "reduced" in kinds else 0.1
+        assert np.abs(rows).max() <= 1 and np.abs(cols).max() <= 1
+        assert np.mean(rows != 0) <= share and np.mean(cols != 0) <= share
+    elif case in COPY_FRINGE:
+        # The far line is a pixel short where Photoshop's fringe is.
+        both = np.concatenate([rows, cols])
+        assert set(both.ravel().tolist()) <= {-1, 0, 1}
+        assert np.mean(both != 0) <= 0.2
+    else:
+        assert not rows.any() and not cols.any()
+
+
+def test_near_unity_kinds() -> None:
+    """Where Photoshop's resampling of an enlarged image changes, as measured."""
+    assert svg._kind(1.0, 150) == "copy"
+    # Reduced to whole pixels: its own size, a pixel less, two less.
+    assert svg._kind(0.999, 133) == "copy"
+    assert svg._kind(0.993, 161) == "nearest"
+    assert svg._kind(0.985, 161) == "reduced"
+    assert svg._kinds(0.985, 0.985, 161, 133) == ("reduced", "reduced")
+    assert svg._kinds(0.985, 0.985, 118, 133) == ("nearest", "nearest")
+    assert svg._kind(1.0099997, 118) == "nearest"
+    assert svg._kind(1.0100001, 118) == "linear"
+    # Growth in pixels on the axis: 146 px at 1.00335 grow 0.489 px.
+    assert svg._kind(1.00335, 146) == "copy"
+    assert svg._kind(1.0039, 126) == "nearest"
+    assert svg._kind(1.0037, 126) == "copy"
+    assert svg._kind(1.0037, 133) == "nearest"
+
+
+def test_nudge_moves_only_nearest_images() -> None:
+    """The exact place reaches nearest-neighbour images; others keep the rounded one."""
+    alpha = np.zeros((40, 60, 4), np.uint8)
+    alpha[..., 3] = (np.arange(60) * 4)[None, :]
+    pic = svg.Picture(alpha, svg.IDENTITY, 1.0)
+    drawing = svg.Drawing((pic,))
+    for scale, moves in ((1.005, True), (1.004, True), (1.2, False), (0.8, False)):
+        exact: svg.Affine = (scale, 0.0, 0.0, scale, 10.4, 7.6)
+        snapped: svg.Affine = (scale, 0.0, 0.0, scale, 10.40625, 7.59375)
+        nudge = (exact[4] - snapped[4], exact[5] - snapped[5])
+        at_exact = svg.rasterize(drawing, exact)
+        nudged = svg.rasterize(drawing, snapped, nudge=nudge)
+        plain = svg.rasterize(drawing, snapped)
+        want = at_exact if moves else plain
+        assert nudged[:2] == want[:2]
+        assert np.array_equal(nudged[2], want[2])
 
 
 # -- in the text engine ----------------------------------------------------
