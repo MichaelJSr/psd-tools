@@ -981,6 +981,8 @@ def _effect_reach(
 
 _ContentBBoxes = dict[int, tuple[int, int, int, int]]
 _GroupAlphas = dict[tuple[int, tuple[int, int, int, int]], np.ndarray]
+# A compositor's colour, alpha and group alpha, as they stood at some point.
+_Canvas = tuple[np.ndarray, np.ndarray, np.ndarray]
 
 
 @dataclass
@@ -2361,13 +2363,20 @@ def _blends_interior_apart(layer: Layer, source: _Source) -> bool:
     (:py:meth:`Compositor._apply_apart`). Under Normal at full fill the two
     ways agree, so only another mode or a lower fill takes this path.
     """
-    if source.knockout or source.opacity <= 0.0:
-        return False
     if _composites_as_passthrough(source, layer.blend_mode):
+        return False
+    return _interior_apart(layer, source.knockout, source.fill_opacity, source.opacity)
+
+
+def _interior_apart(
+    layer: Layer, knockout: Knockout, fill_opacity: float, opacity: float
+) -> bool:
+    """:py:func:`_blends_interior_apart` for a layer that is not pass-through."""
+    if knockout or opacity <= 0.0:
         return False
     if (
         layer.blend_mode in _COVERS_BENEATH | {BlendMode.PASS_THROUGH}
-        and source.fill_opacity >= 1.0
+        and fill_opacity >= 1.0
     ):
         return False
     if layer.tagged_blocks.get_data(Tag.BLEND_INTERIOR_ELEMENTS, 0):
@@ -3237,14 +3246,17 @@ class Compositor:
         # and re-applied against this canvas (#707). A group that mixes in its
         # isolated render goes on as one layer: its children blend with the
         # canvas as it stood before its own shadow and glow.
+        under: _Canvas | None = None
         if layer.is_group() and self._mixes_isolated(layer):
             source = self._resolve_source(layer)
             self._apply_beneath_effects(layer)
         else:
-            self._apply_beneath_effects(layer)
+            if self._knocks_out_window(layer):
+                under = (self._color, self._alpha, self._alpha_g)
+            self._apply_beneath_effects(layer, window=under is not None)
             source = self._resolve_source(layer)
-        if _blends_interior_apart(layer, source):
-            self._apply_apart(layer, source)
+        if under is not None or _blends_interior_apart(layer, source):
+            self._apply_apart(layer, source, under)
             return
         source, outer = self._compose_effects(layer, source)
         if outer and _composites_as_passthrough(source, layer.blend_mode):
@@ -3598,7 +3610,10 @@ class Compositor:
         rather than large.
 
         ``covered`` is None where the layer is composited first after all, and
-        the band goes on at what it was drawn at -- see :py:meth:`apply`.
+        the band goes on at what it was drawn at -- see :py:meth:`apply`. A
+        layer that knocks out to a window takes the canvas down by its shape
+        rather than its alpha, and ``covered`` is that shape
+        (:py:meth:`_apply_apart`).
         """
         for effect in effects:
             coverage = effect.coverage
@@ -3715,13 +3730,21 @@ class Compositor:
         text_gamma: float | None = None,
         faded: float | np.ndarray = 1.0,
         text_key: int | None = None,
+        text_inside: tuple[np.ndarray, np.ndarray] | None = None,
+        under: _Canvas | None = None,
     ) -> None:
         """Put a source on the canvases.
 
         ``text_gamma`` is the space a type layer's coverage mixes its colour
         with the backdrop in -- see :py:mod:`psd_tools.composite.text_blend`.
         The blend mode still sees the document's values; only the mix by
-        coverage moves into that space.
+        coverage moves into that space. ``text_inside``, where given, holds
+        the part of ``alpha`` that mixes there and the colour the layer
+        shows within it (:py:meth:`_mix_in_text_space`).
+
+        ``under``, where given, is what ``shape`` knocks out to instead of
+        the canvas, as a knockout's backdrop is: see
+        :py:meth:`_apply_apart`.
 
         ``faded`` is the share of ``alpha`` that fades the colour instead, for
         the modes :py:func:`~psd_tools.composite.blend.fade_source` names: an
@@ -3729,20 +3752,26 @@ class Compositor:
         """
         color = self._fit_source(color)
         knockout_color, knockout_alpha = self._knockout_backdrop(knockout)
+        knockout_alpha_g = knockout_alpha
+        if under is not None:
+            knockout_color, knockout_alpha, knockout_alpha_g = under
+        knocks_out = bool(knockout) or under is not None
 
         alpha_g_previous = self._alpha_g
         self._shape_g = cast(np.ndarray, utils.union(self._shape_g, shape))
-        if knockout:
+        if knocks_out:
             self._alpha_g = (
-                (1.0 - shape) * self._alpha_g + (shape - alpha) * knockout_alpha + alpha
+                (1.0 - shape) * self._alpha_g
+                + (shape - alpha) * knockout_alpha_g
+                + alpha
             )
         else:
             self._alpha_g = cast(np.ndarray, utils.union(self._alpha_g, alpha))
         alpha_previous = self._alpha
         self._alpha = cast(np.ndarray, utils.union(self._alpha_0, self._alpha_g))
 
-        alpha_b = knockout_alpha if knockout else alpha_previous
-        color_b = knockout_color if knockout else self._color
+        alpha_b = knockout_alpha if knocks_out else alpha_previous
+        color_b = knockout_color if knocks_out else self._color
 
         blend_fn = fade_source(
             get_blend_func(blend_mode, self._color_mode), blend_mode, faded
@@ -3758,7 +3787,8 @@ class Compositor:
                 alpha_b,
                 blend_fn,
                 text_gamma,
-                isolated=self._text_isolated and not knockout,
+                isolated=self._text_isolated and not knocks_out,
+                inside=text_inside,
             )
             if text_key is None or not self._mixes_straight(
                 text_key,
@@ -3794,6 +3824,7 @@ class Compositor:
         blend_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
         text_gamma: float,
         isolated: bool,
+        inside: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> np.ndarray:
         """The colour canvas after a type layer goes on.
 
@@ -3802,6 +3833,12 @@ class Compositor:
         double precision and only on the rows and columns the source covers:
         the transform is a round trip for every pixel the source leaves
         alone, which single precision does not return exactly.
+
+        ``inside``, where given, is the glyph's coverage with the layer's
+        opacity, and the colour the layer shows within it at full coverage,
+        its interior effects gone on straight: only that coverage mixes in
+        the text space. ``isolated`` works that colour out from ``color``
+        instead, as if mixed straight.
 
         ``isolated`` mixes against what this compositor has painted on its own
         -- the canvas with the seeded backdrop taken back out, as
@@ -3824,9 +3861,8 @@ class Compositor:
         backdrop = (
             previous if color_b is self._color else color_b[box].astype(np.float64)
         )
-        source = to_text_space(
-            (1.0 - alpha_b) * color + alpha_b * blend_fn(backdrop, color), text_gamma
-        )
+        blended = (1.0 - alpha_b) * color + alpha_b * blend_fn(backdrop, color)
+        source = to_text_space(blended, text_gamma)
         if isolated:
             color_0 = self._color_0[box].astype(np.float64)
             alpha_0 = self._alpha_0[box].astype(np.float64)
@@ -3840,19 +3876,40 @@ class Compositor:
             )
             backdrop = previous
             alpha_new = self._alpha_g[box]
-        previous = to_text_space(previous, text_gamma)
-        backdrop = (
-            previous if backdrop is previous else to_text_space(backdrop, text_gamma)
-        )
+        # The canvas outside the shape stays, and the shape uncovers the
+        # backdrop for what lies beyond the coverage.
+        share = alpha if inside is None else inside[0][box]
+        prior = to_text_space(previous, text_gamma)
         if isolated:
-            kept = (1.0 - alpha) * alpha_b * previous
+            mixed = (1.0 - share) * alpha_b * prior
         else:
-            kept = (1.0 - shape) * alpha_previous[box] * previous + (
-                shape - alpha
-            ) * alpha_b * backdrop
-        mixed = from_text_space(
-            utils.divide(kept + alpha * source, alpha_new), text_gamma
-        )
+            beneath = (
+                prior if backdrop is previous else to_text_space(backdrop, text_gamma)
+            )
+            mixed = (1.0 - shape) * alpha_previous[box] * prior + (
+                shape - share
+            ) * alpha_b * beneath
+        if inside is None:
+            mixed = mixed + alpha * source
+        else:
+            inner_alpha = np.maximum(
+                alpha_new - (1.0 - share) * alpha_b
+                if isolated
+                else alpha_new
+                - (1.0 - shape) * alpha_previous[box]
+                - (shape - share) * alpha_b,
+                0.0,
+            )
+            if isolated:
+                within = utils.divide(
+                    (share - alpha) * alpha_b * backdrop + alpha * blended,
+                    inner_alpha,
+                    fill=0.0,
+                )
+            else:
+                within = inside[1][box].astype(np.float64)
+            mixed = mixed + inner_alpha * to_text_space(within, text_gamma)
+        mixed = from_text_space(utils.divide(mixed, alpha_new), text_gamma)
         if isolated:
             mixed = utils.divide(
                 alpha_new * mixed + (1.0 - alpha_new) * alpha_0 * color_0,
@@ -3971,7 +4028,9 @@ class Compositor:
         if opacity < 1.0:
             self._fade(opacity, color, alpha, shape_g, alpha_g)
 
-    def _apply_apart(self, layer: Layer, source: _Source) -> None:
+    def _apply_apart(
+        self, layer: Layer, source: _Source, under: _Canvas | None = None
+    ) -> None:
         """Composite a layer whose interior effects are not blended as a group.
 
         Photoshop puts the layer's paint on with its mode at full coverage,
@@ -3979,19 +4038,30 @@ class Compositor:
         that with the effect's own mode, and draws the result back towards
         the canvas by the layer's coverage and opacity once. That is built on
         a compositor seeded with this canvas; what it adds goes on here
-        Normal, at the share of the pixel it holds, so a type layer's edge
-        mixes in the text gamma and what paints beside the layer is
-        attenuated as :py:meth:`_apply_outer_effects` expects.
+        Normal, at the share of the pixel it holds, so what paints beside
+        the layer is attenuated as :py:meth:`_apply_outer_effects` expects.
+        A type layer's paint fades in the text gamma, while the effects go
+        on straight, and only its coverage and opacity draw the result back
+        in the text gamma.
+
+        ``under`` is the canvas as it stood before the layer's shadows, when
+        the layer knocks them out (:py:meth:`_knocks_out_window`): the paint
+        and effects go on over that, and the layer's shape cuts the window
+        to it as it goes on. What paints beside the layer is no part of the
+        window and makes room for that shape.
         """
         region = source.region
         paint = utils.clip(
             utils.divide(source.alpha, region * source.opacity, fill=0.0)
             * source.fill_opacity
         )
+        seed_color, seed_alpha = (
+            (self._color, self._alpha) if under is None else under[:2]
+        )
         scratch = Compositor(
             self._viewport,
-            self._color,
-            self._alpha,
+            seed_color,
+            seed_alpha,
             self._layer_filter,
             self._force,
             widen=self._widen,
@@ -4000,7 +4070,9 @@ class Compositor:
             text_gamma=None,
             mixing=self._mixing,
         )
-        scratch._apply_source(source.color, paint, paint, layer.blend_mode)
+        scratch._apply_source(
+            source.color, paint, paint, layer.blend_mode, text_gamma=source.text_gamma
+        )
         outer = scratch._paint_effects(
             layer,
             _ApartCanvas(scratch, region, source.opacity),
@@ -4008,25 +4080,27 @@ class Compositor:
             source.shape_mask,
         )
         # The scratch canvas is ``own`` of what went on over ``1 - own`` of
-        # this one; taking that back out leaves what went on.
+        # its seed; taking that back out leaves what went on.
         own = scratch._alpha_g
         color = utils.clip(
             utils.divide(
-                scratch._alpha * scratch._color
-                - (1.0 - own) * self._alpha * self._color,
+                scratch._alpha * scratch._color - (1.0 - own) * seed_alpha * seed_color,
                 own,
                 fill=scratch._color,
             )
         )
         alpha = source.alpha * own
-        self._apply_outer_effects(outer, alpha)
+        shape = utils.clip(region * scratch._shape_g) if under is None else region
+        self._apply_outer_effects(outer, alpha if under is None else shape)
         self._apply_source(
             color,
-            utils.clip(region * scratch._shape_g),
+            shape,
             alpha,
             BlendMode.NORMAL,
             text_gamma=source.text_gamma,
             text_key=source.text_key,
+            text_inside=(source.alpha, scratch._color),
+            under=under,
         )
 
     def _fade(
@@ -5113,16 +5187,49 @@ class Compositor:
             )
         return False
 
-    def _apply_beneath_effects(self, layer: Layer) -> None:
+    def _apply_beneath_effects(self, layer: Layer, window: bool = False) -> None:
         """Composite what lies beneath the layer: its drop shadows, then its glows.
 
         Called before the layer is resolved: see :py:meth:`apply`. The outer
-        glows go over the shadows, as Photoshop stacks them.
+        glows go over the shadows, as Photoshop stacks them. ``window`` leaves
+        the shadows uncut under the layer, which knocks them out itself
+        (:py:meth:`_knocks_out_window`).
         """
-        self._apply_drop_shadows(layer)
+        self._apply_drop_shadows(layer, window)
         self._apply_outer_glows(layer)
 
-    def _apply_drop_shadows(self, layer: Layer) -> None:
+    def _knocks_out_window(self, layer: Layer) -> bool:
+        """Whether the layer knocks its shadows out as a window to the canvas.
+
+        A Normal layer below full fill shows its paint and its interior
+        effects over the canvas as it stood before its shadows, the window
+        its shape cuts in them, and is then mixed over the shadows by that
+        shape (:py:meth:`_apply_apart`). In a type layer's text space that
+        is not the same as cutting the shadow under the shape. Only a layer
+        whose every shadow knocks out and that has no outer glow takes it.
+        """
+        if (
+            layer.is_group()
+            or isinstance(layer, AdjustmentLayer)
+            or layer.blend_mode not in _COVERS_BENEATH
+        ):
+            return False
+        fill_opacity, opacity = self._get_const(layer)
+        knockout = _read_knockout(layer)
+        if knockout or fill_opacity >= 1.0 or opacity <= 0.0:
+            return False
+        shadows = _readable(layer, "dropshadow")
+        if not shadows or _readable(layer, "outerglow"):
+            return False
+        if not all(cast(DropShadow, effect).layer_knocks_out for effect in shadows):
+            return False
+        if _interior_apart(layer, knockout, fill_opacity, opacity):
+            return True
+        return _blends_in_text_space(layer, self._color_mode) and not any(
+            _readable(layer, name) for name in _INTERIOR_EFFECTS
+        )
+
+    def _apply_drop_shadows(self, layer: Layer, window: bool = False) -> None:
         """Composite every drop shadow of the layer, beneath the layer.
 
         Called before the layer is resolved: see :py:meth:`apply`. The shadow
@@ -5145,7 +5252,9 @@ class Compositor:
         Each effect is guarded as the strokes are, with the silhouette read
         outside both guards so that a fault compositing a group's contents is
         not taken for an unreadable effect. Without scipy the shadows are left
-        out (:py:meth:`_has_scipy`).
+        out (:py:meth:`_has_scipy`). Under a ``window`` the silhouette cuts
+        nothing, as the layer knocks the shadow out as it goes on; the stroke
+        bands cut as they do without one.
         """
         shadows = _readable(layer, "dropshadow")
         if not shadows or not self._has_scipy("Drop shadows"):
@@ -5214,8 +5323,9 @@ class Compositor:
             if knocks_out:
                 if covers is None:
                     covers = self._covers_beneath(layer)
+                cut = np.zeros_like(silhouette) if window else silhouette
                 coverage = coverage * (
-                    1.0 - self._knockout_shape(layer, bbox, silhouette, covers)
+                    1.0 - self._knockout_shape(layer, bbox, cut, covers)
                 )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
