@@ -4,6 +4,11 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] Opening is faster: engine data and descriptors are read by the
+  new compiled ``psd_tools.psd._engine`` and ``psd_tools.psd._descriptor``
+  (by Python where they are not built or the data is unusual), and a read
+  inside a section no longer seeks to its end. What is parsed, the parse
+  limits and saved bytes are unchanged
 - [security] Upstream 1.26.0's bound on the stroke distance search is not
   taken: it measures straight-line distance where this fork measures
   Photoshop's chamfer distance, and would move stroke edges. A very wide stroke

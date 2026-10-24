@@ -16,7 +16,9 @@ Pretty printing is the best approach to check the descriptor content::
     pprint(descriptor)
 """
 
+import io
 import logging
+from collections import OrderedDict
 from collections.abc import Iterator
 from typing import IO, Any, Self
 
@@ -31,6 +33,7 @@ from psd_tools.psd.base import (
     ListElement,
     NumericElement,
     StringElement,
+    plain_init,
 )
 from psd_tools.psd.bin_utils import (
     read_exact,
@@ -44,12 +47,25 @@ from psd_tools.psd.bin_utils import (
     write_padding,
     write_unicode_string,
 )
-from psd_tools.psd.parse_limits import parse_container, parse_context
+from psd_tools.psd.parse_limits import (
+    charge,
+    nesting_room,
+    parse_container,
+    parse_context,
+)
 from psd_tools.registry import new_registry
 from psd_tools.terminology import Enum, Event, Form, Key, Klass, Type, Unit
 from psd_tools.validators import in_
 
+try:  # Compiled reader, the same objects as the Python one below.
+    import psd_tools.psd._descriptor as _descriptor  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    _descriptor = None
+
 logger = logging.getLogger(__name__)
+
+# Deeper descriptors go to the Python reader, which can raise RecursionError.
+_COMPILED_DEPTH = 100
 
 TYPES, register = new_registry(attribute="ostype")
 
@@ -73,9 +89,13 @@ def read_length_and_key(fp: IO[bytes]) -> bytes:
     length = read_fmt("I", fp)[0]
     key = read_exact(fp, length or 4)
     if length == 0 and key not in _TERMS:
-        logger.debug("Unknown term: %r", key)
+        _log_unknown_term(key)
         return _ZeroLengthKey(key)
     return key
+
+
+def _log_unknown_term(key: bytes) -> None:
+    logger.debug("Unknown term: %r", key)
 
 
 def write_length_and_key(fp: IO[bytes], value: bytes) -> int:
@@ -92,6 +112,10 @@ class _DescriptorMixin(DictElement):
 
     @classmethod
     def _read_body(cls, fp: IO[bytes]) -> dict[str, Any]:
+        if type(fp) is io.BytesIO:
+            body = _compiled_body(fp)
+            if body is not None:
+                return body
         with parse_container():
             name = read_unicode_string(fp, padding=1)
             classID = read_length_and_key(fp)
@@ -877,3 +901,98 @@ class DescriptorBlock2(Descriptor):
         written += self._write_body(fp)
         written += write_padding(fp, written, padding)
         return written
+
+
+def _compiled_body(fp: io.BytesIO) -> dict[str, Any] | None:
+    """Read a body with ``_descriptor`` and charge the budget; None leaves it to Python."""
+    room = nesting_room()
+    if _descriptor is None or room is None:
+        return None
+    try:
+        read = _descriptor.read(fp.getvalue(), fp.tell(), min(room, _COMPILED_DEPTH))
+    except Exception:
+        return None
+    if read is None:
+        return None
+    name, classID, items, end, total, objects, largest, unknown = read
+    if not charge(total, objects, largest):
+        return None
+    fp.seek(end)
+    for key in unknown:
+        _log_unknown_term(key)
+    return {"name": name, "classID": classID, "items": items}
+
+
+def _setup_compiled() -> frozenset[bytes]:
+    def value(converter: Any = None) -> tuple[tuple[str, Any, bool], ...]:
+        return (("value", converter, False),)
+
+    names = (("name", None, False), ("classID", None, False))
+    unit = ("unit", _unit, True)
+    shapes: dict[str, tuple[tuple[str, Any, bool], ...]] = {
+        "descriptor": (("_items", OrderedDict, False), *names),
+        "object_array": (
+            ("_items", OrderedDict, False),
+            ("items_count", None, False),
+            *names,
+        ),
+        "list": (("_items", list, False),),
+        "property": (*names, ("keyID", None, False)),
+        "unit_float": (("value", float, False), unit),
+        "unit_floats": (unit, ("values", None, False)),
+        "double": value(float),
+        "string": value(),
+        "enumerated_reference": (
+            *names,
+            ("typeID", None, False),
+            ("enum", None, False),
+        ),
+        "offset": (*names, ("value", None, False)),
+        "bool": value(bool),
+        "large_integer": value(int),
+        "integer": value(int),
+        "enumerated": (("typeID", None, False), ("enum", None, False)),
+        "raw_data": value(),
+        "class": names,
+        "name": (*names, ("value", None, False)),
+    }
+    kinds: dict[type, str] = {
+        Descriptor: "descriptor",
+        GlobalObject: "descriptor",
+        ObjectArray: "object_array",
+        List: "list",
+        Reference: "list",
+        Property: "property",
+        UnitFloat: "unit_float",
+        UnitFloats: "unit_floats",
+        Double: "double",
+        String: "string",
+        EnumeratedReference: "enumerated_reference",
+        Offset: "offset",
+        Bool: "bool",
+        LargeInteger: "large_integer",
+        Integer: "integer",
+        Identifier: "integer",
+        Index: "integer",
+        Enumerated: "enumerated",
+        RawData: "raw_data",
+        Alias: "raw_data",
+        Path: "raw_data",
+        Class1: "class",
+        Class2: "class",
+        Class3: "class",
+        Name: "name",
+    }
+    # An OSType left out (another class, or one built differently) gives up.
+    table = {
+        ostype.value: (kls, _descriptor.KINDS[kinds[kls]])
+        for ostype, kls in TYPES.items()
+        if kls in kinds and plain_init(kls, shapes[kinds[kls]])
+    }
+    units = {member.value: member for member in Unit}
+    _descriptor.setup(table, units, _TERMS, _ZeroLengthKey, OrderedDict)
+    return frozenset(table)
+
+
+# The OSTypes ``_descriptor`` reads.
+_COMPILED_OSTYPES = _setup_compiled() if _descriptor is not None else frozenset()

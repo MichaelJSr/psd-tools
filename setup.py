@@ -29,6 +29,18 @@ extensions = [
         define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
         py_limited_api=use_limited_api,
     ),
+    Extension(
+        "psd_tools.psd._descriptor",
+        ["src/psd_tools/psd/_descriptor.pyx"],
+        define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
+        py_limited_api=use_limited_api,
+    ),
+    Extension(
+        "psd_tools.psd._engine",
+        ["src/psd_tools/psd/_engine.pyx"],
+        define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
+        py_limited_api=use_limited_api,
+    ),
     # Bit-identical to the numpy code only without FMA contraction.
     Extension(
         "psd_tools.composite._distance",

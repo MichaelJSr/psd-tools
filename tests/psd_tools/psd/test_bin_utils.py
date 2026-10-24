@@ -5,7 +5,9 @@ from typing import Any
 import pytest
 
 from psd_tools.psd.bin_utils import (
+    _remaining_bytes,
     be_array_to_bytes,
+    bounded_reader,
     pack,
     read_fmt,
     read_length_block,
@@ -191,3 +193,37 @@ def test_read_fmt_past_the_end_raises_and_stays_put(fmt: str) -> None:
     with pytest.raises(OSError, match="Failed to read data section"):
         read_fmt(fmt, stream)
     assert stream.tell() == 1
+
+
+def test_read_fmt_in_a_section_leaves_the_file_alone() -> None:
+    seeks: list[tuple[int, int]] = []
+
+    class File(io.BytesIO):
+        def seek(self, offset: int, whence: int = 0) -> int:
+            seeks.append((offset, whence))
+            return super().seek(offset, whence)
+
+    fp = File(bytes(range(16)))
+    fp.seek(2)
+    with bounded_reader(fp, 8) as section:
+        seeks.clear()
+        assert read_fmt("H", section) == (0x0203,)
+        assert _remaining_bytes(section) == 6
+        assert seeks == []
+        with pytest.raises(OSError, match="read=6, expected=8"):
+            read_fmt("Q", section)
+
+
+def test_a_section_in_a_section_reads_the_file() -> None:
+    fp = io.BytesIO(bytes(range(16)))
+    with bounded_reader(fp, 12) as outer:
+        outer.seek(2)
+        with bounded_reader(outer, 6) as inner:
+            assert inner._fp is fp  # type: ignore[attr-defined]
+            assert inner.read(3) == bytes(range(2, 5))
+            assert _remaining_bytes(inner) == 3
+            assert inner.read() == bytes(range(5, 8))
+            with pytest.raises(OSError, match="Seek outside"):
+                inner.seek(9)
+        assert outer.tell() == 8
+    assert fp.tell() == 12

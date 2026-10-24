@@ -34,6 +34,7 @@ from __future__ import annotations
 import codecs
 import logging
 import re
+from collections import OrderedDict
 from collections.abc import Iterator
 from enum import Enum
 from typing import Any
@@ -47,17 +48,28 @@ from psd_tools.psd.base import (
     ListElement,
     NumericElement,
     ValueElement,
+    plain_init,
 )
 from psd_tools.psd.bin_utils import read_remaining, write_bytes
 from psd_tools.psd.parse_limits import (
     ParseLimits,
+    charge,
     consume_bytes,
+    nesting_room,
     parse_container,
     parse_context,
 )
 from psd_tools.registry import new_registry
 
+try:  # Compiled parser, the same objects as the Python one below.
+    import psd_tools.psd._engine as _engine  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    _engine = None
+
 logger = logging.getLogger(__name__)
+
+# Deeper data goes to the Python parser, which can raise RecursionError.
+_COMPILED_DEPTH = 100
 
 TOKEN_CLASSES, register = new_registry()
 
@@ -211,6 +223,10 @@ class Dict(DictElement):
         with parse_context(parse_limits) as is_root, parse_container():
             if is_root or not isinstance(data, Tokenizer):
                 consume_bytes(len(data))
+            if type(data) is bytes and cls in _COMPILED_ROOTS:
+                parsed = _compiled(cls, data)
+                if parsed is not None:
+                    return parsed
             tokenizer = data if isinstance(data, Tokenizer) else Tokenizer(data)
             self = cls()
             for k_token, k_token_type in tokenizer:
@@ -579,3 +595,42 @@ class Tag(ValueElement):
     def write(self, fp: Any, **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""
         return write_bytes(fp, self.value)  # type: ignore[arg-type]
+
+
+def _compiled(cls: type[Dict], data: bytes) -> Dict | None:
+    """Parse with ``_engine`` and charge the budget; None leaves it to Python."""
+    room = nesting_room()
+    if _engine is None or room is None:
+        return None
+    try:
+        parsed = _engine.parse(cls, data, min(room, _COMPILED_DEPTH))
+    except Exception:
+        return None
+    if parsed is None or not charge(*parsed[1:]):
+        return None
+    return parsed[0]
+
+
+def _compiled_roots() -> frozenset[type]:
+    """Set ``_engine`` up; the classes it reads, none if one is built differently."""
+    if _engine is None:
+        return frozenset()
+    shapes: dict[type, Any] = {
+        Dict: (("_items", OrderedDict, False),),
+        EngineData: (("_items", OrderedDict, False),),
+        EngineData2: (("_items", OrderedDict, False),),
+        List: (("_items", list, False),),
+        String: (("value", None, False),),
+        Bool: (("value", bool, False),),
+        Integer: (("value", int, False),),
+        Float: (("value", float, False),),
+        Property: (("value", None, False),),
+        Tag: (("value", None, False),),
+    }
+    if not all(plain_init(kls, shape) for kls, shape in shapes.items()):
+        return frozenset()
+    _engine.setup(Dict, List, String, Bool, Integer, Float, Property, Tag, OrderedDict)
+    return frozenset((Dict, EngineData, EngineData2))
+
+
+_COMPILED_ROOTS = _compiled_roots()

@@ -64,6 +64,9 @@ logger = logging.getLogger(__name__)
 
 TYPES, register = new_registry()
 
+# Tag(key) without the enum call, for a known key.
+_TAGS: dict[bytes, Tag] = {member.value: member for member in Tag}
+
 TYPES.update(ADJUSTMENT_TYPES)
 TYPES.update(
     {
@@ -338,7 +341,7 @@ class TaggedBlock(BaseElement):
 
         key = read_fmt("4s", fp)[0]
         try:
-            key = Tag(key)
+            key = _TAGS[key] if key in _TAGS else Tag(key)
         except ValueError:
             message = f"Unknown key: {key!r}"
             logger.warning(message)

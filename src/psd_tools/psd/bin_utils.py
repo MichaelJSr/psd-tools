@@ -20,13 +20,16 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import IO, Any, cast
 
-from psd_tools.psd.parse_limits import consume_bytes, consume_objects
+from psd_tools.psd.parse_limits import consume_bytes, consume_objects, current_budget
 
 logger = logging.getLogger(__name__)
 
 
 def _remaining_bytes(fp: IO[bytes]) -> int:
     position = fp.tell()
+    if type(fp) is _BoundedReader and fp._start <= position <= fp._end:
+        # What seeking to the end and back gives, without the seeks.
+        return fp._end - position
     try:
         end = fp.seek(0, 2)
     finally:
@@ -38,7 +41,9 @@ def read_exact(fp: IO[bytes], size: int) -> bytes:
     """Read exactly size bytes, validating availability before allocation."""
     if size < 0 or size > _remaining_bytes(fp):
         raise OSError("Invalid data section size: %d" % size)
-    consume_bytes(size)
+    budget = current_budget()
+    if budget is not None:
+        budget.consume(0, size)
     data = fp.read(size)
     if len(data) != size:
         raise OSError(
@@ -58,6 +63,9 @@ class _BoundedReader(io.IOBase):
     def __init__(self, fp: IO[bytes], length: int):
         if length < 0 or length > _remaining_bytes(fp):
             raise OSError("Invalid data section size: %d" % length)
+        if type(fp) is _BoundedReader:
+            # Inside that section: its bounds hold, so read its file directly.
+            fp = fp._fp
         self._fp = fp
         self._start = fp.tell()
         self._end = self._start + length
@@ -123,17 +131,21 @@ def read_fmt(fmt: str, fp: IO[bytes]) -> tuple[Any, ...]:
     packer, fmt_size, objects = _format(fmt)
     # _remaining_bytes() inlined: this is the parser's hottest call.
     position = fp.tell()
-    try:
-        remaining = fp.seek(0, 2) - position
-    finally:
-        fp.seek(position)
+    if type(fp) is _BoundedReader and fp._start <= position <= fp._end:
+        remaining = fp._end - position
+    else:
+        try:
+            remaining = fp.seek(0, 2) - position
+        finally:
+            fp.seek(position)
     if fmt_size > remaining:
         raise OSError(
             "Failed to read data section: read=%d, expected=%d. "
             "Likely the file is corrupted." % (remaining, fmt_size)
         )
-    consume_objects(objects)
-    consume_bytes(fmt_size)
+    budget = current_budget()
+    if budget is not None:
+        budget.consume(objects, fmt_size)
     data = fp.read(fmt_size)
     if len(data) != fmt_size:
         fp.seek(position)

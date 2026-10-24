@@ -34,7 +34,7 @@ from psd_tools.psd.lazy import load
 from psd_tools.psd.parse_limits import (
     ParseLimits,
     consume_bytes,
-    consume_objects,
+    current_budget,
     parse_context,
 )
 
@@ -71,7 +71,9 @@ class BaseElement:
 
     def __new__(cls, *args: Any, **kwargs: Any) -> Self:
         """Create the element and count it against the object budget."""
-        consume_objects(1)
+        budget = current_budget()  # consume_objects(1), inlined
+        if budget is not None:
+            budget.consume(1, 0)
         return super().__new__(cls)
 
     @classmethod
@@ -156,6 +158,24 @@ class BaseElement:
                 child = getattr(element, field_item.name)
                 for _ in BaseElement._traverse(child, condition):
                     yield _
+
+
+def plain_init(cls: type, shape: tuple[tuple[str, Any, bool], ...]) -> bool:
+    """Whether ``cls()`` only stores the fields of ``shape`` through its converters.
+
+    ``shape`` lists ``(name, converter, has a validator)`` in field order. The
+    compiled parsers create such elements without calling ``cls()``.
+    """
+    if (
+        cls.__new__ is not BaseElement.__new__
+        or hasattr(cls, "__attrs_pre_init__")
+        or hasattr(cls, "__attrs_post_init__")
+    ):
+        return False
+    return (
+        tuple((f.name, f.converter, f.validator is not None) for f in fields(cls))
+        == shape
+    )
 
 
 @define
