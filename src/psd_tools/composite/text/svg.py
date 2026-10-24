@@ -1104,27 +1104,51 @@ def _area_weights(n_out: int, n_in: int, scale: float, offset: float) -> np.ndar
     return np.clip(overlap, 0.0, None) * scale
 
 
+def _linear_weights(n_out: int, n_in: int, scale: float, offset: float) -> np.ndarray:
+    """``(n_out, n_in)`` weights of a linear interpolation between pixel centres.
+
+    ``out = scale * in + offset``; past the outer centres the edge pixels
+    hold.
+    """
+    u = np.clip((np.arange(n_out) + 0.5 - offset) / scale - 0.5, 0, n_in - 1)
+    src = np.arange(n_in, dtype=np.float64)
+    return np.clip(1.0 - np.abs(u[:, None] - src[None, :]), 0.0, None)
+
+
+def _enlarged(scale: float) -> bool:
+    return scale > 1.0 + 1e-9
+
+
+def _axis(scale: float, origin: float, n: int) -> tuple[float, float, int, int]:
+    """One axis of an axis-aligned image: its scale, offset, first pixel and end.
+
+    As Photoshop draws it. An enlarged image keeps its exact place, is
+    interpolated between pixel centres (:py:func:`_linear_weights`) and
+    reaches every pixel whose centre is within a pixel of it. Otherwise its
+    size rounds up, it keeps its centre with its corner rounded to the
+    nearest pixel, and source pixel ``i`` is sampled at ``i`` rather than
+    ``i + 1/2``.
+    """
+    if _enlarged(scale):
+        end = origin + scale * n
+        return scale, origin, math.floor(origin - 0.5), math.floor(end + 0.5) + 1
+    size = max(1, math.ceil(scale * n - 1e-6))
+    first = math.floor(origin + (scale * n - size) / 2 + 0.5)
+    k = size / n
+    return k, first - k / 2, first, first + size
+
+
 def _snapped(
     full: Affine, iw: int, ih: int
 ) -> tuple[Affine, tuple[int, int, int, int]]:
-    """The placement of an axis-aligned image snapped to whole pixels, and its rect.
+    """The placement of an axis-aligned image on the pixel grid, and its rect.
 
-    As Photoshop draws it: the size rounds up, the rect keeps the image's
-    centre with its corner rounded to the nearest pixel, and source pixel
-    ``i`` is sampled at ``i`` rather than ``i + 1/2``.
+    See :py:func:`_axis`.
     """
     a, _, _, d, e, f = full
-    w = max(1, math.ceil(a * iw - 1e-6))
-    h = max(1, math.ceil(d * ih - 1e-6))
-    left = math.floor(e + (a * iw - w) / 2 + 0.5)
-    top = math.floor(f + (d * ih - h) / 2 + 0.5)
-    sx, sy = w / iw, h / ih
-    return (sx, 0.0, 0.0, sy, left - sx / 2, top - sy / 2), (
-        left,
-        top,
-        left + w,
-        top + h,
-    )
+    sx, ex, x0, x1 = _axis(a, e, iw)
+    sy, ey, y0, y1 = _axis(d, f, ih)
+    return (sx, 0.0, 0.0, sy, ex, ey), (x0, y0, x1, y1)
 
 
 def _axis_aligned(m: Affine) -> bool:
@@ -1145,9 +1169,9 @@ def picture_layer(
     if _axis_aligned(full):
         place, (rx0, ry0, rx1, ry1) = _snapped(full, iw, ih)
         a, _, _, d, e, f = place
-        wx = _area_weights(w, iw, a, e - x0)
-        wy = _area_weights(h, ih, d, f - y0)
-        # The snapped rectangle clips what the half-pixel shift moves out.
+        wx = (_linear_weights if _enlarged(a) else _area_weights)(w, iw, a, e - x0)
+        wy = (_linear_weights if _enlarged(d) else _area_weights)(h, ih, d, f - y0)
+        # The rect clips what the half-pixel shift or a held edge reaches past it.
         wx[(np.arange(w) + x0 < rx0) | (np.arange(w) + x0 >= rx1)] = 0
         wy[(np.arange(h) + y0 < ry0) | (np.arange(h) + y0 >= ry1)] = 0
         rows = np.tensordot(wy, src, axes=(1, 0))

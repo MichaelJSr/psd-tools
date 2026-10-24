@@ -29,6 +29,7 @@ from psd_tools.composite.text.raster import (
     rasterize,
 )
 
+from ...utils import full_name
 from .conftest import build_font
 
 NONE, STRONG, SHARP = 0, 2, 4
@@ -532,6 +533,81 @@ def test_image_keeps_its_centre(x: float, size: float, left: int) -> None:
     box = svg.device_bbox(drawing, m)
     assert box is not None and box[0] == left and box[2] - box[0] == 6
     assert box[1] == round(20.0 + (size - 6) / 2) and box[3] - box[1] == 6
+
+
+def test_enlarged_image_keeps_its_place() -> None:
+    """An enlarged image is interpolated between pixel centres at its exact place."""
+    drawing = _table({1: IMAGE.format(gid=1)}).drawing(1)
+    assert drawing is not None
+    # 600 units at 0.015 px: 9 x 9 px from (10.3, 20.0), 1.5 px a source pixel.
+    left, top, rgba = svg.rasterize(drawing, (0.015, 0.0, 0.0, 0.015, 10.3, 29.0))
+    # Every pixel whose centre is within a pixel of the image.
+    assert (left, top, rgba.shape[:2]) == (9, 19, (11, 11))
+    # Source pixel i's centre at 10.3 + 1.5 (i + 1/2); the ring is transparent.
+    want = [0, 0, 0.3, 29 / 30, 1, 1, 1, 1, 0.7, 1 / 30, 0]
+    assert rgba[6, :, 3] == pytest.approx(want, abs=1e-6)
+
+
+def test_enlarged_image_edge_holds() -> None:
+    """Past the outer pixel centres an enlarged image keeps its edge pixels."""
+    opaque = np.full((2, 2, 4), 255, np.uint8)
+    doc = (
+        '<svg version="1.1" xmlns="http://www.w3.org/2000/svg" '
+        'xmlns:xlink="http://www.w3.org/1999/xlink"><g id="glyph1">'
+        '<image x="0" y="-200" width="200" height="200" '
+        f'xlink:href="data:image/png;base64,{_png(opaque)}"/></g></svg>'
+    )
+    drawing = _table({1: doc}).drawing(1)
+    assert drawing is not None
+    # 3 x 3 px from (10.25, 20.75): pixels 9..13 and 20..24.
+    left, top, rgba = svg.rasterize(drawing, (0.015, 0.0, 0.0, 0.015, 10.25, 23.75))
+    assert (left, top, rgba.shape[:2]) == (9, 20, (5, 5))
+    assert rgba[..., 3] == pytest.approx(np.ones((5, 5)))
+
+
+def test_reduced_image_still_snaps() -> None:
+    """At or below its own size an image keeps the whole-pixel placement."""
+    drawing = _table({1: IMAGE.format(gid=1)}).drawing(1)
+    assert drawing is not None
+    assert svg.device_bbox(drawing, (0.01, 0.0, 0.0, 0.01, 10.3, 20.0)) == (
+        10,
+        14,
+        16,
+        20,
+    )
+
+
+with np.load(full_name("text-glow-halo.npz")) as _halo:
+    HALO = {k: _halo[k] for k in _halo.files}
+
+
+@pytest.mark.parametrize("case", [str(c) for c in HALO["cases"]])
+def test_glow_halo_matches_photoshop(case: str) -> None:
+    """The :glow and :darkglow halos of stoogedings against Photoshop 2023's pixels.
+
+    Each case is a type layer "a [token] b" Photoshop saved (40, 80 or
+    120 px, or 40 px scaled 3x): the halo picture, its place in document
+    px and Photoshop's alpha on the pixels only the halo covers. Enlarged
+    halos (card text) match to a level; reduced ones keep the snapped
+    placement's few levels.
+    """
+    token = case.rsplit("_", 1)[0]
+    alpha, rgb = HALO[token + "_halo"], HALO[token + "_rgb"]
+    a, d, e, f = HALO[case + "_place"]
+    x0, y0 = (int(v) for v in HALO[case + "_origin"])
+    want, mask = HALO[case + "_photoshop"], HALO[case + "_mask"]
+    rgba = np.dstack([np.broadcast_to(rgb, (*alpha.shape, 3)), alpha])
+    pic = svg.Picture(np.ascontiguousarray(rgba, np.uint8), svg.IDENTITY, 1.0)
+    left, top, got = svg.rasterize(svg.Drawing((pic,)), (a, 0.0, 0.0, d, e, f))
+    placed = np.zeros(want.shape)
+    h, w = got.shape[:2]
+    placed[top - y0 : top - y0 + h, left - x0 : left - x0 + w] = got[..., 3] * 255
+    diff = np.abs(np.round(placed) - want)[mask]
+    if a > 1:
+        assert diff.max() <= 1.0
+        assert np.sqrt((diff**2).mean()) < 0.3
+    else:
+        assert diff.max() <= 8.0
 
 
 # -- in the text engine ----------------------------------------------------
