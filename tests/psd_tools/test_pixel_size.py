@@ -1422,12 +1422,12 @@ def test_pil_peak_model_charges_a_profile_on_a_mode_that_is_not_rgb() -> None:
             "the codec, raw",
         ),
         # The same document under each codec that builds its result rather than
-        # handing back the bytes read at open: RLE reads a row table, whose
-        # entries `decompress_row_peak_bytes()` adds, one per row of every
-        # channel, and prediction adds a pass over the inflated buffer and a copy
-        # back out on top of the inflate. Only here, where the codec phase is the
-        # widest, do these multiples show up in a total at all.
-        (
+        # handing back the bytes read at open: the compiled RLE reads a row
+        # table, whose entries `decompress_row_peak_bytes()` adds, one per row of
+        # every channel, and prediction adds a pass over the inflated buffer and
+        # a copy back out on top of the inflate. Only here, where the codec phase
+        # is the widest, do these multiples show up in a total at all.
+        pytest.param(
             ColorMode.MULTICHANNEL,
             8,
             32,
@@ -1436,6 +1436,10 @@ def test_pil_peak_model_charges_a_profile_on_a_mode_that_is_not_rgb() -> None:
             Compression.RLE,
             1792,
             "the codec, RLE",
+            marks=pytest.mark.skipif(
+                not hasattr(_compression.rle_impl, "decode_rows"),
+                reason="compiled RLE not built",
+            ),
         ),
         (
             ColorMode.MULTICHANNEL,
@@ -1504,6 +1508,15 @@ def test_pil_peak_model_adds_up_to_a_fixed_number(
     assert _pil_peak_bytes(psd, channel, icc) == expected, (
         f"the phase that binds here is {binding}"
     )
+
+
+def test_pil_peak_model_charges_the_python_rle_per_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The RLE row above under the Python codec, which holds an object per row."""
+    monkeypatch.setattr(_compression, "rle_impl", _compression.rle)
+    psd = _forge(4, 4, 8, 32, ColorMode.MULTICHANNEL, compression=Compression.RLE)
+    assert _pil_peak_bytes(psd, None, False) == 5632
 
 
 def test_check_pixel_size_still_defaults_to_the_returned_array() -> None:

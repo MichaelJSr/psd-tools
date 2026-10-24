@@ -562,16 +562,14 @@ def test_the_per_row_term_is_charged_for_rle_alone(
 ) -> None:
     """What ``decompress_row_peak_bytes()`` adds on top of a codec's payload peak.
 
-    The compiled ``decode_rle()`` holds the row table; the Python one holds an
-    object per row of it, through a ``b"".join()`` that keeps every one of them
-    alive while the channel is assembled. The other codecs produce their whole
-    output as one object, so the term is theirs alone -- and a record with no
-    rows holds nothing.
+    The Python ``decode_rle()`` holds an object per row of the table, through a
+    ``b"".join()`` that keeps every one of them alive while the channel is
+    assembled. The other codecs produce their whole output as one object, so
+    the term is theirs alone -- and a record with no rows holds nothing.
     """
-    assert decompress_row_peak_bytes(Compression.RLE, 7) == 7 * RLE_TABLE_ROW_BYTES
-    assert decompress_row_peak_bytes(Compression.RLE, 0) == 0
     monkeypatch.setattr(codecs, "rle_impl", rle)
     assert decompress_row_peak_bytes(Compression.RLE, 7) == 7 * RLE_ROW_BYTES
+    assert decompress_row_peak_bytes(Compression.RLE, 0) == 0
     monkeypatch.undo()
     for compression in (
         Compression.RAW,
@@ -579,3 +577,12 @@ def test_the_per_row_term_is_charged_for_rle_alone(
         Compression.ZIP_WITH_PREDICTION,
     ):
         assert decompress_row_peak_bytes(compression, 7) == 0
+
+
+@pytest.mark.skipif(
+    not hasattr(rle_impl, "decode_rows"), reason="compiled RLE not built"
+)
+def test_the_compiled_rle_charges_its_row_table() -> None:
+    """The compiled ``decode_rle()`` holds the row table, not an object per row."""
+    assert decompress_row_peak_bytes(Compression.RLE, 7) == 7 * RLE_TABLE_ROW_BYTES
+    assert decompress_row_peak_bytes(Compression.RLE, 0) == 0

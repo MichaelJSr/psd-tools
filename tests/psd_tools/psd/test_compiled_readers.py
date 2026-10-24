@@ -12,8 +12,6 @@ from collections.abc import Callable, Iterator
 from functools import partial
 from typing import Any
 
-import psd_tools.psd._descriptor as _descriptor  # type: ignore[import-not-found]
-import psd_tools.psd._engine as _engine  # type: ignore[import-not-found]
 import pytest
 
 from psd_tools import PSDImage
@@ -24,6 +22,9 @@ from psd_tools.psd.parse_limits import ParseLimits, current_budget, parse_contex
 from psd_tools.terminology import Enum, Key, Klass, Unit
 
 from ..utils import TEST_ROOT, all_files
+
+_descriptor = pytest.importorskip("psd_tools.psd._descriptor")
+_engine = pytest.importorskip("psd_tools.psd._engine")
 
 LIMITS = [
     None,
