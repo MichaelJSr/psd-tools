@@ -873,7 +873,7 @@ def _mixer_data(records: list[list[int]], monochrome: int = 0) -> ChannelMixerDa
 
     The reader keeps the first row in ``data`` and the other three in ``unknown``.
     """
-    flat = [value for record in records + [_FOURTH_MIX] for value in record]
+    flat = [value for record in [*records, _FOURTH_MIX] for value in record]
     block = ChannelMixerData(
         monochrome=monochrome, unknown=struct.pack(">15h", *flat[5:])
     )
@@ -982,7 +982,7 @@ def _gradient_map_data(
             location=location,
             midpoint=midpoint,
             mode=0,
-            color=tuple(round(value * 65535) for value in rgb) + (0,),
+            color=(*(round(value * 65535) for value in rgb), 0),
         )
         for location, midpoint, rgb in stops
     ]
@@ -1054,8 +1054,13 @@ def test_gradient_map_keeps_a_hard_edge_between_co_located_stops() -> None:
     red, blue = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)
     layer = _gradient_map_layer(
         _gradient_map_data(
-            [(0, 50, _BLACK), (0, 50, _BLACK), (2048, 50, red), (2048, 50, blue)]
-            + [(4096, 50, _WHITE)]
+            [
+                (0, 50, _BLACK),
+                (0, 50, _BLACK),
+                (2048, 50, red),
+                (2048, 50, blue),
+                (4096, 50, _WHITE),
+            ]
         )
     )
     below, at = 0.5 - 2 / 255, 0.5

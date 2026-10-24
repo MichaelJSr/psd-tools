@@ -37,7 +37,7 @@ def test_tokenizer(fixture: bytes, length: int) -> None:
 )
 def test_tokenizer_item(fixture: bytes, token_type: int) -> None:
     tokenizer = Tokenizer(fixture)
-    token, o_token_type = next(tokenizer)
+    _token, o_token_type = next(tokenizer)
     assert o_token_type == token_type
 
 

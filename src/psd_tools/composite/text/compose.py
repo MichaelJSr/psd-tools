@@ -62,16 +62,16 @@ def break_lines(
     raw: list[tuple[int, int, Decision]]
     if width is None:
         # Point text: trailing spaces count, so lines keep them.
-        starts = [a] + sorted(i for i in (breaks or ()) if a < i < b)
-        ends = starts[1:] + [b]
+        starts = [a, *sorted(i for i in (breaks or ()) if a < i < b)]
+        ends = [*starts[1:], b]
         raw = [
             (s, e, final if e == b else "break")
             for s, e in zip(starts, ends, strict=True)
         ]
         return [Line(s, e, 0.0, d) for s, e, d in raw]
     if breaks is not None:
-        starts = [a] + sorted(i for i in breaks if a < i < b)
-        ends = starts[1:] + [b]
+        starts = [a, *sorted(i for i in breaks if a < i < b)]
+        ends = [*starts[1:], b]
         raw = [
             (s, strip(s, e), final if e == b else "break")
             for s, e in zip(starts, ends, strict=True)

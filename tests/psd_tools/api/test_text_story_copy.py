@@ -146,7 +146,7 @@ def test_copy_remaps_fonts_and_adds_missing_ones() -> None:
     fonts = _fonts(dest)
     copy = name.copy_to(dest)
     assert _run_fonts(copy) == want
-    assert _fonts(dest) == fonts + ["stoogedings-Regular"]
+    assert _fonts(dest) == [*fonts, "stoogedings-Regular"]
     _check(_reopen(dest))
 
 

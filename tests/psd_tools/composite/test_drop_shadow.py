@@ -576,7 +576,7 @@ def test_layer_opacity_fades_the_drop_shadow_with_the_layer() -> None:
     stroke's band is, so it carries the layer opacity itself: nothing later
     applies it where the layer covers nothing.
     """
-    psd, layer = _masks_card()
+    _psd, layer = _masks_card()
     viewport = _around(layer)
     full = _alone(layer, viewport)
     layer.opacity = 128
@@ -598,7 +598,7 @@ def test_fill_opacity_leaves_the_drop_shadow_and_the_knockout_alone() -> None:
     coverage rather than by its paint, leaves nothing at all: that is the
     "shadow only" setup Photoshop's knockout switch exists for.
     """
-    psd, layer = _masks_card()
+    _psd, layer = _masks_card()
     viewport = _around(layer)
     full = _alone(layer, viewport)
     layer.tagged_blocks.set_data(Tag.BLEND_FILL_OPACITY, ByteElement(0))
@@ -623,7 +623,7 @@ def test_a_drop_shadow_lies_beneath_the_layer_not_beside_it() -> None:
     Read just inside the card's left edge, where the card covers the pixel
     fully and its shadow, cast 2 px down, is still ramping up.
     """
-    psd, layer = _masks_card()
+    _psd, layer = _masks_card()
     _shadow_descriptor(layer)[b"layerConceals"] = False
     viewport = _around(layer)
     y = (layer.bbox[1] + layer.bbox[3]) // 2 - viewport[1]
@@ -694,7 +694,7 @@ def test_at_full_fill_the_knockout_leaves_a_soft_edge_its_shadow() -> None:
     """
     layer, shadow = _soft_square()
     viewport = _around(layer, 8)
-    ramp, row, x0 = _ramp_row(layer)
+    _ramp, row, x0 = _ramp_row(layer)
     assert np.allclose(row[x0 - 3 : x0 + 16], 1.0, atol=1e-6), row
     knocked_out = _over_grey(layer, viewport)
     shadow[b"layerConceals"] = False
@@ -962,7 +962,7 @@ def test_a_drop_shadow_reaches_a_viewport_its_layer_misses() -> None:
     silhouette it casts from lies wholly outside the strip. The strip has to
     come out as the same rows of a render that includes the card.
     """
-    psd, layer = _masks_card()
+    _psd, layer = _masks_card()
     left, top, right, bottom = layer.bbox
     strip = (left, bottom + 4, right, bottom + 24)
     assert utils.intersect(strip, layer.bbox) == (0, 0, 0, 0)
@@ -1388,7 +1388,7 @@ def _composited(
         np.ones((height, width, 1), dtype=np.float32),
     )
     compositor.apply(group)
-    color, _, alpha = compositor.finish()
+    _color, _, alpha = compositor.finish()
     return np.concatenate((compositor.result_over_backdrop(), alpha), axis=2)
 
 
@@ -1777,7 +1777,7 @@ def test_without_scipy_a_drop_shadow_is_skipped_and_the_document_renders(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A missing scipy costs the shadow, with a warning, not the render."""
-    psd, layer = _masks_card()
+    _psd, layer = _masks_card()
     viewport = _around(layer)
     shadow = _shadow_descriptor(layer)
     shadow[Key.Enabled] = False
@@ -1811,7 +1811,7 @@ def test_a_drop_shadow_with_no_blend_mode_multiplies() -> None:
     A red shadow tells the two apart over grey: multiplied it darkens the
     grey, painted Normal it covers it.
     """
-    psd, layer = _masks_card()
+    _psd, layer = _masks_card()
     viewport = _around(layer)
     shadow = _shadow_descriptor(layer)
     for key, value in ((Key.Blur, 0.0), (Key.Distance, 20.0), (Key.Opacity, 100.0)):
@@ -2143,7 +2143,7 @@ def test_the_caption_contour_brings_layer_params_closer_to_photoshop(
 
 def test_noise_moves_the_shadow_only_where_it_falls() -> None:
     """A noisy shadow differs from the plain one, and only where that one paints."""
-    psd, layer = _masks_card()
+    _psd, layer = _masks_card()
     viewport = _around(layer)
     plain = _alone(layer, viewport)
     _shadow_descriptor(layer)[Key.Noise] = Double(50.0)

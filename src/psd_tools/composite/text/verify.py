@@ -51,7 +51,7 @@ def stored_raster(layer: TypeLayer) -> tuple[np.ndarray | None, Bbox | None]:
         color = np.asarray(image.convert("RGB"), dtype=np.float32) / 255
     shape = layer.numpy("shape")
     if shape is None:
-        shape = np.ones(color.shape[:2] + (1,), np.float32)
+        shape = np.ones((*color.shape[:2], 1), np.float32)
     rgba = np.concatenate([color, shape], axis=2).astype(np.float32)
     x0, y0, x1, y1 = layer.bbox
     return rgba, (x0, y0, x1, y1)

@@ -224,7 +224,7 @@ def test_draw_stroke_reaches_outside_the_canvas() -> None:
     box, the rasterizer has to put that strip back (#807).
     """
     psd = PSDImage.open(full_name("effects/stroke-composite.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Clip+Effects"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Clip+Effects")
     assert layer.bbox == (182, 7, 273, 78), "the shape runs off the canvas"
 
     on_canvas = vector.draw_stroke(layer)
@@ -254,7 +254,7 @@ def test_an_inner_stroke_covers_the_whole_width_inside_the_path() -> None:
     """
     psd = PSDImage.open(full_name("effects/stroke-composite.psd"))
     # Two of the eight layers are named ``Plain``; this is the left-hand one.
-    layer = [x for x in psd.descendants() if x.name == "Plain"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Plain")
     assert layer.stroke is not None and layer.bbox == (20, 19, 122, 121)
     assert layer.stroke.line_width == 3.0
     assert layer.stroke.line_alignment == "inner"
@@ -287,7 +287,7 @@ def test_a_fractional_stroke_width_matches_photoshops_own_band() -> None:
     gaps in it.
     """
     psd = PSDImage.open(full_name("stroke.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Rectangle 1"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Rectangle 1")
     assert layer.stroke is not None
     assert layer.stroke.line_width == 1.47
     assert layer.stroke.line_alignment == "inner"
@@ -314,7 +314,7 @@ def test_a_centred_stroke_is_still_the_plain_pen() -> None:
     that -- the doubling is what puts a band to one side (#854).
     """
     psd = PSDImage.open(full_name("descriptors/stroke-color-descriptors-rgb.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Rectangle 1"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Rectangle 1")
     assert layer.stroke is not None and layer.stroke.line_alignment == "center"
 
     plain = vector._draw_path(layer, pen={"color": 255, "width": 1.0})
@@ -333,7 +333,7 @@ def test_a_stroke_whose_alignment_is_unreadable_is_drawn_centred() -> None:
     states ``inner``.
     """
     psd = PSDImage.open(full_name("effects/stroke-composite.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Plain"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Plain")
     assert layer.stroke is not None and layer.stroke.line_alignment == "inner"
     desc = layer.stroke._data
     centred = vector._draw_path(layer, pen={"color": 255, "width": 3.0})
@@ -362,7 +362,7 @@ def test_an_outer_stroke_lies_outside_the_path() -> None:
     That is the rasterizer's answer, not the render's.
     """
     psd = PSDImage.open(full_name("effects/stroke-composite.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Plain"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Plain")
     assert layer.stroke is not None and layer.bbox == (20, 19, 122, 121)
     layer.stroke._data[b"strokeStyleLineAlignment"] = Enumerated(
         b"strokeStyleLineAlignment", b"strokeStyleAlignOutside"
@@ -422,7 +422,7 @@ def test_an_inner_stroke_wider_than_half_the_shape_has_no_hole() -> None:
     """
     pytest.importorskip("scipy.ndimage")
     psd = PSDImage.open(full_name("effects/stroke-composite.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Plain"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Plain")
     assert layer.stroke is not None and layer.stroke.line_alignment == "inner"
     desc = layer.stroke._data
     unit = desc[b"strokeStyleLineWidth"].unit
@@ -584,7 +584,7 @@ def test_layer_composite_keeps_a_stroke_past_the_canvas_edge() -> None:
 def _pathless_reveal_all_layer() -> Layer:
     """The layer #823 names: an initial fill rule and no path to rule on."""
     psd = PSDImage.open(full_name("adjustment-fillers.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Color Fill 1"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Color Fill 1")
     assert layer.vector_mask is not None
     assert layer.vector_mask.initial_fill_rule and not layer.vector_mask.paths
     return layer
@@ -602,7 +602,7 @@ def _forged_pathless_stroke(disable_stroke: bool = False) -> tuple[PSDImage, Lay
     one from the other.
     """
     psd = PSDImage.open(full_name("stroke.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Rectangle 1"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Rectangle 1")
     # Every term of ``_get_object()``'s stroke guard, so that an equality
     # below cannot come out true because the stroke was never drawn at all.
     assert layer.has_vector_mask()
@@ -653,7 +653,8 @@ def _nested_component(inner_alike: bool) -> tuple[PSDImage, Layer]:
         return ClosedPath(items=knots, operation=operation, index=0)
 
     keep = [x for x in setting.path if not isinstance(x, ClosedPath)]
-    setting.path._items = keep + [
+    setting.path._items = [
+        *keep,
         rectangle(_OUTER, True, 1),
         rectangle(_INNER, inner_alike, -1),
     ]
@@ -709,7 +710,7 @@ def test_the_subpaths_of_one_component_are_filled_as_one_path() -> None:
     and both bounds below sit between the two with margin either side.
     """
     psd = PSDImage.open(full_name("masks.psd"))
-    layer = [x for x in psd.descendants() if x.name == "twitter"][0]
+    layer = next(x for x in psd.descendants() if x.name == "twitter")
     assert layer.vector_mask is not None
     subpaths = layer.vector_mask.paths
     assert sum(1 for x in subpaths if x.operation == -1) > 0, (
@@ -842,7 +843,7 @@ def test_fill_rule_inversions_stay_brush_gated() -> None:
     between versions.
     """
     psd = PSDImage.open(full_name("vector-mask2.psd"))
-    masked = [x for x in psd.descendants() if x.name == "Masked Rectangle 1"][0]
+    masked = next(x for x in psd.descendants() if x.name == "Masked Rectangle 1")
     assert masked.vector_mask is not None
     assert masked.vector_mask.initial_fill_rule and len(masked.vector_mask.paths) == 1
     brush = vector._draw_path(masked, brush={"color": 255})
@@ -850,7 +851,7 @@ def test_fill_rule_inversions_stay_brush_gated() -> None:
     pen = vector._draw_path(masked, pen={"color": 255, "width": 1.0})
     assert pen.sum() == pytest.approx(35.843136, rel=0.01)
 
-    filled = [x for x in psd.descendants() if x.name == "Color Fill 1"][0]
+    filled = next(x for x in psd.descendants() if x.name == "Color Fill 1")
     vm = filled.vector_mask
     assert vm is not None
     assert vm.initial_fill_rule and [p.operation for p in vm.paths] == [3, 3]
@@ -871,7 +872,7 @@ def test_a_disabled_fill_is_not_drawn_whichever_tag_holds_it(
     content tag instead.
     """
     psd = PSDImage.open(full_name("stroke.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Rectangle 1"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Rectangle 1")
     content = layer.tagged_blocks.get_data(Tag.VECTOR_STROKE_CONTENT_DATA)
     if sheet_tag:
         layer.tagged_blocks.set_data(Tag.SOLID_COLOR_SHEET_SETTING, content)
@@ -890,7 +891,7 @@ def test_a_disabled_fill_is_not_drawn_whichever_tag_holds_it(
 def test_a_stroke_only_layer_with_pixels_keeps_its_stored_alpha() -> None:
     """Stored pixels already hold the fill state, so ``force=False`` reads them (#937)."""
     psd = PSDImage.open(full_name("stroke.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Rectangle 1"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Rectangle 1")
     stored = layer.numpy("shape")
     assert stored is not None
     stored = stored[:, :, 0]
@@ -903,7 +904,7 @@ def test_a_stroke_only_layer_with_pixels_keeps_its_stored_alpha() -> None:
 def test_a_layer_with_neither_fill_nor_stroke_draws_nothing() -> None:
     """A disabled fill with no stroke to draw leaves no coverage (#937)."""
     psd = PSDImage.open(full_name("stroke.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Rectangle 1"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Rectangle 1")
     stroke = layer.tagged_blocks.get_data(Tag.VECTOR_STROKE_DATA)
     stroke["strokeEnabled"] = Bool(False)
     layer.tagged_blocks.set_data(Tag.VECTOR_STROKE_DATA, stroke)
@@ -915,7 +916,7 @@ def test_a_layer_with_neither_fill_nor_stroke_draws_nothing() -> None:
 def test_a_stroke_only_layer_keeps_the_strokes_own_opacity() -> None:
     """The band is the stroke source, so ``strokeStyleOpacity`` applies to it (#937)."""
     psd = PSDImage.open(full_name("stroke.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Rectangle 1"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Rectangle 1")
     stroke = layer.tagged_blocks.get_data(Tag.VECTOR_STROKE_DATA)
     stroke["strokeStyleOpacity"] = UnitFloat(unit=Unit.Percent, value=50.0)
     layer.tagged_blocks.set_data(Tag.VECTOR_STROKE_DATA, stroke)
@@ -1025,7 +1026,7 @@ def test_a_stroke_skips_the_arcs_one_path_buries_in_another(
     the pen should not touch it.
     """
     psd = PSDImage.open(full_name("path-operations/combine.psd"))
-    layer = [x for x in psd.descendants() if x.stroke is not None][0]
+    layer = next(x for x in psd.descendants() if x.stroke is not None)
     solid = vector.draw_vector_mask(layer)[..., 0] >= 1.0
     interior = solid.copy()
     for axis in (0, 1):
@@ -1155,7 +1156,7 @@ def test_an_open_subpath_does_not_disable_the_solid_inner_band() -> None:
     """The open line is no boundary, and the closed shape is still repaired (#890)."""
     pytest.importorskip("scipy.ndimage")
     psd = PSDImage.open(full_name("effects/stroke-composite.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Plain"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Plain")
     assert layer.stroke is not None
     _with_open_line(layer)
     desc = layer.stroke._data
@@ -1271,7 +1272,7 @@ def test_the_solid_inner_band_leaves_a_ridge_the_stroke_has_not_reached(
     monkeypatch.setattr(vector, "_draw_path", _rectangle_mask(box))
     blank = np.zeros((psd.height, psd.width, 1), dtype=np.float32)
     band = vector._solid_inner_band(layer, blank, width, (0, 0, psd.width, psd.height))
-    x0, y0, x1, y1 = box
+    x0, y0, x1, _y1 = box
     centre = band[y0 + 1, (x0 + x1) // 2, 0]
     assert centre == pytest.approx(middle)
 
@@ -1304,9 +1305,9 @@ def test_the_solid_inner_band_does_not_depend_on_the_viewport() -> None:
     """A crop is the same crop of the full render, edge pixels included (#890)."""
     pytest.importorskip("scipy.ndimage")
     psd = PSDImage.open(full_name("effects/stroke-composite.psd"))
-    layer = [x for x in psd.descendants() if x.name == "Plain"][0]
+    layer = next(x for x in psd.descendants() if x.name == "Plain")
     full = (0, 0, psd.width, psd.height)
-    left, top, right, bottom = layer.bbox
+    left, top, _right, _bottom = layer.bbox
     # A window across the top edge, one pixel tall inside the shape.
     window = (left + 40, top, left + 60, top + 3)
     whole = vector._solid_inner_band(
@@ -1458,7 +1459,7 @@ def _aligned_shape(
         for preceding, anchor, leaving in knots
     ]
     keep = [x for x in setting.path if not isinstance(x, ClosedPath)]
-    setting.path._items = keep + [ClosedPath(items=items, operation=1, index=0)]
+    setting.path._items = [*keep, ClosedPath(items=items, operation=1, index=0)]
     assert "_vector_mask" not in layer.__dict__
     return psd, layer
 

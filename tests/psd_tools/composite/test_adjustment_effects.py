@@ -187,7 +187,7 @@ def _unmasked(size: float, style: bytes) -> tuple[PSDImage, Layer, np.ndarray]:
 
 def test_a_stroke_on_an_unmasked_adjustment_layer_follows_the_document_edge() -> None:
     """Without a mask the layer runs to the document's edge, and an inside stroke frames it."""
-    psd, layer, before = _unmasked(5.0, Enum.InsetFrame)
+    psd, _layer, before = _unmasked(5.0, Enum.InsetFrame)
     color, _, _ = composite(psd)
     frame = np.ones(color.shape[:2], dtype=bool)
     frame[5:-5, 5:-5] = False
@@ -198,7 +198,7 @@ def test_a_stroke_on_an_unmasked_adjustment_layer_follows_the_document_edge() ->
 def test_an_outside_stroke_on_an_unmasked_adjustment_layer_falls_off_the_document() -> (
     None
 ):
-    psd, layer, before = _unmasked(5.0, Enum.OutsetFrame)
+    psd, _layer, before = _unmasked(5.0, Enum.OutsetFrame)
     color, _, _ = composite(psd)
     assert np.allclose(color, before, atol=1e-6)
 

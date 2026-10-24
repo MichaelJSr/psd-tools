@@ -510,7 +510,7 @@ def test_a_viewport_reads_the_preview_where_it_stands() -> None:
 
 def test_a_layers_composite_reads_no_preview() -> None:
     """The preview is the document's; a layer composited alone is not it."""
-    psd, name, _ = _kept_raster()
+    _psd, name, _ = _kept_raster()
     alone = name.composite(force=True)
     assert alone is not None
     color, _, _ = composite(name, force=True, text_preview=False)

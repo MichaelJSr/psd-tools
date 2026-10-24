@@ -395,7 +395,7 @@ def _paint(
 ) -> tuple[np.ndarray, np.ndarray]:
     """``glow_paint`` on a canvas the size of ``falloff``, beside nothing by default."""
     if shape is None:
-        shape = np.zeros(falloff.shape + (1,), dtype=np.float32)
+        shape = np.zeros((*falloff.shape, 1), dtype=np.float32)
     viewport = (0, 0, falloff.shape[1], falloff.shape[0])
     return effects.glow_paint(viewport, ColorMode.RGB, desc, shape, falloff)
 
@@ -630,7 +630,7 @@ def test_a_layer_over_its_glow_leaves_it_what_its_coverage_leaves() -> None:
     fill opacity zero the square paints nothing, and the glow has the plain
     ``1 - alpha``.
     """
-    psd, layer = _feathered_stroke_layer("Outset 6")
+    _psd, layer = _feathered_stroke_layer("Outset 6")
     _hard_glow(layer, size=_COVERAGE_SIZE)
     viewport = _around(layer, 8)
     mask = layer.numpy("mask")
@@ -657,7 +657,7 @@ def test_a_layer_in_another_mode_leaves_its_glow_the_complement_of_its_alpha() -
     glow is cut by ``1 - alpha`` alone and the square over it covers
     ``alpha`` of what that leaves: ``alpha + (1 - alpha) ** 2`` over the ramp.
     """
-    psd, layer = _feathered_stroke_layer("Outset 6")
+    _psd, layer = _feathered_stroke_layer("Outset 6")
     _hard_glow(layer, size=_COVERAGE_SIZE)
     layer.blend_mode = BlendMode.SOFT_LIGHT
     viewport = _around(layer, 8)

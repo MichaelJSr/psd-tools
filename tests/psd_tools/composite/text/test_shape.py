@@ -23,25 +23,25 @@ SIZE = 10.0
 
 
 def style(**kwargs: Any) -> Style:
-    base: dict[str, Any] = dict(
-        font=PS_TT,
-        size=SIZE,
-        baseline=0,
-        tracking=0.0,
-        auto_kerning=True,
-        ligatures=True,
-        horizontal_scale=1.0,
-        vertical_scale=1.0,
-        caps=0,
-        faux_bold=False,
-        faux_italic=False,
-        underline=False,
-        strikethrough=False,
-        baseline_shift=0.0,
-        fill=(0.0, 0.0, 0.0),
-        leading=12.0,
-        auto_leading=False,
-    )
+    base: dict[str, Any] = {
+        "font": PS_TT,
+        "size": SIZE,
+        "baseline": 0,
+        "tracking": 0.0,
+        "auto_kerning": True,
+        "ligatures": True,
+        "horizontal_scale": 1.0,
+        "vertical_scale": 1.0,
+        "caps": 0,
+        "faux_bold": False,
+        "faux_italic": False,
+        "underline": False,
+        "strikethrough": False,
+        "baseline_shift": 0.0,
+        "fill": (0.0, 0.0, 0.0),
+        "leading": 12.0,
+        "auto_leading": False,
+    }
     base.update(kwargs)
     return Style(**base)
 

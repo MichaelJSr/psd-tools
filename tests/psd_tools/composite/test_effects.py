@@ -1841,7 +1841,7 @@ def test_a_pass_through_groups_gradient_overlay_is_laid_out_on_the_canvas(
     assert passthrough == (group_name == "Pass Through")
     desc = next(group.effects.find("gradientoverlay")).descriptor
     desc[Key.Angle] = Double(0.0)
-    left, top, right, bottom = group.bbox
+    left, _top, right, _bottom = group.bbox
     layout = psd.viewbox if passthrough else group.bbox
     expected, _ = paint.draw_gradient_fill(
         (left, 16, right, 17), psd.color_mode, desc, layout

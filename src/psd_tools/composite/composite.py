@@ -1,5 +1,6 @@
 """Composite implementation for layer rendering and blending."""
 
+import contextlib
 import functools
 import hashlib
 import logging
@@ -684,10 +685,10 @@ def _path_bbox(layer: Layer) -> tuple[int, int, int, int]:
     width, height = layer._psd.width, layer._psd.height
     try:
         return (
-            int(round(left * width)),
-            int(round(top * height)),
-            int(round(right * width)),
-            int(round(bottom * height)),
+            round(left * width),
+            round(top * height),
+            round(right * width),
+            round(bottom * height),
         )
     except (OverflowError, ValueError):
         return layer.bbox
@@ -3281,10 +3282,8 @@ class Compositor:
         ) and utils.intersect(self._viewport, _effect_reach(layer)) == (0, 0, 0, 0):
             logger.debug("Out of viewport %s", layer)
             return False
-        if not clip_compositing and layer.clipping:
-            # Composited by the layer it clips to, through _apply_clip_layers().
-            return False
-        return True
+        # A clipping layer is composited by its base, through _apply_clip_layers().
+        return clip_compositing or not layer.clipping
 
     def _hold_channels(
         self, channels: list[int], clip_compositing: bool
@@ -5377,10 +5376,8 @@ class Compositor:
         budget = layer._psd._max_alloc_bytes
         bbox: tuple[int, int, int, int] | None = None
         if isinstance(layer, GroupMixin):
-            try:
+            with contextlib.suppress(ValueError):
                 bbox = inner_bbox(cast_from, reach, budget)
-            except ValueError:
-                pass
         if bbox is None:
             bbox = inner_bbox(cast_from, reach, budget, within=self._viewport)
         self._check_effect_growth(bbox, cast_from)

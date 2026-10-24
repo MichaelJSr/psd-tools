@@ -341,9 +341,7 @@ def has_transparency(psdimage: PSDProtocol) -> bool:
         alpha_ids = psdimage.image_resources.get_data(Resource.ALPHA_IDENTIFIERS)
         if alpha_ids and all(x > 0 for x in alpha_ids):
             return False
-        if layer_info is not None and layer_info.layer_count > 0:
-            return False
-        return True
+        return not (layer_info is not None and layer_info.layer_count > 0)
     return False
 
 
@@ -424,7 +422,7 @@ def _validate_color_input(
 
 
 def _normalize_scalar(
-    value: int | float,
+    value: float,
     max_val: int,
     index: int | None = None,
 ) -> float:
@@ -454,7 +452,7 @@ def _normalize_scalar(
 
 
 def _denormalize_scalar(
-    value: int | float,
+    value: float,
     max_val: int,
     index: int | None = None,
 ) -> int:

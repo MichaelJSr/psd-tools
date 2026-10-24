@@ -1058,7 +1058,7 @@ def test_save_leaves_the_flag_where_the_colour_alone_is_stored(route: str) -> No
 def _forge_transparent(filename: str) -> PSDImage:
     """A document with no transparency channel whose layers leave pixels clear."""
     psd = PSDImage.open(full_name(filename))
-    list(psd)[0].visible = False
+    next(iter(psd)).visible = False
     buffer = io.BytesIO()
     psd.save(buffer)
     buffer.seek(0)

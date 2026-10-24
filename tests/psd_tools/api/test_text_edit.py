@@ -549,7 +549,7 @@ def test_add_font_appends_a_face() -> None:
     entry = layer.resource_dict["FontSet"][len(names)]
     assert [str(k.value) for k in entry] == ["Name", "Script", "FontType", "Synthetic"]
     assert isinstance(entry["Name"], engine_data.String)
-    assert txt2_font_names(layer) == story_names + ["stoogedings-Regular"]
+    assert txt2_font_names(layer) == [*story_names, "stoogedings-Regular"]
     # An appended face moves no run's font and leaves the preview current.
     assert layer.font_names == ["ArialMT"]
     assert not layer._psd.is_updated()
@@ -561,8 +561,8 @@ def test_add_font_keeps_a_listed_face() -> None:
     assert add_font(layer, "AdobeInvisFont", font_type=1) == 1
     assert add_font(layer, "Face-Regular", font_type=0) == len(before)
     assert add_font(layer, "Face-Regular") == len(before)
-    assert font_set(layer) == before + [("Face-Regular", 0)]
-    assert txt2_font_names(layer) == story_before + ["Face-Regular"]
+    assert font_set(layer) == [*before, ("Face-Regular", 0)]
+    assert txt2_font_names(layer) == [*story_before, "Face-Regular"]
 
 
 def test_add_font_writes_txt2_entries_as_photoshop_does() -> None:

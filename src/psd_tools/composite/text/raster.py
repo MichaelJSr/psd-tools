@@ -336,7 +336,7 @@ def _point_sampled(glyph: Glyph, n: int) -> Glyph:
 
 
 def _fixed(v: float) -> int:
-    return int(round(v * 0x10000))
+    return round(v * 0x10000)
 
 
 def _empty(transform: Transform) -> tuple[np.ndarray, Bbox]:
@@ -483,8 +483,8 @@ def _rule_items(
                 xy * quad[:, 0] + yy * quad[:, 1] + ty,
             ]
         )
-        x0, y0 = int(math.floor(pts[:, 0].min())), int(math.floor(pts[:, 1].min()))
-        x1, y1 = int(math.ceil(pts[:, 0].max())), int(math.ceil(pts[:, 1].max()))
+        x0, y0 = math.floor(pts[:, 0].min()), math.floor(pts[:, 1].min())
+        x1, y1 = math.ceil(pts[:, 0].max()), math.ceil(pts[:, 1].max())
         w, h = x1 - x0, y1 - y0
         if w <= 0 or h <= 0:
             continue
@@ -601,11 +601,8 @@ def _resample(
     m = np.array([[xx / cx, yx / cy], [xy / cx, yy / cy]])
     corners = np.array([[ax0, ay0], [ax1, ay0], [ax0, ay1], [ax1, ay1]], float) @ m.T
     corners += (tx, ty)
-    bx0, by0 = (
-        int(math.floor(corners[:, 0].min())),
-        int(math.floor(corners[:, 1].min())),
-    )
-    bx1, by1 = int(math.ceil(corners[:, 0].max())), int(math.ceil(corners[:, 1].max()))
+    bx0, by0 = math.floor(corners[:, 0].min()), math.floor(corners[:, 1].min())
+    bx1, by1 = math.ceil(corners[:, 0].max()), math.ceil(corners[:, 1].max())
     w, h = bx1 - bx0, by1 - by0
     _guard("canvas", w, h, w * h * _RESAMPLE_BYTES + 2 * rgba.nbytes, options, budget)
     # Output index (row, col) -> input index, sampling at pixel centres.

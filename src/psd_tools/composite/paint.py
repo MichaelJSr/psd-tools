@@ -368,7 +368,7 @@ def _turn_panel(panel: np.ndarray, desc: Descriptor) -> np.ndarray:
     if turns != round(turns):
         logger.debug("Pattern angle %s is not a right angle; not applied", angle)
         return panel
-    return np.rot90(panel, int(round(turns)) % 4)
+    return np.rot90(panel, round(turns) % 4)
 
 
 def _reduction_box(scale: float) -> int:
@@ -388,7 +388,7 @@ def _box_average(panel: np.ndarray, width: int) -> np.ndarray:
     for axis in (0, 1):
         work = np.moveaxis(panel, axis, 0)
         size = work.shape[0]
-        sums = np.zeros((size + width + 1,) + work.shape[1:], dtype=np.float64)
+        sums = np.zeros((size + width + 1, *work.shape[1:]), dtype=np.float64)
         np.cumsum(work[np.arange(size + width) % size], axis=0, out=sums[1:])
         total = np.subtract(sums[width : width + size], sums[:size])
         total /= width
@@ -443,7 +443,7 @@ def _sample_tiling(
         rows, columns = -(-height // panel.shape[0]), -(-width // panel.shape[1])
         tiled = np.broadcast_to(
             rolled[None, :, None, :, :],
-            (rows,) + panel.shape[:1] + (columns,) + panel.shape[1:],
+            (rows, *panel.shape[:1], columns, *panel.shape[1:]),
         )
         return tiled.reshape(
             rows * panel.shape[0], columns * panel.shape[1], panel.shape[2]

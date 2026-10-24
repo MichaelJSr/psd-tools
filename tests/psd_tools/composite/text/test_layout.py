@@ -22,25 +22,25 @@ ASCENT_D = GLYPHS["d"][1][3] / UPEM  # type: ignore[index]
 
 
 def style(**kwargs: Any) -> Style:
-    base: dict[str, Any] = dict(
-        font=PS_TT,
-        size=SIZE,
-        baseline=0,
-        tracking=0.0,
-        auto_kerning=True,
-        ligatures=True,
-        horizontal_scale=1.0,
-        vertical_scale=1.0,
-        caps=0,
-        faux_bold=False,
-        faux_italic=False,
-        underline=False,
-        strikethrough=False,
-        baseline_shift=0.0,
-        fill=(0.0, 0.0, 0.0),
-        leading=LEADING,
-        auto_leading=False,
-    )
+    base: dict[str, Any] = {
+        "font": PS_TT,
+        "size": SIZE,
+        "baseline": 0,
+        "tracking": 0.0,
+        "auto_kerning": True,
+        "ligatures": True,
+        "horizontal_scale": 1.0,
+        "vertical_scale": 1.0,
+        "caps": 0,
+        "faux_bold": False,
+        "faux_italic": False,
+        "underline": False,
+        "strikethrough": False,
+        "baseline_shift": 0.0,
+        "fill": (0.0, 0.0, 0.0),
+        "leading": LEADING,
+        "auto_leading": False,
+    }
     base.update(kwargs)
     return Style(**base)
 
@@ -62,7 +62,7 @@ def model(
     starts = [0] + [i + 1 for i, c in enumerate(text) if c == "\r"]
     if len(starts) > 1 and starts[-1] >= len(text):
         starts.pop()
-    ends = starts[1:] + [len(text)]
+    ends = [*starts[1:], len(text)]
     codes = (
         [justification] * len(starts)
         if isinstance(justification, int)

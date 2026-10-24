@@ -623,7 +623,7 @@ def test_image_glyph_and_text_compose(color_face: Face) -> None:
         _glyph(color_face, "I", 0.0, 100.0, 40.5),
         _glyph(color_face, "V", 20.0, 100.0, 100.0),
     ]
-    rgba, bbox = _render(glyphs)
+    rgba, _bbox = _render(glyphs)
     blue = rgba[..., 3] > 0.99
     blue &= rgba[..., 2] > 0.99
     assert blue.any()

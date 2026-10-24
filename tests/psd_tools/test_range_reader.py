@@ -6,7 +6,7 @@ import random
 import re
 import threading
 from collections.abc import Iterator
-from typing import IO, cast
+from typing import IO, ClassVar, cast
 
 import numpy as np
 import pytest
@@ -99,7 +99,7 @@ def test_a_short_or_changed_reply_raises() -> None:
 class _Handler(http.server.BaseHTTPRequestHandler):
     data = b""
     ranges = True
-    log: list = []
+    log: ClassVar[list] = []
     url = ""
 
     def do_GET(self) -> None:

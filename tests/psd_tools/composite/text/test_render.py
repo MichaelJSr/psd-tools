@@ -167,7 +167,7 @@ def test_type_layer_psd_renders(luckiest_guy_path: str) -> None:
     layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
     out = render_type_layer(layer, FontMap(aliases={"ArialMT": luckiest_guy_path}))
     assert out is not None
-    rgba, bbox = out
+    rgba, _bbox = out
     assert rgba.shape[0] > 0 and rgba.shape[1] > 0
     assert rgba[..., 3].max() == 1.0
 
@@ -278,7 +278,7 @@ def test_unedited_document_saves_byte_identical(tmp_path: Any) -> None:
 def test_corpus_edit_round_trip(
     corpus_fonts: FontMap, which: int, tmp_path: Any
 ) -> None:
-    psd_name, index, name, *_ = CORPUS[which]
+    psd_name, index, _name, *_ = CORPUS[which]
     layer = corpus_layer(psd_name, index)
     psd = cast(PSDImage, layer._psd)
     layer.set_text(layer.text + " edited")

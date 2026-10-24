@@ -117,7 +117,7 @@ def frame(model: TextModel) -> tuple[float, float, float, float] | None:
     """
     if model.shape != 1 or model.box is None:
         return None
-    left, top, right, bottom = model.box
+    left, top, _right, _bottom = model.box
     if abs(left) >= BOX_ABSOLUTE_FRAME_L:
         left, top = 0.0, 0.0
     return left, top, model.box[2] - model.box[0], model.box[3] - model.box[1]

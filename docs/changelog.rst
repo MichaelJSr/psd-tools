@@ -1,9 +1,13 @@
 Changelog
 =========
 
-1.26.0 (unreleased)
--------------------
+1.26.0+cards (unreleased)
+-------------------------
 
+- [fix] The stroke distance search stays this fork's: Photoshop's chamfer
+  metric over a compiled loop, its offset grid charged to ``max_alloc_bytes``
+  at 64 bytes a pixel plus 48 an offset. Upstream 1.26.0's k-d tree search
+  measures straight-line distance, so strokes would change; it is not taken
 - [fix] Every opaque pixel of a layer states its own edge to the distance a
   stroke, a precise glow or a chisel bevel is measured by, not only one beside
   a clear pixel, as Photoshop measures it: round an antialiased corner, such
@@ -296,12 +300,6 @@ Changelog
   writable, ``set_text()`` and ``set_span_style()`` edit text and styles, and
   ``rasterize()`` draws them into the layer's pixels with the new ``text``
   extra. ``composite()`` still uses the stored pixels (#25, #317, #468)
-- [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
-  ``content_descriptor``, and writes it back. Saving a file with a smart object
-  embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a
-  file whose version 8 entry is missing it (#1011, #1012)
-- [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
-  ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
 - [fix] A drop shadow layer effect is now rendered when a document is
   composited from its layers, instead of being dropped. Distance, size,
   spread, contour, global light, opacity, blend mode and the layer knockout
@@ -379,6 +377,21 @@ Changelog
   snapped onto the pixel grid as Photoshop does: the box of its visible edge
   moves to whole pixels and the path with it, so a centred stroke of odd
   width lands on pixel centres instead of half-covering the pixels either side
+
+1.26.0 (2026-10-21)
+-------------------
+
+- [security] Compositing a layer with a wide stroke effect no longer exhausts
+  memory and CPU: an ordinary file could take minutes and tens of gigabytes
+  where it now takes seconds, with the same pixels. A stroke canvas is now
+  budgeted at 128 bytes per pixel, so a stroked layer of more than about 33
+  megapixels needs a higher ``max_alloc_bytes`` (#897, #895, #1029)
+- [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
+  ``content_descriptor``, and writes it back. Saving a file with a smart object
+  embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a
+  file whose version 8 entry is missing it (#1011, #1012)
+- [api] ``psd.adjustments.PhotoFilter.xyz`` is annotated ``tuple | None``: it is
+  ``None`` for a version 2 record. Runtime behavior is unchanged (#692, #1019)
 
 1.25.0 (2026-10-14)
 -------------------

@@ -236,7 +236,7 @@ def test_stray_stored_ink_renders_the_whole_layer(fonts: FontMap) -> None:
 def test_a_moved_layer_renders_the_whole_layer(fonts: FontMap) -> None:
     layer = type_layer("text.psd")
     before = capture(layer, fonts)
-    moved = replace(before.model, transform=before.model.transform[:4] + (0.0, 0.0))
+    moved = replace(before.model, transform=(*before.model.transform[:4], 0.0, 0.0))
     layer.set_text("Line 1\rLine 7\rLine 3 and text")
     report = layer.rasterize(fonts=fonts, keep=replace(before, model=moved))
     assert report.splice is not None

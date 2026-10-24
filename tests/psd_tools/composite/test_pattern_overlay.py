@@ -80,7 +80,7 @@ def test_an_unscaled_tiling_matches_the_sampler() -> None:
 
 
 def test_moving_the_layer_moves_its_overlay() -> None:
-    psd, layer, desc = _overlay("layer_effects.psd", "Pattern Overlay")
+    _psd, layer, desc = _overlay("layer_effects.psd", "Pattern Overlay")
     before = _drawn(layer, desc)
     layer.left += 7
     layer.top += 5

@@ -52,23 +52,28 @@ def _disc(size: int, radius: float) -> np.ndarray:
 
 
 def _satin(shape: np.ndarray, **kwargs: Any) -> np.ndarray:
-    params: dict[str, Any] = dict(distance=3.0, angle=0.0, size=0.0, inverted=False)
+    params: dict[str, Any] = {
+        "distance": 3.0,
+        "angle": 0.0,
+        "size": 0.0,
+        "inverted": False,
+    }
     params.update(kwargs)
     height, width = shape.shape[:2]
     return effects.draw_satin((0, 0, width, height), shape, **params)
 
 
 def _bevel(shape: np.ndarray, **kwargs: Any) -> tuple[np.ndarray, np.ndarray]:
-    params: dict[str, Any] = dict(
-        style=BevelStyle.INNER_BEVEL,
-        technique=BevelTechnique.SOFT_MATTE,
-        up=True,
-        depth=100.0,
-        size=8.0,
-        soften=0.0,
-        angle=90.0,
-        altitude=30.0,
-    )
+    params: dict[str, Any] = {
+        "style": BevelStyle.INNER_BEVEL,
+        "technique": BevelTechnique.SOFT_MATTE,
+        "up": True,
+        "depth": 100.0,
+        "size": 8.0,
+        "soften": 0.0,
+        "angle": 90.0,
+        "altitude": 30.0,
+    }
     params.update(kwargs)
     height, width = shape.shape[:2]
     return effects.draw_bevel((0, 0, width, height), shape, **params)
@@ -998,7 +1003,7 @@ def test_an_anti_aliased_shape_contour_shades_one_more_row_below() -> None:
     """
     shape = np.zeros((20, 20, 1), dtype=np.float32)
     shape[7:13, 2:18] = 1.0
-    params: dict[str, Any] = dict(size=2.0, depth=100.0)
+    params: dict[str, Any] = {"size": 2.0, "depth": 100.0}
     sharp = _bevel(shape, bevel_shape=effects.BevelShape(None, 0.0, False), **params)
     smooth = _bevel(shape, bevel_shape=effects.BevelShape(None, 0.0, True), **params)
     column = 10

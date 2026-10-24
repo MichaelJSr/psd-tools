@@ -216,7 +216,7 @@ class SvgTable:
         k = bisect_right(self._firsts, gid) - 1
         if k < 0:
             return None
-        first, last, start, length = self._index[k]
+        _first, last, start, length = self._index[k]
         return (start, length) if gid <= last else None
 
     def document(self, gid: int) -> bytes | None:
@@ -998,9 +998,9 @@ class _Parser:
         par = (a.get("preserveAspectRatio") or "xMidYMid meet").split()
         if par[0] != "none":
             s = min(sx, sy) if (len(par) < 2 or par[1] == "meet") else max(sx, sy)
-            if par[0] != "xMidYMid" or (len(par) > 1 and par[1] == "slice"):
-                if abs(sx - sy) > 1e-9 * max(sx, sy):
-                    raise Unsupported("preserveAspectRatio")
+            centred = par[0] == "xMidYMid" and (len(par) < 2 or par[1] != "slice")
+            if not centred and abs(sx - sy) > 1e-9 * max(sx, sy):
+                raise Unsupported("preserveAspectRatio")
             x += (w - iw * s) / 2
             y += (h - ih * s) / 2
             sx = sy = s

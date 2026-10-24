@@ -562,7 +562,7 @@ def test_the_fixtures_smooth_gradient_stroke_runs_through_its_crest_as_photoshop
     pixels = psd.numpy()[:, 33, :3] * 255.0
     readings: Readings = []
     for row in range(130, 155):
-        levels = [int(round(v)) for v in pixels[row]]
+        levels = [round(v) for v in pixels[row]]
         location = round((bottom - row) * 4096 / rows)
         readings.append((location, (levels[0], levels[1], levels[2])))
     ours, eased = _photoshop_misses(stops, readings)
