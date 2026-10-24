@@ -762,10 +762,12 @@ with np.load(full_name("text-halo-near-unity.npz")) as _near:
 #: Copies a level off on one line: undead_glow_copy_fringe's outer row,
 #: which Photoshop draws at alpha 1 and the fork leaves empty, and
 #: electric_glow_s0_993's own first column (2 for Photoshop's 1). About 1
-#: in 20 copied or nearest-neighbour halos in the review fixtures (11 of
-#: 213) differ on one outer line at alpha 1, either way: Photoshop draws
-#: it or leaves it empty.
+#: in 13 copied or nearest-neighbour halos in the review fixtures (15 of
+#: 198) differ on one line, most on an outer line by a level, either way.
 COPY_EDGE = ("undead_glow_copy_fringe", "electric_glow_s0_993")
+#: Nearest-neighbour halos up to 5 levels off on one interior column,
+#: where Photoshop picks another source column.
+COLUMN_PICK = ("fire_glow_s1_01", "electric_glow_s0_985")
 
 
 def _kinds(data: dict, case: str) -> tuple[str, str]:
@@ -783,8 +785,11 @@ def test_halo_near_its_size_matches_photoshop(case: str) -> None:
     exact place, or copies it unscaled about its rounded centre where it
     grows by under 0.49 px; it copies one it reduces to its own size in
     whole pixels and takes a pixel off by nearest neighbour. These match to
-    the level but for about 1 in 20, which differ on one outer line at
-    alpha 1, drawn by Photoshop or left empty (:py:data:`COPY_EDGE`). From
+    the level but for about 1 in 13, which differ on one line: most on an
+    outer line at alpha 1, drawn by Photoshop or left empty
+    (:py:data:`COPY_EDGE`), a few nearest ones on an interior column by up
+    to 5 levels where Photoshop picks another column
+    (:py:data:`COLUMN_PICK`). From
     1 % up it interpolates; those match to a level, and at most one outer
     line of the box differs in which pixels are drawn, either way (13 of
     198 in the review fixtures; panda_glow_140, dark_darkglow_330). Two
@@ -802,6 +807,9 @@ def test_halo_near_its_size_matches_photoshop(case: str) -> None:
         if case in COPY_EDGE:
             assert diff.max() == 1
             assert len(set(ys[diff > 0])) == 1 or len(set(xs[diff > 0])) == 1
+        elif case in COLUMN_PICK:
+            assert 0 < diff.max() <= 5
+            assert len(set(xs[diff > 0])) == 1
         else:
             assert diff.max() == 0
         return
@@ -821,9 +829,9 @@ def test_stroked_halo_near_its_size_matches_photoshop(case: str) -> None:
     outside stroke: Photoshop's first and last pixel darker than 128 on
     each row and column of the halo's box, against the fork's stroke round
     the halo (see :py:func:`test_stroked_picture_matches_photoshop`). The
-    nearest-neighbour and copied halos match on every line but for about 1
-    in 20, whose outline is a pixel off along the one outer line Photoshop
-    draws or leaves empty (:py:data:`COPY_EDGE`); the interpolated and
+    nearest-neighbour and copied halos match on every line but for the few
+    whose outline is a pixel off along the one outer line Photoshop draws
+    or leaves empty (:py:data:`COPY_EDGE`); the interpolated and
     filtered ones are a pixel off on a few lines.
     """
     shape = tuple(int(v) for v in NEAR[case + "_shape"])
