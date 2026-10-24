@@ -1,8 +1,6 @@
 """Vector shapes and path operations for compositing."""
 
 import logging
-from collections.abc import Generator
-from itertools import pairwise
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -647,6 +645,10 @@ def _stroke_subpath(
     pixel aggdraw adds to a *fill* (#844) is not a reason to leave it, and its
     joins and caps are work of their own.
 
+    The pen follows the polyline the fill is rasterized from, not the curves:
+    aggdraw flattens a curve for itself to within half a pixel, which cuts a
+    small rounded corner short of the curve Photoshop's stroke follows.
+
     Knot coordinates are fractions of the document, so the symbol is always
     built against the document size and then translated by minus the viewport
     origin -- a viewport that starts outside the canvas shifts the path
@@ -660,44 +662,11 @@ def _stroke_subpath(
     draw = aggdraw.Draw(mask)
     stroke = aggdraw.Pen(**pen)
     for subpath in subpath_list:
-        path = " ".join(map(str, _generate_symbol(subpath, *doc_size, align=align)))
-        symbol = aggdraw.Symbol(path)
-        draw.symbol((-viewport[0], -viewport[1]), symbol, stroke, None)
+        polyline = _flatten_subpath(subpath, *doc_size, align)
+        path = "M " + " L ".join(f"{x!r} {y!r}" for x, y in polyline.tolist())
+        if subpath.is_closed():
+            path += " Z"
+        draw.symbol((-viewport[0], -viewport[1]), aggdraw.Symbol(path), stroke, None)
     draw.flush()
     del draw
     return np.expand_dims(np.array(mask).astype(np.float32) / 255.0, 2)
-
-
-def _generate_symbol(
-    path,
-    width: int,
-    height: int,
-    command: str = "C",
-    align: tuple[np.ndarray, np.ndarray] | None = None,
-) -> Generator[str | float, None, None]:
-    """Sequence generator for SVG path."""
-    knots = [x for x in path if isinstance(x, Knot)]
-    if len(knots) == 0:
-        return
-    points = _knot_points(knots, width, height, align).tolist()
-
-    # Initial point.
-    yield "M"
-    yield from points[0][0]
-    yield command
-
-    # Closed path or open path
-    pairs = (
-        zip(points, points[1:] + points[:1], strict=True)
-        if path.is_closed()
-        else pairwise(points)
-    )
-
-    # Rest of the points.
-    for p1, p2 in pairs:
-        yield from p1[2]
-        yield from p2[1]
-        yield from p2[0]
-
-    if path.is_closed():
-        yield "Z"

@@ -406,9 +406,9 @@ def test_a_centred_stroke_survives_negative_document_coordinates() -> None:
     wide = vector.draw_stroke(layer, (-4, -4, 68, 68))
     # Row 3 is y = -1, above the canvas, where the tops of the two upper
     # ellipses are; the canvas raster has nowhere to hold them.
-    assert wide[3, 28, 0] == pytest.approx(0.463, abs=0.02)
-    assert wide[3, 44, 0] == pytest.approx(0.463, abs=0.02)
-    assert float(wide.sum() - wide[4:68, 4:68].sum()) == pytest.approx(14.2, rel=0.1)
+    assert wide[3, 28, 0] == pytest.approx(0.494, abs=0.02)
+    assert wide[3, 44, 0] == pytest.approx(0.494, abs=0.02)
+    assert float(wide.sum() - wide[4:68, 4:68].sum()) == pytest.approx(16.6, rel=0.1)
     # aggdraw is not exactly translation-invariant, so the overlap agrees to a
     # quantization step rather than bitwise.
     assert np.allclose(wide[4:68, 4:68], on_canvas, atol=1 / 255)
@@ -1581,3 +1581,69 @@ def test_an_aligned_stroked_shape_matches_photoshops_raster() -> None:
     stored = layer.numpy("shape")
     assert stored is not None
     assert np.allclose(fill + stroke - fill * stroke, stored, atol=1 / 255)
+
+
+def _disk_area(cx: float, cy: float, radius: float, size: int) -> np.ndarray:
+    """Area of a disk inside each pixel of a ``size`` square plane, integrated column by column."""
+    steps = 4096
+    x = (np.arange(size * steps) + 0.5) / steps
+    half = np.sqrt(np.maximum(radius**2 - (x - cx) ** 2, 0.0))
+    rows = np.arange(size, dtype=np.float64)[:, None]
+    covered = np.clip(
+        np.minimum(cy + half, rows + 1.0) - np.maximum(cy - half, rows), 0.0, 1.0
+    )
+    return covered.reshape(size, size, steps).mean(axis=2)
+
+
+def test_a_pen_follows_a_curve_as_closely_as_the_fill() -> None:
+    """A centred 2 px stroke on a circle covers the ring a radius either side of it.
+
+    aggdraw flattens a curve to within half a pixel by itself, so a pen given
+    the curve cuts this circle's ring short by a fraction of a pixel between
+    the points it keeps.
+    """
+    cx, cy, r = 15.3, 16.2, 6.0
+    k = 0.5523 * r  # a cubic's handle length for a quarter circle
+    knots: list[tuple[_Point, _Point, _Point]] = [
+        ((cx - k, cy - r), (cx, cy - r), (cx + k, cy - r)),
+        ((cx + r, cy - k), (cx + r, cy), (cx + r, cy + k)),
+        ((cx + k, cy + r), (cx, cy + r), (cx - k, cy + r)),
+        ((cx - r, cy + k), (cx - r, cy), (cx - r, cy - k)),
+    ]
+    _, layer = _aligned_shape(knots, aligned=False, line_width=2.0)
+    stroke = vector.draw_stroke(layer)[:, :, 0]
+    ring = _disk_area(cx, cy, r + 1.0, 32) - _disk_area(cx, cy, r - 1.0, 32)
+    # The pen is quantized to a level and its vertices to agg's 1/256 px grid.
+    assert np.abs(stroke - ring).max() <= 3 / 255
+
+
+# An inside stroke wider than its corner's radius folds the doubled pen over
+# itself there, which aggdraw fills by a rule of its own.
+_FOLDED_CORNER = "rect r2 w3 Insd 0.9 0.4"
+# Photoshop's own stroke sits a little inside the curve, on both of its edges.
+_CURVE_SLACK = 16 / 255
+
+
+def test_a_stroke_rounds_a_corner_as_photoshop_draws_it() -> None:
+    """Every cell of ``rounded-rectangle-stroke.psd`` is within a few levels.
+
+    Its cells are live rounded rectangles of radius 2 to 8 and ellipses, at
+    sub-pixel origins, with black strokes of 1, 2 and 3 px: centred and inside
+    ones alone, and centred ones over a grey fill.
+    """
+    psd = PSDImage.open(full_name("rounded-rectangle-stroke.psd"))
+    reference = psd.numpy()[..., :3]
+    error = np.abs(composite(psd, force=True)[0] - reference).max(axis=-1)
+    cells = [layer for layer in psd if layer.stroke is not None]
+    assert len(cells) == 54
+    for layer in cells:
+        assert layer.stroke is not None
+        if layer.name == _FOLDED_CORNER:
+            continue
+        reach = math.ceil(float(layer.stroke.line_width)) + 2
+        left, top, right, bottom = layer.bbox
+        box = error[
+            max(top - reach, 0) : bottom + reach, max(left - reach, 0) : right + reach
+        ]
+        worst = float(box.max())
+        assert worst < _CURVE_SLACK, f"{layer.name}: {worst * 255:.1f} levels"

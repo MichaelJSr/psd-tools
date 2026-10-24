@@ -4,6 +4,9 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A shape's vector stroke follows its curves as Photoshop draws them
+  instead of cutting small rounded corners short. **Rendering change** for
+  stroked shapes with curves, most for small rounded corners
 - [security] Upstream 1.26.0's bound on the stroke distance search is not
   taken: it measures straight-line distance where this fork measures
   Photoshop's chamfer distance, and would move stroke edges. A very wide stroke
