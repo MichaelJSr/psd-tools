@@ -10,6 +10,11 @@ Changelog
   as a glyph's, the stroke reaches as far as Photoshop's instead of stopping
   short. **Rendering change** for strokes and precise glows on antialiased
   layers and text
+- [fix] Vibrance is read off tables measured from Photoshop's renders of
+  every 8-bit colour instead of a fitted formula, so vibrance and saturation
+  land within a level of Photoshop's for nearly every colour at any amount,
+  skin tones included. **Rendering change** for vibrance adjustments, most for
+  positive amounts
 - [fix] Drop shadows, outer glows, inner shadows and inner glows draw their
   noise, from Photoshop's own field: the same at each document pixel in every
   document, so a noisy effect renders as Photoshop's does rather than smooth.

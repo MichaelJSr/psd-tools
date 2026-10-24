@@ -1,4 +1,3 @@
-import colorsys
 import copy
 import importlib
 import logging
@@ -1415,101 +1414,49 @@ def test_saturation_scales_chroma_about_photoshops_gray() -> None:
     assert np.allclose(_linear(boosted), np.clip(expected, 0, 1), atol=1 / 255)
 
 
-# The fitted vibrance model, with its constants. Fitted on Photoshop renders
-# of the layer over the same art; a changed constant fails this test.
 _SATURATION_GRAY = np.array([0.288, 0.712, 0.0])
-_BOOST_AMOUNT_CURVE, _BOOST_MID, _BOOST_MID_CURVE = 1.27, 1.274, 1.045
-_BOOST_PALE_DARK, _BOOST_PALE_CURVE, _BOOST_DARK_CURVE = 2.908, 1.842, 1.045
-_BOOST_BLACK_FROM, _BOOST_BLACK_TO, _BOOST_GRAY, _BOOST_GRAY_DARK = (
-    0.038,
-    0.292,
-    0.861,
-    -0.272,
-)
-_SKIN_HUES, _SKIN, _SKIN_CURVE = (-0.175, 0.0, 0.096, 0.139), 1.022, 0.829
-_LOSS, _LOSS_PALE, _LOSS_PALE2, _REGAIN_PALE, _REGAIN_PALE2 = (
-    0.25,
-    1.5,
-    -0.5,
-    0.38,
-    -0.14,
-)
-_DARK, _DARK_LEVEL, _DARK_CURVE, _DIM, _DIM_DARK_SCALE = 1.18, 0.26, 1.14, 1.79, 0.02
 
-
-def _fitted_vibrance(
-    pixel: list[float], vibrance: float, saturation: float
-) -> np.ndarray:
-    encoded = np.array(pixel)
-    hue = colorsys.rgb_to_hsv(*pixel)[0]
-    linear = _linear(encoded)
-    high, low = linear.max(), linear.min()
-    chroma = high - low
-    if vibrance > 0:
-        sat = chroma / high
-        pale, value = 1 - sat, encoded.max()
-        boost = _BOOST_MID * sat * pale**_BOOST_MID_CURVE
-        boost += (
-            _BOOST_PALE_DARK
-            * pale**_BOOST_PALE_CURVE
-            * (1 - value) ** _BOOST_DARK_CURVE
-        )
-        black = (value - _BOOST_BLACK_FROM) / (_BOOST_BLACK_TO - _BOOST_BLACK_FROM)
-        black = np.clip(black, 0, 1)
-        boost *= black * black * (3 - 2 * black)
-        rise_from, core_from, core_to, fall_to = _SKIN_HUES
-        hue = hue - 1 if hue > 0.5 else hue
-        skin = min(
-            np.clip((hue - rise_from) / (core_from - rise_from), 0, 1),
-            np.clip((fall_to - hue) / (fall_to - core_to), 0, 1),
-        )
-        boost *= 1 - skin * _SKIN * pale**_SKIN_CURVE
-        position = np.clip(_BOOST_GRAY + _BOOST_GRAY_DARK * (1 - value), 0, 1)
-        gray = low + position * chroma
-        scale = 1 + vibrance**_BOOST_AMOUNT_CURVE * boost
-        linear = gray + scale * (linear - gray)
-    elif vibrance < 0:
-        amount, sat = -vibrance, chroma / high
-        pale = 1 - sat
-        loss = _LOSS + (_LOSS_PALE + _LOSS_PALE2 * pale) * pale
-        regain = (_REGAIN_PALE + _REGAIN_PALE2 * pale) * pale
-        dark = np.clip(1 - encoded.max() / _DARK_LEVEL, 0, 1) ** _DARK_CURVE
-        kept = (1 - amount * loss + amount**2 * regain) * (1 - amount * _DARK * dark)
-        new_sat = np.clip(sat * kept, 0, sat)
-        dim = (1 - high) * (1 - np.exp(-high / _DIM_DARK_SCALE)) * sat * pale
-        value = high * (1 - amount * _DIM * dim)
-        linear = value - value * new_sat / (high * sat) * (high - linear)
-    gray = linear @ _SATURATION_GRAY
-    linear = gray + (linear - gray) * (1 + saturation)
-    linear = np.clip(linear, 0, 1)
-    return np.where(
-        linear <= 0.0031308, linear * 12.92, 1.055 * linear ** (1 / 2.4) - 0.055
-    )
+# Photoshop 2023 renders of 640 colours (random ones, near-grays, reds, darks
+# and saturated ones) under each vibrance setting the cards use, in a document
+# without a profile and in one with the cards' "Display" profile.
+with np.load(full_name("adjustments/vibrance_probes.npz")) as _data:
+    _PROBES = {key: _data[key] for key in _data.files}
 
 
 @pytest.mark.parametrize(
-    ("pixel", "vibrance", "saturation"),
-    [
-        (_PALE_BLUE, -100, 0),
-        (_DEEP_BLUE, -60, 0),
-        ([0.9, 0.85, 0.8], -100, -30),
-        ([0.2, 0.15, 0.1], -100, 0),
-        ([0.05, 0.04, 0.03], -100, 0),
-        (_PALE_CYAN, 100, 0),
-        ([0.78, 0.94, 0.98], 100, 50),
-        ([0.32, 0.33, 0.27], 100, 50),
-        (_PALE_RED, 70, 40),
-    ],
+    ("space", "index"),
+    [("plain", i) for i in range(len(_PROBES["plain_settings"]))]
+    + [("display", i) for i in range(len(_PROBES["display_settings"]))],
 )
-def test_vibrance_is_the_fitted_model(
-    pixel: list[float], vibrance: int, saturation: int
-) -> None:
-    image = np.array([[pixel]], dtype=np.float32)
-    out = _applied(
-        apply_vibrance(image, ColorMode.RGB, _vibrance_layer(vibrance, saturation))
-    )
-    expected = _fitted_vibrance(pixel, vibrance / 100, saturation / 100)
-    assert np.allclose(out[0, 0], expected, atol=0.5 / 255)
+def test_vibrance_matches_photoshop_within_a_level(space: str, index: int) -> None:
+    vibrance, saturation = (int(v) for v in _PROBES[f"{space}_settings"][index])
+    if space == "plain":
+        layer = _vibrance_layer(vibrance, saturation)
+    else:
+        psd = PSDImage.open(full_name("adjustments/vibrance_display_rgb.psd"))
+        layer = next(layer for layer in psd if isinstance(layer, adjustments.Vibrance))
+        data = Descriptor()
+        data[b"vibrance"] = Integer(vibrance)
+        data[b"Strt"] = Integer(saturation)
+        layer._data = data
+    image = _PROBES["colours"][None].astype(np.float32) / 255
+    out = _applied(apply_vibrance(image, ColorMode.RGB, layer))
+    expected = _PROBES[space][index][None].astype(np.float64)
+    assert np.abs(np.rint(out * 255) - expected).max() <= 1
+
+
+def test_vibrance_reads_its_tables_between_amounts() -> None:
+    """Between the tabulated amounts the change grows smoothly from nothing."""
+    image = np.array([[_PALE_BLUE, _DEEP_BLUE, _PALE_RED]], dtype=np.float32)
+    chroma = [
+        _linear_chroma(
+            _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(v, 0)))
+        )
+        for v in range(-100, 101, 5)
+    ]
+    steps = np.diff(np.stack(chroma), axis=0)
+    assert np.all(steps > 0)
+    assert np.allclose(chroma[20], _linear_chroma(image), atol=1e-6)
 
 
 # Photoshop 2023 at vibrance +100: a dark olive, a light cyan, a pale cyan and
@@ -1526,7 +1473,7 @@ def test_positive_vibrance_boosts_a_dark_pale_pixel_more_than_a_bright_one() -> 
     """The dark olive gains more chroma than the light cyan, as in Photoshop."""
     image = np.array([[pixel for pixel, _ in _BOOSTED]], dtype=np.float32) / 255
     out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(100, 0)))
-    assert np.allclose(out * 255, [[boosted for _, boosted in _BOOSTED]], atol=6)
+    assert np.allclose(out * 255, [[boosted for _, boosted in _BOOSTED]], atol=1)
     gained = _linear_chroma(out) / _linear_chroma(image)
     assert gained[0, 0] > 1.4 * gained[0, 1]
 
@@ -1579,7 +1526,7 @@ def test_vibrance_at_rest_leaves_the_image_alone() -> None:
         ("vibrance_saturation", 1),
         ("vibrance_saturation_boost", 1),
         ("vibrance_negative", 1),
-        ("vibrance_positive", 3),
+        ("vibrance_positive", 1),
         ("vibrance_display_saturation", 1),
         ("vibrance_display", 1),
         ("colorbalance_vibrance", 1),
