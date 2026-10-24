@@ -13,7 +13,15 @@ from psd_tools.composite.text.fonts import FontMap, MissingFontError
 from psd_tools.composite.text.layout import Layout, frame, layout, pieces
 from psd_tools.composite.text.model import Paragraph, Run, Style, TextModel
 
-from .conftest import GLYPHS, PS_TT, UNDERLINE_POSITION, UNDERLINE_THICKNESS, UPEM
+from .conftest import (
+    CVT_TOP,
+    D_TO_CVT,
+    GLYPHS,
+    PS_TT,
+    UNDERLINE_POSITION,
+    UNDERLINE_THICKNESS,
+    UPEM,
+)
 
 SIZE = 10.0
 LEADING = 12.0
@@ -147,6 +155,17 @@ def test_box_first_baseline_is_d_ascent(fonts: FontMap) -> None:
     # BoxBounds.T moves the top.
     lay = layout(model("I\r", box=(0.0, 2.0, 100.0, 50.0)), fonts)
     assert ys(lay) == pytest.approx([9.5])
+
+
+def test_box_first_baseline_follows_instructions(
+    make_font: Callable[..., str],
+) -> None:
+    path = make_font("cvt.ttf", programs={"d": D_TO_CVT}, cvt=[CVT_TOP])
+    fonts = FontMap(dirs=[os.path.dirname(path)])
+    lay = layout(model("I\r", box=(0.0, 0.0, 100.0, 50.0)), fonts)
+    assert lay.lines[0].y == pytest.approx(CVT_TOP / UPEM * SIZE)
+    # Point text sits on its origin whatever the ascent.
+    assert layout(model("I\r"), fonts).lines[0].y == 0.0
 
 
 def test_absolute_frame(fonts: FontMap) -> None:

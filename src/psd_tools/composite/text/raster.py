@@ -36,7 +36,7 @@ from psd_tools.composite.text.constants import (
     NONE_THRESHOLD,
     STRONG_EMBOLDEN_26_6,
 )
-from psd_tools.composite.text.fonts import Face, TextRenderError
+from psd_tools.composite.text.fonts import Face, TextRenderError, outline_points
 from psd_tools.composite.text.layout import Layout, PlacedGlyph, Rule
 from psd_tools.composite.text.model import RGB, Transform
 
@@ -290,6 +290,7 @@ def _render_glyph(
 ) -> Glyph:
     """``(bitmap_left, bitmap_top, coverage uint8)`` of one glyph."""
     ft = face.ft
+    points = face.instructed(gid) if flags == _UNHINTED else None
     # The size, transform and glyph slot are state of the shared face.
     with face.lock:
         try:
@@ -297,6 +298,8 @@ def _render_glyph(
             ft.set_transform(freetype.FT_Matrix(*matrix), freetype.FT_Vector(*delta))
             ft.load_glyph(gid, flags)
             slot = ft.glyph
+            if points is not None and slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE:
+                _place_points(slot, points, size66, matrix, delta, face.metrics.upem)
             if embolden != (0, 0) and slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE:
                 # FreeType grows the outline towards +x and +y by the whole
                 # strength; translating back by half of it centres the dilation.
@@ -309,6 +312,28 @@ def _render_glyph(
         except freetype.FT_Exception as ex:
             raise TextRenderError(f"glyph {gid} of {face.key[0]}: {ex}") from ex
         return slot.bitmap_left, slot.bitmap_top, _bitmap(slot)
+
+
+def _place_points(
+    slot: freetype.GlyphSlot,
+    points: np.ndarray,
+    size66: tuple[int, int],
+    matrix: tuple[int, int, int, int],
+    delta: tuple[int, int],
+    upem: int,
+) -> None:
+    """Move the slot's loaded outline onto ``points`` (font units).
+
+    The points take the load's scale, ``matrix`` and ``delta``.
+    """
+    out = outline_points(slot)
+    if out.shape != points.shape:
+        return
+    x = points[:, 0] * (size66[0] / upem)
+    y = points[:, 1] * (size66[1] / upem)
+    xx, xy, yx, yy = matrix
+    out[:, 0] = np.rint((xx * x + xy * y) / 0x10000) + delta[0]
+    out[:, 1] = np.rint((yx * x + yy * y) / 0x10000) + delta[1]
 
 
 def _samples(mode: _Mode, options: Options) -> int:

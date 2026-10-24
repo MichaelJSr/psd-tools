@@ -1,7 +1,8 @@
 """Fixture fonts for the text engine tests.
 
 Two synthetic fonts (TrueType and CFF) with rectangle glyphs, so coverage is
-hand-computable, plus ``kern`` and ``liga`` features. Every test under this
+hand-computable, plus ``kern`` and ``liga`` features; a TrueType variant
+can carry glyph instructions and a ``cvt `` table. Every test under this
 directory carries the ``text`` marker; test modules ``importorskip`` the
 optional libraries they use.
 """
@@ -9,7 +10,8 @@ optional libraries they use.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable
+from array import array
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -38,6 +40,19 @@ GLYPHS: dict[str, tuple[int, tuple[int, int, int, int] | None]] = {
     "f_i": (500, (0, 0, 400, 700)),
 }
 CMAP = {ord(c): c for c in "IAVfidh"} | {ord(" "): "space"}
+#: The control value that :data:`D_TO_CVT` moves the top of ``d`` to.
+CVT_TOP = 700
+#: ``d`` instructions: its two top points go ``cvt[0]`` above the baseline,
+#: unrounded, as a font whose control values disagree with its outlines.
+D_TO_CVT = [
+    "SVTCA[0]",
+    *("PUSHB[ ]", "0", "MDAP[0]"),
+    *("PUSHB[ ]", "1", "0", "MIRP[00000]"),
+    *("PUSHB[ ]", "2", "0", "MIRP[00000]"),
+    "IUP[0]",
+]
+#: ``d`` instructions: its two top points rounded to the pixel grid.
+D_ROUND = ["SVTCA[0]", *("PUSHB[ ]", "1", "MDAP[1]"), *("PUSHB[ ]", "2", "MDAP[1]")]
 FEATURES = f"""
 feature kern {{ pos A V {KERN_A_V}; }} kern;
 feature liga {{ sub f i by f_i; }} liga;
@@ -68,13 +83,26 @@ def _draw(pen: Any, rect: tuple[int, int, int, int] | None) -> None:
     pen.closePath()
 
 
-def build_font(path: str, *, cff: bool, omit: Iterable[str] = ()) -> str:
-    """Write a fixture font to ``path``; ``omit`` drops glyphs by name."""
+def build_font(
+    path: str,
+    *,
+    cff: bool,
+    omit: Iterable[str] = (),
+    upem: int = UPEM,
+    programs: Mapping[str, list[str]] | None = None,
+    cvt: Sequence[int] = (),
+    prep: list[str] | None = None,
+) -> str:
+    """Write a fixture font to ``path``; ``omit`` drops glyphs by name.
+
+    A TrueType font takes glyph ``programs`` (fontTools assembly), a
+    ``cvt `` table and a ``prep`` program.
+    """
     fontBuilder = pytest.importorskip("fontTools.fontBuilder")
     feaLib = pytest.importorskip("fontTools.feaLib.builder")
     names = [g for g in GLYPHS if g not in set(omit)]
     ps_name, style = (PS_CFF, "CFF") if cff else (PS_TT, "TT")
-    fb = fontBuilder.FontBuilder(UPEM, isTTF=not cff)
+    fb = fontBuilder.FontBuilder(upem, isTTF=not cff)
     fb.setupGlyphOrder(names)
     fb.setupCharacterMap({cp: g for cp, g in CMAP.items() if g in names})
     metrics = {}
@@ -99,7 +127,10 @@ def build_font(path: str, *, cff: bool, omit: Iterable[str] = ()) -> str:
             _draw(pen, rect)
             glyphs[g] = pen.glyph()
             metrics[g] = (adv, rect[0] if rect else 0)
+        for g, assembly in (programs or {}).items():
+            glyphs[g].program = _program(assembly)
         fb.setupGlyf(glyphs)
+        _instructions(fb.font, cvt, prep)
     fb.setupHorizontalMetrics(metrics)
     fb.setupHorizontalHeader(ascent=ASCENT, descent=DESCENT)
     fb.setupNameTable({"familyName": FAMILY, "styleName": style, "psName": ps_name})
@@ -115,6 +146,28 @@ def build_font(path: str, *, cff: bool, omit: Iterable[str] = ()) -> str:
     feaLib.addOpenTypeFeaturesFromString(fb.font, FEATURES)
     fb.save(path)
     return path
+
+
+def _program(assembly: list[str]) -> Any:
+    from fontTools.ttLib.tables import ttProgram  # noqa: PLC0415
+
+    program = ttProgram.Program()
+    program.fromAssembly(assembly)
+    return program
+
+
+def _instructions(font: Any, cvt: Sequence[int], prep: list[str] | None) -> None:
+    from fontTools.ttLib import newTable  # noqa: PLC0415
+
+    if cvt:
+        font["cvt "] = newTable("cvt ")
+        font["cvt "].values = array("h", cvt)
+    if prep:
+        font["prep"] = newTable("prep")
+        font["prep"].program = _program(prep)
+    maxp = font["maxp"]
+    maxp.maxZones, maxp.maxStorage, maxp.maxStackElements = 2, 4, 32
+    maxp.maxSizeOfInstructions = 256
 
 
 @pytest.fixture(autouse=True)
@@ -142,10 +195,12 @@ def cff_font_path(fixture_fonts_dir: str) -> str:
 
 @pytest.fixture
 def make_font(tmp_path: Any) -> Callable[..., str]:
-    """``make_font(name, cff=False, omit=())`` -> path of a fresh fixture font."""
+    """``make_font(name, cff=False, omit=(), **build_font)`` -> a fresh font."""
 
-    def make(name: str, *, cff: bool = False, omit: Iterable[str] = ()) -> str:
-        return build_font(str(tmp_path / name), cff=cff, omit=omit)
+    def make(
+        name: str, *, cff: bool = False, omit: Iterable[str] = (), **kwargs: Any
+    ) -> str:
+        return build_font(str(tmp_path / name), cff=cff, omit=omit, **kwargs)
 
     return make
 

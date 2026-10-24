@@ -8,6 +8,7 @@ freetype = pytest.importorskip("freetype")
 hb = pytest.importorskip("uharfbuzz")
 
 from psd_tools.composite.text import fonts as fonts_module  # noqa: E402
+from psd_tools.composite.text.constants import ASCENT_PPEM  # noqa: E402
 from psd_tools.composite.text.fonts import (  # noqa: E402
     FontMap,
     MissingFontError,
@@ -20,6 +21,9 @@ from psd_tools.composite.text.fonts import (  # noqa: E402
 
 from .conftest import (  # noqa: E402
     ASCENT,
+    CVT_TOP,
+    D_ROUND,
+    D_TO_CVT,
     GLYPHS,
     PS_CFF,
     PS_TT,
@@ -82,6 +86,65 @@ def test_ascent_fallbacks(make_font: Callable[..., str]) -> None:
         ASCENT,
         "ascender",
     )
+
+
+def gid(face: fonts_module.Face, char: str) -> int:
+    return face.ft.get_char_index(ord(char))
+
+
+def test_ascent_runs_truetype_instructions(make_font: Callable[..., str]) -> None:
+    face = load_face(make_font("cvt.ttf", programs={"d": D_TO_CVT}, cvt=[CVT_TOP]))
+    assert face.metrics.truetype
+    assert (face.metrics.ascent_units, face.metrics.ascent_glyph) == (CVT_TOP, "d")
+
+
+def test_ascent_rounds_at_ascent_ppem(make_font: Callable[..., str]) -> None:
+    upem = 2048
+    face = load_face(make_font("round.ttf", upem=upem, programs={"d": D_ROUND}))
+    top = GLYPHS["d"][1][3]  # type: ignore[index]
+    rounded = round(top * ASCENT_PPEM / upem) * upem / ASCENT_PPEM
+    assert face.metrics.ascent_units == pytest.approx(rounded)
+    # At one pixel per unit the grid is the unit: the outline stays put.
+    assert face.instructed(gid(face, "d")) is None
+
+
+def test_instructed_points(make_font: Callable[..., str]) -> None:
+    face = load_face(make_font("cvt.ttf", programs={"d": D_TO_CVT}, cvt=[CVT_TOP]))
+    points = face.instructed(gid(face, "d"))
+    assert points is not None
+    x0, y0, x1, _ = GLYPHS["d"][1]  # type: ignore[misc]
+    assert points.tolist() == [[x0, y0], [x0, CVT_TOP], [x1, CVT_TOP], [x1, y0]]
+    # A glyph its instructions leave alone draws its own outline.
+    assert face.instructed(gid(face, "h")) is None
+
+
+def test_instructions_start_afresh(make_font: Callable[..., str]) -> None:
+    # A prep that acts on what an earlier run of it stored: each run starts
+    # from the same state, so one glyph at one ppem has one outline.
+    prep = ["PUSHB[ ]", "0", "RS[ ]", "IF[ ]", "PUSHB[ ]", "0", "0", "WCVTP[ ]"]
+    prep += ["EIF[ ]", "PUSHB[ ]", "0", "1", "WS[ ]"]
+    path = make_font("prep.ttf", programs={"d": D_TO_CVT}, cvt=[CVT_TOP], prep=prep)
+    face = load_face(path)
+    assert UPEM == ASCENT_PPEM
+    first = fonts_module.instructed_outline(face.ft, gid(face, "d"), UPEM)
+    # Hinted loads on the face's own size, as Sharp text makes.
+    for ppem in (UPEM // 2, UPEM):
+        face.ft.set_char_size(ppem * 64, ppem * 64, 72, 72)
+        face.ft.load_glyph(gid(face, "d"), freetype.FT_LOAD_TARGET_LIGHT)
+    again = fonts_module.instructed_outline(face.ft, gid(face, "d"), UPEM)
+    assert first is not None and again is not None
+    assert (first[0].tolist(), first[1]) == (again[0].tolist(), again[1])
+    assert face.metrics.ascent_units == first[1]
+
+
+def test_cff_draws_its_outline(cff_font_path: str, ttf_font_path: str) -> None:
+    cff = load_face(cff_font_path)
+    assert not cff.metrics.truetype
+    assert cff.instructed(gid(cff, "d")) is None
+    # A TrueType font without instructions keeps its outline too.
+    tt = load_face(ttf_font_path)
+    assert tt.metrics.truetype
+    assert tt.instructed(gid(tt, "d")) is None
 
 
 @pytest.mark.parametrize(

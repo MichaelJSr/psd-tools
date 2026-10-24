@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -40,7 +40,7 @@ from psd_tools.composite.text.raster import (  # noqa: E402
     strike_scale,
 )
 
-from .conftest import GLYPHS, UPEM  # noqa: E402
+from .conftest import CVT_TOP, D_TO_CVT, GLYPHS, UPEM  # noqa: E402
 
 NONE, CRISP, STRONG, SMOOTH, SHARP = 0, 1, 2, 3, 4
 AREA = Options(coverage="area")
@@ -115,11 +115,15 @@ def same(
 
 
 def stem_oracle(
-    transform: Transform, pen: tuple[float, float], em: float, bbox: Sequence[int]
+    transform: Transform,
+    pen: tuple[float, float],
+    em: float,
+    bbox: Sequence[int],
+    rect: Sequence[int] | None = None,
 ) -> np.ndarray:
-    """Exact coverage of the transformed ``I`` rectangle over ``bbox``."""
+    """Exact coverage of the transformed ``I`` (or ``rect``) over ``bbox``."""
     xx, xy, yx, yy, tx, ty = transform
-    gx0, gy0, gx1, gy1 = GLYPHS["I"][1]  # type: ignore[misc]
+    gx0, gy0, gx1, gy1 = rect or GLYPHS["I"][1]  # type: ignore[misc]
     poly = []
     for gx, gy in ((gx0, gy0), (gx1, gy0), (gx1, gy1), (gx0, gy1)):
         x, y = pen[0] + gx / UPEM * em, pen[1] - gy / UPEM * em
@@ -258,6 +262,26 @@ def test_matrix_matches_exact_coverage(face: Face, transform: Transform) -> None
         True,
         True,
     )
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        (3.0, 0.0, 0.0, 3.0, 20.0, 50.0),  # scale
+        (0.0, 3.0, -3.0, 0.0, 20.0, 50.0),  # rot90
+        (2.0, 1.0, -1.5, 3.0, 20.0, 50.0),  # general
+    ],
+)
+def test_truetype_draws_its_instructed_outline(
+    make_font: Callable[..., str], transform: Transform
+) -> None:
+    face = load_face(make_font("cvt.ttf", programs={"d": D_TO_CVT}, cvt=[CVT_TOP]))
+    em, pen = 10.0, (0.0, 0.0)
+    rgba, bbox = render([glyph(face, "d", *pen, em=em)], CRISP, transform)
+    x0, y0, x1, _ = GLYPHS["d"][1]  # type: ignore[misc]
+    oracle = stem_oracle(transform, pen, em, bbox, (x0, y0, x1, CVT_TOP))
+    assert oracle.sum() == pytest.approx(rgba[..., 3].sum(), rel=0.02)
+    assert np.abs(rgba[..., 3] - oracle).max() < 0.05
 
 
 def test_mirror_dilates(face: Face) -> None:

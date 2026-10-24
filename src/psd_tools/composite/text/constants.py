@@ -13,6 +13,10 @@ AUTO_LEADING = 1.2
 # without 'd' falls back through the others, then to ``face.ascender``.
 ASCENT_GLYPHS = ("d", "h", "l", "b")
 
+# Photoshop takes a TrueType face's ascent from its ascent glyph run through
+# the font's instructions at this many pixels per em.
+ASCENT_PPEM = 1000
+
 # A box whose left edge is at least this far from zero stores an absolute
 # frame; its top is then taken as zero.
 BOX_ABSOLUTE_FRAME_L = 1.5

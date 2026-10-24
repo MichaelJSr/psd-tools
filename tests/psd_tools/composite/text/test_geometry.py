@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -22,7 +23,7 @@ from psd_tools.composite.text.layout import layout
 from psd_tools.composite.text.model import TextModel
 
 from ...utils import full_name
-from .conftest import GLYPHS, UPEM
+from .conftest import CVT_TOP, D_TO_CVT, GLYPHS, UPEM
 
 #: ``text.psd`` laid out with ArialMT drawn as Luckiest Guy, one line or glyph
 #: per row; rewrite it from ``text_geometry`` after a deliberate layout change.
@@ -98,6 +99,22 @@ def test_ligature_resolves_to_its_characters(ttf_font_path: str) -> None:
     assert geometry["glyphs"][0]["ink"] == pytest.approx(expected, abs=0.01)
     assert geometry["glyphs"][2]["ink"] is None  # the space
     assert_lines_cover(geometry)
+
+
+def test_ink_of_an_instructed_glyph(make_font: Callable[..., str]) -> None:
+    # The ink is the outline the font's instructions leave, as it is drawn.
+    path = make_font("cvt.ttf", programs={"d": D_TO_CVT}, cvt=[CVT_TOP])
+    fonts = as_fixture_font(path, "ArialMT")
+    layer = type_layer("text.psd")
+    layer.set_text("dI")
+    geometry = text_geometry(layer, fonts)
+    size = TextModel.from_layer(layer).runs[0].style.size
+    x, y = layer.transform[4], layer.transform[5]
+    x0, y0, x1, _ = GLYPHS["d"][1]  # type: ignore[misc]
+    expected = [x + x0 / UPEM * size, y - CVT_TOP / UPEM * size]
+    expected += [x + x1 / UPEM * size, y - y0 / UPEM * size]
+    assert geometry["glyphs"][0]["ink"] == pytest.approx(expected, abs=0.01)
+    assert_ink_covers_render(layer, fonts, geometry)
 
 
 def test_lines_cover_the_text(luckiest_guy_path: str) -> None:
