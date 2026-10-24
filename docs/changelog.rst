@@ -4,10 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
-- [fix] The stroke distance search stays this fork's: Photoshop's chamfer
-  metric over a compiled loop, its offset grid charged to ``max_alloc_bytes``
-  at 64 bytes a pixel plus 48 an offset. Upstream 1.26.0's k-d tree search
-  measures straight-line distance, so strokes would change; it is not taken
+- [security] Upstream 1.26.0's bound on the stroke distance search is not
+  taken: it measures straight-line distance where this fork measures
+  Photoshop's chamfer distance, and would move stroke edges. A very wide stroke
+  on a small shape can still take long to render (#897)
 - [fix] Every opaque pixel of a layer states its own edge to the distance a
   stroke, a precise glow or a chisel bevel is measured by, not only one beside
   a clear pixel, as Photoshop measures it: round an antialiased corner, such

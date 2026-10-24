@@ -1464,6 +1464,130 @@ def test_the_dense_and_sparse_paths_agree(monkeypatch: pytest.MonkeyPatch) -> No
     assert np.array_equal(dense, sparse)
 
 
+def _full_search(
+    alpha: np.ndarray, stating: np.ndarray, near: np.ndarray, radius: float
+) -> np.ndarray:
+    """``_nearest_boundary`` the long way: every offset within ``radius``.
+
+    Lengths are :py:func:`_chamfer_length`'s float32 ones, rounded before the
+    cutoff, and a seed's cost is rounded again when ``near`` is added.
+    """
+    height, width = alpha.shape
+    field = np.where(stating, near, np.where(alpha >= 1, -np.inf, np.inf)).astype(
+        np.float32
+    )
+    rows, cols = np.nonzero(~stating)
+    reach = int(min(math.ceil(radius), max(height, width)))
+    outward = np.full(rows.shape, np.inf, dtype=np.float32)
+    inward = np.full(rows.shape, -np.inf, dtype=np.float32)
+    for dy in range(-reach, reach + 1):
+        for dx in range(-reach, reach + 1):
+            length = np.float32(_chamfer_length(np.array(dy), np.array(dx)))
+            if length > radius:
+                continue
+            r, c = rows + dy, cols + dx
+            valid = (r >= 0) & (r < height) & (c >= 0) & (c < width)
+            hit = np.zeros(rows.shape, dtype=bool)
+            hit[valid] = stating[r[valid], c[valid]]
+            stated = np.zeros(rows.shape, dtype=np.float32)
+            stated[hit] = near[r[hit], c[hit]]
+            outward = np.where(hit, np.minimum(outward, stated + length), outward)
+            inward = np.where(hit, np.maximum(inward, stated - length), inward)
+    # Only pixels within reach of a stating pixel are answered for.
+    within = scipy.ndimage.distance_transform_edt(~stating) <= radius
+    solid = alpha[rows, cols] >= 1
+    stated = np.where(solid, inward, outward)
+    keep = within[rows, cols]
+    field[rows[keep], cols[keep]] = stated[keep]
+    return field
+
+
+def _soft_masks() -> list[tuple[str, np.ndarray]]:
+    rng = np.random.default_rng(897)
+    masks: list[tuple[str, np.ndarray]] = []
+    for index in range(24):
+        height, width = (int(v) for v in rng.integers(1, 22, 2))
+        noise, level, step = rng.random((3, height, width))
+        kind = index % 6
+        if kind == 0:
+            alpha = noise
+        elif kind == 1:
+            alpha = np.where(noise < 0.15, level, step < 0.5)
+        elif kind == 2:
+            alpha = np.where(noise < 0.04, level, 0.0)
+        elif kind == 3:
+            alpha = np.where(noise < 0.04, level, 1.0)
+        elif kind == 4:
+            extreme = np.array([1e-9, 1 - 1e-7, 0.5, 0.25, 0.75])
+            alpha = np.where(noise < 0.3, extreme[(level * 5).astype(int)], step < 0.5)
+        else:
+            parity = np.add.outer(np.arange(height), np.arange(width)) % 2
+            alpha = np.where(parity == 0, level, 0.0)
+        masks.append((f"{kind}-{index}", alpha.astype(np.float32)))
+    single = np.zeros((9, 11), dtype=np.float32)
+    single[4, 5] = 0.3
+    masks.append(("single", single))
+    masks.append(("flat", np.full((7, 7), 0.5, dtype=np.float32)))
+    return [(name, a) for name, a in masks if ((a > 0) & (a < 1)).any()]
+
+
+def _search_paths(monkeypatch: pytest.MonkeyPatch, compiled: bool) -> None:
+    if compiled and effects._cdistance is None:
+        pytest.skip("compiled loops not built")
+    if not compiled:
+        monkeypatch.setattr(effects, "_cdistance", None)
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+@pytest.mark.parametrize(
+    "radius",
+    [
+        0.5,
+        1.0,
+        math.sqrt(2),
+        2.0,
+        math.sqrt(5),
+        1.0 + math.sqrt(5),
+        math.sqrt(5) + math.sqrt(2),
+        5.0,
+        5.5,
+        9.3,
+    ],
+)
+def test_the_nearest_boundary_matches_a_search_of_every_offset(
+    monkeypatch: pytest.MonkeyPatch, compiled: bool, radius: float
+) -> None:
+    """Reach edges, chamfer-exact radii and masks of every density agree bitwise.
+
+    A radius sitting on a chamfer length (``sqrt(2)``, ``1 + sqrt(5)``) is where
+    a float32 length and the radius disagree about whether a seed is in reach,
+    and a radius under 1 reaches no seed at all.
+    """
+    _search_paths(monkeypatch, compiled)
+    for name, alpha in _soft_masks():
+        stating = (alpha > 0) & (alpha < 1)
+        near = (0.5 - alpha).astype(np.float32)
+        expected = _full_search(alpha, stating, near, radius)
+        found = effects._nearest_boundary(alpha, stating, near, radius)
+        assert np.array_equal(found, expected), (name, radius)
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def test_a_feathered_mask_is_searched_exactly(
+    monkeypatch: pytest.MonkeyPatch, compiled: bool
+) -> None:
+    """Every pixel of the layer a seed, with the widest spread of weights."""
+    _search_paths(monkeypatch, compiled)
+    rng = np.random.default_rng(1)
+    alpha = np.zeros((40, 40), dtype=np.float32)
+    alpha[10:30, 10:30] = rng.random((20, 20), dtype=np.float32)
+    stating = (alpha > 0) & (alpha < 1)
+    near = (0.5 - alpha).astype(np.float32)
+    expected = _full_search(alpha, stating, near, 30.0)
+    found = effects._nearest_boundary(alpha, stating, near, 30.0)
+    assert np.array_equal(found, expected)
+
+
 def test_every_stroke_position_draws() -> None:
     """The unrecognised position draws as a band too (#802, #799).
 
