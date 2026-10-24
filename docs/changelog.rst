@@ -4,6 +4,12 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] Every opaque pixel of a layer states its own edge to the distance a
+  stroke, a precise glow or a chisel bevel is measured by, not only one beside
+  a clear pixel, as Photoshop measures it: round an antialiased corner, such
+  as a glyph's, the stroke reaches as far as Photoshop's instead of stopping
+  short. **Rendering change** for strokes and precise glows on antialiased
+  layers and text
 - [fix] Drop shadows, outer glows, inner shadows and inner glows draw their
   noise, from Photoshop's own field: the same at each document pixel in every
   document, so a noisy effect renders as Photoshop's does rather than smooth.

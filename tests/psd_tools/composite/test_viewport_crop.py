@@ -57,6 +57,7 @@ _STYLED_FIXTURES = [
     "effects/shape-stroke-raster-mask-density.psd",
     "effects/shape-stroke-raster-mask.psd",
     "effects/stroke-composite.psd",
+    "effects/stroke-corner-statement.psd",
     "effects/stroke-effect-transparent-shape.psd",
     "effects/stroke-effects.psd",
     "fill_adjustments.psd",
