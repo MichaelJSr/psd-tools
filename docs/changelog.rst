@@ -7,6 +7,11 @@ Changelog
 - [fix] A shape's vector stroke follows its curves as Photoshop draws them
   instead of cutting small rounded corners short. **Rendering change** for
   stroked shapes with curves, most for small rounded corners
+- [fix] TrueType text is drawn from the outlines the font's instructions
+  leave, and paragraph text's first line sits one ``d`` below the box top as
+  they place it at 1000 pixels per em, as Photoshop does. **Rendering change**
+  for fonts whose instructions move their outlines, such as Kung Fu Panda;
+  ``FontMetrics.ascent_units`` is a float
 - [security] Upstream 1.26.0's bound on the stroke distance search is not
   taken: it measures straight-line distance where this fork measures
   Photoshop's chamfer distance, and would move stroke edges. A very wide stroke

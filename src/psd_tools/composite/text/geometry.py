@@ -57,6 +57,7 @@ def _ink(glyph: _layout.PlacedGlyph, lean: float) -> Box | None:
     ``lean`` is the faux italic shear in text space, x per unit of height.
     """
     face = glyph.face
+    points = face.instructed(glyph.gid)
     with face.lock:
         try:
             face.ft.load_glyph(glyph.gid, freetype.FT_LOAD_NO_SCALE)
@@ -64,6 +65,9 @@ def _ink(glyph: _layout.PlacedGlyph, lean: float) -> Box | None:
             return None
         m = face.ft.glyph.metrics
         left, top, width, height = m.horiBearingX, m.horiBearingY, m.width, m.height
+    if points is not None:
+        (left, bottom), (right, top) = points.min(axis=0), points.max(axis=0)
+        width, height = right - left, top - bottom
     if width == 0 or height == 0:
         return None
     sx = glyph.em_w / face.metrics.upem

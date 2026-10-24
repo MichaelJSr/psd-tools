@@ -2,7 +2,8 @@
 
 A :class:`FontMap` indexes every ``.ttf``/``.otf``/``.ttc``/``.otc`` face in
 its directories by PostScript name and resolves the names a type layer uses.
-FreeType supplies the names and unscaled metrics; HarfBuzz shapes.
+FreeType supplies the names and metrics and runs TrueType instructions;
+HarfBuzz shapes.
 """
 
 from __future__ import annotations
@@ -12,15 +13,20 @@ import re
 import threading
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
-from ctypes import byref, c_ubyte, c_ulong
+from ctypes import POINTER, byref, c_ubyte, c_ulong, cast
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Literal
 
 import freetype
+import numpy as np
 import uharfbuzz as hb
 
-from psd_tools.composite.text.constants import ASCENT_GLYPHS, FACE_CACHE_SIZE
+from psd_tools.composite.text.constants import (
+    ASCENT_GLYPHS,
+    ASCENT_PPEM,
+    FACE_CACHE_SIZE,
+)
 from psd_tools.composite.text.svg import SvgTable
 
 How = Literal["exact", "loose", "system", "substitute", "missing"]
@@ -48,10 +54,11 @@ class FontMetrics:
     """Unscaled metrics of one face, in font units unless noted."""
 
     upem: int
-    #: ``horiBearingY`` of the first of ``ASCENT_GLYPHS`` the face has, else
-    #: ``face.ascender``; ``ascent_glyph`` names the source (``"ascender"``
-    #: for the final fallback).
-    ascent_units: int
+    #: The outline top of the first of ``ASCENT_GLYPHS`` the face has, as
+    #: the font's instructions place it at ``ASCENT_PPEM`` for a TrueType
+    #: face, else ``face.ascender``; ``ascent_glyph`` names the source
+    #: (``"ascender"`` for the final fallback).
+    ascent_units: float
     ascent_glyph: str
     #: Centre of the underline relative to the baseline, as FreeType reports
     #: it: ``post``'s top edge minus half the thickness.
@@ -61,6 +68,8 @@ class FontMetrics:
     has_svg: bool
     #: ``y_ppem`` of each embedded bitmap strike.
     strikes: frozenset[int]
+    #: TrueType outlines (a ``glyf`` table), drawn through their instructions.
+    truetype: bool = False
 
 
 @dataclass(frozen=True, eq=False)
@@ -76,6 +85,7 @@ class Face:
     metrics: FontMetrics
     key: tuple[str, int]
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _instructed: dict[int, np.ndarray | None] = field(default_factory=dict, repr=False)
 
     @cached_property
     def svg(self) -> SvgTable | None:
@@ -85,6 +95,20 @@ class Face:
         with self.lock:
             data = sfnt_table(self.ft, b"SVG ")
         return None if data is None else SvgTable(data, self.metrics.upem)
+
+    def instructed(self, gid: int) -> np.ndarray | None:
+        """Glyph ``gid``'s points in font units, as Photoshop draws them.
+
+        A TrueType glyph's ``(n, 2)`` outline points as the font's
+        instructions leave them at one pixel per font unit; ``None`` when
+        they move none, the face is not TrueType or the instructions fail.
+        """
+        if not self.metrics.truetype:
+            return None
+        with self.lock:
+            if gid not in self._instructed:
+                self._instructed[gid] = _moved(self.ft, gid)
+            return self._instructed[gid]
 
 
 @dataclass(frozen=True, eq=False)
@@ -143,12 +167,82 @@ def _env_dirs() -> list[str]:
     return [d for d in value.split(os.pathsep) if d]
 
 
+#: A glyph run through its TrueType instructions; bitmaps and the
+#: auto-hinter are not used.
+_INSTRUCTED = (
+    freetype.FT_LOAD_DEFAULT | freetype.FT_LOAD_NO_BITMAP | freetype.FT_LOAD_NO_AUTOHINT
+)
+_IDENTITY = freetype.FT_Matrix(0x10000, 0, 0, 0x10000)
+
+
 def _glyph_ymax(slot: freetype.GlyphSlot) -> int:
     # The outline's own top: the slot's ``horiBearingY`` can differ from it
     # for a CID-keyed CFF face.
     if slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE and slot.outline.n_points:
         return int(slot.outline.get_bbox().yMax)
     return int(slot.metrics.horiBearingY)
+
+
+def _has_table(face: freetype.Face, tag: bytes) -> bool:
+    length = c_ulong(0)
+    code = int.from_bytes(tag, "big")
+    return freetype.FT_Load_Sfnt_Table(face._FT_Face, code, 0, None, byref(length)) == 0
+
+
+def outline_points(slot: freetype.GlyphSlot) -> np.ndarray:
+    """The slot outline's points: an ``(n, 2)`` view of FreeType's array."""
+    outline = slot.outline._FT_Outline
+    if not outline.n_points:
+        return np.zeros((0, 2), np.int64)
+    pointer = cast(outline.points, POINTER(freetype.FT_Pos))
+    return np.ctypeslib.as_array(pointer, shape=(outline.n_points, 2))
+
+
+def instructed_outline(
+    face: freetype.Face, gid: int, ppem: int
+) -> tuple[np.ndarray, float] | None:
+    """Glyph ``gid`` run through the face's TrueType instructions at ``ppem``.
+
+    Its points and its outline's exact top, in font units; ``None`` for a
+    glyph with no outline. Each run is on a size of its own, so it does not
+    depend on what the face ran before. Raises ``FT_Exception``.
+    """
+    size = freetype.FT_Size()
+    error = freetype.FT_New_Size(face._FT_Face, byref(size))
+    if error:
+        raise freetype.FT_Exception(error)
+    active = face._FT_Face.contents.size
+    freetype.FT_Activate_Size(size)
+    try:
+        face.set_char_size(ppem * 64, ppem * 64, 72, 72)
+        face.set_transform(_IDENTITY, freetype.FT_Vector(0, 0))
+        face.load_glyph(gid, _INSTRUCTED)
+        slot = face.glyph
+        if slot.format != freetype.FT_GLYPH_FORMAT_OUTLINE or not slot.outline.n_points:
+            return None
+        scale = face.units_per_EM / (64 * ppem)
+        points = outline_points(slot) * scale
+        return points, slot.outline.get_bbox().yMax * scale
+    finally:
+        freetype.FT_Activate_Size(active)
+        freetype.FT_Done_Size(size)
+
+
+def _moved(face: freetype.Face, gid: int) -> np.ndarray | None:
+    """Glyph ``gid``'s instructed points at one pixel per unit, if they move."""
+    try:
+        hit = instructed_outline(face, gid, face.units_per_EM)
+        # An unscaled load is transformed too: by the identity set above.
+        face.load_glyph(gid, freetype.FT_LOAD_NO_SCALE)
+    except freetype.FT_Exception:
+        return None
+    if hit is None:
+        return None
+    points = hit[0]
+    unscaled = outline_points(face.glyph)
+    if points.shape != unscaled.shape or np.array_equal(points, unscaled):
+        return None
+    return points
 
 
 def sfnt_table(face: freetype.Face, tag: bytes) -> bytes | None:
@@ -164,17 +258,23 @@ def sfnt_table(face: freetype.Face, tag: bytes) -> bytes | None:
 
 
 def _metrics(face: freetype.Face) -> FontMetrics:
-    ascent, glyph = int(face.ascender), "ascender"
+    truetype = _has_table(face, b"glyf")
+    ascent: float = int(face.ascender)
+    glyph = "ascender"
     for g in ASCENT_GLYPHS:
-        if face.get_char_index(ord(g)):
+        gid = face.get_char_index(ord(g))
+        if gid:
             face.load_char(g, freetype.FT_LOAD_NO_SCALE)
             ascent, glyph = _glyph_ymax(face.glyph), g
+            if truetype:
+                try:
+                    hit = instructed_outline(face, gid, ASCENT_PPEM)
+                except freetype.FT_Exception:
+                    hit = None
+                if hit is not None:
+                    ascent = hit[1]
             break
-    length = c_ulong(0)
-    tag = (ord("S") << 24) | (ord("V") << 16) | (ord("G") << 8) | ord(" ")
-    has_svg = (
-        freetype.FT_Load_Sfnt_Table(face._FT_Face, tag, 0, None, byref(length)) == 0
-    )
+    has_svg = _has_table(face, b"SVG ")
     return FontMetrics(
         upem=int(face.units_per_EM),
         ascent_units=ascent,
@@ -183,6 +283,7 @@ def _metrics(face: freetype.Face) -> FontMetrics:
         underline_thickness=int(face.underline_thickness),
         has_svg=has_svg,
         strikes=frozenset(round(s.y_ppem / 64) for s in face.available_sizes),
+        truetype=truetype,
     )
 
 

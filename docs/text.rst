@@ -189,7 +189,10 @@ metrics kerning and ligatures, super- and subscript, BaselineShift,
 Horizontal and Vertical scale, all caps, faux bold and italic, underline
 and strikethrough, fill colour, the five anti-aliasing modes, and any
 affine transform, at any document resolution. Paragraph text is broken
-with Photoshop's single-line composer, with justification. Warp is
+with Photoshop's single-line composer, with justification, and its first
+line sits one ``d`` below the box top. A TrueType glyph is drawn as the
+font's instructions leave it at one pixel per font unit, and its ``d``
+measured as they place it at 1000 pixels per em, as Photoshop does. Warp is
 rendered unwarped, colour emoji fonts as monochrome silhouettes and the
 platform anti-aliasing modes (Mac LCD, Mac and Windows Gray) as Strong,
 each with a warning in the report.
