@@ -3595,7 +3595,10 @@ class Compositor:
         rather than large.
 
         ``covered`` is None where the layer is composited first after all, and
-        the band goes on at what it was drawn at -- see :py:meth:`apply`.
+        the band goes on at what it was drawn at -- see :py:meth:`apply`. A
+        layer that knocks out to a window takes the canvas down by its shape
+        rather than its alpha, and ``covered`` is that shape
+        (:py:meth:`_apply_apart`).
         """
         for effect in effects:
             coverage = effect.coverage
@@ -4029,7 +4032,8 @@ class Compositor:
         ``under`` is the canvas as it stood before the layer's shadows, when
         the layer knocks them out (:py:meth:`_knocks_out_window`): the paint
         and effects go on over that, and the layer's shape cuts the window
-        to it as it goes on.
+        to it as it goes on. What paints beside the layer is no part of the
+        window and makes room for that shape.
         """
         region = source.region
         paint = utils.clip(
@@ -4071,10 +4075,11 @@ class Compositor:
             )
         )
         alpha = source.alpha * own
-        self._apply_outer_effects(outer, alpha)
+        shape = utils.clip(region * scratch._shape_g) if under is None else region
+        self._apply_outer_effects(outer, alpha if under is None else shape)
         self._apply_source(
             color,
-            utils.clip(region * scratch._shape_g) if under is None else region,
+            shape,
             alpha,
             BlendMode.NORMAL,
             text_gamma=source.text_gamma,
@@ -5233,7 +5238,8 @@ class Compositor:
         outside both guards so that a fault compositing a group's contents is
         not taken for an unreadable effect. Without scipy the shadows are left
         out (:py:meth:`_has_scipy`). Under a ``window`` the silhouette cuts
-        nothing: the layer knocks the shadow out as it goes on.
+        nothing, as the layer knocks the shadow out as it goes on; the stroke
+        bands cut as they do without one.
         """
         shadows = _readable(layer, "dropshadow")
         if not shadows or not self._has_scipy("Drop shadows"):
@@ -5301,7 +5307,7 @@ class Compositor:
                 continue
             if knocks_out:
                 if covers is None:
-                    covers = self._covers_beneath(layer) and not window
+                    covers = self._covers_beneath(layer)
                 cut = np.zeros_like(silhouette) if window else silhouette
                 coverage = coverage * (
                     1.0 - self._knockout_shape(layer, bbox, cut, covers)

@@ -11,8 +11,8 @@ Changelog
 - [fix] A type layer below full fill mixes only its glyphs' coverage and its
   opacity in the text gamma, so an inner glow or overlay on a fill-0 name goes
   on as Photoshop draws it; a layer below full fill that knocks out its drop
-  shadow shows its effects over what lay beneath the shadow. **Rendering
-  change** for such layers
+  shadow shows its effects over what lay beneath the shadow, its stroke still
+  over the shadow. **Rendering change** for such layers
 - [fix] Every opaque pixel of a layer states its own edge to the distance a
   stroke, a precise glow or a chisel bevel is measured by, not only one beside
   a clear pixel, as Photoshop measures it: round an antialiased corner, such

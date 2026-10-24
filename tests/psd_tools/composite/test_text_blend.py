@@ -465,6 +465,54 @@ def test_only_the_coverage_mixes_in_the_text_space() -> None:
     assert _covered_pixel(0.3, 0.9, 0.5, 1.0) == pytest.approx(whole, abs=1e-6)
 
 
+def _grouped_pixel(content: float, coverage: float, share: float, alone: bool) -> float:
+    """One grey pixel of a styled group, over 0.8.
+
+    The group holds 0.3 at ``content`` alpha, then a type layer showing 0.9
+    by ``share`` within its ``coverage``, worked out over the canvas as
+    :py:meth:`Compositor._apply_apart` does. ``alone`` renders the group over
+    nothing and puts it over 0.8 afterwards; otherwise it is seeded with 0.8.
+    """
+    compositor = Compositor(
+        (0, 0, 1, 1),
+        np.full((1, 1, 3), 0.8, dtype=np.float32),
+        np.full((1, 1, 1), 0.0 if alone else 1.0, dtype=np.float32),
+        color_mode=ColorMode.RGB,
+        text_isolated=not alone,
+    )
+    held = np.full((1, 1, 1), content, dtype=np.float32)
+    grey = np.full((1, 1, 3), 0.3, dtype=np.float32)
+    compositor._apply_source(grey, held, held, BlendMode.NORMAL)
+    canvas, alpha = compositor._color, compositor._alpha
+    inside = ((1.0 - share) * alpha * canvas + share * 0.9) / (
+        alpha + share - alpha * share
+    )
+    shape = np.full((1, 1, 1), coverage, dtype=np.float32)
+    compositor._apply_source(
+        np.full((1, 1, 3), 0.9, dtype=np.float32),
+        shape,
+        shape * share,
+        BlendMode.NORMAL,
+        text_gamma=TEXT_BLEND_GAMMA,
+        text_inside=(shape, inside),
+    )
+    alpha = compositor._alpha
+    return float((alpha * compositor._color + (1.0 - alpha) * 0.8)[0, 0, 0])
+
+
+@pytest.mark.parametrize(
+    ("content", "coverage", "share"),
+    [(0.5, 0.5, 0.4), (0.2, 0.3, 1.0), (0.5, 1.0, 0.4), (1.0, 0.7, 0.4)],
+)
+def test_in_a_styled_group_the_coverage_mixes_against_the_group(
+    content: float, coverage: float, share: float
+) -> None:
+    """The layer meets only what the group painted, as if rendered alone."""
+    alone = _grouped_pixel(content, coverage, share, alone=True)
+    grouped = _grouped_pixel(content, coverage, share, alone=False)
+    assert grouped == pytest.approx(alone, abs=1e-6)
+
+
 # -- A layer below full fill: ``effects/text-fill-window.psd`` -------------- #
 
 # Photoshop 2023, one row 110 px tall per layer, each a type layer across a
@@ -483,12 +531,12 @@ _SHADOWED = (
 )
 
 
-def _row_errors(psd: PSDImage) -> dict[str, float]:
+def _row_errors(psd: PSDImage, count: int = 10) -> dict[str, float]:
     """The worst level of each row's composite against Photoshop's."""
     reference = psd.numpy()[..., :3]
     error = np.abs(composite(psd)[0] - reference).max(axis=-1)
     rows = [layer for layer in psd if layer.name not in ("Background", "backdrop")]
-    assert len(rows) == 10
+    assert len(rows) == count
     return {
         layer.name: float(
             error[index * _ROW_HEIGHT : (index + 1) * _ROW_HEIGHT].max() * 255
@@ -519,6 +567,32 @@ def test_a_shadow_cut_under_the_shape_misses_the_window(
     assert all(
         error < 2.0 for name, error in errors.items() if name not in _SHADOWED
     ), errors
+
+
+# ``effects/text-stroke-window.psd``: the same in Photoshop 2023, eight rows
+# with a Normal stroke at 100%, 8 px outside unless named: fill 0 and fill 50
+# over a knocked-out shadow, fill 0 alone, 4 px inside and 6 px centred over
+# the shadow, the Name glow with the stroke and shadow as type and as pixels,
+# and fill 0 over a shadow it does not knock out. Two rows miss for other
+# reasons and are left out: fill 0 alone, whose glyph edge beside the stroke
+# does not mix in the text gamma off the window, and the shadow left on, which
+# Photoshop casts from the stroke as well.
+_STROKE_WINDOW = "effects/text-stroke-window.psd"
+
+
+def test_a_stroke_beside_the_window_keeps_its_share() -> None:
+    """Every row over a knocked-out shadow is within 2 levels of Photoshop's.
+
+    A stroke is no part of the window: its paint hides the shadow as it does
+    off the window, and what it paints beside the layer makes room for the
+    shape the window is cut by.
+    """
+    errors = _row_errors(PSDImage.open(full_name(_STROKE_WINDOW)), 8)
+    shadowed = {
+        name: error for name, error in errors.items() if name.endswith(" shadow")
+    }
+    assert len(shadowed) == 6
+    assert {name: error for name, error in shadowed.items() if error >= 2.0} == {}
 
 
 # -- Layers Photoshop kept as pixels ---------------------------------------- #
