@@ -168,6 +168,8 @@ class Picture:
     rgba: np.ndarray
     transform: Affine
     opacity: float
+    #: The ``<image>`` element's box in pixels of ``rgba``; ``None`` is the image.
+    box: tuple[float, float, float, float] | None = None
 
 
 Item = Shape | Picture
@@ -1001,11 +1003,15 @@ class _Parser:
             centred = par[0] == "xMidYMid" and (len(par) < 2 or par[1] != "slice")
             if not centred and abs(sx - sy) > 1e-9 * max(sx, sy):
                 raise Unsupported("preserveAspectRatio")
-            x += (w - iw * s) / 2
-            y += (h - ih * s) / 2
+            mx, my = (w / s - iw) / 2, (h / s - ih) / 2
+            x += mx * s
+            y += my * s
             sx = sy = s
+            box = (-mx, -my, iw + mx, ih + my) if mx or my else None
+        else:
+            box = None
         place = compose(m, (sx, 0.0, 0.0, sy, x, y))
-        self.items.append(Picture(rgba, place, opacity))
+        self.items.append(Picture(rgba, place, opacity, box))
 
 
 # -- rasterization ---------------------------------------------------------
@@ -1119,19 +1125,33 @@ def _enlarged(scale: float) -> bool:
     return scale > 1.0 + 1e-9
 
 
-def _axis(scale: float, origin: float, n: int) -> tuple[float, float, int, int]:
+def _box_coverage(n: int, start: int, lo: float, hi: float) -> np.ndarray:
+    """Coverage of pixels ``start..start+n`` by ``[lo, hi)``, as Photoshop holds it.
+
+    Rounded up to a quarter of a pixel, so a pixel the box barely touches
+    still takes a quarter of the image.
+    """
+    x = np.arange(n, dtype=np.float64) + start
+    cov = np.clip(np.minimum(x + 1, hi) - np.maximum(x, lo), 0.0, 1.0)
+    return np.minimum(255.0, 64.0 * np.ceil(4.0 * cov - 1e-6)) / 255.0
+
+
+def _axis(
+    scale: float, origin: float, n: int, lo: float, hi: float
+) -> tuple[float, float, int, int]:
     """One axis of an axis-aligned image: its scale, offset, first pixel and end.
 
     As Photoshop draws it. An enlarged image keeps its exact place, is
-    interpolated between pixel centres (:py:func:`_linear_weights`) and
-    reaches every pixel whose centre is within a pixel of it. Otherwise its
-    size rounds up, it keeps its centre with its corner rounded to the
-    nearest pixel, and source pixel ``i`` is sampled at ``i`` rather than
-    ``i + 1/2``.
+    interpolated between pixel centres (:py:func:`_linear_weights`), its
+    edge pixels held out to its ``<image>`` box ``[lo, hi)`` (image pixels),
+    and reaches every pixel the box covers (:py:func:`_box_coverage`).
+    Otherwise its size rounds up, it keeps its centre with its corner
+    rounded to the nearest pixel, and source pixel ``i`` is sampled at ``i``
+    rather than ``i + 1/2``.
     """
     if _enlarged(scale):
-        end = origin + scale * n
-        return scale, origin, math.floor(origin - 0.5), math.floor(end + 0.5) + 1
+        first = math.floor(origin + scale * lo + 1e-6)
+        return scale, origin, first, math.ceil(origin + scale * hi - 1e-6)
     size = max(1, math.ceil(scale * n - 1e-6))
     first = math.floor(origin + (scale * n - size) / 2 + 0.5)
     k = size / n
@@ -1139,15 +1159,16 @@ def _axis(scale: float, origin: float, n: int) -> tuple[float, float, int, int]:
 
 
 def _snapped(
-    full: Affine, iw: int, ih: int
+    full: Affine, iw: int, ih: int, box: tuple[float, float, float, float] | None
 ) -> tuple[Affine, tuple[int, int, int, int]]:
     """The placement of an axis-aligned image on the pixel grid, and its rect.
 
     See :py:func:`_axis`.
     """
     a, _, _, d, e, f = full
-    sx, ex, x0, x1 = _axis(a, e, iw)
-    sy, ey, y0, y1 = _axis(d, f, ih)
+    bx0, by0, bx1, by1 = box or (0.0, 0.0, float(iw), float(ih))
+    sx, ex, x0, x1 = _axis(a, e, iw, bx0, bx1)
+    sy, ey, y0, y1 = _axis(d, f, ih, by0, by1)
     return (sx, 0.0, 0.0, sy, ex, ey), (x0, y0, x1, y1)
 
 
@@ -1167,8 +1188,11 @@ def picture_layer(
     src = (pic.rgba.astype(np.float32) / 255).astype(np.float64)
     ih, iw = src.shape[:2]
     if _axis_aligned(full):
-        place, (rx0, ry0, rx1, ry1) = _snapped(full, iw, ih)
+        place, (rx0, ry0, rx1, ry1) = _snapped(full, iw, ih, pic.box)
         a, _, _, d, e, f = place
+        bx0, by0, bx1, by1 = pic.box or (0.0, 0.0, float(iw), float(ih))
+        cx = _box_coverage(w, x0, e + a * bx0, e + a * bx1) if _enlarged(a) else None
+        cy = _box_coverage(h, y0, f + d * by0, f + d * by1) if _enlarged(d) else None
         wx = (_linear_weights if _enlarged(a) else _area_weights)(w, iw, a, e - x0)
         wy = (_linear_weights if _enlarged(d) else _area_weights)(h, ih, d, f - y0)
         # The rect clips what the half-pixel shift or a held edge reaches past it.
@@ -1176,6 +1200,11 @@ def picture_layer(
         wy[(np.arange(h) + y0 < ry0) | (np.arange(h) + y0 >= ry1)] = 0
         rows = np.tensordot(wy, src, axes=(1, 0))
         layer = np.matmul(rows.transpose(0, 2, 1), wx.T).transpose(0, 2, 1)
+        if cx is not None or cy is not None:
+            # Photoshop resamples to 8 bits, then the box's coverage cuts alpha.
+            layer = np.round(np.clip(layer, 0.0, 1.0) * 255) / 255
+            layer[..., 3] *= (np.ones(h) if cy is None else cy)[:, None]
+            layer[..., 3] *= (np.ones(w) if cx is None else cx)[None, :]
     else:
         # Bilinear from pixel centres; no corpus glyph is rotated or skewed.
         inv = _invert(full)
@@ -1225,7 +1254,7 @@ def device_bbox(drawing: Drawing, m: Affine) -> tuple[int, int, int, int] | None
         full = compose(m, item.transform)
         if isinstance(item, Picture) and _axis_aligned(full):
             ih, iw = item.rgba.shape[:2]
-            boxes.append(_snapped(full, iw, ih)[1])
+            boxes.append(_snapped(full, iw, ih, item.box)[1])
             continue
         x0, y0, x1, y1 = _item_box(item, m)
         boxes.append((math.floor(x0), math.floor(y0), math.ceil(x1), math.ceil(y1)))

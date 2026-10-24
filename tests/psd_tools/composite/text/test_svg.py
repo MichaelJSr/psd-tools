@@ -18,6 +18,7 @@ import pytest
 pytest.importorskip("freetype")
 pytest.importorskip("uharfbuzz")
 
+from psd_tools.composite import effects
 from psd_tools.composite.scanline import fill_coverage
 from psd_tools.composite.text import svg
 from psd_tools.composite.text.fonts import Face, load_face
@@ -28,6 +29,8 @@ from psd_tools.composite.text.raster import (
     raster_warnings,
     rasterize,
 )
+from psd_tools.psd.descriptor import Descriptor, Double, Enumerated
+from psd_tools.terminology import Enum, Key, Klass
 
 from ...utils import full_name
 from .conftest import build_font
@@ -541,28 +544,37 @@ def test_enlarged_image_keeps_its_place() -> None:
     assert drawing is not None
     # 600 units at 0.015 px: 9 x 9 px from (10.3, 20.0), 1.5 px a source pixel.
     left, top, rgba = svg.rasterize(drawing, (0.015, 0.0, 0.0, 0.015, 10.3, 29.0))
-    # Every pixel whose centre is within a pixel of the image.
-    assert (left, top, rgba.shape[:2]) == (9, 19, (11, 11))
-    # Source pixel i's centre at 10.3 + 1.5 (i + 1/2); the ring is transparent.
-    want = [0, 0, 0.3, 29 / 30, 1, 1, 1, 1, 0.7, 1 / 30, 0]
-    assert rgba[6, :, 3] == pytest.approx(want, abs=1e-6)
+    # The pixels the image covers.
+    assert (left, top, rgba.shape[:2]) == (10, 20, (9, 10))
+    # Source pixel i's centre at 10.3 + 1.5 (i + 1/2), in 8 bits; the ring
+    # is transparent.
+    want = [0, 0.3, 29 / 30, 1, 1, 1, 1, 0.7, 1 / 30, 0]
+    assert rgba[5, :, 3] == pytest.approx(want, abs=0.5 / 255 + 1e-6)
 
 
-def test_enlarged_image_edge_holds() -> None:
-    """Past the outer pixel centres an enlarged image keeps its edge pixels."""
+def test_enlarged_image_reaches_its_box() -> None:
+    """Edge pixels hold out to the ``<image>`` box, cut by its coverage in quarters.
+
+    As Photoshop 2023 draws stoogedings' icons enlarged: a pixel the box
+    covers by ``c`` takes ``ceil(4 c) / 4`` of the image (64, 128, 192 or
+    255 of 255) and a pixel it misses takes nothing (the sharp-edged cases
+    below).
+    """
     opaque = np.full((2, 2, 4), 255, np.uint8)
     doc = (
         '<svg version="1.1" xmlns="http://www.w3.org/2000/svg" '
         'xmlns:xlink="http://www.w3.org/1999/xlink"><g id="glyph1">'
-        '<image x="0" y="-200" width="200" height="200" '
+        '<image x="0" y="-200" width="220" height="200" '
         f'xlink:href="data:image/png;base64,{_png(opaque)}"/></g></svg>'
     )
     drawing = _table({1: doc}).drawing(1)
     assert drawing is not None
-    # 3 x 3 px from (10.25, 20.75): pixels 9..13 and 20..24.
-    left, top, rgba = svg.rasterize(drawing, (0.015, 0.0, 0.0, 0.015, 10.25, 23.75))
-    assert (left, top, rgba.shape[:2]) == (9, 20, (5, 5))
-    assert rgba[..., 3] == pytest.approx(np.ones((5, 5)))
+    # The image 3 x 3 px from (10.25, 20.75), its box 0.15 px wider a side.
+    left, top, rgba = svg.rasterize(drawing, (0.015, 0.0, 0.0, 0.015, 10.1, 23.75))
+    assert (left, top, rgba.shape[:2]) == (10, 20, (4, 4))
+    across = np.array([255, 255, 255, 128]) / 255  # box x 10.1..13.4
+    down = np.array([64, 255, 255, 192]) / 255  # box y 20.75..23.75
+    assert rgba[..., 3] == pytest.approx(np.outer(down, across), abs=1e-6)
 
 
 def test_reduced_image_still_snaps() -> None:
@@ -579,6 +591,44 @@ def test_reduced_image_still_snaps() -> None:
 
 with np.load(full_name("text-glow-halo.npz")) as _halo:
     HALO = {k: _halo[k] for k in _halo.files}
+with np.load(full_name("text-image-edges.npz")) as _edges:
+    EDGES = {k: _edges[k] for k in _edges.files}
+
+
+def _box_edges(data: dict, case: str) -> tuple[float, float, float, float]:
+    """A case's ``<image>`` box in document px."""
+    a, d, e, f = data[case + "_place"]
+    bx0, by0, bx1, by1 = data[str(data[case + "_image"]) + "_box"]
+    return e + a * bx0, f + d * by0, e + a * bx1, f + d * by1
+
+
+def _placed_alpha(data: dict, case: str, shape: tuple[int, ...]) -> np.ndarray:
+    """A case's picture drawn at its place: alpha 0..255 on the case's crop."""
+    image = str(data[case + "_image"])
+    alpha, rgb = data[image + "_alpha"], data[image + "_rgb"]
+    bx0, by0, bx1, by1 = (float(v) for v in data[image + "_box"])
+    a, d, e, f = data[case + "_place"]
+    x0, y0 = (int(v) for v in data[case + "_origin"])
+    rgba = np.ascontiguousarray(
+        np.dstack([np.broadcast_to(rgb, (*alpha.shape, 3)), alpha]), np.uint8
+    )
+    pic = svg.Picture(rgba, svg.IDENTITY, 1.0, (bx0, by0, bx1, by1))
+    left, top, got = svg.rasterize(svg.Drawing((pic,)), (a, 0.0, 0.0, d, e, f))
+    out = np.zeros(shape[:2])
+    h, w = got.shape[:2]
+    dy, dx = top - y0, left - x0
+    sy, sx = max(0, -dy), max(0, -dx)
+    hh, ww = min(h - sy, shape[0] - max(0, dy)), min(w - sx, shape[1] - max(0, dx))
+    out[max(0, dy) : max(0, dy) + hh, max(0, dx) : max(0, dx) + ww] = got[
+        sy : sy + hh, sx : sx + ww, 3
+    ]
+    return np.floor(out * 255 + 0.5)
+
+
+def _pixels(data: dict, case: str, shape: tuple[int, ...]) -> tuple[np.ndarray, ...]:
+    x0, y0 = (int(v) for v in data[case + "_origin"])
+    ys, xs = np.mgrid[0 : shape[0], 0 : shape[1]]
+    return xs + x0, ys + y0
 
 
 @pytest.mark.parametrize("case", [str(c) for c in HALO["cases"]])
@@ -587,27 +637,88 @@ def test_glow_halo_matches_photoshop(case: str) -> None:
 
     Each case is a type layer "a [token] b" Photoshop saved (40, 80 or
     120 px, or 40 px scaled 3x): the halo picture, its place in document
-    px and Photoshop's alpha on the pixels only the halo covers. Enlarged
-    halos (card text) match to a level; reduced ones keep the snapped
-    placement's few levels.
+    px and Photoshop's alpha on the ring only the halo covers, its box
+    grown by 3 px on every side less the icon. Enlarged halos (card text)
+    match to a level, and on the box's edge and past it a pixel is drawn
+    exactly where Photoshop draws one: a stroked Text group outlines every
+    bit of it. Reduced ones keep the snapped placement's few levels.
     """
-    token = case.rsplit("_", 1)[0]
-    alpha, rgb = HALO[token + "_halo"], HALO[token + "_rgb"]
-    a, d, e, f = HALO[case + "_place"]
-    x0, y0 = (int(v) for v in HALO[case + "_origin"])
-    want, mask = HALO[case + "_photoshop"], HALO[case + "_mask"]
-    rgba = np.dstack([np.broadcast_to(rgb, (*alpha.shape, 3)), alpha])
-    pic = svg.Picture(np.ascontiguousarray(rgba, np.uint8), svg.IDENTITY, 1.0)
-    left, top, got = svg.rasterize(svg.Drawing((pic,)), (a, 0.0, 0.0, d, e, f))
-    placed = np.zeros(want.shape)
-    h, w = got.shape[:2]
-    placed[top - y0 : top - y0 + h, left - x0 : left - x0 + w] = got[..., 3] * 255
-    diff = np.abs(np.round(placed) - want)[mask]
-    if a > 1:
+    want, mask = HALO[case + "_photoshop"].astype(float), HALO[case + "_mask"]
+    got = _placed_alpha(HALO, case, want.shape)
+    diff = np.abs(got - want)[mask]
+    if HALO[case + "_place"][0] > 1:
         assert diff.max() <= 1.0
-        assert np.sqrt((diff**2).mean()) < 0.3
+        assert np.sqrt((diff**2).mean()) < 0.2
+        x0, y0, x1, y1 = _box_edges(HALO, case)
+        xs, ys = _pixels(HALO, case, want.shape)
+        inside = (xs >= x0) & (xs + 1 <= x1) & (ys >= y0) & (ys + 1 <= y1)
+        edge = mask & ~inside
+        assert np.array_equal(got[edge] > 0, want[edge] > 0)
     else:
         assert diff.max() <= 8.0
+
+
+@pytest.mark.parametrize("case", [str(c) for c in EDGES["sharp"]])
+def test_enlarged_icon_edges_match_photoshop(case: str) -> None:
+    """Enlarged icons with opaque edge pixels against Photoshop 2023's pixels.
+
+    U|big-darkmatter-400, U|big-fire-300 and U|big-fire-40x8 of a
+    Photoshop fixture: Photoshop's alpha on the icon's box grown by 3 px.
+    Where a box edge lies exactly on a pixel boundary Photoshop's own
+    rounding decides whether the pixel outside takes a quarter, so that
+    line is left out.
+    """
+    want = EDGES[case + "_photoshop"].astype(float)
+    got = _placed_alpha(EDGES, case, want.shape)
+    x0, y0, x1, y1 = _box_edges(EDGES, case)
+    xs, ys = _pixels(EDGES, case, want.shape)
+    keep = np.ones(want.shape, bool)
+    for edge, line in ((x0, xs + 1), (x1, xs), (y0, ys + 1), (y1, ys)):
+        if abs(edge - round(edge)) < 1e-6:
+            keep &= line != round(edge)
+    assert np.abs(got - want)[keep].max() <= 2.0
+
+
+def _black_stroke(size: float) -> Descriptor:
+    color = Descriptor(classID=Klass.RGBColor.value)
+    for key in (Key.Red, Key.Green, Key.Blue):
+        color[key] = Double(0.0)
+    desc = Descriptor(classID=b"FrFX")
+    desc[Key.Style] = Enumerated(typeID=b"FStl", enum=Enum.OutsetFrame)
+    desc[Key.SizeKey] = Double(size)
+    desc[Key.PaintType] = Enumerated(typeID=b"FrFl", enum=Enum.SolidColor)
+    desc[Key.Color] = color
+    return desc
+
+
+@pytest.mark.parametrize("case", [str(c) for c in EDGES["stroked"]])
+def test_stroked_picture_matches_photoshop(case: str) -> None:
+    """In a stroked Text group the black disc round a picture is Photoshop's width.
+
+    The stroke outlines every bit of the picture's alpha, so a 1-level
+    fringe a pixel too wide makes the disc a pixel too wide. Each case is a
+    token in a Photoshop 2023 group with a 7 px black outside stroke and
+    nothing else, with Photoshop's first and last column darker than 128
+    on each row of the picture's box. The fork's stroke round the picture
+    (as the layer stores it, 8 bits) puts its edge where it covers over
+    half. Most rows match; the rest are a pixel off where the stroke's own
+    antialiasing crosses a half.
+    """
+    shape = tuple(int(v) for v in EDGES[case + "_shape"])
+    alpha = _placed_alpha(EDGES, case, shape) / 255
+    viewport = (0, 0, shape[1], shape[0])
+    cov, _ = effects.stroke_band(
+        viewport, alpha[..., None].astype(np.float32), _black_stroke(7.0)
+    )
+    dark = cov[..., 0] > 0.5
+    want = EDGES[case + "_extent"]
+    rows = [y for y in range(shape[0]) if want[y, 0] >= 0 and dark[y].any()]
+    assert len(rows) > 0.9 * int((want[:, 0] >= 0).sum())
+    got = np.array([np.flatnonzero(dark[y])[[0, -1]] for y in rows])
+    off = got - want[rows]
+    assert np.abs(off).max() <= 2
+    assert np.mean(off[:, 0] != 0) <= 0.15
+    assert np.mean(off[:, 1] != 0) <= 0.15
 
 
 # -- in the text engine ----------------------------------------------------
