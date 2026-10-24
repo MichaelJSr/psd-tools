@@ -426,6 +426,101 @@ def test_the_mix_is_by_coverage_in_the_text_space(blend_mode: BlendMode) -> None
     assert abs(expected - straight) > 0.02
 
 
+def _covered_pixel(
+    backdrop: float, source: float, coverage: float, share: float
+) -> float:
+    """One grey pixel after ``share`` of a type layer's ``coverage`` paints it.
+
+    The layer shows ``source`` mixed straight over the backdrop by ``share``
+    within its coverage, as an interior effect over a layer at fill 0 does.
+    """
+    compositor = Compositor(
+        (0, 0, 1, 1),
+        np.full((1, 1, 3), backdrop, dtype=np.float32),
+        np.ones((1, 1, 1), dtype=np.float32),
+        color_mode=ColorMode.RGB,
+    )
+    shape = np.full((1, 1, 1), coverage, dtype=np.float32)
+    inside = np.full((1, 1, 3), backdrop + share * (source - backdrop), np.float32)
+    compositor._apply_source(
+        np.full((1, 1, 3), source, dtype=np.float32),
+        shape,
+        shape * share,
+        BlendMode.NORMAL,
+        text_gamma=TEXT_BLEND_GAMMA,
+        text_inside=(shape, inside),
+    )
+    return float(compositor.result_over_backdrop()[0, 0, 0])
+
+
+def test_only_the_coverage_mixes_in_the_text_space() -> None:
+    """What the layer shows within its coverage mixes by that coverage alone."""
+    straight = 0.3 + 0.4 * (0.9 - 0.3)
+    expected = from_text_space(
+        0.5 * to_text_space(np.array([0.3])) + 0.5 * to_text_space(np.array([straight]))
+    )[0]
+    assert _covered_pixel(0.3, 0.9, 0.5, 0.4) == pytest.approx(expected, abs=1e-6)
+    assert _covered_pixel(0.3, 0.9, 1.0, 0.4) == pytest.approx(straight, abs=1e-6)
+    whole = _expected(0.3, 0.9, 0.5, BlendMode.NORMAL)
+    assert _covered_pixel(0.3, 0.9, 0.5, 1.0) == pytest.approx(whole, abs=1e-6)
+
+
+# -- A layer below full fill: ``effects/text-fill-window.psd`` -------------- #
+
+# Photoshop 2023, one row 110 px tall per layer, each a type layer across a
+# brown and a light backdrop: at opacity 50 and at fill 50, then at fill 0
+# under the cards' Name glow (inner, Normal 90%, size 9, range 38%), the
+# same at opacity 50, a colour overlay at 50%, fill 50 under the glow, the
+# glow over a knocked-out drop shadow, the shadow alone, a rasterized copy of
+# the glow and shadow, and fill 50 under both.
+_FILL_WINDOW = "effects/text-fill-window.psd"
+_ROW_HEIGHT = 110
+_SHADOWED = (
+    "fill 0 inner glow shadow",
+    "fill 0 shadow",
+    "pixels fill 0 inner glow shadow",
+    "fill 50 inner glow shadow",
+)
+
+
+def _row_errors(psd: PSDImage) -> dict[str, float]:
+    """The worst level of each row's composite against Photoshop's."""
+    reference = psd.numpy()[..., :3]
+    error = np.abs(composite(psd)[0] - reference).max(axis=-1)
+    rows = [layer for layer in psd if layer.name not in ("Background", "backdrop")]
+    assert len(rows) == 10
+    return {
+        layer.name: float(
+            error[index * _ROW_HEIGHT : (index + 1) * _ROW_HEIGHT].max() * 255
+        )
+        for index, layer in enumerate(rows)
+    }
+
+
+def test_a_faded_layers_interior_mixes_straight_inside_its_window() -> None:
+    """Every row is within 2 levels of Photoshop's composite.
+
+    The opacity and fill rows fade the paint in the text gamma; an interior
+    effect at fill below 100% goes on straight over the backdrop the
+    layer's shape uncovers, and only that shape and the opacity mix in the
+    gamma, over its shadow where it knocks one out.
+    """
+    errors = _row_errors(PSDImage.open(full_name(_FILL_WINDOW)))
+    assert {name: error for name, error in errors.items() if error >= 2.0} == {}
+
+
+def test_a_shadow_cut_under_the_shape_misses_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cut under the shape with the layer put on over the cut, each shadow row misses."""
+    monkeypatch.setattr(Compositor, "_knocks_out_window", lambda self, layer: False)
+    errors = _row_errors(PSDImage.open(full_name(_FILL_WINDOW)))
+    assert all(errors[name] > 4.0 for name in _SHADOWED), errors
+    assert all(
+        error < 2.0 for name, error in errors.items() if name not in _SHADOWED
+    ), errors
+
+
 # -- Layers Photoshop kept as pixels ---------------------------------------- #
 
 # ``text-kept-raster.psd``: a card's name and Ability, each over its own opaque

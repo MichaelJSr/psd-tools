@@ -698,7 +698,10 @@ def test_without_scipy_the_effects_are_left_out_with_a_warning(
     monkeypatch.setattr(compositing, "HAS_SCIPY", False)
     with pytest.warns(UserWarning, match="without scipy") as record:
         result = rendered(True)
-    assert np.array_equal(result, plain)
+    # The type layer below full fill still goes on apart from its inner glow:
+    # its paint and its coverage mix in the text space in two steps, which
+    # are the one mix it takes with the glow off up to rounding.
+    assert np.allclose(result, plain, rtol=0.0, atol=1e-6)
     assert {str(warning.message).split(" are ")[0] for warning in record} == {
         "Drop shadows",
         "Satins",
