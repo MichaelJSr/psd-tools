@@ -25,7 +25,8 @@ The package has two layers and two supporting subpackages.
 :py:mod:`psd_tools.composite`
     The rendering engine: blend modes, layer effects and vector rasterization
     on NumPy arrays. It needs the optional ``composite`` extra. The stroke
-    distance fields have a Cython implementation (``_distance.pyx``) with the
+    distance fields (``_distance.pyx``) and the arithmetic that puts a source
+    on the canvases (``_blend.pyx``) have Cython implementations with the
     NumPy code as the fallback; the two are bit-identical only when the C
     compiler does not contract into FMA, hence ``-ffp-contract=off``.
 

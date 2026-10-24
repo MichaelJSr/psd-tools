@@ -37,6 +37,13 @@ extensions = [
         define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
         py_limited_api=use_limited_api,
     ),
+    Extension(
+        "psd_tools.composite._blend",
+        ["src/psd_tools/composite/_blend.pyx"],
+        extra_compile_args=[] if sys.platform == "win32" else ["-ffp-contract=off"],
+        define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
+        py_limited_api=use_limited_api,
+    ),
 ]
 
 
