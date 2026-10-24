@@ -1004,8 +1004,8 @@ class _Parser:
             if not centred and abs(sx - sy) > 1e-9 * max(sx, sy):
                 raise Unsupported("preserveAspectRatio")
             mx, my = (w / s - iw) / 2, (h / s - ih) / 2
-            x += mx * s
-            y += my * s
+            x += (w - iw * s) / 2
+            y += (h - ih * s) / 2
             sx = sy = s
             box = (-mx, -my, iw + mx, ih + my) if mx or my else None
         else:

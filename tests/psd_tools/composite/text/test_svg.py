@@ -549,6 +549,25 @@ def test_image_keeps_its_centre(x: float, size: float, left: int) -> None:
     assert box[1] == round(20.0 + (size - 6) / 2) and box[3] - box[1] == 6
 
 
+def test_centred_image_at_a_half_pixel_tie() -> None:
+    """A centred image's corner is ``x + (w - iw s) / 2``, so a tie rounds up.
+
+    icon_hk_star's case: 248 x 256 px in a 970 x 1000 box at x=40 drawn at
+    20 px. Its corner lands on 0.8125 + (19.375 - 20) / 2 = 0.5 exactly.
+    """
+    icon = np.zeros((256, 248, 4), np.uint8)
+    icon[..., 2:] = 255
+    doc = (
+        '<svg xmlns="http://www.w3.org/2000/svg"><g id="glyph1">'
+        '<image x="40" y="-1000" width="970" height="1000" '
+        f'href="data:image/png;base64,{_png(icon)}"/></g></svg>'
+    )
+    drawing = _table({1: doc}).drawing(1)
+    assert drawing is not None
+    left, _, _ = svg.rasterize(drawing, (0.02, 0.0, 0.0, 0.02, 0.0, 0.0))
+    assert left == 1
+
+
 def test_enlarged_image_keeps_its_place() -> None:
     """An enlarged image is interpolated between pixel centres at its exact place."""
     drawing = _table({1: IMAGE.format(gid=1)}).drawing(1)
@@ -652,9 +671,10 @@ def test_glow_halo_matches_photoshop(case: str) -> None:
     grown by 3 px on every side less the icon. Enlarged halos (card text)
     match to a level, and on the box's edge and past it these draw a pixel
     exactly where Photoshop draws one: a stroked Text group outlines every
-    bit of it. Not every interpolated halo does: 5 of the 232 outer lines
-    of their boxes in the review fixtures differ, by a level, so there the
-    disc steps a pixel along that line (see
+    bit of it. Not every interpolated halo does: one outer line of the box
+    may differ by a level, drawn by Photoshop or left empty (13 of 198 in
+    the review fixtures, among them the bottom row at 84.7 px, +0.6 px), so
+    there the disc steps a pixel along that line (see
     :py:func:`test_halo_near_its_size_matches_photoshop`). Reduced ones
     keep the snapped placement's few levels.
     """
@@ -739,9 +759,13 @@ def test_stroked_picture_matches_photoshop(case: str) -> None:
 with np.load(full_name("text-halo-near-unity.npz")) as _near:
     NEAR = {k: _near[k] for k in _near.files}
 
-#: Photoshop also holds these copies' last line one line past them, at
-#: alpha 1, as a few copies in the review fixtures do.
-COPY_FRINGE = ("undead_glow_copy_fringe", "electric_glow_s0_993")
+#: Copies a level off on one line: undead_glow_copy_fringe's outer row,
+#: which Photoshop draws at alpha 1 and the fork leaves empty, and
+#: electric_glow_s0_993's own first column (2 for Photoshop's 1). About 1
+#: in 20 copied or nearest-neighbour halos in the review fixtures (11 of
+#: 213) differ on one outer line at alpha 1, either way: Photoshop draws
+#: it or leaves it empty.
+COPY_EDGE = ("undead_glow_copy_fringe", "electric_glow_s0_993")
 
 
 def _kinds(data: dict, case: str) -> tuple[str, str]:
@@ -759,11 +783,12 @@ def test_halo_near_its_size_matches_photoshop(case: str) -> None:
     exact place, or copies it unscaled about its rounded centre where it
     grows by under 0.49 px; it copies one it reduces to its own size in
     whole pixels and takes a pixel off by nearest neighbour. These match to
-    the level (but for :py:data:`COPY_FRINGE`). From 1 % up it
-    interpolates; those match to a level, and at most one outer line of the
-    box differs in which pixels are drawn (panda_glow_140,
-    dark_darkglow_330: a line Photoshop leaves empty). Two pixels smaller
-    it filters (``reduced``), a few levels off.
+    the level but for about 1 in 20, which differ on one outer line at
+    alpha 1, drawn by Photoshop or left empty (:py:data:`COPY_EDGE`). From
+    1 % up it interpolates; those match to a level, and at most one outer
+    line of the box differs in which pixels are drawn, either way (13 of
+    198 in the review fixtures; panda_glow_140, dark_darkglow_330). Two
+    pixels smaller it filters (``reduced``), a few levels off.
     """
     want, mask = NEAR[case + "_photoshop"].astype(float), NEAR[case + "_mask"]
     got = _placed_alpha(NEAR, case, want.shape)
@@ -774,7 +799,7 @@ def test_halo_near_its_size_matches_photoshop(case: str) -> None:
         assert diff.max() <= 4.0
         return
     if "linear" not in kinds:
-        if case in COPY_FRINGE:
+        if case in COPY_EDGE:
             assert diff.max() == 1
             assert len(set(ys[diff > 0])) == 1 or len(set(xs[diff > 0])) == 1
         else:
@@ -796,9 +821,10 @@ def test_stroked_halo_near_its_size_matches_photoshop(case: str) -> None:
     outside stroke: Photoshop's first and last pixel darker than 128 on
     each row and column of the halo's box, against the fork's stroke round
     the halo (see :py:func:`test_stroked_picture_matches_photoshop`). The
-    nearest-neighbour and copied halos match on every line, but the copy
-    fringes' lines end a pixel short; the interpolated and filtered ones
-    are a pixel off on a few lines.
+    nearest-neighbour and copied halos match on every line but for about 1
+    in 20, whose outline is a pixel off along the one outer line Photoshop
+    draws or leaves empty (:py:data:`COPY_EDGE`); the interpolated and
+    filtered ones are a pixel off on a few lines.
     """
     shape = tuple(int(v) for v in NEAR[case + "_shape"])
     data = dict(NEAR)
@@ -821,8 +847,8 @@ def test_stroked_halo_near_its_size_matches_photoshop(case: str) -> None:
         share = 0.2 if "reduced" in kinds else 0.1
         assert np.abs(rows).max() <= 1 and np.abs(cols).max() <= 1
         assert np.mean(rows != 0) <= share and np.mean(cols != 0) <= share
-    elif case in COPY_FRINGE:
-        # The far line is a pixel short where Photoshop's fringe is.
+    elif case in COPY_EDGE:
+        # A pixel off along the line that differs.
         both = np.concatenate([rows, cols])
         assert set(both.ravel().tolist()) <= {-1, 0, 1}
         assert np.mean(both != 0) <= 0.2
