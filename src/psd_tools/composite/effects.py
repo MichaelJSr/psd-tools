@@ -688,17 +688,19 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     ``effects/antialiased-stroke-edge.psd`` are the fixtures this is measured
     against (#799).
 
-    A step from opaque straight to clear states a boundary too, half a pixel
-    from the centre of the pixel on either side of it. One mask can carry both --
-    a glyph antialiased round its curves and stepping hard along its stems --
-    and every pixel takes the nearest boundary any pixel states, of either
-    kind (``effects/antialiased-stroke-edge.psd``, where a partial edge meets
-    a hard one): :py:func:`_nearest_boundary` for the partial pixels, a
-    distance transform for the steps. What stays approximate is that a
-    pixel's ``near`` is applied along the line to that pixel rather than
-    along the boundary's own normal, which parts company with the truth
-    around a curve the way :py:func:`_distance_band` does when it paints the
-    arc.
+    An opaque pixel states a boundary too, at its own edge, half a pixel out
+    from its centre, to every pixel outside it, and a clear pixel states its
+    edge to every pixel inside: the same ``0.5 - alpha`` at either end of the
+    range. That holds whatever lies beside it, a clear pixel or a partial
+    one, and every pixel takes the nearest boundary any pixel states
+    (``effects/antialiased-stroke-edge.psd``, where a partial edge meets a
+    hard one). Where a glyph's corner leaves a quarter-covered pixel, the
+    opaque pixel diagonally behind it states the nearer boundary along the
+    diagonal (``effects/stroke-corner-statement.psd``).
+    :py:func:`_nearest_boundary` measures the partial pixels, a distance
+    transform the opaque and clear ones. Each boundary is measured along the
+    line to the pixel stating it, not along the boundary's own normal, as
+    Photoshop measures it.
 
     Distances are measured in Photoshop's metric, :py:func:`_chamfer_length`,
     whatever kind of boundary they are measured from.
@@ -728,45 +730,38 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
         base = _chamfer_transform(~inside) - _chamfer_transform(inside)
         return np.sign(base) * np.maximum(np.abs(base) - 0.5, 0.0)
 
-    # The pixels on either side of a step from opaque straight to clear.
-    hard = (alpha >= 1) & _grow(alpha <= 0)
-    hard |= (alpha <= 0) & _grow(alpha >= 1)
-    # What each states: a partial pixel by its coverage, a hard one at the
-    # edge it shares with the other side.
+    # What each pixel states: its coverage's 0.5 - alpha, which for an opaque
+    # pixel is its own edge to the outside and for a clear one to the inside.
     near = (0.5 - np.clip(alpha, 0.0, 1.0)).astype(np.float32)
     field = _nearest_boundary(alpha, partial, near, reach)
-    if not hard.any():
+    if not (alpha >= 1).any():
         return field
 
-    # A hard step states the same half pixel all along it, so the nearest one
-    # is a distance transform, which unlike the erosion does not scale with
-    # ``reach``. Nothing past ``reach`` of the steps is in range, so a crop
-    # that far round them holds every path the transform needs.
+    # Every opaque pixel states the same half pixel outward and every clear
+    # one inward, so the nearest of each is a distance transform, which unlike
+    # the erosion does not scale with ``reach``. Any opaque or clear pixel
+    # that can be the nearest lies within a pixel of the boundary -- the
+    # partial pixels and the steps from opaque straight to clear -- so a crop
+    # ``reach`` and a pixel round them holds every path the transform needs.
+    boundary = partial | (alpha >= 1) & _grow(alpha <= 0)
     height, width = alpha.shape
-    span = math.ceil(reach)
-    rows, cols = np.nonzero(hard)
+    span = math.ceil(reach) + 1
+    rows, cols = np.nonzero(boundary)
     crop = (
         slice(max(rows.min() - span, 0), min(rows.max() + span + 1, height)),
         slice(max(cols.min() - span, 0), min(cols.max() + span + 1, width)),
     )
-    sub_hard, sub_alpha = hard[crop], alpha[crop]
+    sub_alpha = alpha[crop]
     inside = sub_alpha >= 1
-    to_opaque = _chamfer_transform(~(sub_hard & inside))
-    to_clear = _chamfer_transform(~(sub_hard & ~inside))
-    opaque_ok, clear_ok = to_opaque <= reach, to_clear <= reach
-    outward = np.minimum(
-        np.where(opaque_ok, to_opaque - 0.5, np.inf),
-        np.where(clear_ok, to_clear + 0.5, np.inf),
-    )
-    inward = np.maximum(
-        np.where(opaque_ok, -0.5 - to_opaque, -np.inf),
-        np.where(clear_ok, 0.5 - to_clear, -np.inf),
-    )
+    to_opaque = _chamfer_transform(~inside)
+    to_clear = _chamfer_transform(~(sub_alpha <= 0))
+    outward = np.where(to_opaque <= reach, to_opaque - 0.5, np.inf)
+    inward = np.where(to_clear <= reach, 0.5 - to_clear, -np.inf)
     sub_field = field[crop]
     stated = np.where(
         inside, np.maximum(sub_field, inward), np.minimum(sub_field, outward)
     )
-    field[crop] = np.where(sub_hard | partial[crop], near[crop], stated)
+    field[crop] = np.where(partial[crop], near[crop], stated)
     return field
 
 

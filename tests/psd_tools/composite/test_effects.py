@@ -715,35 +715,158 @@ def test_an_antialiased_edge_is_stroked_from_its_own_coverage() -> None:
     check_composite_quality("effects/antialiased-stroke-edge.psd", threshold=2e-4)
 
 
-def test_every_boundary_pixel_states_where_the_boundary_falls() -> None:
-    """The field is the nearest boundary any pixel states, of either kind.
+def _stated_field(alpha: np.ndarray, stating: np.ndarray, reach: float) -> np.ndarray:
+    """The nearest boundary ``stating`` states to each pixel, taken outright.
 
-    A partial pixel states ``0.5 - alpha`` from its centre, and a pixel on
-    either side of a hard step states half a pixel; every other pixel is the
-    minimum over those of the :py:func:`_chamfer_length` to the pixel plus what
-    it states, negated inside. Checked against that minimum taken outright, on
-    a square antialiased along one side and stepping hard along the rest.
+    An opaque pixel takes the greatest ``0.5 - alpha - length`` over the
+    stating pixels not opaque, a clear one the least ``0.5 - alpha + length``
+    over the stating pixels not clear, within ``reach``; a partial pixel keeps
+    its own.
     """
-    alpha = np.zeros((20, 20), dtype=np.float32)
-    alpha[5:15, 5:15] = 1.0
-    alpha[5:15, 14] = np.linspace(0.1, 0.9, 10, dtype=np.float32)
-    reach = 6.0
-    field = _signed_distance(alpha, reach)
-
-    partial = (alpha > 0) & (alpha < 1)
-    hard = (alpha >= 1) & _grow(alpha <= 0) | (alpha <= 0) & _grow(alpha >= 1)
     near = 0.5 - alpha
-    rows, cols = np.nonzero(partial | hard)
-    for y, x in zip(*np.nonzero(~partial & ~hard), strict=True):
+    field = near.copy()
+    for y, x in zip(*np.nonzero((alpha <= 0) | (alpha >= 1)), strict=True):
+        inside = alpha[y, x] >= 1
+        rows, cols = np.nonzero(stating & ((alpha < 1) if inside else (alpha > 0)))
         length = _chamfer_length(rows - y, cols - x)
         within = length <= reach
         stated = near[rows, cols][within]
-        if alpha[y, x] >= 1:
-            expected = np.max(stated - length[within], initial=-np.inf)
+        if inside:
+            field[y, x] = np.max(stated - length[within], initial=-np.inf)
         else:
-            expected = np.min(stated + length[within], initial=np.inf)
-        assert float(field[y, x]) == pytest.approx(float(expected), abs=1e-5)
-    assert np.allclose(field[partial | hard], near[partial | hard])
+            field[y, x] = np.min(stated + length[within], initial=np.inf)
+    return field
+
+
+def _rounded_corner() -> np.ndarray:
+    """A square whose top right corner is rounded off by partial pixels.
+
+    The opaque pixel at ``(6, 12)`` touches no clear pixel, only the partial
+    ones above it and to its right, as at a glyph's corner.
+    """
+    alpha = np.zeros((20, 20), dtype=np.float32)
+    alpha[5:15, 5:14] = 1.0
+    alpha[5, 5:12] = 0.5
+    alpha[5, 12], alpha[5, 13] = 0.125, 0.0
+    alpha[6, 13], alpha[7, 13] = 0.25, 0.75
+    return alpha
+
+
+def _antialiased_side() -> np.ndarray:
+    """A square antialiased along one side and stepping hard along the rest."""
+    alpha = np.zeros((20, 20), dtype=np.float32)
+    alpha[5:15, 5:15] = 1.0
+    alpha[5:15, 14] = np.linspace(0.1, 0.9, 10, dtype=np.float32)
+    return alpha
+
+
+@pytest.mark.parametrize(
+    "mask", [_antialiased_side, _rounded_corner], ids=["side", "corner"]
+)
+def test_every_boundary_pixel_states_where_the_boundary_falls(
+    mask: Callable[[], np.ndarray],
+) -> None:
+    """The field is the nearest boundary any pixel states.
+
+    Every pixel states ``0.5 - alpha`` from its centre: a partial one by its
+    coverage, an opaque one its own edge to the pixels outside it, a clear one
+    its own edge to the pixels inside. A pixel outside takes the minimum over
+    the covered pixels of the :py:func:`_chamfer_length` to the pixel plus
+    what it states, one inside the maximum over the uncovered ones of what it
+    states less that length. Checked against that taken outright.
+    """
+    alpha = mask()
+    reach = 8.0
+    field = _signed_distance(alpha, reach)
+    expected = _stated_field(alpha, np.ones(alpha.shape, dtype=bool), reach)
+    assert np.allclose(field, expected, atol=1e-5)
+
+
+def test_an_opaque_pixel_behind_a_corner_states_its_own_edge() -> None:
+    """Not only one beside a clear pixel (``stroke-corner-statement.psd``).
+
+    At the rounded corner the opaque pixel at ``(6, 12)`` lies behind the
+    quarter-covered one at ``(6, 13)``. Along the diagonal its edge,
+    ``chamfer(5, 5) - 0.5``, is nearer to ``(1, 17)`` than the quarter-covered
+    pixel's statement, ``chamfer(5, 4) + 0.25``; a field that hears opaque
+    pixels only where they step straight to clear misses it.
+    """
+    alpha = _rounded_corner()
+    field = _signed_distance(alpha, 8.0)
+    edge = float(_chamfer_length(np.array(5), np.array(5))) - 0.5
+    quarter = float(_chamfer_length(np.array(5), np.array(4))) + 0.25
+    assert edge < quarter
+    assert float(field[1, 17]) == pytest.approx(edge, abs=1e-5)
+
+    hard = (alpha >= 1) & _grow(alpha <= 0) | (alpha <= 0) & _grow(alpha >= 1)
+    partial = (alpha > 0) & (alpha < 1)
+    steps_only = _stated_field(alpha, partial | hard, 8.0)
+    assert float(steps_only[1, 17]) == pytest.approx(quarter, abs=1e-5)
+
+
+def _corner_cells(psd: PSDImage) -> list[tuple[str, tuple[int, int, int, int]]]:
+    """Each stroked layer or group of the fixture, as far as its stroke reaches."""
+    cells = []
+    for layer in psd:
+        if not layer.has_effects():
+            continue
+        (stroke,) = layer.effects.find("stroke")
+        size = math.ceil(float(stroke.descriptor[Key.SizeKey].value)) + 2
+        left, top, right, bottom = layer.bbox
+        box = (
+            max(left - size, 0),
+            max(top - size, 0),
+            min(right + size, psd.width),
+            min(bottom + size, psd.height),
+        )
+        cells.append((layer.name, box))
+    return cells
+
+
+def _hard_steps_only(alpha: np.ndarray, reach: float | None = None) -> np.ndarray:
+    """The ablation: an opaque or clear pixel states its edge only at a step.
+
+    A step straight from opaque to clear, as a field that misses the corners
+    has it.
+    """
+    if reach is None:
+        reach = float(math.hypot(*alpha.shape))
+    partial = (alpha > 0) & (alpha < 1)
+    hard = (alpha >= 1) & _grow(alpha <= 0) | (alpha <= 0) & _grow(alpha >= 1)
+    near = (0.5 - np.clip(alpha, 0.0, 1.0)).astype(np.float32)
+    return effects._nearest_boundary(alpha, partial | hard, near, reach)
+
+
+def test_a_stroke_reaches_round_a_corner_as_photoshop_draws_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every cell of ``stroke-corner-statement.psd`` is within 2 levels.
+
+    Its rows are exact-alpha probes -- squares turned 26.565, 30, 40 and 45
+    degrees, discs and a square at quarter-pixel offsets, a right-angled
+    wedge, a quarter-covered corner, a single pixel -- under outside strokes
+    of 1, 4, 7 and 9 px, as holes in a sheet under a 4 px inside stroke, and
+    under a 7 px centered one; below them type layers of the cards' fonts, in
+    groups carrying the cards' 7 px outside stroke and a 1 px one. Each of
+    them has a pixel where the opaque pixel behind a partial one states the
+    nearer boundary, so each fails with opaque pixels heard only at a hard
+    step.
+    """
+    psd = PSDImage.open(full_name("effects/stroke-corner-statement.psd"))
+    reference = psd.numpy()[..., :3]
+    cells = _corner_cells(psd)
+    assert len(cells) == 10
+
+    error = np.abs(composite(psd)[0] - reference).max(axis=-1)
+    for name, (left, top, right, bottom) in cells:
+        worst = float(error[top:bottom, left:right].max())
+        assert worst < 2 / 255.0, f"{name}: {worst * 255:.2f} levels"
+
+    monkeypatch.setattr(effects, "_signed_distance", _hard_steps_only)
+    error = np.abs(composite(psd)[0] - reference).max(axis=-1)
+    for name, (left, top, right, bottom) in cells:
+        worst = float(error[top:bottom, left:right].max())
+        assert worst > 2 / 255.0, f"{name} passes without the opaque statement"
 
 
 def test_the_chamfer_length_is_exact_along_its_moves_and_long_between() -> None:
@@ -781,6 +904,7 @@ def test_the_chamfer_transform_is_the_nearest_clear_pixel() -> None:
         "effects/group-clips-child-stroke.psd",
         "effects/group-stroke-off-canvas.psd",
         "effects/shape-stroke-raster-mask.psd",
+        "effects/stroke-corner-statement.psd",
     ],
 )
 def test_a_stroke_is_measured_in_photoshops_metric(filename: str) -> None:
