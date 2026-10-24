@@ -6,9 +6,10 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
+import psd_tools.compression as codecs
 from psd_tools.api import numpy_io, utils
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.compression import decompress_row_peak_bytes
+from psd_tools.compression import decompress_row_peak_bytes, rle
 from psd_tools.constants import ColorMode, Compression, Resource, Tag
 from psd_tools.psd.patterns import (
     Pattern,
@@ -262,7 +263,9 @@ def test_the_pattern_estimate_covers_the_decode_peak() -> None:
     assert peak <= _rle_peak(side, planes) + 65536
 
 
-def test_a_tall_narrow_pattern_is_guarded_at_its_own_rows() -> None:
+def test_a_tall_narrow_pattern_is_guarded_at_its_own_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Rows, not payload, are what an RLE pattern decode allocates.
 
     The codec's own multiple of the payload -- ``_layer_read_peak_bytes()``
@@ -270,6 +273,9 @@ def test_a_tall_narrow_pattern_is_guarded_at_its_own_rows() -> None:
     the same row count allocates, so a budget set at it has to be refused rather
     than admitted.
     """
+    # The Python codec, which holds an object per row; the compiled one holds
+    # the row table alone.
+    monkeypatch.setattr(codecs, "rle_impl", rle)
     rows = 20000
     pattern = _forged_pattern_of_size(1, rows, Compression.RLE)
     planes = sum(1 for c in pattern.data.channels if c.is_written)
@@ -282,13 +288,18 @@ def test_a_tall_narrow_pattern_is_guarded_at_its_own_rows() -> None:
     assert numpy_io.get_pattern(pattern, charged).shape == (rows, 1, planes)
 
 
-def test_a_pattern_whose_channels_do_not_share_a_codec() -> None:
+def test_a_pattern_whose_channels_do_not_share_a_codec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The guard is per channel: its own multiple and its own rows together.
 
     The fixture's pattern carries three written channels. Tied on the codec's
     multiple, an estimate that takes the widest of them and no rows is still
     below what the RLE ones allocate.
     """
+    # The Python codec, which holds an object per row; the compiled one holds
+    # the row table alone.
+    monkeypatch.setattr(codecs, "rle_impl", rle)
     rows = 20000
     pattern = _forged_pattern_of_size(1, rows, Compression.ZIP)
     written = [c for c in pattern.data.channels if c.is_written]

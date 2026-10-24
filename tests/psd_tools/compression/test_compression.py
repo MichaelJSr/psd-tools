@@ -7,8 +7,10 @@ import zlib
 
 import pytest
 
+import psd_tools.compression as codecs
 from psd_tools.compression import (
     RLE_ROW_BYTES,
+    RLE_TABLE_ROW_BYTES,
     PSDDecompressionWarning,
     _decompress,
     _safe_zlib_decompress,
@@ -20,6 +22,7 @@ from psd_tools.compression import (
     decompressed_size_bound,
     encode_prediction,
     encode_rle,
+    rle,
     rle_impl,
 )
 from psd_tools.constants import Compression
@@ -554,16 +557,22 @@ def test_decompress_failure_warning_states_what_follows(depth: int) -> None:
         decompress(corrupt, Compression.ZIP, 4, 4, depth)
 
 
-def test_the_per_row_term_is_charged_for_rle_alone() -> None:
+def test_the_per_row_term_is_charged_for_rle_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """What ``decompress_row_peak_bytes()`` adds on top of a codec's payload peak.
 
-    ``decode_rle()`` holds one object per row of the table, through a
-    ``b"".join()`` that keeps every one of them alive while the channel is
-    assembled. The other codecs produce their whole output as one object, so the
-    term is theirs alone -- and a record with no rows holds nothing.
+    The compiled ``decode_rle()`` holds the row table; the Python one holds an
+    object per row of it, through a ``b"".join()`` that keeps every one of them
+    alive while the channel is assembled. The other codecs produce their whole
+    output as one object, so the term is theirs alone -- and a record with no
+    rows holds nothing.
     """
-    assert decompress_row_peak_bytes(Compression.RLE, 7) == 7 * RLE_ROW_BYTES
+    assert decompress_row_peak_bytes(Compression.RLE, 7) == 7 * RLE_TABLE_ROW_BYTES
     assert decompress_row_peak_bytes(Compression.RLE, 0) == 0
+    monkeypatch.setattr(codecs, "rle_impl", rle)
+    assert decompress_row_peak_bytes(Compression.RLE, 7) == 7 * RLE_ROW_BYTES
+    monkeypatch.undo()
     for compression in (
         Compression.RAW,
         Compression.ZIP,

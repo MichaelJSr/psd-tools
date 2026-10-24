@@ -177,7 +177,7 @@ _ALLOCATOR_SLACK: int = 1
 # Bytes live at the codec's own peak, as a multiple of the decompressed size.
 # One step wider than the numpy path's table throughout, because this path asks
 # `get_data()` to split the buffer per channel and the split is a second copy.
-# RLE's per-row objects are not here: `decompress_row_peak_bytes()` counts them.
+# RLE's per-row cost is not here: `decompress_row_peak_bytes()` counts it.
 _DECOMPRESS_PEAK: dict[Compression, int] = {
     Compression.RAW: 2,
     Compression.RLE: 3,

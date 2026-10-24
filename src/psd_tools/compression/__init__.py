@@ -460,14 +460,22 @@ def encode_rle(data: bytes, width: int, height: int, depth: int, version: int) -
 # reads, the object the codec returns, and the join holding both.
 RLE_ROW_BYTES: int = 128
 
+# The same where the compiled codec decodes every row in one call: the row's
+# entry in the row table and the bytes the table is read from.
+RLE_TABLE_ROW_BYTES: int = 8
+
 
 def decompress_row_peak_bytes(compression: Compression, rows: int) -> int:
-    """Bytes :func:`decompress` holds in one object per row, above the payload.
+    """Bytes :func:`decompress` holds for each row, above the payload.
 
-    Only RLE decodes a row at a time; the other codecs produce their whole output
+    Only RLE has rows of its own; the other codecs produce their whole output
     as a single object, so *rows* adds nothing for them.
     """
-    return rows * RLE_ROW_BYTES if compression == Compression.RLE else 0
+    if compression != Compression.RLE:
+        return 0
+    if hasattr(rle_impl, "decode_rows"):
+        return rows * RLE_TABLE_ROW_BYTES
+    return rows * RLE_ROW_BYTES
 
 
 def decode_rle(
@@ -495,6 +503,9 @@ def decode_rle(
         row_size = _row_size(width, depth)
         with io.BytesIO(data) as fp:
             bytes_counts = read_be_array(("H", "I")[version - 1], height, fp)
+            decode_rows = getattr(rle_impl, "decode_rows", None)
+            if decode_rows is not None:
+                return decode_rows(data, fp.tell(), bytes_counts, row_size)
             return b"".join(
                 rle_impl.decode(fp.read(count), row_size) for count in bytes_counts
             )

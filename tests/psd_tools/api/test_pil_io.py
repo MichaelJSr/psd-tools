@@ -4,9 +4,10 @@ import zlib
 
 import pytest
 
+import psd_tools.compression as codecs
 from psd_tools.api import pil_io, utils
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.compression import decompress_row_peak_bytes
+from psd_tools.compression import decompress_row_peak_bytes, rle
 from psd_tools.constants import ColorMode, Compression
 from psd_tools.psd.patterns import Pattern
 
@@ -91,13 +92,18 @@ def test_the_pattern_budget_is_the_modelled_peak() -> None:
         pil_io.convert_pattern_to_pil(pattern, max_alloc_bytes=peak - 1)
 
 
-def test_a_tall_narrow_pattern_is_charged_its_decoded_rows() -> None:
+def test_a_tall_narrow_pattern_is_charged_its_decoded_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The PIL pattern guard includes what one object per row costs.
 
     A one-pixel-wide body sizes the codec's payload multiple at a fraction of
     what the decode allocates, so a budget set at that estimate alone has to be
     refused rather than admitted.
     """
+    # The Python codec, which holds an object per row; the compiled one holds
+    # the row table alone.
+    monkeypatch.setattr(codecs, "rle_impl", rle)
     rows = 20000
     pattern = _forged_pattern_of_size(1, rows, Compression.RLE)
     written = sum(1 for c in pattern.data.channels if c.is_written)

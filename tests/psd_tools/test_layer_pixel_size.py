@@ -8,12 +8,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import psd_tools.compression as codecs
 from psd_tools import PSDImage, PSDLargeImageWarning
 from psd_tools.api import numpy_io
 from psd_tools.api.layers import Layer
 from psd_tools.api.numpy_io import _layer_read_peak_bytes
 from psd_tools.api.pil_io import _layer_peak_bytes
-from psd_tools.compression import decompress_row_peak_bytes
+from psd_tools.compression import decompress_row_peak_bytes, rle
 from psd_tools.constants import ChannelID, Compression
 
 from .utils import full_name
@@ -242,7 +243,9 @@ def _tall_narrow_layer(rows: int) -> Layer:
     return psd.create_pixel_layer(Image.new("RGB", (1, rows)), name="L")
 
 
-def test_a_tall_narrow_rle_layer_is_not_admitted_at_its_payload_peak() -> None:
+def test_a_tall_narrow_rle_layer_is_not_admitted_at_its_payload_peak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The rows an RLE decode holds are part of what the guard has to bound.
 
     ``_layer_read_peak_bytes()`` without ``row_objects`` sizes the codec's
@@ -251,6 +254,9 @@ def test_a_tall_narrow_rle_layer_is_not_admitted_at_its_payload_peak() -> None:
     times past it. Both rows below are the guard's own decisions rather than a
     measured peak, which belongs to the platform it was taken on.
     """
+    # The Python codec, which holds an object per row; the compiled one holds
+    # the row table alone.
+    monkeypatch.setattr(codecs, "rle_impl", rle)
     rows = 8000
     layer = _tall_narrow_layer(rows)
     assert {c.compression for c in layer._channels} == {Compression.RLE}

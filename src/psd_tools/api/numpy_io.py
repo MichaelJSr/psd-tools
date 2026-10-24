@@ -118,10 +118,10 @@ _BACKGROUND_TRANSIENT: int = 18
 # ``ImageData.get_data()`` runs after the guard, so this is inside what the guard
 # has to bound. RAW hands back the bytes read at open time -- the same object,
 # when the body is exactly the declared length -- while the other three build
-# their result: RLE joins materialised rows, beside the per-row objects
-# `decompress_row_peak_bytes()` counts, and prediction adds a pass over the
-# inflated buffer and a copy back out. Each multiple is rounded up from what
-# that peak measures.
+# their result: RLE decodes its rows into a buffer it copies out, beside the
+# per-row cost `decompress_row_peak_bytes()` counts, and prediction adds a
+# pass over the inflated buffer and a copy back out. Each multiple is rounded
+# up from what that peak measures.
 _DECOMPRESS_PEAK: dict[Compression, int] = {
     Compression.RAW: 1,
     Compression.RLE: 3,
