@@ -1422,8 +1422,8 @@ def test_pil_peak_model_charges_a_profile_on_a_mode_that_is_not_rgb() -> None:
             "the codec, raw",
         ),
         # The same document under each codec that builds its result rather than
-        # handing back the bytes read at open: RLE joins materialised rows, whose
-        # per-row objects `decompress_row_peak_bytes()` adds, one per row of every
+        # handing back the bytes read at open: RLE reads a row table, whose
+        # entries `decompress_row_peak_bytes()` adds, one per row of every
         # channel, and prediction adds a pass over the inflated buffer and a copy
         # back out on top of the inflate. Only here, where the codec phase is the
         # widest, do these multiples show up in a total at all.
@@ -1434,7 +1434,7 @@ def test_pil_peak_model_charges_a_profile_on_a_mode_that_is_not_rgb() -> None:
             False,
             None,
             Compression.RLE,
-            5632,
+            1792,
             "the codec, RLE",
         ),
         (

@@ -111,6 +111,11 @@ from psd_tools.constants import (
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Key
 
+try:  # Compiled loops, bit-identical to the numpy ones they stand in for.
+    from . import _blend as _cblend  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    _cblend = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -2276,13 +2281,16 @@ def _edge_evidence(
         return None
     backdrop = color_b[on]
     shape_on, alpha_on, alpha_b_on = shape[on], alpha[on], alpha_b[on]
-    lerped = (shape_on - alpha_on) * alpha_b_on * backdrop + alpha_on * (
-        (1.0 - alpha_b_on) * color[on] + alpha_b_on * blend_fn(backdrop, color[on])
-    )
-    lerped = utils.clip(
-        utils.divide(
-            (1.0 - shape_on) * alpha_previous[on] * canvas[on] + lerped, alpha_new[on]
-        )
+    lerped = _over(
+        shape_on,
+        alpha_on,
+        alpha_b_on,
+        backdrop,
+        color[on],
+        blend_fn(backdrop, color[on]),
+        alpha_previous[on],
+        canvas[on],
+        alpha_new[on],
     )
     gamma = mixed[on]
     read = edge & (np.abs(gamma - lerped).max(axis=2) > _TEXT_DECISIVE)
@@ -2884,6 +2892,8 @@ def _unmix(
     share is taken out as if it had. Where ``alpha`` is zero there is no
     content to divide out, and the canvas is handed back as it is.
     """
+    if _compiled_fits((backdrop_alpha, alpha), (color, backdrop_color)):
+        return _cblend.unmix(color, backdrop_color, backdrop_alpha, alpha)
     return utils.clip(
         color
         + (color - backdrop_color)
@@ -2907,6 +2917,10 @@ def _remix(
     ``canvas_alpha`` is the union of the two alphas, which the caller already
     holds.
     """
+    if _compiled_fits((backdrop_alpha, alpha, canvas_alpha), (content, backdrop_color)):
+        return _cblend.remix(
+            content, backdrop_color, backdrop_alpha, alpha, canvas_alpha
+        )
     return utils.clip(
         utils.divide(
             alpha * content + (1.0 - alpha) * backdrop_alpha * backdrop_color,
@@ -3009,6 +3023,80 @@ def _blend_unfiltered(
     np.copyto(out, color, where=alpha <= 0)
     logger.debug("Smart filter mask applied to %r", layer.name)
     return out, alpha
+
+
+def _over(
+    shape: np.ndarray,
+    alpha: np.ndarray,
+    alpha_b: np.ndarray,
+    color_b: np.ndarray,
+    color: np.ndarray,
+    blended: np.ndarray,
+    alpha_previous: np.ndarray,
+    canvas: np.ndarray,
+    canvas_alpha: np.ndarray,
+) -> np.ndarray:
+    """``canvas`` once a source of ``color`` goes on over ``color_b``.
+
+    ``blended`` is the blend mode's answer for the two, ``canvas_alpha`` the
+    alpha the canvas has with the source on.
+    """
+    if _compiled_fits(
+        (shape, alpha, alpha_b, alpha_previous, canvas_alpha),
+        (canvas, color_b, color, blended),
+    ):
+        return _cblend.over(
+            shape,
+            alpha,
+            alpha_b,
+            color_b,
+            color,
+            blended,
+            alpha_previous,
+            canvas,
+            canvas_alpha,
+        )
+    color_t = (shape - alpha) * alpha_b * color_b + alpha * (
+        (1.0 - alpha_b) * color + alpha_b * blended
+    )
+    return utils.clip(
+        utils.divide((1.0 - shape) * alpha_previous * canvas + color_t, canvas_alpha)
+    )
+
+
+def _compiled_fits(
+    ones: Sequence[object], wide: Sequence[object] = (), channels: int | None = None
+) -> bool:
+    """Whether :py:mod:`._blend` takes these operands as numpy would.
+
+    Every one a float32 canvas of one height and width, ``ones`` a single
+    channel and ``wide`` ``channels``, by default the first one's, laid out
+    in rows of pixels as a box cut from a canvas is; anything else, a scalar,
+    a float64 or a broadcast canvas, stays with numpy's own promotion and
+    broadcasting.
+    """
+    if _cblend is None:
+        return False
+    first = ones[0]
+    if not isinstance(first, np.ndarray) or first.ndim != 3:
+        return False
+    size = first.shape[:2]
+    if channels is None:
+        channels = 1
+        if wide:
+            if not isinstance(wide[0], np.ndarray) or wide[0].ndim != 3:
+                return False
+            channels = wide[0].shape[2]
+    for array, width in [(a, 1) for a in ones] + [(a, channels) for a in wide]:
+        if not (
+            isinstance(array, np.ndarray)
+            and array.dtype == np.float32
+            and array.shape == (*size, width)
+            and (width == 1 or array.strides[2] == 4)
+            and (size[1] < 2 or array.strides[1] == 4 * width)
+        ):
+            return False
+    return True
 
 
 class Compositor:
@@ -3651,12 +3739,27 @@ class Compositor:
         color_b = self._color
         alpha_b = self._alpha
 
-        self._shape_g = cast(np.ndarray, utils.union(self._shape_g, shape))
-        self._alpha_g = cast(np.ndarray, utils.union(self._alpha_g, alpha))
         # union(alpha_b, alpha) -- ``alpha`` is the group alpha already scaled by
         # ``mask``, which is what the premultiplied interpolation resolves to.
-        self._alpha = cast(np.ndarray, utils.union(self._alpha_0, self._alpha_g))
+        self._unite(shape, alpha)
 
+        scalar = type(mask) is float
+        if _compiled_fits(
+            (alpha, alpha_b, self._alpha) + (() if scalar else (mask,)),
+            (color_b, color),
+            self._channels,
+        ):
+            self._color = _cblend.passthrough(
+                alpha if scalar else mask,
+                mask if scalar else 0.0,
+                scalar,
+                alpha,
+                alpha_b,
+                color_b,
+                color,
+                self._alpha,
+            )
+            return
         color_t = (1.0 - mask) * alpha_b * color_b + (
             mask * alpha_b + alpha * (1.0 - alpha_b)
         ) * color
@@ -3758,17 +3861,17 @@ class Compositor:
         knocks_out = bool(knockout) or under is not None
 
         alpha_g_previous = self._alpha_g
-        self._shape_g = cast(np.ndarray, utils.union(self._shape_g, shape))
+        alpha_previous = self._alpha
         if knocks_out:
+            self._shape_g = cast(np.ndarray, utils.union(self._shape_g, shape))
             self._alpha_g = (
                 (1.0 - shape) * self._alpha_g
                 + (shape - alpha) * knockout_alpha_g
                 + alpha
             )
+            self._alpha = cast(np.ndarray, utils.union(self._alpha_0, self._alpha_g))
         else:
-            self._alpha_g = cast(np.ndarray, utils.union(self._alpha_g, alpha))
-        alpha_previous = self._alpha
-        self._alpha = cast(np.ndarray, utils.union(self._alpha_0, self._alpha_g))
+            self._unite(shape, alpha)
 
         alpha_b = knockout_alpha if knocks_out else alpha_previous
         color_b = knockout_color if knocks_out else self._color
@@ -3803,14 +3906,28 @@ class Compositor:
             ):
                 self._color = mixed
                 return
-        color_t = (shape - alpha) * alpha_b * color_b + alpha * (
-            (1.0 - alpha_b) * color + alpha_b * blend_fn(color_b, color)
+        self._color = _over(
+            shape,
+            alpha,
+            alpha_b,
+            color_b,
+            color,
+            blend_fn(color_b, color),
+            alpha_previous,
+            self._color,
+            self._alpha,
         )
-        self._color = utils.clip(
-            utils.divide(
-                (1.0 - shape) * alpha_previous * self._color + color_t, self._alpha
+
+    def _unite(self, shape: np.ndarray, alpha: np.ndarray) -> None:
+        """Union a source's ``shape`` and ``alpha`` into the group canvases."""
+        if _compiled_fits((self._shape_g, shape, self._alpha_g, alpha, self._alpha_0)):
+            self._shape_g, self._alpha_g, self._alpha = _cblend.unions(
+                self._shape_g, shape, self._alpha_g, alpha, self._alpha_0
             )
-        )
+            return
+        self._shape_g = cast(np.ndarray, utils.union(self._shape_g, shape))
+        self._alpha_g = cast(np.ndarray, utils.union(self._alpha_g, alpha))
+        self._alpha = cast(np.ndarray, utils.union(self._alpha_0, self._alpha_g))
 
     def _mix_in_text_space(
         self,
@@ -5018,7 +5135,12 @@ class Compositor:
             hit = self._cache.rc.get(rkey)
             if hit is not None:
                 alpha = self._cache.group_alphas[key] = hit[0]
+        if alpha is None and rkey is None:
+            inner, alpha = self._held_group_alpha(layer, inner)
         if alpha is None:
+            if rkey is None:
+                inner = self._group_alpha_box(layer, viewport, inner, passthrough)
+                key = (id(layer), inner)
             inner_h, inner_w = inner[3] - inner[1], inner[2] - inner[0]
             group_compositor = Compositor(
                 inner,
@@ -5041,6 +5163,54 @@ class Compositor:
                 assert self._cache.rc is not None
                 self._cache.rc.put(rkey, (alpha,))
         return paste(viewport, inner, alpha)
+
+    def _held_group_alpha(
+        self, layer: Layer, inner: tuple[int, int, int, int]
+    ) -> tuple[tuple[int, int, int, int], np.ndarray | None]:
+        """A group alpha this pass already holds on a box around ``inner``, and that box."""
+        x0, y0, x1, y1 = inner
+        for (held, box), alpha in self._cache.group_alphas.items():
+            if (
+                held == id(layer)
+                and box[0] <= x0
+                and box[1] <= y0
+                and x1 <= box[2]
+                and y1 <= box[3]
+            ):
+                return box, alpha
+        return inner, None
+
+    def _group_alpha_box(
+        self,
+        layer: Layer,
+        viewport: tuple[int, int, int, int],
+        inner: tuple[int, int, int, int],
+        passthrough: bool,
+    ) -> tuple[int, int, int, int]:
+        """``inner`` grown to the boxes the group's strokes are traced on.
+
+        A shadow's knockout traces them from the shadow's box and the strokes
+        from this compositor's viewport, each a little wider than the shadow;
+        composited once on all of them, the alpha is cropped for each.
+        """
+        if self._traces_mask(layer):
+            return inner
+        content = _content_bbox(layer, self._cache.content_bboxes)
+        box = inner
+        for effect in _readable(layer, "stroke"):
+            try:
+                drawn = _stroke_box(
+                    layer, effect.descriptor, self._cache.content_bboxes
+                )
+                reach = stroke_reach(effect.descriptor)
+            except _UNREADABLE:
+                continue
+            for within in (viewport, self._viewport):
+                traced = _within_reach(drawn, within, reach)
+                if not passthrough:
+                    traced = utils.intersect(traced, content)
+                box = utils.union_bbox(box, traced)
+        return box
 
     def _cast_shape(
         self, layer: Layer, viewport: tuple[int, int, int, int]

@@ -2350,6 +2350,22 @@ def test_the_compiled_relaxation_matches_numpy(
 
 
 @pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
+@pytest.mark.parametrize("width", range(8))
+def test_the_compiled_chamfer_is_numpys_at_every_narrow_width(
+    monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    """Rows too narrow for every move, and their edges, relax as numpy's do."""
+    rng = np.random.default_rng(width)
+    for height in (0, 1, 2, 3, 9):
+        for share in (0.0, 0.3, 0.9, 1.0):
+            mask = rng.random((height, width)) < share
+            compiled = _chamfer_transform(mask)
+            with monkeypatch.context() as patch:
+                patch.setattr(effects, "_cdistance", None)
+                assert compiled.tobytes() == _chamfer_transform(mask).tobytes()
+
+
+@pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
 @pytest.mark.parametrize("radius", [0.5, 1.0, 2.5, 7.0, 40.0])
 def test_the_compiled_disk_marking_is_the_distance_transform(radius: float) -> None:
     rng = np.random.default_rng(int(radius * 10))

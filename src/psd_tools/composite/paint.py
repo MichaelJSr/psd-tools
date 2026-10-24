@@ -960,11 +960,42 @@ def _canvas_rows(color_mode: ColorMode, rgb: np.ndarray) -> np.ndarray:
     return np.array([_from_rgb(color_mode, tuple(row)) for row in rgb.tolist()])
 
 
+class _Lookup:
+    """``interp1d(samples, table, axis=0, bounds_error=False, fill_value=(table[0], table[-1]))``.
+
+    Linear interpolation along the first axis of ``table`` at ``samples``,
+    which ascend, worked out step for step as ``scipy.interpolate.interp1d``
+    works it out, so that a gradient does not import ``scipy.interpolate``.
+    """
+
+    def __init__(self, samples: np.ndarray, table: np.ndarray) -> None:
+        self._x = samples
+        self._extra = table.shape[1:]
+        self._y = table.reshape((table.shape[0], -1))
+        self._below = np.asarray(table[0]).ravel()
+        self._above = np.asarray(table[-1]).ravel()
+
+    def __call__(self, positions: Any) -> np.ndarray:
+        x = np.asarray(positions)
+        if not np.issubdtype(x.dtype, np.inexact):
+            x = x.astype(np.float64)
+        shape = x.shape
+        x = x.ravel()
+        hi = np.searchsorted(self._x, x).clip(1, len(self._x) - 1).astype(int)
+        x_lo, x_hi = self._x[hi - 1], self._x[hi]
+        y_lo, y_hi = self._y[hi - 1], self._y[hi]
+        span = x_hi - x_lo
+        up, down = ((x - x_lo) / span)[:, None], ((x_hi - x) / span)[:, None]
+        y = up * y_hi + down * y_lo
+        if len(y) > 0:
+            y[x < self._x[0]] = self._below
+            y[x > self._x[-1]] = self._above
+        return y.reshape(shape + self._extra)
+
+
 def _make_linear_gradient_color(
     color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
 ) -> tuple[Any | None, Any | None]:
-    from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
-
     smoothness = _clamp01(_finite(grad, Key.Interpolation, 4096.0) / 4096.0)
     colors = grad.get(Key.Colors, [])
     table = _blend_stops(
@@ -989,10 +1020,7 @@ def _make_linear_gradient_color(
     samples = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
 
     def lookup(table: np.ndarray) -> Any:
-        table = table.astype(np.float32)
-        return interpolate.interp1d(
-            samples, table, axis=0, bounds_error=False, fill_value=(table[0], table[-1])
-        )
+        return _Lookup(samples, table.astype(np.float32))
 
     G = lookup(table)
     if Key.Transparency not in grad:

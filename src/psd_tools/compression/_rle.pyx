@@ -4,6 +4,40 @@
 from libcpp.string cimport string
 from libcpp.algorithm cimport copy_n, fill_n
 
+cdef void _decode_into(
+    const unsigned char* data, Py_ssize_t length, char* out, Py_ssize_t size
+) noexcept nogil:
+    """PackBits-decode ``length`` bytes into ``size`` zeroed bytes at ``out``."""
+    cdef Py_ssize_t i = 0
+    cdef Py_ssize_t j = 0
+    cdef Py_ssize_t actual, available
+    cdef unsigned char bit
+
+    if length == 1:
+        # Single byte: either a no-op (128) or a stray header — return zeros
+        return
+
+    while i < length and j < size:
+        i, bit = i+1, data[i]
+        if bit > 128:
+            bit = 256 - bit
+            if i >= length:  # lone repeat header at end of stream — stop
+                break
+            actual = min(1+bit, size-j)  # clip at remaining output space
+            fill_n(out+j, actual, <char>data[i])
+            j += actual
+            i += 1
+        elif bit < 128:
+            if i >= length:  # copy header is the last byte; nothing to copy
+                break
+            available = min(length-i, 1+bit)
+            actual = min(available, size-j)  # clip to input and output
+            copy_n(&data[i], actual, out+j)
+            j += actual
+            i += available  # advance by declared amount or to end
+        # bit == 128: no-op
+
+
 def decode(const unsigned char[:] data, Py_ssize_t size) -> string:
     """decode(data, size) -> bytes
 
@@ -14,40 +48,33 @@ def decode(const unsigned char[:] data, Py_ssize_t size) -> string:
     remaining bytes are zero-padded (std::string::resize zero-initialises).
     The function always returns exactly *size* bytes without raising.
     """
-
-    cdef Py_ssize_t i = 0
-    cdef Py_ssize_t j = 0
-    cdef Py_ssize_t length = data.shape[0]
-    cdef Py_ssize_t actual, available
-    cdef unsigned char bit
     cdef string result
-
     result.resize(size)  # zero-initialised by std::string::resize
+    if data.shape[0]:
+        _decode_into(&data[0], data.shape[0], &result[0], size)
+    return result
 
-    if length == 1:
-        # Single byte: either a no-op (128) or a stray header — return zeros
-        return result
 
-    while i < length and j < size:
-        i, bit = i+1, data[i]
-        if bit > 128:
-            bit = 256 - bit
-            if i >= length:  # lone repeat header at end of stream — stop
-                break
-            actual = min(1+bit, size-j)  # clip at remaining output space
-            fill_n(result.begin()+j, actual, <char>data[i])
-            j += actual
-            i += 1
-        elif bit < 128:
-            if i >= length:  # copy header is the last byte; nothing to copy
-                break
-            available = min(length-i, 1+bit)
-            actual = min(available, size-j)  # clip to input and output
-            copy_n(&data[i], actual, result.begin()+j)
-            j += actual
-            i += available  # advance by declared amount or to end
-        # bit == 128: no-op
+def decode_rows(
+    const unsigned char[:] data, Py_ssize_t start, counts, Py_ssize_t size
+) -> string:
+    """decode_rows(data, start, counts, size) -> bytes
 
+    :func:`decode` of each row in turn, joined: the rows follow one another
+    from ``start``, each ``count`` bytes long, and a row the data runs out
+    under decodes what is left, as reading them one at a time would.
+    """
+    cdef Py_ssize_t length = data.shape[0]
+    cdef Py_ssize_t pos = min(max(start, 0), length)
+    cdef Py_ssize_t row = 0, count, end
+    cdef string result
+    result.resize(len(counts) * size)  # zero-initialised
+    for count in counts:
+        end = min(pos + count, length)
+        if end > pos:
+            _decode_into(&data[pos], end - pos, &result[row * size], size)
+        pos = end
+        row += 1
     return result
 
 
