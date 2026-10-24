@@ -12,6 +12,11 @@ Changelog
   they place it at 1000 pixels per em, as Photoshop does. **Rendering change**
   for fonts whose instructions move their outlines, such as Kung Fu Panda;
   ``FontMetrics.ascent_units`` is a float
+- [refactor] Opening is faster: engine data and descriptors are read by the
+  new compiled ``psd_tools.psd._engine`` and ``psd_tools.psd._descriptor``
+  (by Python where they are not built or the data is unusual), and a read
+  inside a section no longer seeks to its end. What is parsed, the parse
+  limits and saved bytes are unchanged
 - [security] Upstream 1.26.0's bound on the stroke distance search is not
   taken: it measures straight-line distance where this fork measures
   Photoshop's chamfer distance, and would move stroke edges. A very wide stroke
