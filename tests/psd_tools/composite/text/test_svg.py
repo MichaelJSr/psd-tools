@@ -863,6 +863,9 @@ def test_near_unity_kinds() -> None:
     assert svg._kind(0.999, 133) == "copy"
     assert svg._kind(0.993, 161) == "nearest"
     assert svg._kind(0.985, 161) == "reduced"
+    # A size a hair over a whole pixel rounds down; 131.005 px rounds up.
+    assert svg._kind(0.9921283, 127) == "nearest"
+    assert svg._kind(0.985, 133) == "nearest"
     assert svg._kinds(0.985, 0.985, 161, 133) == ("reduced", "reduced")
     assert svg._kinds(0.985, 0.985, 118, 133) == ("nearest", "nearest")
     assert svg._kind(1.0099997, 118) == "nearest"

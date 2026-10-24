@@ -1136,6 +1136,16 @@ _NEAREST_BELOW = 1.01
 _COPY_GROWTH = 0.49
 
 
+#: A reduced size this close above a whole pixel rounds down to it:
+#: 126.0003 px is drawn at 126, 131.005 px at 132.
+_SIZE_SLACK = 1e-3
+
+
+def _reduced_size(scale: float, n: int) -> int:
+    """Whole pixels ``n`` image pixels take at ``scale`` <= 1 (up, less :py:data:`_SIZE_SLACK`)."""
+    return max(1, math.ceil(scale * n - _SIZE_SLACK))
+
+
 def _kind(scale: float, n: int) -> str:
     """How Photoshop resamples ``n`` image pixels to ``scale`` times their size.
 
@@ -1149,7 +1159,7 @@ def _kind(scale: float, n: int) -> str:
         if scale >= _NEAREST_BELOW:
             return "linear"
         return "copy" if scale * n - n < _COPY_GROWTH else "nearest"
-    size = max(1, math.ceil(scale * n - 1e-6))
+    size = _reduced_size(scale, n)
     if size >= n:
         return "copy"
     return "nearest" if size == n - 1 else "reduced"
@@ -1223,7 +1233,7 @@ def _axis(
     if kind == "copy":
         first = math.floor(origin + (scale * n - n) / 2 + 0.5)
         return kind, 1.0, float(first), first, first + n
-    size = max(1, math.ceil(scale * n - 1e-6))
+    size = _reduced_size(scale, n)
     first = math.floor(origin + (scale * n - size) / 2 + 0.5)
     k = size / n
     return kind, k, first - k / 2, first, first + size
