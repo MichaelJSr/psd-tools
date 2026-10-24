@@ -632,18 +632,24 @@ def _box_edges(data: dict, case: str) -> tuple[float, float, float, float]:
     return e + a * bx0, f + d * by0, e + a * bx1, f + d * by1
 
 
-def _placed_alpha(data: dict, case: str, shape: tuple[int, ...]) -> np.ndarray:
-    """A case's picture drawn at its place: alpha 0..255 on the case's crop."""
+def _placed_alpha(
+    data: dict, case: str, shape: tuple[int, ...], skew: bool = True
+) -> np.ndarray:
+    """A case's picture drawn at its place: alpha 0..255 on the case's crop.
+
+    With its layer's ``(b, c)`` if it has them and ``skew``.
+    """
     image = str(data[case + "_image"])
     alpha, rgb = data[image + "_alpha"], data[image + "_rgb"]
     bx0, by0, bx1, by1 = (float(v) for v in data[image + "_box"])
     a, d, e, f = data[case + "_place"]
+    b, c = data.get(case + "_skew", (0.0, 0.0)) if skew else (0.0, 0.0)
     x0, y0 = (int(v) for v in data[case + "_origin"])
     rgba = np.ascontiguousarray(
         np.dstack([np.broadcast_to(rgb, (*alpha.shape, 3)), alpha]), np.uint8
     )
     pic = svg.Picture(rgba, svg.IDENTITY, 1.0, (bx0, by0, bx1, by1))
-    left, top, got = svg.rasterize(svg.Drawing((pic,)), (a, 0.0, 0.0, d, e, f))
+    left, top, got = svg.rasterize(svg.Drawing((pic,)), (a, b, c, d, e, f))
     out = np.zeros(shape[:2])
     h, w = got.shape[:2]
     dy, dx = top - y0, left - x0
@@ -883,6 +889,27 @@ def test_near_unity_kinds() -> None:
     assert svg._kind(1.0039, 126) == "nearest"
     assert svg._kind(1.0037, 126) == "copy"
     assert svg._kind(1.0037, 133) == "nearest"
+
+
+@pytest.mark.parametrize("case", [str(c) for c in NEAR["skewed"]])
+def test_halo_on_slightly_rotated_text_matches_photoshop(case: str) -> None:
+    """A halo on a card's Ability text rotated 0.07 degrees (Greenpath).
+
+    Photoshop draws it unrotated, by :py:func:`svg._kind`: the fork's
+    alpha matches Photoshop's on the ring (less the other text's ink grown
+    2 px) but for 2-3 % of it, where interpolating misses 16-22 %.
+    """
+    want, mask = NEAR[case + "_photoshop"].astype(float), NEAR[case + "_mask"]
+    got = _placed_alpha(NEAR, case, want.shape)
+    assert (got == _placed_alpha(NEAR, case, want.shape, skew=False)).all()
+    assert np.mean(np.abs(got - want)[mask] > 0) < 0.05
+
+
+def test_only_a_slight_skew_counts_as_axis_aligned() -> None:
+    """Under 1 % of the scale, as raster.is_general's bound on a layer."""
+    assert svg._axis_aligned((3.0, 0.029, -0.029, 3.0, 0.0, 0.0))
+    assert not svg._axis_aligned((3.0, 0.031, 0.0, 3.0, 0.0, 0.0))
+    assert not svg._axis_aligned((3.0, 0.0, 0.0, -3.0, 0.0, 0.0))
 
 
 def test_nudge_moves_only_nearest_images() -> None:

@@ -31,6 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from psd_tools.composite.scanline import fill_coverage, flatten_cubics
+from psd_tools.composite.text.constants import GENERAL_TRANSFORM_EPS
 
 #: ``(a, b, c, d, e, f)``: ``x' = a x + c y + e``, ``y' = b x + d y + f``.
 Affine = tuple[float, float, float, float, float, float]
@@ -1259,7 +1260,13 @@ def _snapped(
 
 
 def _axis_aligned(m: Affine) -> bool:
-    return abs(m[1]) < 1e-9 and abs(m[2]) < 1e-9 and m[0] > 0 and m[3] > 0
+    """A scale, or one skewed by under :py:data:`GENERAL_TRANSFORM_EPS` of it.
+
+    Photoshop draws an image on slightly rotated text as if unrotated.
+    """
+    a, b, c, d = m[:4]
+    eps = GENERAL_TRANSFORM_EPS
+    return a > 0 and d > 0 and abs(b) < eps * a and abs(c) < eps * d
 
 
 def picture_layer(
@@ -1298,7 +1305,7 @@ def picture_layer(
             layer[..., 3] *= (np.ones(h) if cy is None else cy)[:, None]
             layer[..., 3] *= (np.ones(w) if cx is None else cx)[None, :]
     else:
-        # Bilinear from pixel centres; no corpus glyph is rotated or skewed.
+        # Bilinear from pixel centres.
         inv = _invert(full)
         if inv is None:
             return np.zeros((h, w, 4), np.float32)
