@@ -3,12 +3,14 @@ import logging
 import math
 import warnings
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import pytest
 import scipy.ndimage  # type: ignore[import-untyped]
+import scipy.spatial  # type: ignore[import-untyped]
 from PIL import Image
 
 from psd_tools.api.mask import Mask
@@ -1531,15 +1533,21 @@ def _soft_masks() -> list[tuple[str, np.ndarray]]:
     return [(name, a) for name, a in masks if ((a > 0) & (a < 1)).any()]
 
 
-_SEARCH_PATHS = ["compiled", "erosion", "loop"]
+_SEARCH_PATHS = ["compiled", "erosion", "loop", "tree", "split"]
 
 
 def _search_path(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
     """Route ``_nearest_boundary`` through one branch.
 
     Without the compiled loops the density gate alone picks numpy's erosion
-    or loop, so it is pinned to either extreme.
+    or loop, so it is pinned to either extreme. ``tree`` hands every pixel
+    to the k-d tree whatever the reach, ``split`` every one over a pixel deep.
     """
+    if path in ("tree", "split"):
+        monkeypatch.setattr(effects, "_BALL_SEARCH_REACH", 0.0)
+        depth = -1.0 if path == "tree" else 1.0
+        monkeypatch.setattr(effects, "_BALL_SEARCH_DEPTH", depth)
+        return
     if path == "compiled":
         if effects._cdistance is None:
             pytest.skip("compiled loops not built")
@@ -1597,6 +1605,124 @@ def test_a_feathered_mask_is_searched_exactly(
     expected = _full_search(alpha, stating, near, 30.0)
     found = effects._nearest_boundary(alpha, stating, near, 30.0)
     assert np.array_equal(found, expected)
+
+
+def _bits(field: np.ndarray) -> np.ndarray:
+    return field.view(np.uint32)
+
+
+def _searched_by_tree(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The pixels each :py:func:`effects._ball_search` call answered, patched in."""
+    answered: list[int] = []
+    real = effects._ball_search
+
+    def spy(*args: Any) -> np.ndarray:
+        answered.append(args[3].size)
+        return real(*args)
+
+    monkeypatch.setattr(effects, "_ball_search", spy)
+    return answered
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+@pytest.mark.parametrize("below", [True, False])
+def test_only_a_wide_reach_searches_by_tree(
+    monkeypatch: pytest.MonkeyPatch, compiled: bool, below: bool
+) -> None:
+    """From :py:data:`effects._BALL_SEARCH_REACH` on, far pixels go to the tree.
+
+    Below it every pixel loops, as a card's strokes all do. Either way the
+    field is the loop's to the bit, outside a small disc and inside a large
+    one, where the far pixels are opaque.
+    """
+    if compiled and effects._cdistance is None:
+        pytest.skip("compiled loops not built")
+    if not compiled:
+        monkeypatch.setattr(effects, "_cdistance", None)
+    radius = effects._BALL_SEARCH_REACH - (1.0 if below else 0.0)
+    pad = math.ceil(radius) + 2
+    small = np.pad(_antialiased_disc(12, 4.0), pad)
+    large = _antialiased_disc(2 * pad, pad - 3.0)
+    answered = _searched_by_tree(monkeypatch)
+    for alpha in (small, large):
+        stating = (alpha > 0) & (alpha < 1)
+        near = (0.5 - alpha).astype(np.float32)
+        answered.clear()
+        found = effects._nearest_boundary(alpha, stating, near, radius)
+        assert bool(answered) != below
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(effects, "_BALL_SEARCH_REACH", math.inf)
+            looped = effects._nearest_boundary(alpha, stating, near, radius)
+        assert np.array_equal(_bits(found), _bits(looped))
+
+
+_REAL_TREE = scipy.spatial.cKDTree
+
+
+class _CountingTree:
+    """``cKDTree`` that keeps what each query returned, patched in by a test."""
+
+    returned: ClassVar[list[int]] = []
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._tree = _REAL_TREE(*args, **kwargs)
+
+    def query_ball_point(self, *args: Any, **kwargs: Any) -> Any:
+        found = self._tree.query_ball_point(*args, **kwargs)
+        self.returned.append(sum(len(hits) for hits in found))
+        return found
+
+
+@pytest.mark.parametrize("budget", [1, 7, 500, 1 << 18])
+def test_a_tree_batch_holds_its_budget_and_leaves_the_field(
+    monkeypatch: pytest.MonkeyPatch, budget: int
+) -> None:
+    """A batch returns no more than the budget past its last query (#897).
+
+    Where the batches are cut does not move the field.
+    """
+    radius = effects._BALL_SEARCH_REACH + 8.0
+    alpha = np.pad(_antialiased_disc(30, 10.0), math.ceil(radius) + 2)
+    stating = (alpha > 0) & (alpha < 1)
+    near = (0.5 - alpha).astype(np.float32)
+    whole = effects._nearest_boundary(alpha, stating, near, radius)
+
+    monkeypatch.setattr(_CountingTree, "returned", [])
+    monkeypatch.setattr(scipy.spatial, "cKDTree", _CountingTree)
+    monkeypatch.setattr(effects, "_BALL_CANDIDATES", budget)
+    found = effects._nearest_boundary(alpha, stating, near, radius)
+
+    returned = _CountingTree.returned
+    assert returned, "the tree was never queried"
+    assert max(returned) <= budget + int(stating.sum())
+    if budget < 1 << 18:
+        assert len(returned) > 1, "one batch held everything"
+    assert np.array_equal(_bits(found), _bits(whole))
+
+
+def test_tree_batches_bound_what_their_balls_can_hold() -> None:
+    """Each batch's squares hold the budget, plus its first query's."""
+    rng = np.random.default_rng(12)
+    stating = rng.random((40, 50)) < 0.3
+    rows, cols = rng.integers(0, 40, 300), rng.integers(0, 50, 300)
+    queried = rng.random(300) * 12.0
+    held = np.array(
+        [
+            stating[
+                max(r - math.ceil(q), 0) : r + math.ceil(q) + 1,
+                max(c - math.ceil(q), 0) : c + math.ceil(q) + 1,
+            ].sum()
+            for r, c, q in zip(rows, cols, queried, strict=True)
+        ]
+    )
+    for budget in (1, 50, 1000, 1 << 20):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(effects, "_BALL_CANDIDATES", budget)
+            bounds = effects._ball_batches(stating, rows, cols, queried)
+        assert bounds[0] == 0 and bounds[-1] == rows.size
+        assert (np.diff(bounds) > 0).all()
+        for lo, hi in pairwise(bounds):
+            assert held[lo:hi].sum() <= budget + held[lo]
 
 
 def test_every_stroke_position_draws() -> None:

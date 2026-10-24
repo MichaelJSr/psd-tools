@@ -85,6 +85,7 @@ automatically applied when rendering layers that have effects enabled.
 
 import logging
 import math
+from itertools import chain, pairwise
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
@@ -148,6 +149,17 @@ _DENSE_EROSION_DENSITY = 0.15
 
 # The largest radius the compiled disk marking takes; past it the transform is cheaper.
 _DISK_REACH_MAX = 64.0
+
+# A pixel further than this from every stating pixel is answered by a k-d tree
+# query (:py:func:`_ball_search`): its offset loop runs on to its own depth,
+# and around this depth the two cost alike. Only a search reaching
+# _BALL_SEARCH_REACH or further has enough of them to pay for the tree.
+_BALL_SEARCH_DEPTH = 32.0
+_BALL_SEARCH_REACH = 48.0
+
+# The most seeds one batch of k-d tree queries may return, which bounds what a
+# batch holds in memory.
+_BALL_CANDIDATES = 1 << 18
 
 # The lengths of a diagonal and a knight's move, which with an axis move are
 # the steps :py:func:`_chamfer_length` measures in.
@@ -523,6 +535,91 @@ def _chamfer_relax(field: np.ndarray) -> np.ndarray:
     return field
 
 
+def _ball_batches(
+    stating: np.ndarray, rows: np.ndarray, cols: np.ndarray, queried: np.ndarray
+) -> np.ndarray:
+    """Indices cutting the queries into batches of :py:data:`_BALL_CANDIDATES`.
+
+    A ball holds no more stating pixels than the square around it, which a
+    summed-area table counts. A batch can pass the budget by its first query's.
+    """
+    height, width = stating.shape
+    table = np.zeros((height + 1, width + 1), dtype=np.intp)
+    np.cumsum(np.cumsum(stating, axis=0, dtype=np.intp), axis=1, out=table[1:, 1:])
+    reach = np.ceil(queried).astype(np.intp)
+    top, bottom = np.maximum(rows - reach, 0), np.minimum(rows + reach + 1, height)
+    left, right = np.maximum(cols - reach, 0), np.minimum(cols + reach + 1, width)
+    held = table[bottom, right] - table[top, right] - table[bottom, left]
+    held += table[top, left]
+    ends = np.cumsum(held)
+    steps = np.arange(0, ends[-1] + _BALL_CANDIDATES, _BALL_CANDIDATES)
+    return np.unique(np.append(np.searchsorted(ends, steps), rows.size))
+
+
+def _ball_search(
+    alpha: np.ndarray,
+    stating: np.ndarray,
+    near: np.ndarray,
+    pixels: np.ndarray,
+    depth: np.ndarray,
+    radius: float,
+) -> np.ndarray:
+    """:py:func:`_nearest_boundary`'s answer at the flat ``pixels``, by k-d tree.
+
+    ``depth`` is each pixel's :py:func:`_chamfer_transform`, the length to
+    its nearest stating pixel, whose boundary is no further than ``depth``
+    plus the largest ``near``. A stating pixel more than ``depth`` plus the
+    spread of ``near`` away states one further still, so the tree need only
+    return those within that distance on a straight line, which is never
+    longer than the :py:func:`_chamfer_length`. Each is measured as the
+    offset loop measures it, in the same float32 arithmetic and under the
+    same cutoff, so the answer is the loop's to the bit; the query is widened
+    by a margin for the rounding on either side of the bound.
+    """
+    from scipy.spatial import cKDTree  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    width = stating.shape[1]
+    seeds = np.flatnonzero(stating)
+    seed_rows, seed_cols = np.divmod(seeds, width)
+    weights = near.ravel()[seeds]
+    spread = float(weights.max()) - float(weights.min())
+    # Lengths are float32 and compared with ``radius`` as such, so a pixel can
+    # pass at a true length a rounding above it.
+    cutoff = max(radius, float(np.float32(radius)))
+    margin = max(1e-3, 8.0 * float(np.spacing(np.float32(cutoff + 1.0))))
+    queried = np.minimum(depth.astype(np.float64) + spread, cutoff) + margin
+    tree = cKDTree(
+        np.column_stack([seed_rows, seed_cols]).astype(np.float64),
+        balanced_tree=False,
+        compact_nodes=False,
+    )
+    rows, cols = np.divmod(pixels, width)
+    inside = alpha.ravel()[pixels] >= 1
+    values = np.empty(pixels.size, dtype=np.float32)
+    for lo, hi in pairwise(_ball_batches(stating, rows, cols, queried)):
+        points = np.column_stack([rows[lo:hi], cols[lo:hi]]).astype(np.float64)
+        found = tree.query_ball_point(points, queried[lo:hi], return_sorted=False)
+        counts = np.fromiter(map(len, found), np.intp, count=hi - lo)
+        flat = np.fromiter(chain.from_iterable(found), np.intp, count=counts.sum())
+        del found
+        owner = np.repeat(np.arange(hi - lo), counts)
+        length = _chamfer_length(
+            seed_rows[flat] - rows[lo:hi][owner], seed_cols[flat] - cols[lo:hi][owner]
+        )
+        weight = weights[flat]
+        # Inward the loop takes the largest ``near - length``: the smallest
+        # ``length - near``, negated below, which is exact.
+        stated = np.where(inside[lo:hi][owner], length - weight, weight + length)
+        stated = np.where(length <= radius, stated, np.inf)
+        best = np.full(hi - lo, np.inf, dtype=np.float32)
+        hit = counts > 0
+        starts = (np.cumsum(counts) - counts)[hit]
+        if starts.size:
+            best[hit] = np.minimum.reduceat(stated, starts)
+        values[lo:hi] = np.where(inside[lo:hi], -best, best)
+    return values
+
+
 def _nearest_boundary(
     alpha: np.ndarray, stating: np.ndarray, near: np.ndarray, radius: float
 ) -> np.ndarray:
@@ -567,6 +664,12 @@ def _nearest_boundary(
     of its worst case, which stays the one the erosion branch exists to
     avoid.
 
+    A pixel's loop runs on to its own depth, the distance to its nearest
+    stating pixel, so a wide reach makes the far pixels its cost. A search
+    reaching :py:data:`_BALL_SEARCH_REACH` or further hands each pixel
+    deeper than :py:data:`_BALL_SEARCH_DEPTH` to :py:func:`_ball_search`
+    instead, whose answer is the loop's to the bit, and loops over the rest.
+
     Both branches read and write through the same crop the density above is
     measured on, padded arrays included, rather than the whole of ``alpha``:
     everything either one needs already sits inside it, so this is memory
@@ -607,8 +710,29 @@ def _nearest_boundary(
         return field
     density = active.sum() / ((r1 - r0) * (c1 - c0))
 
-    if density >= _DENSE_EROSION_DENSITY and (
-        _cdistance is None or near.dtype != np.float32
+    searched = False
+    if radius >= _BALL_SEARCH_REACH and near.dtype == np.float32:
+        depth = _chamfer_transform(~stating[crop])
+        far = active[crop] & (depth > _BALL_SEARCH_DEPTH)
+        if far.any():
+            pixels = np.flatnonzero(far)
+            rows_f, cols_f = np.divmod(pixels, c1 - c0)
+            field[r0 + rows_f, c0 + cols_f] = _ball_search(
+                alpha[crop],
+                stating[crop],
+                near[crop],
+                pixels,
+                depth.ravel()[pixels],
+                radius,
+            )
+            active[crop] &= ~far
+            searched = True
+        del depth, far
+
+    if (
+        not searched
+        and density >= _DENSE_EROSION_DENSITY
+        and (_cdistance is None or near.dtype != np.float32)
     ):
         sub_stating, sub_near, sub_alpha, sub_active = (
             stating[crop],

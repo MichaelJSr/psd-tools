@@ -22,10 +22,10 @@ Changelog
   it is not built), a group's shadow, knockout and stroke share one composite
   of its alpha, RLE channels decode in one call, and a gradient no longer
   imports ``scipy.interpolate``. Renders are unchanged
-- [security] Upstream 1.26.0's bound on the stroke distance search is not
-  taken: it measures straight-line distance where this fork measures
-  Photoshop's chamfer distance, and would move stroke edges. A very wide stroke
-  on a small shape can still take long to render (#897)
+- [security] A very wide stroke, precise glow or chisel bevel searches the
+  pixels far from its layer with upstream 1.26.0's k-d tree bound, restated
+  in Photoshop's chamfer distance, so it no longer takes long to render and
+  draws exactly as before (#897)
 - [fix] A type layer below full fill mixes only its glyphs' coverage and its
   opacity in the text gamma, so an inner glow or overlay on a fill-0 name goes
   on as Photoshop draws it; a layer below full fill that knocks out its drop
