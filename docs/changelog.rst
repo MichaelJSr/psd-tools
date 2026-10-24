@@ -4,6 +4,11 @@ Changelog
 1.26.0 (unreleased)
 -------------------
 
+- [fix] Vibrance is read off tables measured from Photoshop's renders of
+  every 8-bit colour instead of a fitted formula, so vibrance and saturation
+  land within a level of Photoshop's for nearly every colour at any amount,
+  skin tones included. **Rendering change** for vibrance adjustments, most for
+  positive amounts
 - [fix] Drop shadows, outer glows, inner shadows and inner glows draw their
   noise, from Photoshop's own field: the same at each document pixel in every
   document, so a noisy effect renders as Photoshop's does rather than smooth.

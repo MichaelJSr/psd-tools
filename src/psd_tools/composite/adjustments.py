@@ -5,6 +5,7 @@ import logging
 import math
 import struct
 from collections.abc import Callable
+from importlib import resources
 from typing import Literal, TypeVar, cast
 
 import numpy as np
@@ -26,6 +27,7 @@ from psd_tools.api.adjustments import (
     Vibrance,
 )
 from psd_tools.api.layers import Layer
+from psd_tools.color_convert import SRGB_CUTOFF, SRGB_GAMMA, SRGB_OFFSET, SRGB_SLOPE
 from psd_tools.composite import paint
 from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.blend import (
@@ -1100,51 +1102,35 @@ def apply_vibrance(
     linear = paint._srgb_to_linear(img)
     space = _vibrance_space(layer)
     if space is None:
-        out = _vibrance(img, linear, vibrance, saturation)
+        out = _vibrance(linear, vibrance, saturation)
     else:
-        linear = linear @ space.T
-        encoded = np.sign(linear) * paint._linear_to_srgb(np.abs(linear))
-        out = _vibrance(encoded, linear, vibrance, saturation)
+        out = _vibrance(linear @ space.T, vibrance, saturation)
         out = np.clip(out @ np.linalg.inv(space).T, _0, _1)
     return paint._linear_to_srgb(out).astype(np.float32, copy=False)
 
 
-# In linear light each pixel is scaled away from or toward a gray on the line
-# through its darkest and brightest channel, which keeps its hue. Both amounts
-# are fitted to Photoshop renders of probes: every pair of darkest and
-# brightest levels, hue against saturation and value, saturation against value.
-# A positive amount raises chroma about a gray near the brightest channel, most
-# for pale pixels and dark ones, from nothing near black up to an encoded value
-# of 0.3; a pale reddish (skin) hue gets less. Its fit weighs every saturation
-# and value alike.
-# A negative amount lowers the linear HSV saturation of a pale pixel furthest
-# and of a pure one by a quarter of the amount, more below an encoded value of
-# about a quarter, and dims mid-saturated pixels away from white.
+# In linear light vibrance keeps each pixel's hue: its brightest channel H
+# becomes H' and every channel c becomes H' - k (H - c). H' / H - 1 and k - 1
+# depend on the pixel's encoded value (H) and linear saturation (1 - low / H)
+# alone, and are read off ``vibrance_tables.npz`` (rebuilt by
+# tools/vibrance_tables.py from Photoshop 2023 renders of every 8-bit colour):
+# k - 1 at amounts 1/4, 1/2, 3/4 and 1 each way, read between them along a
+# quadratic through the nearest three and 0 at 0; H' - H is linear in the
+# amount. A positive amount spares the reds: one whose red is the brightest,
+# with green and blue equal, gets the k of a smaller amount and part of the
+# rise, both tabulated; toward magenta that share of the spared amount and rise
+# falls off linearly with the hue, toward yellow it holds to halfway and is gone
+# by three quarters of the way.
 # The saturation slider then scales chroma about 0.288 R + 0.712 G,
 # Photoshop's gray for it: blue has no say. Only that result is clipped.
-_VIBRANCE_BOOST_AMOUNT_CURVE = 1.27
-_VIBRANCE_BOOST_MID = 1.274
-_VIBRANCE_BOOST_MID_CURVE = 1.045
-_VIBRANCE_BOOST_PALE_DARK = 2.908
-_VIBRANCE_BOOST_PALE_CURVE = 1.842
-_VIBRANCE_BOOST_DARK_CURVE = 1.045
-_VIBRANCE_BOOST_BLACK = (0.038, 0.292)
-_VIBRANCE_BOOST_GRAY = 0.861
-_VIBRANCE_BOOST_GRAY_DARK = -0.272
-_VIBRANCE_SKIN_HUES = (-0.175, 0.0, 0.096, 0.139)
-_VIBRANCE_SKIN = 1.022
-_VIBRANCE_SKIN_CURVE = 0.829
-_VIBRANCE_LOSS = 0.25
-_VIBRANCE_LOSS_PALE = 1.5
-_VIBRANCE_LOSS_PALE2 = -0.5
-_VIBRANCE_REGAIN_PALE = 0.38
-_VIBRANCE_REGAIN_PALE2 = -0.14
-_VIBRANCE_DARK = 1.18
-_VIBRANCE_DARK_LEVEL = 0.26
-_VIBRANCE_DARK_CURVE = 1.14
-_VIBRANCE_DIM = 1.79
-_VIBRANCE_DIM_DARK_SCALE = 0.02
 _VIBRANCE_GRAY_WEIGHTS = np.array([0.288, 0.712, 0.0], dtype=np.float32)
+# The tables' nodes: encoded values every 4 levels, and linear saturations
+# crowded at both ends, where the tables bend most, then a few past 1, which a
+# document profile's space can take a pixel to.
+_VIBRANCE_VALUES = np.r_[np.arange(0.0, 256.0, 4.0), 255.0]
+_VIBRANCE_SATURATIONS = np.r_[
+    (1 - np.cos(np.pi * np.linspace(0.0, 1.0, 41))) / 2, 1.1, 1.25, 1.5, 2.0
+]
 _ICC_D50 = np.array([0.9642, 1.0, 0.8249])
 _ICC_SRGB_COLORANTS = np.array(
     [[0.4361, 0.3851, 0.1431], [0.2225, 0.7169, 0.0606], [0.0139, 0.0971, 0.7141]]
@@ -1207,89 +1193,122 @@ def _icc_xyz(tag: bytes) -> tuple[float, float, float]:
     return (x / 65536, y / 65536, z / 65536)
 
 
-def _vibrance(
-    img: np.ndarray, linear: np.ndarray, vibrance: float, saturation: float
-) -> np.ndarray:
-    """Linear-light result of the vibrance and saturation sliders.
-
-    ``img`` is ``linear`` encoded.
-    """
-    high = linear.max(axis=2, keepdims=True)
-    low = linear.min(axis=2, keepdims=True)
-    out = linear
-    if vibrance > 0:
-        out = _raise_vibrance(img, linear, high, low, vibrance)
-    elif vibrance < 0:
-        encoded_high = img.max(axis=2, keepdims=True)
-        out = _lower_vibrance(linear, high, low, encoded_high, -vibrance)
+def _vibrance(linear: np.ndarray, vibrance: float, saturation: float) -> np.ndarray:
+    """Linear-light result of the vibrance and saturation sliders."""
+    out = _vibrance_step(linear, vibrance) if vibrance else linear
     if saturation:
         gray = out @ _VIBRANCE_GRAY_WEIGHTS
         out = gray[..., None] + (out - gray[..., None]) * (_1 + saturation)
     return np.clip(out, _0, _1)
 
 
-def _lower_vibrance(
-    linear: np.ndarray,
-    high: np.ndarray,
-    low: np.ndarray,
-    encoded_high: np.ndarray,
-    amount: float,
-) -> np.ndarray:
-    """Lower the linear HSV saturation and value of ``linear``, hue kept.
+@functools.cache
+def _vibrance_tables() -> dict[str, np.ndarray]:
+    """The vibrance tables by name; see ``_vibrance_step``."""
+    source = resources.files(__package__).joinpath("vibrance_tables.npz")
+    with source.open("rb") as stream, np.load(stream) as data:
+        return {key: data[key].astype(np.float32) for key in data.files}
 
-    ``high`` and ``low`` are its per-pixel extremes, ``encoded_high`` the
-    brightest encoded channel; ``amount`` is in (0, 1].
+
+def _vibrance_amount_weights(
+    amount: np.ndarray | float,
+) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], np.ndarray]:
+    """Weights of the quadratic through three of the amounts 0, 1/4 ... 1.
+
+    Returns the three weights and the index of the first amount.
     """
-    sat = (high - low) / np.maximum(high, _FLOAT_EPSILON)
-    pale = _1 - sat
-    loss = _VIBRANCE_LOSS + (_VIBRANCE_LOSS_PALE + _VIBRANCE_LOSS_PALE2 * pale) * pale
-    regain = (_VIBRANCE_REGAIN_PALE + _VIBRANCE_REGAIN_PALE2 * pale) * pale
-    dark = np.clip(_1 - encoded_high / _VIBRANCE_DARK_LEVEL, _0, _1)
-    dark = _1 - amount * _VIBRANCE_DARK * dark**_VIBRANCE_DARK_CURVE
-    new_sat = np.clip(sat * (_1 - amount * loss + amount**2 * regain) * dark, _0, sat)
-    dim = _1 - np.exp(-high / _VIBRANCE_DIM_DARK_SCALE)
-    value = high * (_1 - amount * _VIBRANCE_DIM * (_1 - high) * dim * sat * pale)
-    scale = value * new_sat / np.maximum(high * sat, _FLOAT_EPSILON)
-    return value - scale * (high - linear)
+    position = np.asarray(amount, dtype=np.float32) * 4
+    first = np.clip(np.ceil(position) - 1, 0, 2).astype(np.intp)
+    u = position - first
+    return ((u - 1) * (u - 2) / 2, -u * (u - 2), u * (u - 1) / 2), first
 
 
-def _raise_vibrance(
-    img: np.ndarray,
-    linear: np.ndarray,
-    high: np.ndarray,
-    low: np.ndarray,
-    vibrance: float,
+def _vibrance_at(tables: np.ndarray, amount: float) -> np.ndarray:
+    """``tables`` at amounts 1/4 ... 1, read linearly at ``amount``, held below 1/4."""
+    position = (max(amount, 0.25) - 0.25) * 4
+    first = min(int(position), len(tables) - 2)
+    fraction = position - first
+    return tables[first] * (1 - fraction) + tables[first + 1] * fraction
+
+
+def _vibrance_step(linear: np.ndarray, amount: float) -> np.ndarray:
+    """Linear light after the vibrance slider at ``amount``, in [-1, 1]."""
+    tables = _vibrance_tables()
+    high = linear.max(axis=-1)
+    low = linear.min(axis=-1)
+    span = high - low
+    lit = high > 0
+    sat = np.where(lit, span / np.where(lit, high, _1), _0)
+    # Past white, as a document profile's space can take a pixel, the tables
+    # extrapolate.
+    value = SRGB_SLOPE * high
+    bright = high > SRGB_CUTOFF
+    value[bright] = (1.0 + SRGB_OFFSET) * high[bright] ** (
+        1.0 / SRGB_GAMMA
+    ) - SRGB_OFFSET
+    node = _vibrance_node(value * _255, sat)
+    size = abs(amount)
+    name = "raise" if amount > 0 else "lower"
+    chroma = tables[f"{name}_chroma"]
+    anchors = np.concatenate([np.zeros_like(chroma[:1]), chroma])
+    weights, first = _vibrance_amount_weights(size)
+    at_amount = sum(w * anchors[first + j] for j, w in enumerate(weights))
+    scale = _1 + _bilinear(at_amount, node)
+    rise = high * np.float32(size) * _bilinear(tables[f"{name}_value"], node)
+    if amount > 0:
+        red, green, blue = linear[..., 0], linear[..., 1], linear[..., 2]
+        reds = np.nonzero((red >= green) & (red >= blue) & (span > 0))
+        if reds[0].size:
+            spared = _vibrance_spared(linear[reds], high[reds], low[reds])
+            row, col, down, across = node
+            at = (row[reds], col[reds], down[reds], across[reds])
+            share = _bilinear(_vibrance_at(tables["skin_amount"], size), at)
+            effective = size * (_1 - spared * (_1 - share))
+            own = np.concatenate(
+                [np.zeros((1, *effective.shape), np.float32), _bilinear(chroma, at)]
+            )
+            weights, first = _vibrance_amount_weights(effective)
+            scale[reds] = _1 + sum(
+                w * np.take_along_axis(own, (first + j)[None], 0)[0]
+                for j, w in enumerate(weights)
+            )
+            rises = np.concatenate([tables["skin_value"], np.ones_like(chroma[:1])])
+            share = _bilinear(_vibrance_at(rises, size), at)
+            rise[reds] *= _1 - spared * (_1 - share)
+    return (high + rise)[..., None] - scale[..., None] * (high[..., None] - linear)
+
+
+def _vibrance_spared(
+    linear: np.ndarray, high: np.ndarray, low: np.ndarray
 ) -> np.ndarray:
-    """Scale chroma up, most for pale and dark pixels, less for skin tones.
+    """How much of a red-brightest pixel the skin tones' spare reaches, 0 to 1."""
+    hue = (linear.sum(axis=-1) - high - low - low) / (high - low)
+    toward_yellow = linear[..., 1] >= linear[..., 2]
+    return np.where(toward_yellow, np.clip(3 - 4 * hue, _0, _1), _1 - hue)
 
-    ``img`` is ``linear`` encoded; ``high`` and ``low`` are its per-pixel
-    extremes.
-    """
-    sat = np.clip((high - low) / np.maximum(high, _FLOAT_EPSILON), _0, _1)
-    pale = _1 - sat
-    encoded_high = np.clip(img.max(axis=2, keepdims=True), _0, _1)
-    boost = _VIBRANCE_BOOST_MID * sat * pale**_VIBRANCE_BOOST_MID_CURVE
-    boost = (
-        boost
-        + _VIBRANCE_BOOST_PALE_DARK
-        * pale**_VIBRANCE_BOOST_PALE_CURVE
-        * (_1 - encoded_high) ** _VIBRANCE_BOOST_DARK_CURVE
+
+def _vibrance_node(
+    value: np.ndarray, sat: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Each pixel's cell in the tables and where in it, extrapolating past the last."""
+    values, sats = _VIBRANCE_VALUES, _VIBRANCE_SATURATIONS
+    row = np.clip(np.searchsorted(values, value, side="right") - 1, 0, len(values) - 2)
+    col = np.clip(np.searchsorted(sats, sat, side="right") - 1, 0, len(sats) - 2)
+    down = np.maximum((value - values[row]) / (values[row + 1] - values[row]), 0)
+    across = np.maximum((sat - sats[col]) / (sats[col + 1] - sats[col]), 0)
+    return row, col, down.astype(np.float32), across.astype(np.float32)
+
+
+def _bilinear(
+    table: np.ndarray, node: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+) -> np.ndarray:
+    """``table`` (its last two axes the nodes) read bilinearly at ``node``."""
+    row, col, down, across = node
+    top = table[..., row, col] * (1 - across) + table[..., row, col + 1] * across
+    bottom = (
+        table[..., row + 1, col] * (1 - across) + table[..., row + 1, col + 1] * across
     )
-    start, end = _VIBRANCE_BOOST_BLACK
-    black = np.clip((encoded_high - start) / (end - start), _0, _1)
-    boost = boost * black * black * (3 - 2 * black)
-    hue = rgb2hsl(np.clip(img, _0, _1))[..., 0:1]
-    hue = np.where(hue > 0.5, hue - _1, hue)
-    rise_from, core_from, core_to, fall_to = _VIBRANCE_SKIN_HUES
-    skin = np.minimum(
-        np.clip((hue - rise_from) / (core_from - rise_from), _0, _1),
-        np.clip((fall_to - hue) / (fall_to - core_to), _0, _1),
-    )
-    boost = boost * (_1 - skin * _VIBRANCE_SKIN * pale**_VIBRANCE_SKIN_CURVE)
-    scale = _1 + vibrance**_VIBRANCE_BOOST_AMOUNT_CURVE * boost
-    position = _VIBRANCE_BOOST_GRAY + _VIBRANCE_BOOST_GRAY_DARK * (_1 - encoded_high)
-    gray = low + np.clip(position, _0, _1) * (high - low)
-    return gray + scale * (linear - gray)
+    return top * (1 - down) + bottom * down
 
 
 """Adjustment function table."""
