@@ -30,6 +30,7 @@ from psd_tools.composite.composite import (
     _content_bbox,
     _covers_beneath,
     _effect_reach,
+    _faded_at_8_bits,
     _held,
     paste,
 )
@@ -51,6 +52,11 @@ from .test_composite import _feathered_stroke_layer, _mse
 pytest.importorskip("scipy")
 
 logger = logging.getLogger(__name__)
+
+
+# Half an 8-bit level, and a hair: what holding a float at the document's
+# levels can move it by.
+_HALF_LEVEL = 0.5 / 255.0 + 1e-6
 
 
 def _disc(size: int, radius: float) -> np.ndarray:
@@ -323,21 +329,41 @@ def _box_passes(matte: np.ndarray, width: int, outside: float = 0.0) -> np.ndarr
     return matte
 
 
+def _reach(alpha: np.ndarray, pixels: int) -> np.ndarray:
+    """``max(alpha[q] - length(x - q))`` over the covered pixels ``q`` near each ``x``.
+
+    How far past ``x`` the furthest-reaching covered pixel's coverage ends, in
+    Photoshop's metric, offset by offset.
+    """
+    covered = alpha >= effects._SPREAD_FLOOR
+    stated = np.where(covered, alpha, -np.inf)
+    height, width = alpha.shape
+    span = pixels + 1
+    padded = np.pad(stated, span, constant_values=-np.inf)
+    best = np.full(alpha.shape, -np.inf)
+    for down in range(-span, span + 1):
+        for across in range(-span, span + 1):
+            length = float(effects._chamfer_length(np.array(down), np.array(across)))
+            moved = padded[
+                span + down : span + down + height,
+                span + across : span + across + width,
+            ]
+            best = np.maximum(best, moved - length)
+    return best
+
+
 def _grown_and_blurred(shape: np.ndarray, pixels: int, size: int) -> np.ndarray:
     """The closed form of a spread shadow cast nowhere.
 
-    The covered pixels, grown by ``pixels`` from where their coverage ends
-    (a covered pixel's rim lies its own coverage past its inner side, so a
-    full one ends half a pixel past its centre), and then blurred by what
-    is left of ``size``.
+    The covered pixels, grown by ``pixels`` past where the furthest-reaching
+    covered pixel's coverage ends (a covered pixel's rim lies its own
+    coverage past its inner side, so a full one ends half a pixel past its
+    centre), and then blurred by what is left of ``size``.
     """
-    from scipy.ndimage import distance_transform_edt  # type: ignore[import-untyped]  # noqa: PLC0415
-
     alpha = shape[:, :, 0]
     covered = alpha >= effects._SPREAD_FLOOR
-    outside, nearest = distance_transform_edt(~covered, return_indices=True)
-    rim = alpha[nearest[0], nearest[1]]
-    matte = np.where(covered, 1.0, np.clip(pixels + rim - outside, 0.0, 1.0))
+    grown = np.clip(pixels + _reach(alpha, pixels), 0.0, 1.0)
+    matte = np.where(covered, 1.0, grown)
     return _box_passes(matte.astype(np.float64), size - pixels)
 
 
@@ -409,6 +435,78 @@ def test_the_spread_edge_follows_the_rim_pixels_own_coverage(
     )
     row = grown[20, 30:36, 0]
     assert np.allclose(row, [1.0, 1.0, 1.0, rim[-1], 0.0, 0.0], atol=1e-6), row
+
+
+def test_spread_grows_from_whichever_covered_pixel_reaches_furthest() -> None:
+    """Not from the nearest one: a fuller pixel a diagonal step back can win.
+
+    ``(12, 12)`` is a pixel from a faint one at ``(11, 12)`` and a diagonal
+    step from an opaque one at ``(11, 11)``. The opaque pixel's edge, half a
+    pixel past its centre, reaches ``1 - sqrt(2)`` short of it and the faint
+    one's ``alpha - 1``, so a 1 px spread covers it ``2 - sqrt(2)``. Beside
+    the faint pixel, at ``(11, 13)``, the faint one reaches furthest.
+    """
+    shape = np.zeros((21, 21, 1), dtype=np.float32)
+    shape[11, 11] = 1.0
+    shape[11, 12] = 0.05
+    grown = effects.draw_drop_shadow(
+        (0, 0, 21, 21), shape, distance=0.0, angle=0.0, size=1.0, spread=100.0
+    )
+    assert float(grown[12, 12, 0]) == pytest.approx(2.0 - math.sqrt(2.0), abs=1e-5)
+    assert float(grown[11, 13, 0]) == pytest.approx(0.05, abs=1e-5)
+
+
+@pytest.mark.parametrize("pixels", [1, 3, 9])
+def test_spread_is_the_furthest_reach_of_any_covered_pixel(pixels: int) -> None:
+    """Scattered levels, each covered pixel reaching ``alpha - length`` past ``x``."""
+    rng = np.random.default_rng(pixels)
+    alpha = np.where(rng.random((41, 47)) < 0.04, rng.random((41, 47)), 0.0)
+    alpha = (np.round(alpha * 255.0) / 255.0).astype(np.float32)
+    covered = alpha >= effects._SPREAD_FLOOR
+    expected = np.where(covered, 1.0, np.clip(pixels + _reach(alpha, pixels), 0, 1))
+    assert np.allclose(effects._spread(alpha, pixels), expected, atol=1e-5)
+
+
+def _nearest_rim(alpha: np.ndarray, pixels: int) -> np.ndarray:
+    """The ablation: the grown edge read off the nearest covered pixel alone."""
+    from scipy.ndimage import distance_transform_edt  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    covered = alpha >= effects._SPREAD_FLOOR * (1.0 - 1e-6)
+    if covered.all() or not covered.any():
+        return covered.astype(np.float32)
+    outside, nearest = distance_transform_edt(~covered, return_indices=True)
+    rim = alpha[nearest[0], nearest[1]]
+    grown = np.clip(pixels + rim - outside, 0.0, 1.0)
+    return np.where(covered, 1.0, grown).astype(np.float32)
+
+
+def _premultiplied_error(psd: PSDImage) -> np.ndarray:
+    """Each pixel's largest difference from the stored composite, colour premultiplied."""
+    reference = psd.numpy()
+    color, _, alpha = composite(psd)
+    result = np.concatenate((color * alpha, alpha), axis=2)
+    stored = np.concatenate(
+        (reference[..., :3] * reference[..., 3:], reference[..., 3:]), axis=2
+    )
+    return np.abs(result - stored).max(axis=-1)
+
+
+def test_spread_reaches_round_antialiased_edges_as_photoshop_grows_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every pixel of ``spread-cone.psd`` is within rounding.
+
+    Its rows are a drop shadow spread 28% of 4 px, 15% of 5 px and 50% of
+    8 px, an inner shadow choked 28% of 4 px and a soft outer glow spread
+    28% of 4 px, each in Normal at 100% over a transparent document, on a
+    pixel font's 45-degree staircase, a square turned 45 degrees, a disc, a
+    square at a sub-pixel offset and one opaque pixel.
+    """
+    psd = PSDImage.open(full_name("effects/spread-cone.psd"))
+    assert float(_premultiplied_error(psd).max()) < 1.5 / 255.0
+
+    monkeypatch.setattr(effects, "_spread", _nearest_rim)
+    assert float(_premultiplied_error(psd).max()) > 8.0 / 255.0
 
 
 def test_spread_grows_the_coverage_not_its_level() -> None:
@@ -635,7 +733,8 @@ def test_a_drop_shadow_lies_beneath_the_layer_not_beside_it() -> None:
     layer.tagged_blocks.set_data(Tag.BLEND_FILL_OPACITY, ByteElement(fill))
     alpha = _alone(layer, viewport)[y, inside, 0]
 
-    assert np.all(np.diff(shadow) > 0), "the shadow is not partial here"
+    assert np.all((shadow > 0) & (shadow < 1)), "the shadow is not partial here"
+    assert np.all(np.diff(shadow) >= 0) and shadow[-1] > shadow[0]
     f = fill / 255.0
     assert np.allclose(alpha, f + shadow * (1.0 - f), atol=1e-6)
 
@@ -719,7 +818,8 @@ def test_the_knockout_leaves_the_shadow_what_the_layers_shape_leaves(
     ramp, row, x0 = _ramp_row(layer)
     f, o = fill / 255.0, opacity / 255.0
     expected = o * (ramp * f + 1.0 - ramp)
-    assert np.allclose(row[x0 : x0 + 6], expected, atol=1e-5), row[x0 : x0 + 6]
+    # The shadow is held at the document's 8-bit levels (_faded_at_8_bits).
+    assert np.allclose(row[x0 : x0 + 6], expected, atol=_HALF_LEVEL), row[x0 : x0 + 6]
 
 
 def test_a_layer_in_another_mode_cuts_its_shadow_under_its_whole_shape() -> None:
@@ -792,7 +892,7 @@ def test_a_strokes_antialiased_rim_hides_the_shadow_at_its_opacity(
     b = band[rim]
     p = o if mode == Enum.Normal else 0.0
     expected = o * b + (1.0 - o * b) * (1.0 - b) / (1.0 - p * b)
-    assert np.allclose(alpha[rim], expected, atol=1e-5), alpha[rim]
+    assert np.allclose(alpha[rim], expected, atol=_HALF_LEVEL), alpha[rim]
 
 
 # The card's one stroke, inside, Normal and black, and switched off.
@@ -1234,14 +1334,16 @@ def test_a_groups_knockout_traces_its_stroke_from_the_groups_alpha() -> None:
 def _faint_tailed_group() -> tuple[PSDImage, Group]:
     """A white square casting a faint soft shadow, in a group with a 3 px stroke.
 
-    The shadow is 6% opaque and 8 px soft, straight under the square, so its
-    tail runs on below half a level of 8-bit alpha. The square's own stroke
-    and the group's shadow are switched off.
+    The shadow is 6% opaque and 8 px soft, straight under the square, and
+    the square's opacity of 40% fades its last levels, so its tail runs on
+    below half a level of 8-bit alpha. The square's own stroke and the
+    group's shadow are switched off.
     """
     psd = PSDImage.new("RGB", (80, 80))
     child = psd.create_pixel_layer(
         Image.new("RGBA", (20, 20), (255, 255, 255, 255)), top=30, left=30
     )
+    child.opacity = 102
     group = psd.create_group([child])
     block = _forge_header_effects(child)
     block[Klass.FrameFX][Key.Enabled] = False
@@ -1299,6 +1401,62 @@ def test_only_an_8_bit_document_is_held_at_its_levels() -> None:
     assert np.array_equal(_held(alpha, 8) * 255.0, [0.0, 0.0, 1.0, 2.0, 255.0])
     assert _held(alpha, 16) is alpha
     assert _held(alpha, 32) is alpha
+
+
+def test_an_8_bit_shadow_fades_its_held_matte_by_its_held_opacity() -> None:
+    """Matte and opacity each at 8 bits, their product rounded to a level.
+
+    At 46%, held as 117, a matte of 1.4 levels holds 1 and fades to nothing,
+    where the float product, 0.64 of a level, would round to one. 50% holds
+    as 128, half a level rounding up. Other depths fade in float.
+    """
+    coverage = np.array([1.4, 2.0, 1.0, 255.0], dtype=np.float32) / 255.0
+    faded = _faded_at_8_bits(coverage, 46.0, 8) * 255.0
+    assert np.array_equal(faded, np.round([117 / 255, 234 / 255, 117 / 255, 117]))
+    assert float(_held(coverage[:1] * 0.46, 8)[0]) * 255.0 == pytest.approx(1.0)
+    assert float(_faded_at_8_bits(coverage[2:3], 50.0, 8)[0]) * 255.0 == pytest.approx(
+        1.0
+    )
+    assert np.allclose(_faded_at_8_bits(coverage, 46.0, 16), coverage * 0.46)
+
+
+def _faded_in_float(coverage: np.ndarray, percent: float, depth: int) -> np.ndarray:
+    """The ablation: the matte faded by its opacity in float."""
+    return coverage * (percent / 100.0)
+
+
+def test_a_shadow_fades_as_photoshop_fades_it_at_8_bits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``shadow-opacity-levels.psd`` to the level, faint tails included.
+
+    Random dots under a drop shadow of size 3 at 100, 46, 6, 50, 90 and 2%,
+    in Normal over a transparent document: every pixel's alpha is the stored
+    one. Faded in float, some pixels keep a level Photoshop's do not.
+    """
+    psd = PSDImage.open(full_name("effects/shadow-opacity-levels.psd"))
+    stored = psd.numpy()[..., 3]
+    assert float(_premultiplied_error(psd).max()) < 0.5 / 255.0
+
+    module = sys.modules["psd_tools.composite.composite"]
+    monkeypatch.setattr(module, "_faded_at_8_bits", _faded_in_float)
+    _, _, alpha = composite(psd)
+    levels = np.floor(alpha[..., 0] * 255.0 + 0.5)
+    assert np.any((stored == 0) & (levels > 0))
+
+
+def test_a_groups_stroke_follows_its_childs_shadow_tail_as_photoshop_does() -> None:
+    """``group-stroke-shadow-tail.psd`` within rounding, on white.
+
+    The cards' setup twice over: a pixel font's diagonal casting a shadow
+    spread 28% of 4 px, and a turned square and a disc casting a 46% shadow
+    of 3 px, each in a group whose 9 px or 7 px outside stroke and shadow
+    trace the child's shadow to its last level.
+    """
+    psd = PSDImage.open(full_name("effects/group-stroke-shadow-tail.psd"))
+    reference = psd.numpy()[..., :3]
+    color, _, _ = composite(psd)
+    assert float(np.abs(color - reference).max()) < 1.5 / 255.0
 
 
 def _strokes(layer: Layer) -> list[Stroke]:
@@ -1580,7 +1738,9 @@ def test_a_shape_layer_with_its_fill_off_casts_its_shadow_from_its_stroke() -> N
         "not a ring"
     )
     # Left of the ring only the shadow paints: the ring, moved 6 px.
-    assert np.allclose(alpha[:, left - 6 : left], ring[:, left : left + 6], atol=1e-6)
+    assert np.allclose(
+        alpha[:, left - 6 : left], ring[:, left : left + 6], atol=_HALF_LEVEL
+    )
 
 
 def test_a_shape_layers_shadow_reaches_as_far_as_its_outer_vector_stroke() -> None:

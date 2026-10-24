@@ -7,6 +7,7 @@ for every kind that can repeat.
 """
 
 import copy
+import math
 
 import numpy as np
 import pytest
@@ -288,5 +289,6 @@ def test_a_faded_first_listed_drop_shadow_is_composited_over_the_second(
         desc[b"Dstn"] = Double(2.0)
         desc[b"blur"] = Double(0.0)
         desc[b"Ckmt"] = Double(0.0)
-    mixed = _over(opacity / 100.0, _RED, _BLUE)
+    # An 8-bit document holds the shadow's opacity at a level (_faded_at_8_bits).
+    mixed = _over(math.floor(opacity * 255.0 / 100.0 + 0.5) / 255.0, _RED, _BLUE)
     np.testing.assert_allclose(_below(psd), [mixed, mixed, (1.0, 1.0, 1.0)], atol=1e-6)

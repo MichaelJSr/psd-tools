@@ -1,5 +1,5 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True, language_level=3
-"""C loops behind effects._nearest_boundary and effects._chamfer_transform.
+"""C loops behind effects._nearest_boundary, effects._chamfer_transform and _chamfer_relax.
 
 The numpy code's float32 (pruned minimum) and float64 (chamfer) operations in
 the same order, so the results are bit-identical. Memoryviews only, so the
@@ -76,12 +76,17 @@ cdef inline void _relax(double[:, ::1] f, Py_ssize_t row, Py_ssize_t before, Py_
 
 def chamfer_transform(mask, double diag, double knight):
     mask = np.ascontiguousarray(mask, dtype=bool)
-    cdef Py_ssize_t height, width
     # Unpacking checks the length (ValueError, as the numpy code); shape[1]
     # of a 1-D mask would read past the tuple under boundscheck=False.
     height, width = mask.shape
     out = np.where(mask, np.inf, 0.0)
-    cdef double[:, ::1] f = out
+    chamfer_relax(out, diag, knight)
+    return out.astype(np.float32)
+
+
+def chamfer_relax(double[:, ::1] f, double diag, double knight):
+    """Lower each value of ``f`` to the least of every value plus its chamfer length, in place."""
+    cdef Py_ssize_t height = f.shape[0], width = f.shape[1]
     cdef double[::1] tmp = np.empty(max(width, 1), dtype=np.float64)
     cdef Py_ssize_t passno, idx, row, step, before, j
     cdef double run, v
@@ -120,7 +125,6 @@ def chamfer_transform(mask, double diag, double knight):
                 for j in range(width):
                     if tmp[j] < f[row, j]:
                         f[row, j] = tmp[j]
-    return out.astype(np.float32)
 
 
 def disk_reach(const unsigned char[:, ::1] stating, double radius):

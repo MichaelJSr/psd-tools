@@ -200,6 +200,21 @@ def _held(alpha: np.ndarray, depth: int) -> np.ndarray:
     return (np.floor(alpha * _LEVELS_8 + 0.5) / _LEVELS_8).astype(np.float32)
 
 
+def _faded_at_8_bits(coverage: np.ndarray, percent: float, depth: int) -> np.ndarray:
+    """A shadow's ``coverage`` faded by its opacity ``percent``, in 8-bit steps.
+
+    In an 8-bit document Photoshop holds the matte and the opacity at 8 bits
+    and rounds their product, so a faint tail can fade to nothing or keep a
+    level where the float product would not; a group's stroke traces exactly
+    that (``effects/shadow-opacity-levels.psd``). Other depths fade in float.
+    """
+    if depth != 8:
+        return coverage * (percent / 100.0)
+    level = np.floor(coverage * _LEVELS_8 + 0.5)
+    opacity = math.floor(percent * _LEVELS_8 / 100.0 + 0.5)
+    return (np.floor(level * opacity / _LEVELS_8 + 0.5) / _LEVELS_8).astype(np.float32)
+
+
 def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
     """Whether compositing the layer keeps ``1 - alpha`` of what lies beneath.
 
@@ -5204,7 +5219,7 @@ class Compositor:
                 )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
-                faded = coverage * effect_opacity
+                faded = _faded_at_8_bits(coverage, shadow.opacity, layer._psd.depth)
                 self._apply_source(
                     color, coverage, faded * opacity, blend_mode, faded=faded
                 )
