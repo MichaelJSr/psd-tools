@@ -7,7 +7,8 @@ Changelog
 - [refactor] Compositing is faster: the arithmetic that puts a source on the
   canvas runs in the new compiled ``psd_tools.composite._blend`` (numpy where
   it is not built), a group's shadow, knockout and stroke share one composite
-  of its alpha, and RLE channels decode in one call. Renders are unchanged
+  of its alpha, RLE channels decode in one call, and a gradient no longer
+  imports ``scipy.interpolate``. Renders are unchanged
 - [security] Upstream 1.26.0's bound on the stroke distance search is not
   taken: it measures straight-line distance where this fork measures
   Photoshop's chamfer distance, and would move stroke edges. A very wide stroke

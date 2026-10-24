@@ -9,7 +9,7 @@ F = TypeVar("F", bound=Callable)
 if TYPE_CHECKING:
     # Type checkers see these as always available
     import aggdraw  # type: ignore[import-not-found]
-    from scipy import interpolate  # type: ignore[import-untyped]
+    import scipy  # type: ignore[import-untyped]
 
 # Check for optional dependencies
 try:
@@ -20,7 +20,8 @@ except ImportError:
     HAS_AGGDRAW = False
 
 try:
-    from scipy import interpolate  # noqa: F401  # type: ignore[import-untyped,no-redef]
+    # The package only: each submodule is imported where it is used.
+    import scipy  # noqa: F401  # type: ignore[import-untyped,no-redef]
 
     HAS_SCIPY = True
 except ImportError:
