@@ -1,0 +1,2 @@
+recursive-include src/psd_tools *.pyx
+global-exclude *.c *.cpp *.so

@@ -4,6 +4,8 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [packaging] The sdist carries the Cython sources, so a wheel builds from
+  it, and the wheel no longer ships the generated C
 - [fix] A shape's vector stroke follows its curves as Photoshop draws them
   instead of cutting small rounded corners short. **Rendering change** for
   stroked shapes with curves, most for small rounded corners
