@@ -14,6 +14,13 @@ Changelog
   as a glyph's, the stroke reaches as far as Photoshop's instead of stopping
   short. **Rendering change** for strokes and precise glows on antialiased
   layers and text
+- [fix] A shadow's spread, an inner shadow's choke and a soft outer glow's
+  spread grow from whichever covered pixel reaches furthest, and in 8-bit
+  documents a drop shadow's opacity fades its matte in 8-bit steps, as
+  Photoshop does: diagonal and curved edges spread as far as Photoshop's, and
+  a group's stroke round a child's shadow ends where Photoshop's does.
+  **Rendering change** for spread or choked effects on antialiased layers and
+  text, and by up to a level for faded drop shadows
 - [fix] Vibrance is read off tables measured from Photoshop's renders of
   every 8-bit colour instead of a fitted formula, so vibrance and saturation
   land within a level of Photoshop's for nearly every colour at any amount,

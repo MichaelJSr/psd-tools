@@ -486,8 +486,21 @@ def _chamfer_transform(mask: np.ndarray) -> np.ndarray:
     """
     if _cdistance is not None:
         return _cdistance.chamfer_transform(mask, _DIAGONAL, _KNIGHT)
-    height, width = mask.shape
-    field = np.where(mask, np.inf, 0.0)
+    return _chamfer_relax(np.where(mask, np.inf, 0.0)).astype(np.float32)
+
+
+def _chamfer_relax(field: np.ndarray) -> np.ndarray:
+    """``field`` lowered in place to ``min(field[q] + length(x - q))`` over every ``q``.
+
+    The passes :py:func:`_chamfer_transform` runs, from a float64 ``field``
+    holding each pixel's own starting value rather than a zero. Unlike
+    :py:func:`_nearest_boundary`'s minimum, the cost does not grow with how
+    far a value travels.
+    """
+    if _cdistance is not None and hasattr(_cdistance, "chamfer_relax"):
+        _cdistance.chamfer_relax(field, _DIAGONAL, _KNIGHT)
+        return field
+    height, width = field.shape
     cols = np.arange(width, dtype=np.float64)
     moves = ((1, 0, 1.0), (1, 1, _DIAGONAL), (1, 2, _KNIGHT), (2, 1, _KNIGHT))
     for order in (range(height), range(height - 1, -1, -1)):
@@ -507,7 +520,7 @@ def _chamfer_transform(mask: np.ndarray) -> np.ndarray:
             np.minimum(line, np.minimum.accumulate(line - cols) + cols, out=line)
             back = np.minimum.accumulate((line + cols)[::-1])[::-1] - cols
             np.minimum(line, back, out=line)
-    return field.astype(np.float32)
+    return field
 
 
 def _nearest_boundary(
@@ -1229,14 +1242,17 @@ def _spread(alpha: np.ndarray, pixels: int) -> np.ndarray:
     cast from its outermost fringe and comes out hard, and a half-covered
     silhouette casts an opaque matte.
 
-    The edge is grown from where the coverage ends, read off the outermost
-    covered pixels: a pixel's coverage reaches that share of the way across
-    it, so a fully covered pixel's edge is half a pixel past its centre, as
-    :py:func:`_signed_distance` puts a hard edge, and a feather's faint
-    fringe ends about half a pixel short of its centre.
+    Each covered pixel's coverage reaches that share of the way across it,
+    so a fully covered pixel's edge is half a pixel past its centre and a
+    faint fringe's about half a pixel short of it, and the grown edge is the
+    furthest any covered pixel reaches: ``pixels + alpha - length`` at its
+    best over all of them, the length in :py:func:`_chamfer_length`'s metric.
+    Read off the nearest covered pixel alone, a diagonal or curved
+    antialiased edge comes out short wherever a fuller pixel a step further
+    back reaches further (``effects/spread-cone.psd``). That maximum is
+    ``pixels + 0.5`` less the nearest boundary the covered pixels state at
+    ``0.5 - alpha``, which :py:func:`_chamfer_relax` finds.
     """
-    from scipy.ndimage import distance_transform_edt  # type: ignore[import-untyped]  # noqa: PLC0415
-
     # A hair under the floor: the complement of an 8-bit level, taken in
     # float32, lands an ulp short of it.
     inside = alpha >= _SPREAD_FLOOR * (1.0 - 1e-6)
@@ -1244,9 +1260,18 @@ def _spread(alpha: np.ndarray, pixels: int) -> np.ndarray:
         return np.ones(alpha.shape, dtype=np.float32)
     if not inside.any():
         return np.zeros(alpha.shape, dtype=np.float32)
-    outside, nearest = distance_transform_edt(~inside, return_indices=True)
-    edge = alpha[nearest[0], nearest[1]]
-    grown = np.clip(pixels + edge - outside, 0.0, 1.0)
+    # Past ``pixels + 1`` no covered pixel reaches, even an opaque one.
+    height, width = alpha.shape
+    rows, cols = np.nonzero(inside)
+    span = pixels + 1
+    crop = (
+        slice(max(rows.min() - span, 0), min(rows.max() + span + 1, height)),
+        slice(max(cols.min() - span, 0), min(cols.max() + span + 1, width)),
+    )
+    near = 0.5 - np.clip(alpha[crop], 0.0, 1.0).astype(np.float64)
+    boundary = _chamfer_relax(np.where(inside[crop], near, np.inf))
+    grown = np.zeros(alpha.shape, dtype=np.float32)
+    grown[crop] = np.clip(pixels + 0.5 - boundary, 0.0, 1.0)
     return np.where(inside, np.float32(1.0), grown).astype(np.float32)
 
 

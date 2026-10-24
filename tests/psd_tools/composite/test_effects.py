@@ -2314,6 +2314,41 @@ def test_the_compiled_loops_match_numpy(
     assert compiled.tobytes() == _signed_distance(alpha, reach).tobytes()
 
 
+def _weighted_field(seed: int) -> np.ndarray:
+    """A float64 field of scattered starting values, the rest infinitely far."""
+    rng = np.random.default_rng(seed)
+    field = np.full((37, 53), np.inf)
+    starts = rng.random(field.shape) < 0.03
+    field[starts] = rng.uniform(-0.5, 0.5, int(starts.sum()))
+    return field
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+def test_the_chamfer_relaxation_is_the_least_start_plus_length(
+    monkeypatch: pytest.MonkeyPatch, compiled: bool
+) -> None:
+    """``min(field[q] + length(x - q))`` over every ``q``, from any starting values."""
+    if compiled and effects._cdistance is None:
+        pytest.skip("compiled loops not built")
+    if not compiled:
+        monkeypatch.setattr(effects, "_cdistance", None)
+    field = _weighted_field(5)
+    rows, cols = np.nonzero(np.isfinite(field))
+    yy, xx = np.mgrid[: field.shape[0], : field.shape[1]]
+    lengths = _chamfer_length(yy[..., None] - rows, xx[..., None] - cols)
+    expected = (field[rows, cols] + lengths).min(axis=-1)
+    assert np.allclose(effects._chamfer_relax(field.copy()), expected, atol=1e-5)
+
+
+@pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
+def test_the_compiled_relaxation_matches_numpy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiled = effects._chamfer_relax(_weighted_field(9))
+    monkeypatch.setattr(effects, "_cdistance", None)
+    assert compiled.tobytes() == effects._chamfer_relax(_weighted_field(9)).tobytes()
+
+
 @pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
 @pytest.mark.parametrize("radius", [0.5, 1.0, 2.5, 7.0, 40.0])
 def test_the_compiled_disk_marking_is_the_distance_transform(radius: float) -> None:
