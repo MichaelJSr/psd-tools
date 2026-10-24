@@ -5046,7 +5046,12 @@ class Compositor:
             hit = self._cache.rc.get(rkey)
             if hit is not None:
                 alpha = self._cache.group_alphas[key] = hit[0]
+        if alpha is None and rkey is None:
+            inner, alpha = self._held_group_alpha(layer, inner)
         if alpha is None:
+            if rkey is None:
+                inner = self._group_alpha_box(layer, viewport, inner, passthrough)
+                key = (id(layer), inner)
             inner_h, inner_w = inner[3] - inner[1], inner[2] - inner[0]
             group_compositor = Compositor(
                 inner,
@@ -5069,6 +5074,54 @@ class Compositor:
                 assert self._cache.rc is not None
                 self._cache.rc.put(rkey, (alpha,))
         return paste(viewport, inner, alpha)
+
+    def _held_group_alpha(
+        self, layer: Layer, inner: tuple[int, int, int, int]
+    ) -> tuple[tuple[int, int, int, int], np.ndarray | None]:
+        """A group alpha this pass already holds on a box around ``inner``, and that box."""
+        x0, y0, x1, y1 = inner
+        for (held, box), alpha in self._cache.group_alphas.items():
+            if (
+                held == id(layer)
+                and box[0] <= x0
+                and box[1] <= y0
+                and x1 <= box[2]
+                and y1 <= box[3]
+            ):
+                return box, alpha
+        return inner, None
+
+    def _group_alpha_box(
+        self,
+        layer: Layer,
+        viewport: tuple[int, int, int, int],
+        inner: tuple[int, int, int, int],
+        passthrough: bool,
+    ) -> tuple[int, int, int, int]:
+        """``inner`` grown to the boxes the group's strokes are traced on.
+
+        A shadow's knockout traces them from the shadow's box and the strokes
+        from this compositor's viewport, each a little wider than the shadow;
+        composited once on all of them, the alpha is cropped for each.
+        """
+        if self._traces_mask(layer):
+            return inner
+        content = _content_bbox(layer, self._cache.content_bboxes)
+        box = inner
+        for effect in _readable(layer, "stroke"):
+            try:
+                drawn = _stroke_box(
+                    layer, effect.descriptor, self._cache.content_bboxes
+                )
+                reach = stroke_reach(effect.descriptor)
+            except _UNREADABLE:
+                continue
+            for within in (viewport, self._viewport):
+                traced = _within_reach(drawn, within, reach)
+                if not passthrough:
+                    traced = utils.intersect(traced, content)
+                box = utils.union_bbox(box, traced)
+        return box
 
     def _cast_shape(
         self, layer: Layer, viewport: tuple[int, int, int, int]
