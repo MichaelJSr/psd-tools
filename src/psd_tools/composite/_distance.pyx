@@ -55,25 +55,6 @@ cdef double DIAG = 1.4142135623730951
 cdef double KNIGHT = 2.23606797749979
 
 
-cdef inline void _relax(double[:, ::1] f, Py_ssize_t row, Py_ssize_t before, Py_ssize_t across, double length, Py_ssize_t width) noexcept nogil:
-    cdef Py_ssize_t j
-    cdef double s
-    if across == 0:
-        for j in range(width):
-            s = f[before, j] + length
-            if s < f[row, j]:
-                f[row, j] = s
-        return
-    for j in range(across, width):
-        s = f[before, j - across] + length
-        if s < f[row, j]:
-            f[row, j] = s
-    for j in range(0, width - across):
-        s = f[before, j + across] + length
-        if s < f[row, j]:
-            f[row, j] = s
-
-
 def chamfer_transform(mask, double diag, double knight):
     mask = np.ascontiguousarray(mask, dtype=bool)
     cdef Py_ssize_t height, width
@@ -82,44 +63,132 @@ def chamfer_transform(mask, double diag, double knight):
     height, width = mask.shape
     out = np.where(mask, np.inf, 0.0)
     cdef double[:, ::1] f = out
-    cdef double[::1] tmp = np.empty(max(width, 1), dtype=np.float64)
-    cdef Py_ssize_t passno, idx, row, step, before, j
-    cdef double run, v
-    cdef int k
-    cdef Py_ssize_t downs[4]
-    cdef Py_ssize_t acrosses[4]
-    cdef double lens[4]
-    downs[:] = [1, 1, 1, 2]
-    acrosses[:] = [0, 1, 2, 1]
-    lens[:] = [1.0, diag, knight, knight]
+    cdef Py_ssize_t passno, idx, row, step, b1, b2, j
+    cdef double run, v, m, s
+    cdef bint has1, has2
+    cdef double* cur
+    cdef double* p1
+    cdef double* p2
+    cdef Py_ssize_t edge[4]
+    cdef int e
     with nogil:
         for passno in range(2):
             step = 1 if passno == 0 else -1
             for idx in range(height):
                 row = idx if passno == 0 else height - 1 - idx
-                for k in range(4):
-                    before = row - step * downs[k]
-                    if before < 0 or before >= height or acrosses[k] >= width:
-                        continue
-                    _relax(f, row, before, acrosses[k], lens[k], width)
+                b1 = row - step
+                b2 = row - 2 * step
+                has1 = 0 <= b1 < height
+                has2 = 0 <= b2 < height and width > 1
+                cur = &f[row, 0]
+                # Every move from the one or two rows before at once: each is
+                # a minimum against a finished row, so the order is free.
+                if has1 and has2 and width > 4:
+                    p1 = &f[b1, 0]
+                    p2 = &f[b2, 0]
+                    for j in range(2, width - 2):
+                        m = cur[j]
+                        s = p1[j] + 1.0
+                        m = s if s < m else m
+                        s = p1[j - 1] + diag
+                        m = s if s < m else m
+                        s = p1[j + 1] + diag
+                        m = s if s < m else m
+                        s = p1[j - 2] + knight
+                        m = s if s < m else m
+                        s = p1[j + 2] + knight
+                        m = s if s < m else m
+                        s = p2[j - 1] + knight
+                        m = s if s < m else m
+                        s = p2[j + 1] + knight
+                        m = s if s < m else m
+                        cur[j] = m
+                    edge[0] = 0
+                    edge[1] = 1
+                    edge[2] = width - 2
+                    edge[3] = width - 1
+                    for e in range(4):
+                        j = edge[e]
+                        m = cur[j]
+                        s = p1[j] + 1.0
+                        if s < m:
+                            m = s
+                        if j >= 1:
+                            s = p1[j - 1] + diag
+                            if s < m:
+                                m = s
+                        if j + 1 < width:
+                            s = p1[j + 1] + diag
+                            if s < m:
+                                m = s
+                        if j >= 2:
+                            s = p1[j - 2] + knight
+                            if s < m:
+                                m = s
+                        if j + 2 < width:
+                            s = p1[j + 2] + knight
+                            if s < m:
+                                m = s
+                        if j >= 1:
+                            s = p2[j - 1] + knight
+                            if s < m:
+                                m = s
+                        if j + 1 < width:
+                            s = p2[j + 1] + knight
+                            if s < m:
+                                m = s
+                        cur[j] = m
+                elif has1 or has2:
+                    p1 = &f[b1, 0] if has1 else cur
+                    p2 = &f[b2, 0] if has2 else cur
+                    for j in range(width):
+                        m = cur[j]
+                        if has1:
+                            s = p1[j] + 1.0
+                            if s < m:
+                                m = s
+                            if j >= 1:
+                                s = p1[j - 1] + diag
+                                if s < m:
+                                    m = s
+                            if j + 1 < width:
+                                s = p1[j + 1] + diag
+                                if s < m:
+                                    m = s
+                            if j >= 2:
+                                s = p1[j - 2] + knight
+                                if s < m:
+                                    m = s
+                            if j + 2 < width:
+                                s = p1[j + 2] + knight
+                                if s < m:
+                                    m = s
+                        if has2:
+                            if j >= 1:
+                                s = p2[j - 1] + knight
+                                if s < m:
+                                    m = s
+                            if j + 1 < width:
+                                s = p2[j + 1] + knight
+                                if s < m:
+                                    m = s
+                        cur[j] = m
                 run = INFINITY
                 for j in range(width):
-                    v = f[row, j] - <double>j
+                    v = cur[j] - <double>j
                     if v < run or j == 0:
                         run = v
-                    tmp[j] = run + <double>j
-                for j in range(width):
-                    if tmp[j] < f[row, j]:
-                        f[row, j] = tmp[j]
+                    v = run + <double>j
+                    if v < cur[j]:
+                        cur[j] = v
                 run = INFINITY
                 for j in range(width - 1, -1, -1):
-                    v = f[row, j] + <double>j
+                    v = cur[j] + <double>j
                     if v < run or j == width - 1:
                         run = v
-                    tmp[j] = run - <double>j
-                for j in range(width):
-                    if tmp[j] < f[row, j]:
-                        f[row, j] = tmp[j]
+                    v = run - <double>j
+                    if v < cur[j]:
+                        cur[j] = v
     return out.astype(np.float32)
 
 
