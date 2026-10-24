@@ -1531,14 +1531,25 @@ def _soft_masks() -> list[tuple[str, np.ndarray]]:
     return [(name, a) for name, a in masks if ((a > 0) & (a < 1)).any()]
 
 
-def _search_paths(monkeypatch: pytest.MonkeyPatch, compiled: bool) -> None:
-    if compiled and effects._cdistance is None:
-        pytest.skip("compiled loops not built")
-    if not compiled:
-        monkeypatch.setattr(effects, "_cdistance", None)
+_SEARCH_PATHS = ["compiled", "erosion", "loop"]
 
 
-@pytest.mark.parametrize("compiled", [True, False])
+def _search_path(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    """Route ``_nearest_boundary`` through one branch.
+
+    Without the compiled loops the density gate alone picks numpy's erosion
+    or loop, so it is pinned to either extreme.
+    """
+    if path == "compiled":
+        if effects._cdistance is None:
+            pytest.skip("compiled loops not built")
+        return
+    monkeypatch.setattr(effects, "_cdistance", None)
+    density = 0.0 if path == "erosion" else 1.1
+    monkeypatch.setattr(effects, "_DENSE_EROSION_DENSITY", density)
+
+
+@pytest.mark.parametrize("path", _SEARCH_PATHS)
 @pytest.mark.parametrize(
     "radius",
     [
@@ -1555,7 +1566,7 @@ def _search_paths(monkeypatch: pytest.MonkeyPatch, compiled: bool) -> None:
     ],
 )
 def test_the_nearest_boundary_matches_a_search_of_every_offset(
-    monkeypatch: pytest.MonkeyPatch, compiled: bool, radius: float
+    monkeypatch: pytest.MonkeyPatch, path: str, radius: float
 ) -> None:
     """Reach edges, chamfer-exact radii and masks of every density agree bitwise.
 
@@ -1563,7 +1574,7 @@ def test_the_nearest_boundary_matches_a_search_of_every_offset(
     a float32 length and the radius disagree about whether a seed is in reach,
     and a radius under 1 reaches no seed at all.
     """
-    _search_paths(monkeypatch, compiled)
+    _search_path(monkeypatch, path)
     for name, alpha in _soft_masks():
         stating = (alpha > 0) & (alpha < 1)
         near = (0.5 - alpha).astype(np.float32)
@@ -1572,12 +1583,12 @@ def test_the_nearest_boundary_matches_a_search_of_every_offset(
         assert np.array_equal(found, expected), (name, radius)
 
 
-@pytest.mark.parametrize("compiled", [True, False])
+@pytest.mark.parametrize("path", _SEARCH_PATHS)
 def test_a_feathered_mask_is_searched_exactly(
-    monkeypatch: pytest.MonkeyPatch, compiled: bool
+    monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
     """Every pixel of the layer a seed, with the widest spread of weights."""
-    _search_paths(monkeypatch, compiled)
+    _search_path(monkeypatch, path)
     rng = np.random.default_rng(1)
     alpha = np.zeros((40, 40), dtype=np.float32)
     alpha[10:30, 10:30] = rng.random((20, 20), dtype=np.float32)

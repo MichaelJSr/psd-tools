@@ -385,7 +385,8 @@ Changelog
   memory and CPU: an ordinary file could take minutes and tens of gigabytes
   where it now takes seconds, with the same pixels. A stroke canvas is now
   budgeted at 128 bytes per pixel, so a stroked layer of more than about 33
-  megapixels needs a higher ``max_alloc_bytes`` (#897, #895, #1029)
+  megapixels needs a higher ``max_alloc_bytes`` (#897, #895, #1029). Not
+  taken in this fork; see 1.26.0+cards above
 - [api] ``LinkedLayer`` reads the descriptor that ends a version 8 entry into
   ``content_descriptor``, and writes it back. Saving a file with a smart object
   embedded by Photoshop 26.9 or later no longer drops it. Photoshop refuses a
