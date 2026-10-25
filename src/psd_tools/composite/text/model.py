@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
+from psd_tools.api.text_edit import stylistic_alternates
 from psd_tools.composite.text.constants import (
     AUTO_LEADING,
     SUB_POSITION,
@@ -55,6 +57,8 @@ class Style:
     fill: RGB  #: straight RGB 0..1
     leading: float  #: pt, used when ``auto_leading`` is false
     auto_leading: bool
+    #: Character > OpenType > Stylistic Alternates: shaped with ``salt``
+    stylistic_alternates: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +116,7 @@ class TextModel:
         pnormal = _nth(psheets, pnormal_index, "Properties")
 
         runs = _runs(text, offsets, _get(engine, "StyleRun", None), normal, font_set)
+        runs = _with_alternates(runs, stylistic_alternates(layer))
         paragraphs = _paragraphs(
             text, offsets, _get(engine, "ParagraphRun", None), pnormal
         )
@@ -230,7 +235,27 @@ def _style(data: Any, normal: Any, font_set: Sequence[str]) -> Style:
         fill=_fill(data, normal),
         leading=float(_lookup(data, normal, "Leading", 0.0)),
         auto_leading=bool(_lookup(data, normal, "AutoLeading", True)),
+        stylistic_alternates=bool(_lookup(data, normal, "StylisticAlternates", False)),
     )
+
+
+def _with_alternates(
+    runs: list[Run], spans: tuple[tuple[int, int], ...] | None
+) -> list[Run]:
+    """Runs cut where the story turns Stylistic Alternates on or off."""
+    if spans is None:
+        return runs
+    cuts = sorted({i for span in spans for i in span})
+    out: list[Run] = []
+    for run in runs:
+        bounds = [run.start, *(c for c in cuts if run.start < c < run.end), run.end]
+        for a, b in pairwise(bounds):
+            on = any(s <= a and b <= e for s, e in spans)
+            style = run.style
+            if style.stylistic_alternates != on:
+                style = replace(style, stylistic_alternates=on)
+            out.append(Run(a, b, style))
+    return out
 
 
 def _spans(text: str, offsets: Sequence[int], run: Any) -> list[tuple[int, int, Any]]:

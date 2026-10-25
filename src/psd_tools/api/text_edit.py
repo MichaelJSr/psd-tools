@@ -34,6 +34,7 @@ __all__ = [
     "set_span_style",
     "set_text",
     "story_text",
+    "stylistic_alternates",
     "sync_story",
     "utf16_prefix",
 ]
@@ -158,6 +159,7 @@ _FEATURES = {
     "FontCaps": 12,
     "FontBaseline": 13,
     "Ligatures": 18,
+    "StylisticAlternates": 28,
     "BaselineDirection": 35,
     "Tsume": 36,
     "StyleRunAlignment": 37,
@@ -288,6 +290,36 @@ def story_text(layer: TypeLayer) -> str | None:
     r"""Return the text of the layer's Txt2 story, final ``\r`` included, or None."""
     story = _story(layer)
     return None if story is None else story.text
+
+
+def stylistic_alternates(layer: TypeLayer) -> tuple[tuple[int, int], ...] | None:
+    """Return the ``str`` spans with Stylistic Alternates on in the layer's story.
+
+    Photoshop writes the flag to the Txt2 story only, not to TySh. None
+    without a story, or when the story holds other text than the layer.
+    """
+    try:
+        story = _story(layer)
+        text = None if story is None else _editor_text(layer)
+        if story is None or story.text != text:
+            return None
+        units = utf16_prefix(text)
+        spans = story._spans(story.model[story.k.styles], units[-1])
+    except (ValueError, IndexError, KeyError, TypeError):
+        return None
+    k = story.k
+    key = str(_FEATURES["StylisticAlternates"]) if k.numbered else "StylisticAlternates"
+    out: list[tuple[int, int]] = []
+    for u0, u1, data in spans:
+        sheet = data.get(k.sheet) if isinstance(data, engine_data.Dict) else None
+        inner = sheet.get(k.features) if isinstance(sheet, engine_data.Dict) else None
+        flag = inner.get(key) if isinstance(inner, engine_data.Dict) else None
+        if getattr(flag, "value", flag) is True:
+            a, b = _str_index(units, u0), _str_index(units, u1)
+            if out and out[-1][1] == a:
+                a = out.pop()[0]
+            out.append((a, b))
+    return tuple(out)
 
 
 def sync_story(layer: TypeLayer) -> bool:

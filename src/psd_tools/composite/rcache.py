@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from psd_tools.api.text_edit import stylistic_alternates
 from psd_tools.constants import Resource, Tag
 
 if TYPE_CHECKING:
@@ -151,6 +152,8 @@ def layer_key(layer: Layer, memo: dict[int, bytes]) -> bytes:
     digest.update(_record_bytes(layer._record, version))
     for channel in layer._channels:
         digest.update(channel.data)
+    if layer.kind == "type":  # Stylistic Alternates live in Txt2 only
+        digest.update(repr(stylistic_alternates(layer)).encode())  # type: ignore[arg-type]
     if layer.is_group():
         bounding = getattr(layer, "_bounding_record", None)
         if bounding is not None:

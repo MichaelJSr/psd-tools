@@ -9,6 +9,7 @@ pytest.importorskip("uharfbuzz")
 
 from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
+from psd_tools.api.text_edit import set_span_style, stylistic_alternates
 from psd_tools.composite.text import model as model_module
 from psd_tools.composite.text.layout import frame
 from psd_tools.composite.text.model import TextModel, utf16_to_str
@@ -270,3 +271,26 @@ def test_resource_constants(text_layer: TypeLayer) -> None:
     m = TextModel.from_layer(cast(TypeLayer, _Layer(text_layer.engine_dict, resources)))
     assert (m.sub_size, m.sub_position, m.auto_leading) == (0.6, 0.3, 1.5)
     assert m.transform == (2.0, 0.0, 0.0, 2.0, 10.0, 20.0)
+
+
+def test_stylistic_alternates_from_story() -> None:
+    # Photoshop 2023 writes Stylistic Alternates to the Txt2 story only.
+    layer = _type_layer("text-stylistic-alternates.psd")
+    model = TextModel.from_layer(layer)
+    assert model.text == "Abc (1CD)\r"
+    assert [(r.start, r.end, r.style.stylistic_alternates) for r in model.runs] == [
+        (0, 10, True)
+    ]
+    set_span_style(layer, 0, 4, StylisticAlternates=False)
+    assert stylistic_alternates(layer) == ((4, 10),)
+    runs = TextModel.from_layer(layer).runs
+    assert [(r.start, r.end, r.style.stylistic_alternates) for r in runs] == [
+        (0, 4, False),
+        (4, 10, True),
+    ]
+
+
+def test_stylistic_alternates_without_story(text_layer: TypeLayer) -> None:
+    assert not any(
+        r.style.stylistic_alternates for r in TextModel.from_layer(text_layer).runs
+    )

@@ -263,3 +263,11 @@ def test_make_font_adapter(make_font: Callable[..., str]) -> None:
     text = "I"
     shaped = shape_piece(text, 0, 1, runs_for(text, style()), fonts)
     assert shaped.glyphs[0].face.metrics.ascent_glyph == "h"
+
+
+def test_stylistic_alternates(fonts: FontMap) -> None:
+    text = "II"
+    runs = runs_for(text, style(), style(stylistic_alternates=True), cuts=(1,))
+    assert shaping_key(runs[0].style) != shaping_key(runs[1].style)
+    shaped = shape_piece(text, 0, 2, runs, fonts)
+    assert [g.adv for g in shaped.glyphs] == [adv("I"), adv("A")]

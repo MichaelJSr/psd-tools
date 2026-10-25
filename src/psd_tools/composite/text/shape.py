@@ -71,6 +71,7 @@ def shaping_key(style: Style) -> tuple[object, ...]:
         style.faux_bold,
         style.faux_italic,
         style.baseline_shift,
+        style.stylistic_alternates,
     )
 
 
@@ -154,6 +155,8 @@ def shape_piece(
             "clig": style.ligatures,
             "calt": False,
         }
+        if style.stylistic_alternates:
+            features["salt"] = True
         # AutoKerning off on a character removes the pair ending at it; the
         # segment's first character has no pair to remove.
         off = [j for j in range(1, n) if not runs[at(s + j)].style.auto_kerning]

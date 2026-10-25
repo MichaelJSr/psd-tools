@@ -56,6 +56,7 @@ D_ROUND = ["SVTCA[0]", *("PUSHB[ ]", "1", "MDAP[1]"), *("PUSHB[ ]", "2", "MDAP[1
 FEATURES = f"""
 feature kern {{ pos A V {KERN_A_V}; }} kern;
 feature liga {{ sub f i by f_i; }} liga;
+feature salt {{ sub I by A; }} salt;
 """
 
 FONTS_DIR = os.path.join(
