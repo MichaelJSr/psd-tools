@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -12,7 +13,8 @@ from psd_tools.composite.text.constants import FAUX_BOLD_EM, SUB_SIZE
 from psd_tools.composite.text.fonts import Face, FontMap
 from psd_tools.composite.text.model import Run, Style
 
-#: Characters that take the space glyph's advance and offer a line break.
+#: Characters that take the space glyph's advance and offer a line break; a
+#: tab's advance then runs to the next tab stop.
 SPACE_CLASS = frozenset(" \t")
 #: Terminators: never shaped, no glyph, no advance.
 CONTROL = frozenset("\r\x03\n")
@@ -42,6 +44,9 @@ class Shaped:
     measure: Callable[[int, int], float]
     #: advance of each space-class character by ``str`` index
     space_adv: Mapping[int, float]
+    #: ``tab_adv(a, b)``: advance of each tab in ``text[a:b]`` by ``str``
+    #: index, the line starting at ``a`` at a tab stop
+    tab_adv: Callable[[int, int], Mapping[int, float]]
 
 
 def rendered_em(style: Style, sub_size: float = SUB_SIZE) -> float:
@@ -123,11 +128,14 @@ def shape_piece(
     fonts: FontMap,
     *,
     sub_size: float = SUB_SIZE,
+    tab_width: float = 0.0,
 ) -> Shaped:
     """Shape ``text[a:b]``, one segment per run of identical shaping style.
 
     A run whose font resolved to no face (``skip`` policy) produces no glyphs
-    and no advance. Writing direction is left to right.
+    and no advance. Writing direction is left to right. A tab is shaped as a
+    space and then advances the pen to the next multiple of ``tab_width``
+    from the line's start (none when 0).
     """
     glyphs: list[Glyph] = []
     at = run_locator(runs)
@@ -187,14 +195,36 @@ def shape_piece(
     for g in glyphs:
         pen.append(pen[-1] + g.adv + g.tracking)
 
+    tabs = [k for k, g in enumerate(glyphs) if text[g.cluster] == "\t"]
+    tabs = tabs if tab_width > 0 else []
+
+    def tab_stops(k0: int, k1: int) -> list[tuple[int, float]]:
+        """``(glyph index, advance)`` of each tab in glyphs ``k0:k1``."""
+        out: list[tuple[int, float]] = []
+        extra = 0.0
+        for k in tabs[bisect_left(tabs, k0) : bisect_left(tabs, k1)]:
+            x = pen[k] - pen[k0] + extra
+            # A tab on a stop, up to float noise, goes on to the next one.
+            adv = (math.floor(x / tab_width + 1e-6) + 1) * tab_width - x
+            out.append((k, adv))
+            extra += adv - glyphs[k].adv
+        return out
+
+    def tab_adv(p: int, q: int) -> dict[int, float]:
+        k0, k1 = bisect_left(clusters, p), bisect_left(clusters, q)
+        return {glyphs[k].cluster: adv for k, adv in tab_stops(k0, k1)}
+
     def measure(p: int, q: int) -> float:
         k0, k1 = bisect_left(clusters, p), bisect_left(clusters, q)
         if k1 <= k0:
             return 0.0
-        return pen[k1] - pen[k0] - glyphs[k1 - 1].tracking
+        width = pen[k1] - pen[k0] - glyphs[k1 - 1].tracking
+        if tabs:
+            width += sum(adv - glyphs[k].adv for k, adv in tab_stops(k0, k1))
+        return width
 
     space_adv: dict[int, float] = {}
     for g in glyphs:
         if text[g.cluster] in SPACE_CLASS:
             space_adv[g.cluster] = space_adv.get(g.cluster, 0.0) + g.adv
-    return Shaped(glyphs=tuple(glyphs), measure=measure, space_adv=space_adv)
+    return Shaped(tuple(glyphs), measure, space_adv, tab_adv)

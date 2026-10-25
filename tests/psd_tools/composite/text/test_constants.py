@@ -10,6 +10,7 @@ def test_values() -> None:
     assert c.SUB_SIZE == 0.583
     assert c.SUB_POSITION == 0.333
     assert c.AUTO_LEADING == 1.2
+    assert c.TAB_WIDTH == 36.0
     assert c.ASCENT_GLYPHS == ("d", "h", "l", "b")
     assert c.BOX_ABSOLUTE_FRAME_L == 1.5
     assert c.WORD_SPACING_MIN == 0.8

@@ -338,6 +338,18 @@ def test_box_wrap_and_stretch(fonts: FontMap) -> None:
     assert [line.y for line in lay.lines] == pytest.approx([7.5, 19.5])
 
 
+def test_tab_stops(fonts: FontMap) -> None:
+    # A tab runs to the next default stop from the line's start, a tab on a
+    # stop to the one after; a wrapped line starts its own.
+    lay = layout(model("I\tA\t\tI\r"), fonts)
+    assert xs(lay)[2] == pytest.approx(36.0)
+    assert xs(lay)[5] == pytest.approx(108.0)
+    word = "I" * int(45 // adv("I"))
+    lay = layout(model(word + "\t\tA\r", box=(0.0, 0.0, 50.0, 50.0)), fonts)
+    assert [line.text for line in lay.lines] == [word, "\tA"]
+    assert xs(lay)[-1] == pytest.approx(36.0)
+
+
 def test_justify_last_centre(fonts: FontMap) -> None:
     lay = layout(model("I I\r", box=(0.0, 0.0, 100.0, 50.0), justification=5), fonts)
     assert lay.lines[0].stretch == 0.0

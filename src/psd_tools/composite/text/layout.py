@@ -216,10 +216,17 @@ def layout(
     y = top
     started = False  # a line with content has been placed
     for piece in pieces(model):
+        paragraph = model.paragraphs[piece.paragraph]
         shaped = shape_piece(
-            text, piece.start, piece.end, model.runs, fonts, sub_size=model.sub_size
+            text,
+            piece.start,
+            piece.end,
+            model.runs,
+            fonts,
+            sub_size=model.sub_size,
+            tab_width=paragraph.tab_width,
         )
-        justification = model.paragraphs[piece.paragraph].justification
+        justification = paragraph.justification
         lines = break_lines(
             text,
             piece.start,
@@ -254,7 +261,14 @@ def layout(
 
             line_glyphs = _line_glyphs(shaped, line)
             natural = shaped.measure(line.start, line.end)
-            count = sum(1 for g in line_glyphs if g.cluster in shaped.space_adv)
+            tabs = shaped.tab_adv(line.start, line.end)
+            # Justification stretches the spaces past the line's last tab.
+            after = text.rfind("\t", line.start, line.end) + 1
+
+            def stretched(i: int) -> bool:
+                return i >= after and i in shaped.space_adv
+
+            count = sum(1 for g in line_glyphs if stretched(g.cluster))
             if width is None:
                 x0 = _align(justification, 0.0, -natural)
             else:
@@ -282,8 +296,8 @@ def layout(
                 style = model.runs[g.run].style
                 em = rendered_em(style, model.sub_size)
                 base = y + baseline_shift(style, model)
-                advance = g.adv + (
-                    line.stretch if g.cluster in shaped.space_adv else 0.0
+                advance = tabs.get(g.cluster, g.adv) + (
+                    line.stretch if stretched(g.cluster) else 0.0
                 )
                 glyphs.append(
                     PlacedGlyph(

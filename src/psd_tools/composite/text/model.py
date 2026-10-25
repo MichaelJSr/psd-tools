@@ -10,7 +10,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from psd_tools.composite.text.constants import AUTO_LEADING, SUB_POSITION, SUB_SIZE
+from psd_tools.composite.text.constants import (
+    AUTO_LEADING,
+    SUB_POSITION,
+    SUB_SIZE,
+    TAB_WIDTH,
+)
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import TypeLayer
@@ -68,6 +73,7 @@ class Paragraph:
     start: int
     end: int
     justification: int  #: 0 left, 1 right, 2 center, 3-5 justify last left/right/center, 6 justify all
+    tab_width: float = TAB_WIDTH  #: pt between the default tab stops
 
 
 @dataclass(frozen=True)

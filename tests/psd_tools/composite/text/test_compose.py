@@ -200,3 +200,31 @@ def test_word_wider_than_line_then_fit() -> None:
     lines = break_lines(text, 0, len(text), measure, sp, 50.0, 2)
     assert texts(text, lines) == ["aaaaa", "aaaaa", "aa bb"]
     assert [x.decision for x in lines] == ["break", "break", "paragraph"]
+
+
+def tabbed(text: str, stop: float) -> tuple[Callable[[int, int], float], list[int]]:
+    """Ten pt a character, a tab to the next multiple of ``stop`` from ``a``."""
+
+    def measure(a: int, b: int) -> float:
+        x = 0.0
+        for c in text[a:b]:
+            x = (x // stop + 1) * stop if c == "\t" else x + 10.0
+        return x
+
+    return measure, [i for i, c in enumerate(text) if c in " \t"]
+
+
+def test_tab_past_the_width_starts_the_next_line() -> None:
+    # The first tab starts at 50, inside 55, and stays; the next starts at 60.
+    text = "aaaa \t\tbb"
+    measure, sp = tabbed(text, 30.0)
+    lines = break_lines(text, 0, len(text), measure, sp, 55.0, 0)
+    assert spans(lines) == [(0, 4), (6, 9)]
+
+
+def test_justify_stretches_only_past_the_last_tab() -> None:
+    text = "a b\tc d eeeeeeee"
+    measure, sp = tabbed(text, 40.0)
+    lines = break_lines(text, 0, len(text), measure, sp, 80.0, 3)
+    assert texts(text, lines) == ["a b\tc d", "eeeeeeee"]
+    assert lines[0].stretch == pytest.approx(80.0 - 70.0)

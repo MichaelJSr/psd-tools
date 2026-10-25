@@ -56,8 +56,17 @@ def break_lines(
             q -= 1
         return q
 
+    tabs = [i for i in spaces if text[i] == "\t"]
+
+    def stretchy(p: int, q: int) -> list[int]:
+        """Spaces in ``text[p:q]`` that justification stretches: past the last tab."""
+        k = bisect_left(tabs, q) - 1
+        if k >= 0 and tabs[k] >= p:
+            p = tabs[k] + 1
+        return spaces[bisect_left(spaces, p) : bisect_left(spaces, q)]
+
     def n_spaces(p: int, q: int) -> int:
-        return bisect_left(spaces, q) - bisect_left(spaces, p)
+        return len(stretchy(p, q))
 
     raw: list[tuple[int, int, Decision]]
     if width is None:
@@ -77,7 +86,7 @@ def break_lines(
             for s, e in zip(starts, ends, strict=True)
         ]
     else:
-        raw = _greedy(text, a, b, measure, spaces, space_set, width, justified, final)
+        raw = _greedy(text, a, b, measure, stretchy, space_set, width, justified, final)
 
     out: list[Line] = []
     for k, (s, e, decision) in enumerate(raw):
@@ -119,7 +128,7 @@ def _greedy(
     a: int,
     b: int,
     measure: Callable[[int, int], float],
-    spaces: list[int],
+    stretchy: Callable[[int, int], list[int]],
     space_set: frozenset[int],
     width: float,
     justified: bool,
@@ -132,8 +141,7 @@ def _greedy(
 
     def factor(p: int, q: int) -> float | None:
         """Word-spacing factor that sets ``text[p:q]`` to ``width``; None without spaces."""
-        k0, k1 = bisect_left(spaces, p), bisect_left(spaces, q)
-        total = sum(measure(i, i + 1) for i in spaces[k0:k1])
+        total = sum(measure(i, i + 1) for i in stretchy(p, q))
         return None if total <= 0 else 1 + (width - measure(p, q)) / total
 
     def compressible(p: int, q: int, natural: int | None) -> bool:
@@ -154,6 +162,16 @@ def _greedy(
         while q > p and (q - 1) in space_set:
             q -= 1
         return q
+
+    def resume(p: int, e: int, s: int) -> int:
+        """Where the line after ``text[p:e]`` starts, its spaces ``text[e:s]``.
+
+        A tab that starts past the width starts the next line.
+        """
+        for t in range(e, s):
+            if text[t] == "\t" and measure(p, t) > width + _FIT_EPS:
+                return t
+        return s
 
     lines: list[tuple[int, int, Decision]] = []
     pos = a
@@ -188,13 +206,13 @@ def _greedy(
                 e += 1
             if rest and e >= rest[0][0]:
                 lines.append((pos, rest[0][0], "fit"))
-                pos = rest[0][1]
+                pos = resume(pos, *rest[0])
             else:
                 lines.append((pos, e, "break"))
                 pos = e
         else:
             lines.append((pos, best[0], "compress" if compressed else "fit"))
-            pos = best[1]
+            pos = resume(pos, *best)
         if pos >= b:
             break
     return lines
