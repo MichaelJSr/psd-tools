@@ -283,6 +283,8 @@ def test_stylistic_alternates_from_story() -> None:
     ]
     set_span_style(layer, 0, 4, StylisticAlternates=False)
     assert stylistic_alternates(layer) == ((4, 10),)
+    tysh = layer.engine_dict["StyleRun"]["RunArray"]
+    assert not any("StylisticAlternates" in r["StyleSheet"]["StyleSheetData"] for r in tysh)
     runs = TextModel.from_layer(layer).runs
     assert [(r.start, r.end, r.style.stylistic_alternates) for r in runs] == [
         (0, 4, False),

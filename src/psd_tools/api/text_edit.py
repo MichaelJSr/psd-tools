@@ -168,6 +168,8 @@ _FEATURES = {
     "FillColor": 53,
     "StrokeColor": 54,
 }
+#: Features Photoshop keeps in the Txt2 story only, never in TySh.
+_STORY_ONLY = frozenset({"StylisticAlternates"})
 
 
 def utf16_prefix(text: str) -> list[int]:
@@ -244,6 +246,8 @@ def set_span_style(
 
     With a Txt2 story the key must have a story feature (``_FEATURES``),
     else ``ValueError``: Photoshop would undo a TySh-only style.
+    ``StylisticAlternates`` goes to the story alone, as Photoshop writes it;
+    without a story it raises ``ValueError``.
     """
     text = _editor_text(layer)
     if not 0 <= start <= end <= len(text):
@@ -254,14 +258,18 @@ def set_span_style(
     a, b = units[start], units[end]
     style = _section(layer, "StyleRun")
     spans = _spans(style, units[-1])
-    values = _values(layer, fill, keys)
-    if b <= a or not values:
+    values = _values(layer, fill, {k: v for k, v in keys.items() if k not in _STORY_ONLY})
+    story_only = sorted(_STORY_ONLY & keys.keys())
+    if b <= a or not (values or story_only):
         return
     story = _story(layer)
+    if story is None and story_only:
+        raise ValueError(f"{', '.join(story_only)} needs the layer's Txt2 story")
     write_story = (
         story.restyle(layer, text, a, b, fill, keys) if story is not None else None
     )
-    _write_spans(style, _restyled(spans, a, b, values, _sheet), merge=True)
+    if values:
+        _write_spans(style, _restyled(spans, a, b, values, _sheet), merge=True)
     if write_story is not None:
         write_story()
     _touch(layer)
