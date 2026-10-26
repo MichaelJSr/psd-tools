@@ -144,6 +144,30 @@ def test_smart_filter_accessors_read_the_document_block(version: int) -> None:
     assert np.array_equal(painted[1], filtered.mask)
 
 
+def test_smart_filter_item_is_named_after_the_placed_id() -> None:
+    """The item named after the layer's placed ID is its own, wherever it lies in the
+    block and wherever it was moved to (Photoshop moves an item with its layer)."""
+    filtered = _filtered_object()
+    layer = filtered.layer
+    so = layer.smart_object
+    enable_filters(layer)
+    assert so.placed_id == "1b723783-5c1a-5f48-a260-e6925c5c68df"
+    assert so.filter_item is None
+    decoy = feid_item(
+        layer.bbox, filtered.source, filtered.alpha, filtered.mask[1:-1], uuid="x"
+    )
+    filtered.item.uuid = so.placed_id
+    store_items(filtered.psd, [decoy, filtered.item])
+    assert so.filter_item is filtered.item
+    assert so.filter_effect() is filtered.item
+    layer.left, layer.top = layer.left + 7, layer.top + 3
+    top, left, bottom, right = filtered.item.rectangle
+    filtered.item.rectangle = (top + 3, left + 7, bottom + 3, right + 7)
+    stored = so.filter_source()
+    assert stored is not None and stored[0] == layer.bbox
+    assert np.array_equal(stored[1], filtered.source)
+
+
 def test_smart_filter_flags_that_are_not_booleans_read_as_the_defaults() -> None:
     filtered = _filtered_object()
     fx = enable_filters(filtered.layer, extends_white=False)

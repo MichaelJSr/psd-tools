@@ -384,18 +384,52 @@ class SmartObject:
         """Mask value outside its stored rectangle: white (filtered) or black."""
         return get_scalar(self.filters, b"filterMaskExtendWithWhite", bool, True)
 
+    @property
+    def placed_id(self) -> str | None:
+        """The placed instance's ID (``placed``), NULs stripped; ``None`` without one.
+
+        Each placed copy of one embedded object has its own.
+        """
+        if self._config is None:
+            return None
+        value = get_scalar(self._config.data, b"placed", str, None)
+        return None if value is None else value.strip("\x00") or None
+
+    @property
+    def filter_item(self) -> FilterEffect | None:
+        """The document's ``FEid`` item named after this layer's placed ID.
+
+        Photoshop names each item after the placed instance it belongs to, so
+        a copy has its own, and moving a layer moves its item's rectangle (the
+        planes stay). ``None`` without smart filters or such an item.
+        """
+        if self.filters is None:
+            return None
+        placed = self.placed_id
+        if placed is None:
+            return None
+        return next(
+            (
+                item
+                for item in _filter_items(self._layer)
+                if (item.uuid or "").strip("\x00") == placed
+            ),
+            None,
+        )
+
     def filter_effect(self) -> FilterEffect | None:
         """Return the document's stored filter input and mask for this layer.
 
         Photoshop keeps, for each smart object carrying smart filters, the
         object rendered *before* the filters and the painted filter mask in the
         document's ``FEid`` block, one item per filtered layer in file order;
-        the layer's own channels hold the filtered result. An item belongs to
-        this layer only if its rectangle contains the layer's bbox as the
-        document was opened: the item at the layer's position among the
-        filtered layers then if it does, else the first one that does. A
-        duplicate pairs as its source does; a layer the document was not opened
-        with has none.
+        the layer's own channels hold the filtered result. The item named after
+        the layer's placed ID (:py:attr:`filter_item`) is its own, where it
+        lies. Else an item belongs to this layer only if its rectangle contains
+        the layer's bbox as the document was opened: the item at the layer's
+        position among the filtered layers then if it does, else the first one
+        that does. A duplicate pairs as its source does; a layer the document
+        was not opened with has none.
         """
         paired = self._paired_effect()
         return None if paired is None else paired[0]
@@ -404,18 +438,16 @@ class SmartObject:
         """:py:meth:`filter_effect`, and how far the layer has moved since."""
         if self.filters is None:
             return None
+        own = self.filter_item
+        if own is not None:  # moved with its layer, as Photoshop does
+            return own, 0, 0
         psd = getattr(self._layer, "_psd", None)
-        blocks = getattr(psd, "tagged_blocks", None)
-        if psd is None or blocks is None:
+        if psd is None or getattr(psd, "tagged_blocks", None) is None:
             return None
         opened = psd._opened_records.get(id(self._layer._record))
         if opened is None:
             return None
-        items = None
-        for key in (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3):
-            items = blocks.get_data(key)
-            if items is not None:
-                break
+        items = _filter_items(self._layer)
         if not items:
             return None
         _, index, left, top = opened
@@ -583,6 +615,18 @@ def _has_filters(blocks: TaggedBlocks) -> bool:
         if config is not None:
             return isinstance(config.data.get(b"filterFX"), Descriptor)
     return False
+
+
+def _filter_items(layer: LayerProtocol) -> Sequence[FilterEffect]:
+    """The items of *layer*'s document's ``FEid`` block; empty without one."""
+    blocks = getattr(getattr(layer, "_psd", None), "tagged_blocks", None)
+    if blocks is None:
+        return []
+    for key in (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3):
+        items = blocks.get_data(key)
+        if items is not None:
+            return items
+    return []
 
 
 def _contains(item: FilterEffect, bbox: tuple[int, int, int, int]) -> bool:
