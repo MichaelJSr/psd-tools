@@ -126,6 +126,11 @@ def test_tracking_unit_and_width(fonts: FontMap) -> None:
         text, 0, 2, runs_for(text, style(tracking=100.0, baseline=2)), fonts
     )
     assert shaped.glyphs[0].tracking == pytest.approx(track * 0.583)
+    # Scaled with the run's horizontal scale, as Photoshop spaces it.
+    shaped = shape_piece(
+        text, 0, 2, runs_for(text, style(tracking=100.0, horizontal_scale=0.5)), fonts
+    )
+    assert shaped.glyphs[0].tracking == pytest.approx(track * 0.5)
 
 
 def test_tracking_from_each_glyphs_run(fonts: FontMap) -> None:

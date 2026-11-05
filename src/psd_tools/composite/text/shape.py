@@ -188,7 +188,8 @@ def shape_piece(
                     adv=pos.x_advance * kx + bold,
                     xoff=pos.x_offset * kx,
                     yoff=pos.y_offset * ky,
-                    tracking=tracked.tracking / 1000 * em,
+                    # As Photoshop: tracking scales with the run's width.
+                    tracking=tracked.tracking / 1000 * em * tracked.horizontal_scale,
                     run=at(s + j),
                 )
             )
