@@ -236,6 +236,28 @@ def test_a_smart_object_without_an_id_keeps_every_item() -> None:
     assert _named(_saved(psd)) == named
 
 
+def _placed(psd: PSDImage) -> list[str]:
+    """Each smart object's stored placed ID, NULs kept."""
+    configs = [layer.smart_object._config for layer in _objects(psd)]
+    return [str(c.data[b"placed"].value) for c in configs if c is not None]
+
+
+def test_an_edited_save_ends_a_named_placed_id_with_a_nul() -> None:
+    """Photoshop 2023 refuses an FEid item naming an ID without it; others stay."""
+    psd = _with_items()
+    free, made = (layer.smart_object._config for layer in _objects(psd)[1:])
+    assert free is not None and made is not None and psd.tagged_blocks is not None
+    free.data[b"placed"] = String("free")
+    made.data[b"placed"] = String("made")
+    psd.tagged_blocks.get_data(Tag.FILTER_EFFECTS2)[2].uuid = "made"
+    kept = _placed(_saved(psd))
+    assert kept[1:] == ["free", "made"]
+    psd.mark_updated()
+    saved = _saved(psd)
+    assert _placed(saved) == [kept[0], "free", "made\x00"]
+    assert _named(saved)[2] == [kept[0].strip("\x00"), "made"]
+
+
 def test_an_unedited_save_keeps_an_item_no_layer_names() -> None:
     psd = _with_items()
     assert psd.tagged_blocks is not None

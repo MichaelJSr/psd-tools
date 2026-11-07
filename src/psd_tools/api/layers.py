@@ -1504,7 +1504,7 @@ class Layer(LayerProtocol):
     def _duplicate(self, parent: "GroupMixin") -> Self:
         """Build a detached copy of this subtree from its low-level records."""
         duplicate = type(self)(parent, deepcopy(self._record), deepcopy(self._channels))
-        instance_id = str(uuid.uuid4())
+        instance_id = str(uuid.uuid4()) + "\x00"  # NUL-ended, as Photoshop's
         for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
             config = duplicate.tagged_blocks.get_data(key)
             if isinstance(config, SmartObjectLayerData):
