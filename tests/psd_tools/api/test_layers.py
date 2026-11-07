@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from psd_tools.api.layers import (
     AdjustmentLayer,
     Artboard,
     Group,
+    GroupMixin,
     Layer,
     PixelLayer,
     ShapeLayer,
@@ -148,6 +150,31 @@ def is_group_args(request: Any) -> tuple[Any, bool | None]:
 def test_layer_is_group(is_group_args: tuple[Any, bool]) -> None:
     layer, expected = is_group_args
     assert layer.is_group() == expected
+
+
+@pytest.mark.parametrize("include_clip", [True, False])
+@pytest.mark.parametrize(
+    "fixture",
+    ["clipping-mask.psd", "clipping-mask2.psd", "group-clipping/group-clipping.psd"],
+)
+def test_descendants_matches_the_recursive_walk(
+    fixture: str, include_clip: bool
+) -> None:
+    """Same layers, same pre-order, same clip filter as recursing on GroupMixin."""
+
+    def recursive(group: Any) -> Iterator[Any]:
+        for layer in group:
+            if not include_clip and layer.clipping:
+                continue
+            yield layer
+            if isinstance(layer, GroupMixin):
+                yield from recursive(layer)
+
+    psd = PSDImage.open(full_name(fixture))
+    assert any(x.clipping and x.parent is not psd for x in psd.descendants())
+    expected = list(recursive(psd))
+    walked = list(psd.descendants(include_clip=include_clip))
+    assert [id(x) for x in walked] == [id(x) for x in expected]
 
 
 def test_layer_has_mask(pixel_layer: PixelLayer) -> None:
