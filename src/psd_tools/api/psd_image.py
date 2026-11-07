@@ -86,7 +86,7 @@ from psd_tools.psd.color_mode_data import HDRT_DEFAULT, ColorModeData
 from psd_tools.psd.document import PSD
 from psd_tools.psd.header import FileHeader
 from psd_tools.psd.image_data import ImageData
-from psd_tools.psd.image_resources import ImageResources
+from psd_tools.psd.image_resources import ImageResource, ImageResources, VersionInfo
 from psd_tools.psd.layer_and_mask import (
     ChannelImageData,
     GlobalLayerMaskInfo,
@@ -131,6 +131,9 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         # sign, but a count of zero has no sign, so a rebuild that momentarily
         # sees no layers would lose it. See _update_record().
         self._merged_alpha: bool = False
+        # Whether the merged image is dropped (see strip_merged()); None until
+        # save() needs to know.
+        self._stripped: bool | None = None
         # Every smart object's record as opened, by id, with its index among
         # the filtered ones in file order -- the order of the document's FEid
         # items, which tree edits do not rewrite -- and its offset then, where
@@ -351,7 +354,9 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             leaves it as it was. A document without a VersionInfo resource
             always reports ``True``.
         :param update_preview: ``False`` writes the stored preview unchanged,
-            even after an edit.
+            even after an edit. A document without its merged image
+            (:py:meth:`strip_merged`) is saved without one either way, unless
+            ``preview`` is given.
         :raises TypeError: if ``preview`` is not a PIL image.
         :raises ValueError: if ``preview`` does not fit the document, is given
             for a multichannel document, which PIL has no mode for, or is
@@ -363,7 +368,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             planes, holds = pil_io.convert_pil_to_image_data(self, preview)
             self._record.image_data.set_data(planes, self._record.header)
             self._mark_composite(holds)
-        elif update_preview and self.is_updated():
+            self._stripped = None
+        elif update_preview and self.is_updated() and not self.is_stripped():
             try:
                 self._update_preview()
             except ImportError as e:
@@ -405,6 +411,7 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             self._record.header,
         )
         self._mark_composite(numpy_io.holds_composite(self, color, alpha))
+        self._stripped = None
 
     def _mark_composite(self, holds: bool | None) -> None:
         """Record in VersionInfo whether the merged image data is the composite.
@@ -590,6 +597,60 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         if version_info:
             return version_info.has_composite
         return True  # Assuming the image data is valid by default.
+
+    def strip_merged(self) -> None:
+        """Drop the merged image, as Photoshop saves with Maximize Compatibility off.
+
+        The colour planes become white, RLE-compressed; other channels keep
+        their planes, the thumbnail stays, and VersionInfo records that the
+        file holds no real merged data: :py:meth:`has_preview` is ``False``
+        and :py:meth:`composite` renders the layers. :py:meth:`save` keeps
+        the document so after an edit unless ``preview`` is given.
+        """
+        record = self._record
+        header = record.header
+        count = get_color_channels(self)
+        planes = [_white_plane(header)] * count
+        if header.channels > count:
+            stored = record.image_data.get_data(header)
+            assert isinstance(stored, list)
+            planes += stored[count:]
+        record.image_data.compression = Compression.RLE
+        record.image_data.set_data(planes, header)
+        version_info = self.image_resources.get_data(Resource.VERSION_INFO)
+        if version_info is None:
+            self.image_resources[Resource.VERSION_INFO] = ImageResource(
+                key=Resource.VERSION_INFO,
+                data=VersionInfo(  # type: ignore[arg-type]
+                    writer="psd-tools", reader="psd-tools"
+                ),
+            )
+        else:
+            version_info.has_composite = False
+        self._stripped = True
+
+    def is_stripped(self) -> bool:
+        """Whether the merged image is dropped, as :py:meth:`strip_merged` does.
+
+        ``True`` for a document whose VersionInfo records no real merged data
+        and whose colour planes are white, as Photoshop saves one with
+        Maximize Compatibility off.
+        """
+        if self.has_preview():
+            return False
+        if self._stripped is None:
+            header = self._record.header
+            try:
+                planes = self._record.image_data.get_data(header)
+            except Exception:  # an undecodable section is not white
+                self._stripped = False
+            else:
+                white = _white_plane(header)
+                count = get_color_channels(self)
+                self._stripped = len(planes) >= count and all(
+                    plane == white for plane in planes[:count]
+                )
+        return self._stripped
 
     @property
     def name(self) -> str:
@@ -1193,3 +1254,13 @@ def _adjustment_kind(blocks: TaggedBlocks) -> type[layers.Layer] | None:
     if len(keys) > 1 and Tag.CONTENT_GENERATOR_EXTRA_DATA in keys:
         keys.remove(Tag.CONTENT_GENERATOR_EXTRA_DATA)
     return adjustments.TYPES[keys[0]] if keys else None
+
+
+def _white_plane(header: FileHeader) -> bytes:
+    """One white colour plane at the header's size and depth."""
+    if header.depth == 1:  # a set bit is black
+        return b"\x00" * (((header.width + 7) // 8) * header.height)
+    pixels = header.width * header.height
+    if header.depth == 32:
+        return np.ones(pixels, dtype=">f4").tobytes()
+    return b"\xff" * (pixels * header.depth // 8)
