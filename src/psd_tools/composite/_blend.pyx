@@ -2,14 +2,15 @@
 """C loops behind the compositor's source arithmetic.
 
 Each is the numpy expression it replaces in ``composite.py`` (``lut_levels``:
-``adjustments._apply_lut``; ``to_bytes``: ``composite_pil``), its float32
-operations in the same order, so the results are bit-identical. Memoryviews
-only, so the module builds against the Limited API without numpy headers.
+``adjustments._apply_lut``; ``to_bytes``: ``composite_pil``; ``divide`` and
+``clip``: ``utils``), its float32 operations in the same order, so the results
+are bit-identical. Memoryviews only, so the module builds against the Limited
+API without numpy headers.
 
 Every canvas but ``lut_levels``' and ``to_bytes``' is read a row at a time, so
 a pixel's channels must be adjacent and its neighbour the next pixel along
-(``_rows``), as they are in a box cut from a canvas; ``composite._compiled_fits``
-checks that first.
+(``_rows``), as they are in a box cut from a canvas; ``utils.in_rows`` checks
+that first.
 """
 from libc.math cimport NAN, floorf, fmaxf, fminf, rintf
 
@@ -376,3 +377,242 @@ def to_bytes(const float[:, :, :] color, const float[:, :, :] alpha=None):
                 if has_alpha:
                     orow[x * m + n] = _byte(alpha[y, x, 0])
     return result
+
+
+def divide(
+    const float[:, :, :] a,
+    const float[:, :, :] b,
+    const float[:, :, :] fill,
+    float fill_scalar,
+    bint scalar,
+):
+    """``utils.divide``: ``a / b`` where ``b > 0``, else ``fill``; ``b`` one channel.
+
+    ``fill`` is ``a``'s size and read only when ``scalar`` is false.
+    """
+    cdef Py_ssize_t h = a.shape[0], w = a.shape[1], n = a.shape[2]
+    cdef Py_ssize_t y, x, c, i
+    cdef float d, f
+    _rows(a, h, w, n)
+    _rows(b, h, w, 1)
+    if not scalar:
+        _rows(fill, h, w, n)
+    result = np.empty((h, w, n), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return result
+    cdef float[:, :, ::1] out = result
+    cdef const float *p_a
+    cdef const float *p_b
+    cdef const float *p_f = NULL
+    cdef float *o
+    with nogil:
+        for y in range(h):
+            p_a, p_b, o = &a[y, 0, 0], &b[y, 0, 0], &out[y, 0, 0]
+            if not scalar:
+                p_f = &fill[y, 0, 0]
+            # Both sides computed and one picked, so the loop has no branch.
+            if n == 1 and scalar:
+                for x in range(w):
+                    d = p_b[x]
+                    f = p_a[x] / d
+                    o[x] = f if d > 0 else fill_scalar
+                continue
+            if n == 1:
+                for x in range(w):
+                    d = p_b[x]
+                    f = p_a[x] / d
+                    o[x] = f if d > 0 else p_f[x]
+                continue
+            if scalar:
+                for x in range(w):
+                    d = p_b[x]
+                    for c in range(n):
+                        i = x * n + c
+                        f = p_a[i] / d
+                        o[i] = f if d > 0 else fill_scalar
+                continue
+            for x in range(w):
+                d = p_b[x]
+                for c in range(n):
+                    i = x * n + c
+                    f = p_a[i] / d
+                    o[i] = f if d > 0 else p_f[i]
+    return result
+
+
+def clip(const float[:, :, :] values):
+    """``utils.clip``: ``np.clip(values, 0.0, 1.0)``."""
+    cdef Py_ssize_t h = values.shape[0], w = values.shape[1], n = values.shape[2]
+    cdef Py_ssize_t y, i
+    _rows(values, h, w, n)
+    result = np.empty((h, w, n), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return result
+    cdef float[:, :, ::1] out = result
+    cdef const float *p
+    cdef float *o
+    with nogil:
+        for y in range(h):
+            p, o = &values[y, 0, 0], &out[y, 0, 0]
+            for i in range(w * n):
+                o[i] = _clip(p[i])
+    return result
+
+
+def effect_start(
+    const float[:, :, :] source_alpha,
+    const float[:, :, :] region,
+    const float[:, :, :] color,
+    float factor,
+):
+    """``_EffectCanvas._start``: its alpha and premultiplied colour."""
+    cdef Py_ssize_t h = color.shape[0], w = color.shape[1], n = color.shape[2]
+    cdef Py_ssize_t y, x, c, i
+    cdef float r, q
+    _rows(source_alpha, h, w, 1)
+    _rows(region, h, w, 1)
+    _rows(color, h, w, n)
+    out_alpha = np.empty((h, w, 1), dtype=np.float32)
+    out_premultiplied = np.empty((h, w, n), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return out_alpha, out_premultiplied
+    cdef float[:, :, ::1] al = out_alpha
+    cdef float[:, :, ::1] pm = out_premultiplied
+    cdef const float *p_sa
+    cdef const float *p_r
+    cdef const float *p_c
+    cdef float *o_al
+    cdef float *o_pm
+    with nogil:
+        for y in range(h):
+            p_sa, p_r, p_c = &source_alpha[y, 0, 0], &region[y, 0, 0], &color[y, 0, 0]
+            o_al, o_pm = &al[y, 0, 0], &pm[y, 0, 0]
+            for x in range(w):
+                r = p_r[x]
+                q = p_sa[x] / r
+                q = (q if r > 0 else <float>0.0) * factor
+                o_al[x] = q
+                for c in range(n):
+                    i = x * n + c
+                    o_pm[i] = q * p_c[i]
+    return out_alpha, out_premultiplied
+
+
+def effect_over(
+    const float[:, :, :] alpha,
+    const float[:, :, :] premultiplied,
+    const float[:, :, :] shape,
+    float shape_scalar,
+    bint scalar,
+    const float[:, :, :] coverage,
+    const float[:, :, :] color,
+    float opacity,
+):
+    """``_EffectCanvas.over`` in Normal: the new alpha, premultiplied and shape.
+
+    ``shape`` is read only when ``scalar`` is false. The blend's ``color`` is
+    kept as numpy spells it, ``(1 - A) * c + A * c``.
+    """
+    cdef Py_ssize_t h = color.shape[0], w = color.shape[1], n = color.shape[2]
+    cdef Py_ssize_t y, x, c, i
+    cdef float k, a, s, e, e1, a1, q
+    _rows(alpha, h, w, 1)
+    _rows(coverage, h, w, 1)
+    if not scalar:
+        _rows(shape, h, w, 1)
+    _rows(premultiplied, h, w, n)
+    _rows(color, h, w, n)
+    out_alpha = np.empty((h, w, 1), dtype=np.float32)
+    out_premultiplied = np.empty((h, w, n), dtype=np.float32)
+    out_shape = np.empty((h, w, 1), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return out_alpha, out_premultiplied, out_shape
+    cdef float[:, :, ::1] al = out_alpha
+    cdef float[:, :, ::1] pm = out_premultiplied
+    cdef float[:, :, ::1] sh = out_shape
+    cdef const float *p_a
+    cdef const float *p_pm
+    cdef const float *p_s = NULL
+    cdef const float *p_k
+    cdef const float *p_c
+    cdef float *o_al
+    cdef float *o_pm
+    cdef float *o_sh
+    with nogil:
+        for y in range(h):
+            p_a, p_pm, p_k = &alpha[y, 0, 0], &premultiplied[y, 0, 0], &coverage[y, 0, 0]
+            p_c, o_al, o_pm, o_sh = &color[y, 0, 0], &al[y, 0, 0], &pm[y, 0, 0], &sh[y, 0, 0]
+            if not scalar:
+                p_s = &shape[y, 0, 0]
+            for x in range(w):
+                k = p_k[x]
+                e = k * opacity
+                e1 = <float>1.0 - e
+                a = p_a[x]
+                a1 = <float>1.0 - a
+                for c in range(n):
+                    i = x * n + c
+                    q = p_c[i]
+                    o_pm[i] = e1 * p_pm[i] + e * (a1 * q + a * q)
+                o_al[x] = e + e1 * a
+                s = shape_scalar if scalar else p_s[x]
+                o_sh[x] = (s + k) - (s * k)
+    return out_alpha, out_premultiplied, out_shape
+
+
+def effect_source(
+    const float[:, :, :] region,
+    const float[:, :, :] alpha,
+    const float[:, :, :] premultiplied,
+    const float[:, :, :] shape,
+    float shape_scalar,
+    bint scalar,
+    const float[:, :, :] color,
+    float opacity,
+):
+    """``_EffectCanvas.source``: the colour, shape and alpha it hands on.
+
+    ``shape`` is read only when ``scalar`` is false.
+    """
+    cdef Py_ssize_t h = color.shape[0], w = color.shape[1], n = color.shape[2]
+    cdef Py_ssize_t y, x, c, i
+    cdef float r, a, q, f
+    _rows(region, h, w, 1)
+    _rows(alpha, h, w, 1)
+    if not scalar:
+        _rows(shape, h, w, 1)
+    _rows(premultiplied, h, w, n)
+    _rows(color, h, w, n)
+    out_color = np.empty((h, w, n), dtype=np.float32)
+    out_shape = np.empty((h, w, 1), dtype=np.float32)
+    out_alpha = np.empty((h, w, 1), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return out_color, out_shape, out_alpha
+    cdef float[:, :, ::1] co = out_color
+    cdef float[:, :, ::1] sh = out_shape
+    cdef float[:, :, ::1] al = out_alpha
+    cdef const float *p_r
+    cdef const float *p_a
+    cdef const float *p_pm
+    cdef const float *p_s = NULL
+    cdef const float *p_c
+    cdef float *o_co
+    cdef float *o_sh
+    cdef float *o_al
+    with nogil:
+        for y in range(h):
+            p_r, p_a, p_pm = &region[y, 0, 0], &alpha[y, 0, 0], &premultiplied[y, 0, 0]
+            p_c, o_co, o_sh, o_al = &color[y, 0, 0], &co[y, 0, 0], &sh[y, 0, 0], &al[y, 0, 0]
+            if not scalar:
+                p_s = &shape[y, 0, 0]
+            for x in range(w):
+                r = p_r[x]
+                a = (r * p_a[x]) * opacity
+                for c in range(n):
+                    i = x * n + c
+                    q = (r * p_pm[i]) * opacity
+                    f = q / a
+                    o_co[i] = _clip(f if a > 0 else p_c[i])
+                o_sh[x] = _clip(r * (shape_scalar if scalar else p_s[x]))
+                o_al[x] = _clip(a)
+    return out_color, out_shape, out_alpha

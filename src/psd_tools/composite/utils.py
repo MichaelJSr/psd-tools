@@ -1,5 +1,6 @@
 """Utility functions for composite operations."""
 
+from collections.abc import Sequence
 from typing import Any, overload
 
 import numpy as np
@@ -7,6 +8,11 @@ from numpy.typing import NDArray
 
 from psd_tools.api.layers import Layer
 from psd_tools.constants import Tag
+
+try:  # Compiled loops, bit-identical to the numpy ones they stand in for.
+    from psd_tools.composite import _blend as _cblend  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    _cblend = None
 
 # A divisor or a fill is usually a canvas, but ``draw_stroke_effect()``
 # normalizes by a NumPy scalar and every caller may pass a plain float.
@@ -35,6 +41,11 @@ def divide(
     quotient only to overwrite it -- the divisor is never negative here, so
     ``b > 0`` and "b is nonzero" are the same test.
     """
+    if _cblend is not None and in_rows((b,), (a,)):
+        if type(fill) is float:
+            return _cblend.divide(a, b, None, fill, True)
+        if in_rows((b,), (a, fill)):
+            return _cblend.divide(a, b, fill, 0.0, False)
     shape = np.broadcast_shapes(np.shape(a), np.shape(b))
     dtype = np.result_type(a, b)
     positive = np.asarray(b) > 0
@@ -121,4 +132,39 @@ def union(
 
 def clip(x: NDArray[np.floating]) -> NDArray[np.floating]:
     """Clip between [0, 1]."""
+    if _cblend is not None and in_rows((), (x,)):
+        return _cblend.clip(x)
     return np.clip(x, 0.0, 1.0)
+
+
+def in_rows(
+    ones: Sequence[object], wide: Sequence[object] = (), channels: int | None = None
+) -> bool:
+    """Whether :py:mod:`._blend` takes these operands as numpy would.
+
+    Every one a float32 canvas of one height and width, ``ones`` a single
+    channel and ``wide`` ``channels``, by default the first wide one's, laid
+    out in rows of pixels as a box cut from a canvas is; anything else, a
+    scalar, a float64 or a broadcast canvas, stays with numpy's own promotion
+    and broadcasting.
+    """
+    first = ones[0] if ones else wide[0]
+    if not isinstance(first, np.ndarray) or first.ndim != 3:
+        return False
+    size = first.shape[:2]
+    if channels is None:
+        channels = 1
+        if wide:
+            if not isinstance(wide[0], np.ndarray) or wide[0].ndim != 3:
+                return False
+            channels = wide[0].shape[2]
+    for array, width in [(a, 1) for a in ones] + [(a, channels) for a in wide]:
+        if not (
+            isinstance(array, np.ndarray)
+            and array.dtype == np.float32
+            and array.shape == (*size, width)
+            and (width == 1 or array.strides[2] == 4)
+            and (size[1] < 2 or array.strides[1] == 4 * width)
+        ):
+            return False
+    return True
