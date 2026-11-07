@@ -440,6 +440,57 @@ def decompressed_size_bound(
     return length
 
 
+def decompress_rows(
+    data: bytes,
+    compression: Compression,
+    width: int,
+    height: int,
+    depth: int,
+    version: int,
+    start: int,
+    stop: int,
+) -> bytes | None:
+    """Rows ``start`` to ``stop`` of :py:func:`decompress`'s output, decoding only those.
+
+    RAW and RLE only, and only where the whole decode succeeds as it stands;
+    None otherwise, for the caller to decode the whole channel.
+    """
+    try:
+        _validate_dimensions(width, height, depth)
+    except ValueError:
+        return None
+    if not 0 <= start < stop <= height or version not in (1, 2):
+        return None
+    row = _row_size(width, depth)
+    if compression == Compression.RAW:
+        if len(data) < height * row:
+            return None
+        return data[start * row : stop * row]
+    if compression != Compression.RLE:
+        return None
+    try:
+        _check_expansion(height * row, len(data), "RLE output")
+    except DecompressionLimitError:
+        return None
+    table = height * 2 * version
+    if len(data) < table:
+        return None
+    counts = np.frombuffer(data, (">u2", ">u4")[version - 1], height)
+    # A short body is padded row by row: the whole decode's business.
+    if table + int(counts.sum(dtype=np.int64)) > len(data):
+        return None
+    pos = table + int(counts[:start].sum(dtype=np.int64))
+    rows = counts[start:stop].tolist()
+    decode_rows = getattr(rle_impl, "decode_rows", None)
+    if decode_rows is not None:
+        return decode_rows(data, pos, rows, row)
+    out = []
+    for count in rows:
+        out.append(rle_impl.decode(data[pos : pos + count], row))
+        pos += count
+    return b"".join(out)
+
+
 def encode_rle(data: bytes, width: int, height: int, depth: int, version: int) -> bytes:
     """Encode raw image data with RLE."""
     row_size = _row_size(width, depth)

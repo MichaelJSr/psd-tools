@@ -3054,6 +3054,15 @@ def _unfilter_under_mask(
         return color, shape
 
 
+def _may_unfilter(layer: SmartObjectLayer) -> bool:
+    """Whether :py:func:`_unfilter_under_mask` may change the stored pixels; True when unsure."""
+    try:
+        so = layer.smart_object
+        return bool(so.has_enabled_filters and so.filter_mask_enabled)
+    except Exception:
+        return True
+
+
 def _blend_unfiltered(
     layer: SmartObjectLayer,
     color: np.ndarray,
@@ -4609,6 +4618,30 @@ class Compositor:
                 self._cache.unfiltered = (layer, color, shape)
         return color, shape
 
+    def _read_rows(
+        self, layer: Layer, viewport: tuple[int, int, int, int]
+    ) -> tuple[np.ndarray, np.ndarray | None, tuple[int, int, int, int]] | None:
+        """:py:meth:`_read_object`'s stored pixels on the rows ``viewport`` crosses, and their box.
+
+        A box render need not decode the rest of a tall layer. None where the
+        read runs whole: every row crossed or none, a fill, a smart filter
+        mask (:py:func:`_unfilter_under_mask` blends on the whole box), or data
+        only the whole decode reads.
+        """
+        left, top, right, bottom = layer.bbox
+        start = max(viewport[1], top) - top
+        stop = min(viewport[3], bottom) - top
+        if start >= stop or (start == 0 and stop == bottom - top):
+            return None
+        if not layer.has_pixels() or (self._force and utils.has_fill(layer)):
+            return None
+        if isinstance(layer, SmartObjectLayer) and _may_unfilter(layer):
+            return None
+        rows = numpy_io.get_layer_rows(layer, start, stop)
+        if rows is None:
+            return None
+        return rows[0], rows[1], (left, top + start, right, top + stop)
+
     @staticmethod
     def _place_object_shape(
         color: np.ndarray | None,
@@ -4712,13 +4745,18 @@ class Compositor:
         if viewport is None:
             viewport = self._viewport
         height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-        color, own_shape = self._read_object(layer)
-        shape = self._place_object_shape(color, own_shape, layer.bbox, viewport)
+        rows = self._read_rows(layer, viewport)
+        if rows is None:
+            color, own_shape = self._read_object(layer)
+            box = layer.bbox
+        else:
+            color, own_shape, box = rows
+        shape = self._place_object_shape(color, own_shape, box, viewport)
 
         if color is None:
             color = np.ones((height, width, 1), dtype=np.float32)
         else:
-            color = paste(viewport, layer.bbox, color, 1.0)
+            color = paste(viewport, box, color, 1.0)
 
         alpha = shape * 1.0  # Constant factor is always 1.
         fill_off = utils.is_fill_disabled(layer)

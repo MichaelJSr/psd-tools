@@ -14,6 +14,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
+from psd_tools.api import numpy_io
 from psd_tools.api.effects import (
     DropShadow,
     InnerGlow,
@@ -327,3 +328,36 @@ def test_a_traced_group_is_memoised_per_box() -> None:
     planted = np.full_like(alpha, 0.25)
     compositor._cache.group_alphas[key] = planted
     assert np.array_equal(compositor._get_group_alpha(group, box), planted)
+
+
+@pytest.mark.parametrize(
+    "filename", ["masks.psd", "layer_params.psb", "clipping-mask2.psd"]
+)
+def test_a_box_render_decodes_only_the_rows_it_draws(
+    filename: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Layers the box cuts are read on its rows alone, and the render is the whole one cropped."""
+    read = numpy_io.get_layer_rows
+    rows: list[int] = []
+
+    def spy(layer: Layer, start: int, stop: int) -> Any:
+        result = read(layer, start, stop)
+        if result is not None:
+            rows.append(stop - start)
+        return result
+
+    monkeypatch.setattr(numpy_io, "get_layer_rows", spy)
+    psd = PSDImage.open(full_name(filename))
+    width, height = psd.width, psd.height
+    whole = composite(psd)
+    rows.clear()
+    for box in (
+        (0, height // 3, width, height // 3 + 7),
+        (width // 4, height // 2, width, height // 2 + 1),
+    ):
+        left, top, right, bottom = box
+        part = composite(psd, viewport=box)
+        for full, cut in zip(whole, part, strict=True):
+            assert np.array_equal(full[top:bottom, left:right], cut), box
+    # The one-row box read one row of some layer.
+    assert 1 in rows
