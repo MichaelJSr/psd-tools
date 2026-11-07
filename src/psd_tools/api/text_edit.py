@@ -258,7 +258,9 @@ def set_span_style(
     a, b = units[start], units[end]
     style = _section(layer, "StyleRun")
     spans = _spans(style, units[-1])
-    values = _values(layer, fill, {k: v for k, v in keys.items() if k not in _STORY_ONLY})
+    values = _values(
+        layer, fill, {k: v for k, v in keys.items() if k not in _STORY_ONLY}
+    )
     story_only = sorted(_STORY_ONLY & keys.keys())
     if b <= a or not (values or story_only):
         return
