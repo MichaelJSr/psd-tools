@@ -41,7 +41,8 @@ def divide(
     quotient only to overwrite it -- the divisor is never negative here, so
     ``b > 0`` and "b is nonzero" are the same test.
     """
-    if _cblend is not None and in_rows((b,), (a,)):
+    # hasattr: a _blend built before this loop runs numpy's.
+    if hasattr(_cblend, "divide") and in_rows((b,), (a,)):
         if type(fill) is float:
             return _cblend.divide(a, b, None, fill, True)
         if in_rows((b,), (a, fill)):
@@ -132,7 +133,7 @@ def union(
 
 def clip(x: NDArray[np.floating]) -> NDArray[np.floating]:
     """Clip between [0, 1]."""
-    if _cblend is not None and in_rows((), (x,)):
+    if hasattr(_cblend, "clip") and in_rows((), (x,)):
         return _cblend.clip(x)
     return np.clip(x, 0.0, 1.0)
 

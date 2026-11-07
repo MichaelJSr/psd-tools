@@ -240,6 +240,44 @@ def test_a_render_is_numpys(
     assert compiled.tobytes() == plain.tobytes()
 
 
+_NEWEST = (
+    "divide",
+    "clip",
+    "effect_start",
+    "effect_over",
+    "effect_source",
+    "vibrance_step",
+)
+
+
+class _Stale:
+    """A ``_blend`` built before its newest loops."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+
+    def __getattr__(self, name: str) -> Any:
+        if name in _NEWEST:
+            raise AttributeError(name)
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize(
+    "filename", ["effects/stroke-effects.psd", "effects/fading-mode-effects.psd"]
+)
+def test_a_stale_build_renders_as_before(
+    monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    path = full_name(filename)
+    kw: dict[str, Any] = {"force": True, "ignore_preview": True, "apply_icc": False}
+    with np.errstate(all="ignore"):
+        fresh = PSDImage.open(path).composite(**kw)
+        for module in (composite, utils, adjustments):
+            monkeypatch.setattr(module, "_cblend", _Stale(module._cblend))
+        stale = PSDImage.open(path).composite(**kw)
+    assert stale.tobytes() == fresh.tobytes()
+
+
 @pytest.mark.parametrize("size", [2, 256, 4097, 65536])
 def test_lut_levels_are_numpys(monkeypatch: pytest.MonkeyPatch, size: int) -> None:
     """Every level's edge and its float32 neighbours, the specials, strided views."""

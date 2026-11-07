@@ -2620,8 +2620,11 @@ class _EffectCanvas:
         # inside it, faded by fill opacity.
         opacity = source.opacity
         factor = source.fill_opacity / opacity if opacity > 0.0 else 0.0
-        if type(factor) is float and _compiled_fits(
-            (source.alpha, self.region), (self._color,)
+        # hasattr: a _blend built before these loops runs numpy's.
+        if (
+            type(factor) is float
+            and hasattr(_cblend, "effect_start")
+            and _compiled_fits((source.alpha, self.region), (self._color,))
         ):
             self._alpha, self._premultiplied = _cblend.effect_start(
                 source.alpha, self.region, self._color, factor
@@ -2713,6 +2716,7 @@ class _EffectCanvas:
             type(opacity) in (float, int)
             and blend_mode not in _NEUTRAL_SOURCE
             and get_blend_func(blend_mode, self._compositor._color_mode) is normal
+            and hasattr(_cblend, "effect_over")
             and _compiled_fits(
                 (self._alpha, coverage) + (() if scalar else (shape,)),
                 (self._premultiplied, color),
@@ -2759,9 +2763,13 @@ class _EffectCanvas:
         opacity = self._source.opacity
         shape = self._shape
         scalar = type(shape) in (float, int)
-        if type(opacity) in (float, int) and _compiled_fits(
-            (self.region, self._alpha) + (() if scalar else (shape,)),
-            (self._premultiplied, self._color),
+        if (
+            type(opacity) in (float, int)
+            and hasattr(_cblend, "effect_source")
+            and _compiled_fits(
+                (self.region, self._alpha) + (() if scalar else (shape,)),
+                (self._premultiplied, self._color),
+            )
         ):
             color, shape, alpha = _cblend.effect_source(
                 self.region,
