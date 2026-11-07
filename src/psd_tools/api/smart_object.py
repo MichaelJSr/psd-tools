@@ -618,7 +618,7 @@ def _has_filters(blocks: TaggedBlocks) -> bool:
 
 
 def _filter_items(layer: LayerProtocol) -> Sequence[FilterEffect]:
-    """The items of *layer*'s document's ``FEid`` block; empty without one."""
+    """Return the items of *layer*'s document's ``FEid`` block; empty without one."""
     blocks = getattr(getattr(layer, "_psd", None), "tagged_blocks", None)
     if blocks is None:
         return []

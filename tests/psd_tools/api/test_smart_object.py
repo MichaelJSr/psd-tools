@@ -145,8 +145,10 @@ def test_smart_filter_accessors_read_the_document_block(version: int) -> None:
 
 
 def test_smart_filter_item_is_named_after_the_placed_id() -> None:
-    """The item named after the layer's placed ID is its own, wherever it lies in the
-    block and wherever it was moved to (Photoshop moves an item with its layer)."""
+    """An item named after the layer's placed ID is its own, wherever it lies.
+
+    Photoshop moves an item with its layer.
+    """
     filtered = _filtered_object()
     layer = filtered.layer
     so = layer.smart_object
