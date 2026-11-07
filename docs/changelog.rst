@@ -4,6 +4,9 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A perceptual gradient fades its transparency stops as opacity to the
+  power 1.728, as Photoshop 2023 draws them. **Rendering change** for
+  perceptual gradients with transparency
 - [packaging] The sdist carries the Cython sources, so a wheel builds from
   it, and the wheel no longer ships the generated C
 - [fix] A shape's vector stroke follows its curves as Photoshop draws them

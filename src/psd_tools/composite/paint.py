@@ -951,24 +951,19 @@ def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
     return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ _OKLAB_LMS_INV.T)
 
 
-# The perceptual method fades opacity along a power of the blend whose
-# exponent runs from 1 at the opaque end to 1 + this at the transparent end.
-# Fitted to Photoshop's renders of foreground-to-transparent fills.
-_PERCEPTUAL_ALPHA_EASE = 1.42
+# The perceptual method blends opacity raised to 1 / this. Fitted to
+# Photoshop 2023's foreground-to-transparent fills.
+_PERCEPTUAL_ALPHA_GAMMA = 1.728
 
 
 def _ease_alpha(alpha: np.ndarray) -> np.ndarray:
-    """Perceptual opacity from a linearly blended one."""
-    return alpha ** (1.0 + _PERCEPTUAL_ALPHA_EASE * (1.0 - alpha))
-
-
-_ALPHA_SAMPLES = np.linspace(0.0, 1.0, _RAMP_SAMPLES)
-_EASED_ALPHA_SAMPLES = _ease_alpha(_ALPHA_SAMPLES)
+    """Perceptual opacity from a blended one."""
+    return np.power(np.clip(alpha, 0.0, 1.0), _PERCEPTUAL_ALPHA_GAMMA)
 
 
 def _unease_alpha(alpha: np.ndarray) -> np.ndarray:
-    """Inverse of :py:func:`_ease_alpha`, read off its samples."""
-    return np.interp(alpha, _EASED_ALPHA_SAMPLES, _ALPHA_SAMPLES)
+    """Inverse of :py:func:`_ease_alpha`."""
+    return np.power(np.clip(alpha, 0.0, 1.0), 1.0 / _PERCEPTUAL_ALPHA_GAMMA)
 
 
 _BlendSpace = tuple[
