@@ -200,3 +200,30 @@ def test_lut_levels_are_numpys(monkeypatch: pytest.MonkeyPatch, size: int) -> No
         with monkeypatch.context() as patch:
             patch.setattr(adjustments, "_cblend", None)
             _same(compiled, adjustments._apply_lut(v, lut))
+
+
+def test_bytes_are_numpys() -> None:
+    """composite_pil's bytes: every level's edge and its neighbours, the specials."""
+    edges = (np.arange(256, dtype=np.float32) + np.float32(0.5)) / np.float32(255)
+    values = np.concatenate(
+        [
+            np.linspace(-0.01, 1.01, 100_001, dtype=np.float32),
+            edges,
+            np.nextafter(edges, np.float32(2)),
+            np.nextafter(edges, np.float32(-1)),
+            _SPECIAL,
+            -_SPECIAL,
+        ]
+    )
+    values = values[: values.size // 16 * 16].reshape(-1, 4, 4)
+    rgb, alpha = values[..., :3], values[..., 3:]
+    packed = np.ascontiguousarray(rgb), np.ascontiguousarray(alpha)
+    for color, plane in (packed, (rgb, alpha), (rgb, None), (rgb[..., :1], alpha)):
+        stacked = color if plane is None else np.concatenate((color, plane), 2)
+        plain = 255 * stacked
+        np.clip(plain, 0, 255, out=plain)
+        np.rint(plain, out=plain)
+        assert (
+            composite._cblend.to_bytes(color, plane).tobytes()
+            == plain.astype(np.uint8).tobytes()
+        )
