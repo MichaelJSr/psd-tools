@@ -14,7 +14,7 @@ import pytest
 
 from psd_tools.api.layers import Group, Layer, TypeLayer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.constants import Tag
+from psd_tools.constants import Resource, Tag
 
 from ..utils import full_name
 
@@ -224,3 +224,76 @@ def test_the_fixture_links_its_type_layers_to_the_document_text() -> None:
         if isinstance(layer, TypeLayer)
     }
     assert indices == {"Ability": 1, "Name": 0}
+
+
+# hp with Hp Dark, Ability with Name, by layer id.
+LINKS = {7: 3, 10: 3, 18: 5, 20: 5}
+
+
+def _ids(psd: PSDImage) -> list[int]:
+    records = psd._layer_records()
+    return [record.tagged_blocks.get_data(Tag.LAYER_ID) for record in records]
+
+
+def _linked() -> PSDImage:
+    """The fixture with links as Photoshop writes them, one entry per record; hp targeted."""
+    psd = _open()
+    ids = _ids(psd)
+    psd.image_resources.get_data(Resource.LAYER_GROUP_INFO)[:] = [
+        LINKS.get(i, 0) for i in ids
+    ]
+    psd.image_resources[Resource.LAYER_STATE_INFO].data.value = ids.index(7)
+    return _reopen(psd)
+
+
+def _links(psd: PSDImage) -> tuple[dict[int, int], set[int], int]:
+    """Link groups by layer id, read by position as Photoshop does; flags; target."""
+    resources = psd.image_resources
+    ids = _ids(psd)
+    groups = resources.get_data(Resource.LAYER_GROUP_INFO)
+    flags = resources.get_data(Resource.LAYER_GROUPS_ENABLED_ID)
+    assert len(groups) == len(flags) == len(ids)
+    target = ids[resources.get_data(Resource.LAYER_STATE_INFO)]
+    return {i: g for i, g in zip(ids, groups, strict=True) if g}, set(flags), target
+
+
+def _duplicate(psd: PSDImage) -> set[int]:
+    _find(psd, "Stats Bars/Bars/hp").duplicate(index=0)
+    return set()
+
+
+@pytest.mark.parametrize("name", [*EDITS, "duplicate"])
+def test_links_follow_their_layers(name: str) -> None:
+    psd = _linked()
+    EDITS.get(name, _duplicate)(psd)
+    again = _reopen(psd)
+    present = {layer.layer_id for layer in again.descendants()}
+    assert _links(again) == (
+        {i: g for i, g in LINKS.items() if i in present},
+        {1},
+        7,
+    )
+
+
+def test_stale_links_stay_until_the_records_change() -> None:
+    psd = _open()
+    resources = psd.image_resources
+    resources.get_data(Resource.LAYER_GROUP_INFO)[:] = [3] * 20
+    resources.get_data(Resource.LAYER_GROUPS_ENABLED_ID)[:] = [1] * 20
+    resources[Resource.LAYER_STATE_INFO].data.value = 19
+    psd = _reopen(psd)
+    _text(psd)
+    kept = _reopen(psd)
+    assert list(kept.image_resources.get_data(Resource.LAYER_GROUP_INFO)) == [3] * 20
+    assert kept.image_resources.get_data(Resource.LAYER_STATE_INFO) == 19
+    _remove(kept)
+    assert _links(_reopen(kept)) == ({}, {1}, 15)
+
+
+def test_links_follow_a_move_undone_after_a_save() -> None:
+    psd = _linked()
+    hp = _find(psd, "Stats Bars/Bars/hp")
+    hp.move_to(hp.parent, index=0)
+    psd.save(io.BytesIO(), update_preview=False)
+    hp.move_to(hp.parent, index=1)
+    assert _links(_reopen(psd)) == (LINKS, {1}, 7)
