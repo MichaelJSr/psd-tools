@@ -10,6 +10,11 @@ Changelog
 - [fix] Exposure brings RGB darks back from linear light along a straight
   line out of black, as Photoshop 2023 does. **Rendering change** for
   exposure adjustments in RGB documents, in the darks
+- [fix] Once layers are added, removed or moved, saving keeps each layer's
+  link (image resources 1026 and 1072, read by position) and the target
+  layer (1024) with that layer; a new layer is unlinked, and lists that
+  were already out of step are written unlinked. Other saves write them
+  as read
 - [packaging] The sdist carries the Cython sources, so a wheel builds from
   it, and the wheel no longer ships the generated C
 - [fix] A shape's vector stroke follows its curves as Photoshop draws them
