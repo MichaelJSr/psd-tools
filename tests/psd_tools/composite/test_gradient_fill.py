@@ -993,6 +993,15 @@ def test_a_perceptual_ramp_between_partial_opacities_still_lands_on_its_stops() 
     assert ramp[50] < 0.5
 
 
+def test_a_perceptual_fade_matches_photoshop_2023() -> None:
+    """Photoshop 2023's own 50%-to-clear perceptual fill and its PNG of it."""
+    psd = PSDImage.open(full_name("layers/gradient-perceptual-fade.psd"))
+    ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
+    png = Image.open(full_name("layers/gradient-perceptual-fade.png"))
+    theirs = np.asarray(png.convert("RGBA"), dtype=int)
+    assert np.abs(ours[..., 3] - theirs[..., 3]).max() <= 2
+
+
 # The width each mode's color arrays carry; multichannel's is per file.
 MODE_CHANNELS = {
     ColorMode.BITMAP: 1,
