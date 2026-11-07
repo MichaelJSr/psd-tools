@@ -25,6 +25,7 @@ DESCENT = -200
 UNDERLINE_POSITION = -100
 UNDERLINE_THICKNESS = 50
 KERN_A_V = -80
+KERN_V_SPACE = -60
 
 #: glyph -> (advance, rectangle (x0, y0, x1, y1) or None)
 GLYPHS: dict[str, tuple[int, tuple[int, int, int, int] | None]] = {
@@ -54,7 +55,7 @@ D_TO_CVT = [
 #: ``d`` instructions: its two top points rounded to the pixel grid.
 D_ROUND = ["SVTCA[0]", *("PUSHB[ ]", "1", "MDAP[1]"), *("PUSHB[ ]", "2", "MDAP[1]")]
 FEATURES = f"""
-feature kern {{ pos A V {KERN_A_V}; }} kern;
+feature kern {{ pos A V {KERN_A_V}; pos V space {KERN_V_SPACE}; }} kern;
 feature liga {{ sub f i by f_i; }} liga;
 feature salt {{ sub I by A; }} salt;
 """
