@@ -13,7 +13,7 @@ from psd_tools.api._resources import _descriptors
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.constants import Tag
 from psd_tools.psd import PSD
-from psd_tools.psd.lazy import Span
+from psd_tools.psd.lazy import Span, load
 from psd_tools.psd.parse_limits import ParseLimitError, ParseLimits
 from psd_tools.range_reader import RangeReader
 
@@ -147,6 +147,19 @@ def test_lazy_payloads_keep_the_parse_budget() -> None:
         PSD.read(io.BytesIO(data), parse_limits=limits)
     with pytest.raises(ParseLimitError):
         PSD.read(io.BytesIO(data), parse_limits=limits, lazy=True)
+
+
+def test_layer_blocks_read_later_keep_the_parse_budget() -> None:
+    """An open holds a layer's blocks unparsed; reading them spends its budget."""
+    with open(full_name("layers/type-layer.psd"), "rb") as f:
+        data = f.read()
+    psd = PSD.read(io.BytesIO(data), parse_limits=ParseLimits(max_objects=1000))
+    info = psd.layer_and_mask_information.layer_info
+    assert info is not None and info.layer_records is not None
+    with pytest.raises(ParseLimitError, match="max_objects"):
+        for record in info.layer_records:
+            for block in record.tagged_blocks.values():
+                load(block)
 
 
 def test_lazy_blocks_in_a_block_copy_stay_eager() -> None:

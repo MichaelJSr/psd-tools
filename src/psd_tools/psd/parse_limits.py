@@ -115,6 +115,35 @@ class _Context:
                 _budget.reset(token)
 
 
+class _Resume:
+    """``resume_budget()``."""
+
+    __slots__ = ("_budget", "_token")
+
+    def __init__(self, budget: _ParseBudget | None):
+        self._budget = budget
+        self._token: Token[_ParseBudget | None] | None = None
+
+    def __enter__(self) -> None:
+        if self._budget is not None and _budget.get() is None:
+            self._token = _budget.set(self._budget)
+
+    def __exit__(self, kind: Any, value: Any, traceback: Any) -> None:
+        token = self._token
+        if token is not None:
+            self._token = None
+            try:
+                if kind is None and self._budget is not None and self._budget.error:
+                    raise self._budget.error
+            finally:
+                _budget.reset(token)
+
+
+def resume_budget(budget: _ParseBudget | None) -> AbstractContextManager[None]:
+    """Charge a later read to ``budget``, the parse that left it; None: its own."""
+    return _Resume(budget)
+
+
 def parse_context(limits: ParseLimits | None = None) -> AbstractContextManager[bool]:
     """Start a parse budget or reuse the current synchronous parse budget."""
     return _Context(limits)

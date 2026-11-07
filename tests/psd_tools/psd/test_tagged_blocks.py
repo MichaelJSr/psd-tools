@@ -201,6 +201,17 @@ def test_an_unknown_block_still_reads_as_bytes() -> None:
     assert blocks.get_data(b"zzzz") == b"abc"
 
 
+def test_an_unread_layer_block_is_written_as_read() -> None:
+    # A layer id with 4 bytes its parser skips.
+    raw = _raw_block(Tag.LAYER_ID.value, struct.pack(">II", 7, 1)).getvalue()
+    blocks = TaggedBlocks.frombytes(raw)
+    assert blocks[Tag.LAYER_ID]._held is not None
+    assert blocks.tobytes() == raw
+    assert blocks.get_data(Tag.LAYER_ID) == 7
+    blocks[Tag.LAYER_ID].data = IntegerElement(9)
+    assert blocks.tobytes() == _raw_block(Tag.LAYER_ID.value, b"\0\0\0\x09").getvalue()
+
+
 def test_nested_layer_info_blocks_raise_a_parse_limit_error() -> None:
     with open(os.path.join(TEST_ROOT, "psd_files", "1layer.psd"), "rb") as f:
         psd = PSD.read(f)
