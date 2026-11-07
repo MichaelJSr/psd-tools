@@ -366,8 +366,10 @@ def test_an_external_smart_object_without_any_path_raises_value_error() -> None:
     linked_file = layer.smart_object._data.linked_file
     for key in (b"fullPath", b"relPath"):
         del linked_file[key]
-    with pytest.raises(ValueError, match="no readable path"):
+    with pytest.raises(ValueError, match="places nowhere"):
         layer.smart_object.data
+    with pytest.raises(ValueError, match="no readable path"), layer.smart_object.open():
+        pass
 
 
 def test_a_forced_stroke_skips_non_knot_records() -> None:

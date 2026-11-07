@@ -8,8 +8,9 @@ from typing import Any
 
 import attrs
 
+from psd_tools.api import links
 from psd_tools.api.protocols import PSDProtocol
-from psd_tools.constants import Tag
+from psd_tools.constants import LinkedLayerType, Tag
 from psd_tools.psd.base import DictElement, ListElement
 from psd_tools.psd.descriptor import String
 from psd_tools.psd.layer_and_mask import LayerRecord
@@ -65,11 +66,30 @@ class ResourceTransfer:
     different content is replaced by a fresh one in the layer's descriptors.
     A reference the source cannot resolve is left as it is. One instance
     serves a whole operation, so layers sharing a resource share its transfer.
+
+    A link to an external file is rebased: its relative paths run from the
+    destination's folder, read off both documents' ``repo_path``.
     """
 
     def __init__(self, dest: PSDProtocol) -> None:
         self._dest = dest
         self._ids: dict[tuple[int, str, str], str] = {}
+
+    def check(self, source: PSDProtocol, records: Iterable[LayerRecord]) -> None:
+        """Raise before anything is carried if a link *records* use cannot follow.
+
+        :raises ValueError: if a layer links an external file and either
+            document's ``repo_path`` is unknown, or the link places nowhere.
+        """
+        if source is self._dest:
+            return
+        for record in records:
+            for tag in _SMART_OBJECT_TAGS:
+                data = record.tagged_blocks.get_data(tag)
+                key = _bare(getattr(data, "data", {}).get(Key.ID)) if data else None
+                if key is not None:
+                    for _, item in _find(source, _LINKED_TAGS, "uuid", key):
+                        self._rebased(source, item)
 
     def add(self, source: PSDProtocol, records: Iterable[LayerRecord]) -> None:
         """Carry what *records* reference from *source*, rewriting their ids."""
@@ -146,10 +166,34 @@ class ResourceTransfer:
             target.append(clone)
         return new
 
+    def _rebased(self, source: PSDProtocol, item: Any) -> Any:
+        """*item* as it reads from the destination's folder."""
+        if source is self._dest or item.kind != LinkedLayerType.EXTERNAL:
+            return item
+        name = item.filename.strip("\x00")
+        if source.repo_path is None or self._dest.repo_path is None:
+            raise ValueError(
+                f"Cannot carry the link to {name!r}: both documents need a repo_path"
+            )
+        folder = links.folder_of(self._dest.repo_path)
+        if links.folder_of(source.repo_path) == folder:
+            return item
+        target = links.place(item.linked_file, source.repo_path)
+        if target is None:
+            raise ValueError(f"Cannot carry the link to {name!r}: it places nowhere")
+        clone = deepcopy(item)
+        for key in links.PATH_KEYS:
+            value = clone.linked_file.get(key)
+            if isinstance(value, String) and links.is_relative(value.value):
+                rel = links.relative(target, self._dest.repo_path)
+                clone.linked_file[key] = String(rel + "\x00")
+        return clone
+
     def _linked(self, source: PSDProtocol, unique_id: str) -> str:
         found = _find(source, _LINKED_TAGS, "uuid", unique_id)
         if not found:
             return unique_id
+        found = [(tag, self._rebased(source, item)) for tag, item in found]
         present = _find(self._dest, _LINKED_TAGS, "uuid", unique_id)
         if [item for _, item in present] == [item for _, item in found]:
             return unique_id

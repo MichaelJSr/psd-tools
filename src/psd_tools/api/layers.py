@@ -1460,8 +1460,10 @@ class Layer(LayerProtocol):
             Indexed or Multichannel document, which cannot hold layers; an
             :py:class:`~psd_tools.api.layers.Artboard` is not going to the
             document root; the layer cannot be converted to the
-            destination's colour mode; or a type layer's story cannot go
-            between a Photoshop CC file's ``Txt2`` and an older one's.
+            destination's colour mode; a type layer's story cannot go
+            between a Photoshop CC file's ``Txt2`` and an older one's; or a
+            linked smart object cannot be rebased on the destination's
+            folder, which takes both documents' ``repo_path``.
         :raises IndexError: If ``index`` is out of range.
         :return: The inserted copy.
         """
@@ -1493,6 +1495,8 @@ class Layer(LayerProtocol):
                 target._apply_reencoded(converted)
         seed_resource = _issue_layer_ids(group._psd, group._psd.descendants(), copies)
         transfer = ResourceTransfer(group._psd)
+        for node in copies:
+            transfer.check(self._psd, _layer_records(node))
         for node in copies:
             transfer.add(self._psd, _layer_records(node))
         for write in stories:
@@ -2208,6 +2212,7 @@ class GroupMixin(GroupMixinProtocol, Protocol):
                 nodes.extend(layer.descendants())
             for node in nodes:
                 if node._psd != self._psd:
+                    ResourceTransfer(self._psd).check(node._psd, _layer_records(node))
                     result = node._reencode(self)
                     if result is not None:
                         converted[id(node)] = result

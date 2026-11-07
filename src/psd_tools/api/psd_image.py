@@ -137,6 +137,10 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         # those items' rectangles stay. The record is held so that its id is
         # not reused.
         self._opened_records: dict[int, tuple[LayerRecord, int | None, int, int]] = {}
+        #: The document's path in its repository, ``/``-separated, or ``None``.
+        #: Links are placed and written from it (see
+        #: :py:meth:`~psd_tools.api.smart_object.SmartObject.link_target`).
+        self.repo_path: str | None = None
 
         self._psd = self  # For GroupMixin protocol compatibility.
         self._init()
