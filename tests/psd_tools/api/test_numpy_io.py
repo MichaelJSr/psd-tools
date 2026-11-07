@@ -1,5 +1,7 @@
 import logging
 import os
+import subprocess
+import sys
 import tracemalloc
 from collections.abc import Sequence
 
@@ -510,3 +512,13 @@ def test_the_compiled_8bit_read_is_parse_arrays(
         assert real(planes, 16, 16).tobytes() == want.tobytes()
     with pytest.raises(ValueError):
         real([levels, levels[1:]], 16, 16)
+
+
+def test_a_read_does_not_load_the_compositor() -> None:
+    code = (
+        "import sys; from psd_tools import PSDImage; "
+        f"psd = PSDImage.open({full_name('layer-edit.psd')!r}); "
+        "[layer.numpy() for layer in psd.descendants()]; "
+        "assert 'psd_tools.composite' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

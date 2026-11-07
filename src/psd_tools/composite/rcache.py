@@ -148,7 +148,8 @@ def layer_key(layer: Layer, memo: dict[int, bytes]) -> bytes:
     if known is not None:
         return known
     version = layer._psd.version
-    digest = hashlib.blake2b(digest_size=16)
+    # sha256 runs on the CPU's hash instructions: 3x blake2b on an M-series.
+    digest = hashlib.sha256()
     digest.update(_record_bytes(layer._record, version))
     for channel in layer._channels:
         digest.update(channel.data)
@@ -160,7 +161,7 @@ def layer_key(layer: Layer, memo: dict[int, bytes]) -> bytes:
             digest.update(_record_bytes(bounding, version))
         for child in layer:  # type: ignore[attr-defined]
             digest.update(layer_key(child, memo))
-    key = memo[id(layer)] = digest.digest()
+    key = memo[id(layer)] = digest.digest()[:16]
     return key
 
 
@@ -196,7 +197,7 @@ def doc_key(psd: PSDImage) -> bytes | None:
         return None
     record = psd._record
     version = record.header.version
-    digest = hashlib.blake2b(digest_size=16)
+    digest = hashlib.sha256()
     digest.update(_record_bytes(record.header, version))
     digest.update(_record_bytes(record.color_mode_data, version))
     digest.update(repr(psd._max_alloc_bytes).encode())
@@ -207,4 +208,4 @@ def doc_key(psd: PSDImage) -> bytes | None:
         for tag in _DOCUMENT_BLOCKS:
             if tag in blocks:
                 digest.update(_record_bytes(blocks[tag], version))
-    return digest.digest()
+    return digest.digest()[:16]
