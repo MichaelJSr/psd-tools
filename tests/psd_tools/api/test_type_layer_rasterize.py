@@ -14,8 +14,9 @@ pytest.importorskip("freetype")
 pytest.importorskip("uharfbuzz")
 
 from psd_tools import PSDImage
+from psd_tools.api import text_edit
 from psd_tools.api.layers import TypeLayer
-from psd_tools.composite.text import FontMap, render_type_layer
+from psd_tools.composite.text import FontMap, capture, render_type_layer
 from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.constants import ChannelID
 
@@ -88,6 +89,47 @@ def test_rasterize_round_trip(
     whole = np.asarray(again.composite().convert("RGBA"), dtype=np.float32)
     x0, y0, x1, y1 = bbox
     assert (whole[y0:y1, x0:x1, :3].min(axis=-1) < 128).any()
+
+
+def _has_strikes(layer: TypeLayer) -> bool:
+    story = text_edit._story(layer)
+    assert story is not None
+    return story.k.strikes in story.story[story.k.view]
+
+
+def test_rasterize_drops_the_strikes(
+    layer: TypeLayer, arial_as_luckiest_guy: FontMap, tmp_path: Any
+) -> None:
+    psd = cast(PSDImage, layer._psd)
+    assert _has_strikes(layer)
+    layer.set_text("Hello")
+    layer.rasterize(fonts=arial_as_luckiest_guy)
+    assert not _has_strikes(layer)
+    psd.save(tmp_path / "edited.psd")
+    again = PSDImage.open(tmp_path / "edited.psd")
+    reopened = next(x for x in again.descendants() if isinstance(x, TypeLayer))
+    assert not _has_strikes(reopened)
+    assert reopened.story_text == "Hello\r"
+
+
+def test_an_unchanged_splice_keeps_the_strikes(
+    layer: TypeLayer, arial_as_luckiest_guy: FontMap
+) -> None:
+    keep = capture(layer, arial_as_luckiest_guy)
+    layer.rasterize(fonts=arial_as_luckiest_guy, keep=keep)
+    assert _has_strikes(layer)
+
+
+def test_earthboundzero_keeps_the_strikes(
+    layer: TypeLayer, luckiest_guy_path: str
+) -> None:
+    fonts = FontMap(
+        aliases={"ArialMT": luckiest_guy_path, "EarthboundZero": luckiest_guy_path}
+    )
+    layer.add_font("EarthboundZero")
+    layer.set_span_style(0, 4, Font="EarthboundZero")
+    layer.rasterize(fonts=fonts)
+    assert _has_strikes(layer)
 
 
 def test_rasterize_keeps_the_mask(luckiest_guy_path: str, tmp_path: Any) -> None:

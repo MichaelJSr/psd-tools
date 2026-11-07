@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import copy
 from bisect import bisect_right
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "add_font",
+    "drop_strikes",
     "set_run_style",
     "set_span_style",
     "set_text",
@@ -140,6 +141,8 @@ _NAMED = _Spelling(
     frame_strike=("StreamTag", "FrameStrike", "Frame"),
 )
 
+#: Photoshop refuses a document where it must compose these (embedded bitmaps).
+_KEEP_STRIKES = frozenset({"EarthboundZero"})
 #: What ends a paragraph run: Photoshop ends one at a forced line break too.
 _PARAGRAPH_ENDS = "\r\x03"
 
@@ -1064,6 +1067,27 @@ def _set_stored_text(layer: TypeLayer, text: str) -> None:
     if item is not None:
         old = item.value if isinstance(item.value, str) else ""
         item.value = text[:-1] + ("\x00" if old.endswith("\x00") else "")
+
+
+def drop_strikes(layer: TypeLayer, fonts: Iterable[str]) -> None:
+    """Drop the story's frame and glyph strikes: the layer was redrawn.
+
+    Photoshop mixes a raster under stale strikes straight, and composes a
+    story without strikes at open, in the text gamma. ``fonts`` are the
+    faces the story is set in; a story in :data:`_KEEP_STRIKES` keeps them.
+    """
+    if _KEEP_STRIKES.intersection(fonts):
+        return
+    try:
+        story = _story(layer)
+    except ValueError:  # a shared or broken story is not this layer's alone
+        return
+    if story is None:
+        return
+    view = story.story.get(story.k.view)
+    if isinstance(view, engine_data.Dict) and story.k.strikes in view:
+        del view[story.k.strikes]
+        _touch(layer)
 
 
 def _touch(layer: TypeLayer) -> None:
