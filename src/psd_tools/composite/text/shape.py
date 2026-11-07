@@ -16,8 +16,10 @@ from psd_tools.composite.text.model import Run, Style
 #: Characters that take the space glyph's advance and offer a line break; a
 #: tab's advance then runs to the next tab stop.
 SPACE_CLASS = frozenset(" \t")
-#: Terminators: never shaped, no glyph, no advance.
+#: Terminators: no glyph, no advance.
 CONTROL = frozenset("\r\x03\n")
+#: Terminators Photoshop sets as a space: the line's last glyph kerns with it.
+SET_AS_SPACE = frozenset("\r\x03")
 
 
 @dataclass(frozen=True, eq=False)
@@ -149,6 +151,15 @@ def shape_piece(
         chars = text[s:e].replace("\t", " ")
         if style.caps == 2:
             chars = _caps(chars)
+        end = runs[at(b)].style
+        if (
+            e == b
+            and b < len(text)
+            and text[b] in SET_AS_SPACE
+            and end.auto_kerning
+            and shaping_key(end) == shaping_key(style)
+        ):
+            chars += " "
         features: dict[str, object] = {
             "kern": True,
             "liga": style.ligatures,
@@ -177,7 +188,9 @@ def shape_piece(
         bold = em * FAUX_BOLD_EM if style.faux_bold else 0.0
         for k, (info, pos) in enumerate(zip(infos, positions, strict=True)):
             j = info.cluster
-            following = infos[k + 1].cluster if k + 1 < len(infos) else n
+            if j >= n:
+                break
+            following = min(infos[k + 1].cluster, n) if k + 1 < len(infos) else n
             # The tracking after a glyph comes from the last character it covers.
             tracked = runs[at(s + max(j, following - 1))].style
             glyphs.append(

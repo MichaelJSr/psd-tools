@@ -17,7 +17,7 @@ from psd_tools.composite.text.shape import (
     shaping_key,
 )
 
-from .conftest import GLYPHS, KERN_A_V, PS_CFF, PS_TT, UPEM
+from .conftest import GLYPHS, KERN_A_V, KERN_V_SPACE, PS_CFF, PS_TT, UPEM
 
 SIZE = 10.0
 
@@ -219,6 +219,27 @@ def test_spaces_and_terminators(fonts: FontMap) -> None:
         4 * adv("I") + 2 * adv("space")
     )
     assert shaped.measure(4, 6) == pytest.approx(adv("I"))
+
+
+@pytest.mark.parametrize("end", ["\r", "\x03"])
+def test_terminator_kerns_as_a_space(fonts: FontMap, end: str) -> None:
+    text = f"V{end}"
+    shaped = shape_piece(text, 0, 1, runs_for(text, style()), fonts)
+    assert [g.cluster for g in shaped.glyphs] == [0]
+    assert shaped.measure(0, 1) == pytest.approx(adv("V") + KERN_V_SPACE / UPEM * SIZE)
+    # Another shaping key: no pair. Its AutoKerning off: none either.
+    for other in (style(size=2 * SIZE), style(auto_kerning=False)):
+        runs = runs_for(text, style(), other, cuts=(1,))
+        shaped = shape_piece(text, 0, 1, runs, fonts)
+        assert shaped.measure(0, 1) == pytest.approx(adv("V"))
+    # No terminator, no pair.
+    shaped = shape_piece("V", 0, 1, runs_for("V", style()), fonts)
+    assert shaped.measure(0, 1) == pytest.approx(adv("V"))
+    # AutoKerning off further back leaves the pair.
+    text = f"IAV{end}"
+    runs = runs_for(text, style(), style(auto_kerning=False), style(), cuts=(1, 2))
+    shaped = shape_piece(text, 0, 3, runs, fonts)
+    assert shaped.glyphs[2].adv == pytest.approx(adv("V") + KERN_V_SPACE / UPEM * SIZE)
 
 
 def test_piece_range(fonts: FontMap) -> None:
