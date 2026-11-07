@@ -410,6 +410,18 @@ Changelog
   moves to whole pixels and the path with it, so a centred stroke of odd
   width lands on pixel centres instead of half-covering the pixels either side
 
+1.26.1 (unreleased)
+-------------------
+
+- [fix] A Brightness/Contrast layer saved with *Use Legacy* reads as
+  ``BrightnessContrast`` instead of an empty ``PixelLayer``, and composites with
+  Photoshop's legacy formula instead of being skipped. The low-level ``brit``
+  block reads its brightness and contrast as signed values (#1039)
+- [fix] Opening a PSD dominated by embedded smart-object payloads no longer peaks
+  at about three times the file size in memory; linked-layer blocks are parsed
+  from a bounded substream instead of a copy. A block whose parser leaves part
+  of its window unread now reads as raw bytes (#899, #1037)
+
 1.26.0 (2026-10-21)
 -------------------
 

@@ -1184,8 +1184,8 @@ def _build_record_tree(
 def _adjustment_kind(blocks: TaggedBlocks) -> type[layers.Layer] | None:
     """Return the adjustment or fill layer class the blocks select, or `None`."""
     keys = [key for key in adjustments.TYPES if key in blocks]
-    # Other adjustments carry CgEd too (a Curves preset's name), so it selects
-    # Brightness/Contrast only when no other adjustment block is present.
-    if len(keys) > 1 and Tag.CONTENT_GENERATOR_EXTRA_DATA in keys:
-        keys.remove(Tag.CONTENT_GENERATOR_EXTRA_DATA)
+    # Other adjustments carry CgEd too (a Curves preset's name), so it and brit
+    # select Brightness/Contrast only when no other adjustment block is present.
+    bare = (Tag.CONTENT_GENERATOR_EXTRA_DATA, Tag.BRIGHTNESS_AND_CONTRAST)
+    keys = [key for key in keys if key not in bare] or keys
     return adjustments.TYPES[keys[0]] if keys else None

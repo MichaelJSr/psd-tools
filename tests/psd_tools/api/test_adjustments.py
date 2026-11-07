@@ -66,6 +66,25 @@ def test_brightness_contrast_reads_the_auto_flag(
     assert layer.automatic is flag
 
 
+@pytest.mark.parametrize(
+    "colormode, brightness, contrast",
+    [("rgb", 20, 57), ("cmyk", 44, 19), ("grayscale", -23, -26)],
+)
+def test_legacy_brightness_contrast(
+    colormode: str, brightness: int, contrast: int
+) -> None:
+    psd = PSDImage.open(
+        full_name(f"adjustments/brightnesscontrast_legacy_{colormode}.psd")
+    )
+    layer = psd[1]
+    assert isinstance(layer, adjustments.BrightnessContrast)
+    assert layer.brightness == brightness
+    assert layer.contrast == contrast
+    assert layer.mean == 127
+    assert layer.lab is False
+    assert layer.use_legacy is True
+
+
 def test_levels(psd: PSDImage) -> None:
     layer = psd[5]
     assert isinstance(layer, adjustments.Levels)
@@ -89,12 +108,13 @@ def test_curves_without_extra_records_reads_none(
 
 
 def _with_preset_block(filename: str) -> PSDImage:
-    """Open `filename` with a Curves-preset CgEd block added to its first layer."""
+    """Open `filename` with Curves-preset CgEd and zeroed brit blocks on its first layer."""
     with open(full_name(filename), "rb") as f:
         psd = PSD.read(f)
     layer_info = psd.layer_and_mask_information.layer_info
     assert layer_info is not None
-    layer_info.layer_records[0].tagged_blocks.set_data(
+    blocks = layer_info.layer_records[0].tagged_blocks
+    blocks.set_data(
         Tag.CONTENT_GENERATOR_EXTRA_DATA,
         items={
             b"Vrsn": Integer(1),
@@ -102,6 +122,7 @@ def _with_preset_block(filename: str) -> PSDImage:
             b"curvesPresetFileName": String("Negative (RGB)"),
         },
     )
+    blocks.set_data(Tag.BRIGHTNESS_AND_CONTRAST, 0, 0, 127, 0)
     buffer = io.BytesIO()
     psd.write(buffer)
     buffer.seek(0)

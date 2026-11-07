@@ -17,6 +17,7 @@ from psd_tools.composite.adjustments import (
     _apply_lut,
     _brightness_curve,
     _huesaturation,
+    _legacy_brightnesscontrast_lut,
     _levels_gamma,
     _lut_domain,
     _rows_from_rgb,
@@ -71,7 +72,7 @@ STRICT = 5e-6  # tolerance for precise adjustment algorithms (e.g. threshold)
 # Brightness & Contrast
 brightnesscontrast_tests = {
     "brightnesscontrast": ACCURATE,
-    "brightnesscontrast_legacy": LOOSE,
+    "brightnesscontrast_legacy": ACCURATE,
 }
 brightnesscontrast_colorspaces = ["rgb", "cmyk", "grayscale"]
 
@@ -80,10 +81,6 @@ brightnesscontrast_colorspaces = ["rgb", "cmyk", "grayscale"]
 @pytest.mark.parametrize("colormode", brightnesscontrast_colorspaces)
 def test_brightnesscontrast_composite_icc(name: str, colormode: str) -> None:
     filename = f"adjustments/{name}_{colormode}"
-    if name.endswith("legacy"):
-        pytest.xfail(
-            "legacy adjustment layers recognized as PixelLayers with no bounding box"
-        )
     check_icc_composite_quality(filename, brightnesscontrast_tests[name])
 
 
@@ -91,10 +88,6 @@ def test_brightnesscontrast_composite_icc(name: str, colormode: str) -> None:
 @pytest.mark.parametrize("colormode", brightnesscontrast_colorspaces)
 def test_brightnesscontrast_composite_error(name: str, colormode: str) -> None:
     filename = f"adjustments/{name}_{colormode}.psd"
-    if name.endswith("legacy"):
-        pytest.xfail(
-            "legacy adjustment layers recognized as PixelLayers with no bounding box"
-        )
     check_composite_quality(filename, brightnesscontrast_tests[name], False)
 
 
@@ -197,6 +190,14 @@ def test_a_brightness_of_one_moves_no_level_by_much_more_than_one(
     """The shoulder flattens to the identity with the gain: no step at zero."""
     t = _lut_domain(256)
     assert _brightness_curve(brightness, t) == pytest.approx(t, abs=1.5 / 255)
+
+
+def test_legacy_brightnesscontrast_at_full_contrast_is_a_threshold() -> None:
+    t = np.linspace(0, 1, 256, dtype=np.float32)
+    lut = _legacy_brightnesscontrast_lut(0, 100, t)
+    assert np.isfinite(lut).all()
+    assert (lut[:127] == 0).all()
+    assert (lut[128:] == 1).all()
 
 
 # Levels

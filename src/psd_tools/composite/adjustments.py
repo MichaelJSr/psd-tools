@@ -60,6 +60,10 @@ _FLOAT_EPSILON = np.float32(1e-9)
 _CONTRAST_CONTROL_X = np.array([0.0, 63.0, 191.0, 255.0], dtype=np.float32) / _255
 _CONTRAST_INNER_DELTA = np.float32(25.0 / 255.0)
 
+# Level the legacy brightness and contrast line pivots on (0–255 scale).
+# Only mean 127 with lab False is verified; neither property is read here.
+_LEGACY_PIVOT = np.float32(127.0) / _255
+
 # Modern brightness curve, fitted to Photoshop exports. Positive brightness
 # scales the shadows by a gain of exp(brightness / _BRIGHTNESS_GAIN_SCALE) up
 # to a knee, then rolls off into white; negative brightness is its inverse.
@@ -255,11 +259,14 @@ def apply_brightnesscontrast(
     """
     from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
 
-    if layer.use_legacy:  # these layers are skipped during composing as they are recognized as PixelLayers with no bounding box
-        return img
+    t = _lut_domain(_get_lut_size(layer))
+
+    if layer.use_legacy:
+        lut = _legacy_brightnesscontrast_lut(layer.brightness, layer.contrast, t)
+        channel_id = 1 if colormode == ColorMode.GRAYSCALE else 0
+        return _apply_luts({channel_id: lut}, img, colormode)
 
     c = np.float32(layer.contrast) / _100
-    t = _lut_domain(_get_lut_size(layer))
 
     x = _CONTRAST_CONTROL_X
     y = np.array(
@@ -293,6 +300,26 @@ def _brightness_curve(brightness: int, t: NDArray[np.float32]) -> NDArray[np.flo
     if brightness > 0:
         return np.interp(t, grid, curve)
     return np.interp(t, curve, grid)
+
+
+def _legacy_brightnesscontrast_lut(
+    brightness: int, contrast: int, t: NDArray[np.float32]
+) -> NDArray[np.float32]:
+    """
+    Return Photoshop's legacy brightness and contrast, a line through mid-gray.
+
+    Brightness shifts by that many of 255 levels. A positive contrast then
+    steepens the line by ``100 / (100 - contrast)``, so 100 is a threshold; a
+    negative contrast flattens it by ``(100 + contrast) / 100`` before the shift.
+    """
+    shift = np.float32(brightness) / _255
+    if contrast > 0:
+        slope = _100 / max(_100 - np.float32(contrast), _FLOAT_EPSILON)
+        lut = (t + shift - _LEGACY_PIVOT) * slope + _LEGACY_PIVOT
+    else:
+        slope = (_100 + np.float32(contrast)) / _100
+        lut = (t - _LEGACY_PIVOT) * slope + _LEGACY_PIVOT + shift
+    return lut.clip(_0, _1).astype(np.float32, copy=False)
 
 
 @_preserve_alpha
