@@ -41,6 +41,7 @@ _MAGIC_TABLE: tuple[tuple[bytes, str], ...] = (
     (b"BM", "bmp"),
 )
 _MAGIC_PREFIX_LEN = max(len(p) for p, _ in _MAGIC_TABLE)
+_FILTER_TAGS = (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3)
 
 
 def _detect_filetype_from_magic(data: bytes) -> str | None:
@@ -622,7 +623,7 @@ def _filter_items(layer: LayerProtocol) -> Sequence[FilterEffect]:
     blocks = getattr(getattr(layer, "_psd", None), "tagged_blocks", None)
     if blocks is None:
         return []
-    for key in (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3):
+    for key in _FILTER_TAGS:
         items = blocks.get_data(key)
         if items is not None:
             return items

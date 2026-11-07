@@ -175,6 +175,75 @@ def test_smart_filter_item_is_named_after_the_placed_id() -> None:
     assert np.array_equal(stored[1], filtered.source)
 
 
+def _objects(psd: PSDImage) -> list[SmartObjectLayer]:
+    return [layer for layer in psd if isinstance(layer, SmartObjectLayer)]
+
+
+def _saved(psd: PSDImage) -> PSDImage:
+    buf = io.BytesIO()
+    psd.save(buf, update_preview=False)
+    buf.seek(0)
+    return PSDImage.open(buf)
+
+
+def _with_items() -> PSDImage:
+    """placedLayer.psd as saved with an FEid item named after each smart object."""
+    psd = PSDImage.open(full_name("placedLayer.psd"))
+    plane = np.zeros((1, 1), np.uint8)
+    source = np.zeros((1, 1, 3), np.uint8)
+    ids = [layer.smart_object.placed_id or "" for layer in _objects(psd)]
+    items = [
+        feid_item((0, 0, 1, 1), source, plane, plane, uuid=placed) for placed in ids
+    ]
+    store_items(psd, items)
+    return _saved(psd)
+
+
+def _named(psd: PSDImage) -> list[list[str]]:
+    """The IDs in the lnk2, lnkE and FEid blocks."""
+    blocks = psd.tagged_blocks
+    assert blocks is not None
+    tags = (Tag.LINKED_LAYER2, Tag.LINKED_LAYER_EXTERNAL, Tag.FILTER_EFFECTS2)
+    return [[item.uuid.strip("\x00") for item in blocks.get_data(tag)] for tag in tags]
+
+
+def test_an_edited_save_drops_what_no_layer_names() -> None:
+    """Photoshop 2023 refuses a file holding any of them."""
+    psd = _with_items()
+    external, kept, embedded = _objects(psd)
+    psd.remove(external)
+    psd.remove(embedded)
+    so = kept.smart_object
+    assert _named(_saved(psd)) == [[], [so.unique_id], [so.placed_id]]
+
+
+def test_a_moved_layer_keeps_its_data() -> None:
+    psd = _with_items()
+    named = _named(psd)
+    _objects(psd)[2].move_to(psd, index=1)
+    assert psd.is_updated()
+    assert _named(_saved(psd)) == named
+
+
+def test_a_smart_object_without_an_id_keeps_every_item() -> None:
+    psd = _with_items()
+    named = _named(psd)
+    gone, unknown, _ = _objects(psd)
+    config = unknown.smart_object._config
+    assert config is not None
+    del config.data[b"Idnt"], config.data[b"placed"]
+    psd.remove(gone)
+    assert _named(_saved(psd)) == named
+
+
+def test_an_unedited_save_keeps_an_item_no_layer_names() -> None:
+    psd = _with_items()
+    assert psd.tagged_blocks is not None
+    psd.tagged_blocks.get_data(Tag.FILTER_EFFECTS2)[0].uuid = "x"
+    named = _named(psd)
+    assert named[2][0] == "x" and _named(_saved(psd)) == named
+
+
 def test_smart_filter_flags_that_are_not_booleans_read_as_the_defaults() -> None:
     filtered = _filtered_object()
     fx = enable_filters(filtered.layer, extends_white=False)
