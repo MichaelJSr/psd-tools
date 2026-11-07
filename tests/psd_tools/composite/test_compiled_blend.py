@@ -6,8 +6,9 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
+from psd_tools.api import numpy_io
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import utils
+from psd_tools.composite import adjustments, utils
 from psd_tools.composite.composite import _over, _remix, _unmix
 
 from ..utils import full_name
@@ -168,8 +169,34 @@ def test_a_render_is_numpys(
         compiled = psd.composite(force=force, ignore_preview=True, apply_icc=False)
         with monkeypatch.context() as patch:
             patch.setattr(composite, "_cblend", None)
+            patch.setattr(adjustments, "_cblend", None)
+            patch.setattr(numpy_io, "_cnumpy_io", None)
             plain = PSDImage.open(path).composite(
                 force=force, ignore_preview=True, apply_icc=False
             )
     assert compiled.mode == plain.mode
     assert compiled.tobytes() == plain.tobytes()
+
+
+@pytest.mark.parametrize("size", [2, 256, 4097, 65536])
+def test_lut_levels_are_numpys(monkeypatch: pytest.MonkeyPatch, size: int) -> None:
+    """Every level's edge and its float32 neighbours, the specials, strided views."""
+    rng = np.random.default_rng(size)
+    lut = rng.random(size, dtype=np.float32)
+    edges = (np.arange(size, dtype=np.float32) + np.float32(0.5)) / np.float32(size - 1)
+    values = np.concatenate(
+        [
+            np.linspace(0, 1, 300_001, dtype=np.float32),
+            edges,
+            np.nextafter(edges, np.float32(2)),
+            np.nextafter(edges, np.float32(-1)),
+            np.tile(_SPECIAL, 3),
+            -_SPECIAL,
+        ]
+    )
+    values = values[: values.size // 6 * 6].reshape(-1, 2, 3)
+    for v in (values, values[:, :, 1], values[::2, :, 1:]):
+        compiled = adjustments._apply_lut(v, lut)
+        with monkeypatch.context() as patch:
+            patch.setattr(adjustments, "_cblend", None)
+            _same(compiled, adjustments._apply_lut(v, lut))

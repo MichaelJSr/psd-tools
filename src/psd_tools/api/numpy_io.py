@@ -30,6 +30,11 @@ from psd_tools.compression import (
 from psd_tools.constants import ChannelID, ColorMode, Compression
 from psd_tools.psd.patterns import Pattern
 
+try:  # The compiled 8-bit read, bit-identical to _parse_array's.
+    from psd_tools.api import _numpy_io as _cnumpy_io  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    _cnumpy_io = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -283,7 +288,8 @@ def _layer_read_peak_bytes(
     channel count. The phases run in sequence: decompressing a channel, parsing
     it while the earlier ones are retained, and ``np.stack`` copying the lot.
     The doubled float32 stack is the high-water mark for anything past a single
-    8-bit plane. ``held`` is what the caller keeps live across the read, added
+    8-bit plane. The compiled 8-bit read holds less: the decoded planes and one
+    float32 array. ``held`` is what the caller keeps live across the read, added
     to every phase.
 
     ``row_objects`` is the per-row space the codec's payload multiple is not
@@ -351,6 +357,13 @@ def check_shape_read(layer: "LayerProtocol", held: int) -> None:
     )
 
 
+def _stacked(channels: list[np.ndarray], height: int, width: int) -> np.ndarray | None:
+    """Stack parsed planes side by side, ``(height, width, n)``; None for none."""
+    if len(channels) and channels[0].size > 0:
+        return np.stack(channels, axis=1).reshape((height, width, -1))
+    return None
+
+
 def get_layer_data(
     layer: "LayerProtocol",
     channel: str | None,
@@ -368,17 +381,30 @@ def get_layer_data(
         depth, version = layer._psd.depth, layer._psd.version
         _guard_channel_read(layer, width, height, condition, held)
         iterator = zip(layer._record.channel_info, layer._channels, strict=False)
-        channels = [
-            _parse_array(
-                data.get_data(width, height, depth, version),
-                cast(Literal[1, 8, 16, 32], depth),
-                width,
-            )
-            for info, data in iterator
-            if condition(info) and len(data.data) > 0
+        selected = [
+            data for info, data in iterator if condition(info) and len(data.data) > 0
         ]
-        if len(channels) and channels[0].size > 0:
-            result = np.stack(channels, axis=1).reshape((height, width, -1))
+        if depth == 8 and _cnumpy_io is not None:
+            # Every plane decoded, then levelled into one array in one pass.
+            planes = [data.get_data(width, height, depth, version) for data in selected]
+            size = width * height
+            if planes and size and all(len(plane) == size for plane in planes):
+                result = _cnumpy_io.planes8(planes, height, width)
+            else:
+                result = _stacked(
+                    [_parse_array(p, 8, width) for p in planes], height, width
+                )
+        else:
+            channels = [
+                _parse_array(
+                    data.get_data(width, height, depth, version),
+                    cast(Literal[1, 8, 16, 32], depth),
+                    width,
+                )
+                for data in selected
+            ]
+            result = _stacked(channels, height, width)
+        if result is not None:
             expected_channels = EXPECTED_CHANNELS.get(layer._psd.color_mode)
             if expected_channels is not None and result.shape[2] > expected_channels:
                 logger.debug("Extra channel found")

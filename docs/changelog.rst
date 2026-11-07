@@ -24,6 +24,10 @@ Changelog
   it is not built), a group's shadow, knockout and stroke share one composite
   of its alpha, RLE channels decode in one call, and a gradient no longer
   imports ``scipy.interpolate``. Renders are unchanged
+- [refactor] 8-bit channel reads level every plane into one array in the new
+  compiled ``psd_tools.api._numpy_io`` (numpy where it is not built), at a
+  lower memory peak; LUT adjustments read their levels in ``_blend``, and a
+  solid colour fill copies one row down. Renders are unchanged
 - [security] A very wide stroke, precise glow or chisel bevel searches the
   pixels far from its layer with upstream 1.26.0's k-d tree bound, restated
   in Photoshop's chamfer distance, so it no longer takes long to render and

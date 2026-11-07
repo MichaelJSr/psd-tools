@@ -462,3 +462,51 @@ def test_cactus_top_is_not_unmatted_on_an_undeclared_channel() -> None:
     assert image.mode == "RGB"
     preview = np.asarray(image).astype(np.float32) / 255.0
     assert np.array_equal(preview, color)
+
+
+@pytest.mark.skipif(numpy_io._cnumpy_io is None, reason="compiled read not built")
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "masks.psd",
+        "masks2.psd",
+        "colormodes/4x4_8bit_cmyk.psd",
+        "colormodes/4x4_8bit_grayscale.psd",
+    ],
+)
+def test_the_compiled_8bit_read_is_parse_arrays(
+    monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    """Taken on every 8-bit read, and bit for bit the per-plane parse."""
+    compiled = numpy_io._cnumpy_io
+    real = compiled.planes8
+    calls: list[int] = []
+
+    def planes8(planes: list[bytes], h: int, w: int) -> np.ndarray:
+        calls.append(len(planes))
+        return real(planes, h, w)
+
+    def reads() -> list[np.ndarray | None]:
+        psd = PSDImage.open(full_name(filename))
+        channels = ("color", "shape", "mask", None)
+        return [layer.numpy(c) for layer in psd.descendants() for c in channels]
+
+    monkeypatch.setattr(compiled, "planes8", planes8)
+    fast = reads()
+    assert calls
+    monkeypatch.setattr(numpy_io, "_cnumpy_io", None)
+    for got, want in zip(fast, reads(), strict=True):
+        assert (got is None) == (want is None)
+        if got is not None and want is not None:
+            assert got.shape == want.shape and got.dtype == want.dtype
+            assert got.tobytes() == want.tobytes()
+    levels = bytes(range(256))
+    for n in range(1, 6):
+        planes = [levels[k:] + levels[:k] for k in range(n)]
+        want = numpy_io._stacked(
+            [numpy_io._parse_array(p, 8, 16) for p in planes], 16, 16
+        )
+        assert want is not None
+        assert real(planes, 16, 16).tobytes() == want.tobytes()
+    with pytest.raises(ValueError):
+        real([levels, levels[1:]], 16, 16)

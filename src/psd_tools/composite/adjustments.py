@@ -41,6 +41,11 @@ from psd_tools.constants import ColorMode, Resource
 from psd_tools.psd.adjustments import LevelRecord
 from psd_tools.psd.adjustments import Levels as LevelsData
 
+try:
+    from psd_tools.composite import _blend as _cblend  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover
+    _cblend = None
+
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable)
@@ -219,6 +224,19 @@ def _apply_lut(values: np.ndarray, lut: np.ndarray) -> NDArray[np.float32]:
     on them, the master reading each channel's output at its nearest.
     """
     lut_size = int(lut.shape[0])
+    if (
+        _cblend is not None
+        and 0 < lut_size <= 2**16
+        and lut.ndim == 1
+        and lut.dtype == np.float32
+        and values.dtype == np.float32
+        and values.ndim in (2, 3)
+    ):
+        out = _cblend.lut_levels(
+            values if values.ndim == 3 else values[:, :, None],
+            np.ascontiguousarray(lut),
+        )
+        return out if values.ndim == 3 else out[:, :, 0]
     if lut_size <= 2**16:
         nan = np.isnan(values)
         if nan.any():

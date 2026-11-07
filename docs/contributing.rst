@@ -56,9 +56,10 @@ Finally, run tests::
 
 The Cython extensions build in place with ``python setup.py build_ext
 --inplace`` (Cython and setuptools on the path). Without
-``psd_tools.composite._distance`` or ``psd_tools.composite._blend`` the NumPy
-code runs instead; ``test_the_compiled_loops_match_numpy`` and
-``test_compiled_blend.py`` check the two agree bit for bit.
+``psd_tools.composite._distance``, ``psd_tools.composite._blend`` or
+``psd_tools.api._numpy_io`` the NumPy code runs instead;
+``test_the_compiled_loops_match_numpy``, ``test_compiled_blend.py`` and
+``test_the_compiled_8bit_read_is_parse_arrays`` check the two agree bit for bit.
 
 ``tests/psd_tools/test_malformed.py`` byte-mutates every fixture up to 500 KB and checks
 that only ``ValueError`` or ``OSError`` escapes (see :doc:`untrusted`). It is
