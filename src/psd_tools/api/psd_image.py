@@ -72,6 +72,7 @@ from psd_tools.api.utils import (
     normalize_color,
     validate_alloc_budget,
 )
+from psd_tools.color_convert import LAB_NEUTRAL_CHROMA
 from psd_tools.constants import (
     TEXT_BLEND_GAMMA,
     ChannelID,
@@ -610,7 +611,7 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         record = self._record
         header = record.header
         count = get_color_channels(self)
-        planes = [_white_plane(header)] * count
+        planes = _white_planes(header, count)
         if header.channels > count:
             stored = record.image_data.get_data(header)
             assert isinstance(stored, list)
@@ -645,11 +646,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             except Exception:  # an undecodable section is not white
                 self._stripped = False
             else:
-                white = _white_plane(header)
                 count = get_color_channels(self)
-                self._stripped = len(planes) >= count and all(
-                    plane == white for plane in planes[:count]
-                )
+                self._stripped = planes[:count] == _white_planes(header, count)
         return self._stripped
 
     @property
@@ -1256,11 +1254,18 @@ def _adjustment_kind(blocks: TaggedBlocks) -> type[layers.Layer] | None:
     return adjustments.TYPES[keys[0]] if keys else None
 
 
-def _white_plane(header: FileHeader) -> bytes:
-    """One white colour plane at the header's size and depth."""
+def _white_planes(header: FileHeader, count: int) -> list[bytes]:
+    """Return *count* colour planes of a white image at the header's size and depth."""
     if header.depth == 1:  # a set bit is black
-        return b"\x00" * (((header.width + 7) // 8) * header.height)
+        return [b"\x00" * (((header.width + 7) // 8) * header.height)] * count
     pixels = header.width * header.height
     if header.depth == 32:
-        return np.ones(pixels, dtype=">f4").tobytes()
-    return b"\xff" * (pixels * header.depth // 8)
+        return [np.ones(pixels, dtype=">f4").tobytes()] * count
+    white = b"\xff" * (pixels * header.depth // 8)
+    if header.color_mode != ColorMode.LAB:
+        return [white] * count
+    # Lab white: full lightness, neutral a and b.
+    dtype = ">u2" if header.depth == 16 else "u1"
+    top = np.iinfo(dtype).max
+    neutral = np.full(pixels, round(LAB_NEUTRAL_CHROMA * top), dtype=dtype).tobytes()
+    return [white] + [neutral] * (count - 1)

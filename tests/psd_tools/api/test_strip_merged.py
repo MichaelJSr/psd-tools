@@ -38,3 +38,14 @@ def test_a_stripped_document_saves_stripped_after_an_edit() -> None:
 
     back.save(io.BytesIO(), preview=back.composite())
     assert not back.is_stripped()
+
+
+def test_a_lab_document_strips_to_lab_white() -> None:
+    psd = PSDImage.new("LAB", (3, 2))
+    psd.strip_merged()
+    saved = io.BytesIO()
+    psd.save(saved)
+    back = PSDImage.open(io.BytesIO(saved.getvalue()))
+    planes = back._record.image_data.get_data(back._record.header)
+    assert planes == [b"\xff" * 6, b"\x80" * 6, b"\x80" * 6]
+    assert back.is_stripped()
