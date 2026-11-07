@@ -26,6 +26,7 @@ from psd_tools.compression import (
     PSDDecompressionWarning,
     _row_size,
     decompress_row_peak_bytes,
+    decompress_rows,
 )
 from psd_tools.constants import ChannelID, ColorMode, Compression
 from psd_tools.psd.patterns import Pattern
@@ -457,6 +458,66 @@ def get_layer_data(
             warn=False,
         )
     return np.concatenate([color, shape], axis=2)
+
+
+def get_layer_rows(
+    layer: "LayerProtocol", start: int, stop: int
+) -> tuple[np.ndarray, np.ndarray | None] | None:
+    """:func:`get_layer_data`'s ``color`` and ``shape``, rows ``start`` to ``stop`` only.
+
+    Decodes just those rows of 8-bit RAW and RLE channels, so a box render
+    skips the rest of a tall layer. None wherever only the whole read can
+    tell -- another depth or codec, a body short of its rows -- for the caller
+    to make that read.
+    """
+    width, height = layer.width, layer.height
+    depth, version = layer._psd.depth, layer._psd.version
+    if depth != 8:
+        return None
+    pairs = list(zip(layer._record.channel_info, layer._channels, strict=False))
+    color = [d for i, d in pairs if i.id >= 0 and len(d.data) > 0]
+    shape = [
+        d for i, d in pairs if i.id == ChannelID.TRANSPARENCY_MASK and len(d.data) > 0
+    ]
+    codecs = (Compression.RAW, Compression.RLE)
+    if not color or any(d.compression not in codecs for d in color + shape):
+        return None
+    expected = EXPECTED_CHANNELS.get(layer._psd.color_mode)
+
+    def read(selected: list[Any]) -> np.ndarray | None:
+        planes = []
+        for data in selected:
+            plane = decompress_rows(
+                data.data, data.compression, width, height, depth, version, start, stop
+            )
+            if plane is None:
+                return None
+            planes.append(plane)
+        if _cnumpy_io is not None:
+            result = _cnumpy_io.planes8(planes, stop - start, width)
+        else:
+            result = np.stack([_parse_array(p, 8, width) for p in planes], axis=1)
+            result = result.reshape((stop - start, width, -1))
+        if expected is not None and result.shape[2] > expected:
+            return result[:, :, :expected]
+        return result
+
+    # The whole read's guards, so what it refuses stays refused.
+    _guard_channel_read(layer, width, height, lambda x: x.id >= 0)
+    color_rows = read(color)
+    if color_rows is None:
+        return None
+    shape_rows = None
+    if shape:
+        # The whole read holds its colour, float32, through the shape read.
+        held = width * height * len(color) * 4
+        _guard_channel_read(
+            layer, width, height, lambda x: x.id == ChannelID.TRANSPARENCY_MASK, held
+        )
+        shape_rows = read(shape)
+        if shape_rows is None:
+            return None
+    return color_rows, shape_rows
 
 
 def _check_pattern_read(

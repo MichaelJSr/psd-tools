@@ -19,6 +19,7 @@ from psd_tools.compression import (
     decode_rle,
     decompress,
     decompress_row_peak_bytes,
+    decompress_rows,
     decompressed_size_bound,
     encode_prediction,
     encode_rle,
@@ -586,3 +587,39 @@ def test_the_compiled_rle_charges_its_row_table() -> None:
     """The compiled ``decode_rle()`` holds the row table, not an object per row."""
     assert decompress_row_peak_bytes(Compression.RLE, 7) == 7 * RLE_TABLE_ROW_BYTES
     assert decompress_row_peak_bytes(Compression.RLE, 0) == 0
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("use_python", [False, True], ids=["compiled", "python"])
+def test_decompress_rows_is_the_whole_decode_sliced(
+    version: int, use_python: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows decoded alone equal those rows of the whole decode; None leaves it whole."""
+    if use_python:
+        monkeypatch.setattr(codecs, "rle_impl", rle)
+    width, height = 37, 23
+    rng = random.Random(version)
+    data = bytes(rng.choice((0, 0, 0, 7, 255)) for _ in range(width * height))
+    for compression in (Compression.RAW, Compression.RLE):
+        packed = compress(data, compression, width, height, 8, version)
+        whole = decompress(packed, compression, width, height, 8, version)
+        for start, stop in ((0, 1), (5, 17), (22, 23), (0, 23)):
+            assert (
+                decompress_rows(
+                    packed, compression, width, height, 8, version, start, stop
+                )
+                == whole[start * width : stop * width]
+            )
+        assert (
+            decompress_rows(packed[:-1], compression, width, height, 8, version, 0, 1)
+            is None
+        )
+        assert (
+            decompress_rows(packed, compression, width, height, 8, version, 3, 3)
+            is None
+        )
+    zipped = compress(data, Compression.ZIP, width, height, 8, version)
+    assert (
+        decompress_rows(zipped, Compression.ZIP, width, height, 8, version, 0, 1)
+        is None
+    )
