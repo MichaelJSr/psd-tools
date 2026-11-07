@@ -10,7 +10,7 @@ Every canvas but ``lut_levels``' is read a row at a time, so a pixel's channels
 must be adjacent and its neighbour the next pixel along (``_rows``), as they are
 in a box cut from a canvas; ``composite._compiled_fits`` checks that first.
 """
-from libc.math cimport NAN, floorf
+from libc.math cimport NAN, floorf, fmaxf, fminf, rintf
 
 import numpy as np
 
@@ -332,4 +332,47 @@ def lut_levels(const float[:, :, :] values, const float[::1] lut):
                         continue
                     t = floorf(t * top + <float>0.5)
                     out[y, x, c] = lut[0 if t < 0 else (<Py_ssize_t>top if t > top else <Py_ssize_t>t)]
+    return result
+
+
+
+cdef inline unsigned char _byte(float v) noexcept nogil:
+    # 255 * v, np.clip to [0, 255], np.rint, astype(uint8). fmaxf takes NaN
+    # to 0, which is what the cast makes of it.
+    return <unsigned char>rintf(fminf(fmaxf(<float>255.0 * v, <float>0.0), <float>255.0))
+
+
+def to_bytes(const float[:, :, :] color, const float[:, :, :] alpha=None):
+    """``composite_pil``'s float32 canvas as bytes, ``alpha`` (one plane) appended last."""
+    cdef Py_ssize_t h = color.shape[0], w = color.shape[1], n = color.shape[2]
+    cdef Py_ssize_t m = n + (1 if alpha is not None else 0), y, x, c
+    cdef bint has_alpha = alpha is not None
+    cdef const float* row
+    cdef const float* arow
+    cdef unsigned char* orow
+    if has_alpha and (alpha.shape[0] != h or alpha.shape[1] != w or alpha.shape[2] != 1):
+        raise ValueError("alpha is not one plane of the canvas")
+    result = np.empty((h, w, m), dtype=np.uint8)
+    if h == 0 or w == 0 or m == 0:
+        return result
+    cdef unsigned char[:, :, ::1] out = result
+    cdef bint packed = color.strides[2] == sizeof(float) and color.strides[1] == n * sizeof(float) and (
+        not has_alpha or alpha.strides[1] == sizeof(float))
+    with nogil:
+        for y in range(h):
+            orow = &out[y, 0, 0]
+            if packed and n == 3 and has_alpha:
+                row = &color[y, 0, 0]
+                arow = &alpha[y, 0, 0]
+                for x in range(w):
+                    orow[4 * x] = _byte(row[3 * x])
+                    orow[4 * x + 1] = _byte(row[3 * x + 1])
+                    orow[4 * x + 2] = _byte(row[3 * x + 2])
+                    orow[4 * x + 3] = _byte(arow[x])
+                continue
+            for x in range(w):
+                for c in range(n):
+                    orow[x * m + c] = _byte(color[y, x, c])
+                if has_alpha:
+                    orow[x * m + n] = _byte(alpha[y, x, 0])
     return result
