@@ -57,10 +57,10 @@ def rendered_em(style: Style, sub_size: float = SUB_SIZE) -> float:
 
 
 def shaping_key(style: Style) -> tuple[object, ...]:
-    """What a segment shares; colour, tracking and underline do not cut.
+    """What a segment shares; colour and underline do not cut.
 
-    A ``BaselineShift`` change does: a shifted glyph is not kerned with its
-    neighbours.
+    ``BaselineShift`` and ``Tracking`` changes do: Photoshop kerns no pair
+    and forms no ligature across either.
     """
     return (
         style.font,
@@ -74,6 +74,7 @@ def shaping_key(style: Style) -> tuple[object, ...]:
         style.faux_italic,
         style.baseline_shift,
         style.stylistic_alternates,
+        style.tracking,
     )
 
 
