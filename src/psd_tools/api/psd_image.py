@@ -52,6 +52,7 @@ group-like behavior for accessing child layers.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
@@ -329,7 +330,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         dropped, here as well as in the file: Photoshop refuses a file that
         holds them.
 
-        :param fp: filename or file-like object.
+        :param fp: filename or file-like object. A file is opened only once
+            the document has serialized.
         :param encoding: charset encoding of the pascal string within the file,
             default 'macroman'.
         :param mode: file open mode, default 'wb'.
@@ -377,8 +379,11 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             self._prune_embedded()
 
         if isinstance(fp, (str, bytes, os.PathLike)):
-            with open(fp, mode) as f:
-                self._record.write(f, **kwargs)  # type: ignore[arg-type]
+            # In memory: a file's tell() and seek() are slow; a failed write keeps it.
+            with io.BytesIO() as buffer:
+                self._record.write(buffer, **kwargs)
+                with open(fp, mode) as f, buffer.getbuffer() as view:
+                    f.write(view)
         else:
             self._record.write(fp, **kwargs)  # type: ignore[arg-type]
 
