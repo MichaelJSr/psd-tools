@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -265,11 +266,19 @@ def test_resource_constants(text_layer: TypeLayer) -> None:
     resources = copy.deepcopy(text_layer.resource_dict)
     resources["SubscriptSize"] = engine_data.Float(0.6)
     resources["SubscriptPosition"] = engine_data.Float(0.3)
+    resources["SuperscriptSize"] = engine_data.Float(0.5)
+    resources["SuperscriptPosition"] = engine_data.Float(0.25)
     resources["ParagraphSheetSet"][0]["Properties"]["AutoLeading"] = engine_data.Float(
         1.5
     )
     m = TextModel.from_layer(cast(TypeLayer, _Layer(text_layer.engine_dict, resources)))
     assert (m.sub_size, m.sub_position, m.auto_leading) == (0.6, 0.3, 1.5)
+    style = m.runs[0].style
+    ratios = [
+        (m.size_ratio(s), m.position_ratio(s))
+        for s in (replace(style, baseline=b) for b in (0, 1, 2))
+    ]
+    assert ratios == [(1.0, 0.0), (0.5, 0.25), (0.6, 0.3)]
     assert m.transform == (2.0, 0.0, 0.0, 2.0, 10.0, 20.0)
 
 

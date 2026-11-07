@@ -82,6 +82,10 @@ def test_subscript_em(fonts: FontMap) -> None:
         text, 0, 1, runs_for(text, style(baseline=1)), fonts, sub_size=0.5
     )
     assert shaped.glyphs[0].adv == pytest.approx(adv("I") * 0.5)
+    shaped = shape_piece(
+        text, 0, 1, runs_for(text, style(baseline=1)), fonts, super_size=0.4
+    )
+    assert shaped.glyphs[0].adv == pytest.approx(adv("I") * 0.4)
 
 
 def test_horizontal_scale(fonts: FontMap) -> None:

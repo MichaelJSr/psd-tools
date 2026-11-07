@@ -135,7 +135,7 @@ def baseline_shift(style: Style, model: TextModel) -> float:
     vertically; ``BaselineShift`` is unscaled and positive upwards.
     """
     sign = {1: -1.0, 2: 1.0}.get(style.baseline, 0.0)
-    shift = sign * model.sub_position * style.size * style.vertical_scale
+    shift = sign * model.position_ratio(style) * style.size * style.vertical_scale
     return shift - style.baseline_shift
 
 
@@ -224,6 +224,7 @@ def layout(
             model.runs,
             fonts,
             sub_size=model.sub_size,
+            super_size=model.super_size,
             tab_width=paragraph.tab_width,
         )
         justification = paragraph.justification
@@ -294,7 +295,7 @@ def layout(
             span_start, span_run = pen, -1
             for k, g in enumerate(line_glyphs):
                 style = model.runs[g.run].style
-                em = rendered_em(style, model.sub_size)
+                em = rendered_em(style, model.sub_size, model.super_size)
                 base = y + baseline_shift(style, model)
                 advance = tabs.get(g.cluster, g.adv) + (
                     line.stretch if stretched(g.cluster) else 0.0
