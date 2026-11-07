@@ -2460,6 +2460,27 @@ def test_the_compiled_loops_match_numpy(
     assert compiled.tobytes() == _signed_distance(alpha, reach).tobytes()
 
 
+@pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
+@pytest.mark.parametrize("radius", [1.0, 2.5, 7.3, 12.0, 87.0])
+@pytest.mark.parametrize("outside", [0.0, 1.0])
+def test_the_compiled_tent_blur_is_scipys(
+    monkeypatch: pytest.MonkeyPatch, radius: float, outside: float
+) -> None:
+    """Mattes wide, thin and smaller than the reach blur to scipy's bits."""
+    rng = np.random.default_rng(int(radius * 10))
+    for shape in ((1, 1), (3, 200), (150, 2), (61, 97)):
+        alpha = rng.random(shape, dtype=np.float32)
+        alpha[alpha < 0.3] = 0.0
+        alpha[alpha > 0.7] = 1.0
+        view = np.pad(alpha, 2)[2:-2, 2:-2]
+        compiled = effects._tent_blur(view, radius, outside)
+        with monkeypatch.context() as patch:
+            patch.setattr(effects, "_cdistance", None)
+            plain = effects._tent_blur(view, radius, outside)
+        assert compiled.dtype == plain.dtype == np.float32
+        assert compiled.tobytes() == plain.tobytes()
+
+
 def _weighted_field(seed: int) -> np.ndarray:
     """A float64 field of scattered starting values, the rest infinitely far."""
     rng = np.random.default_rng(seed)

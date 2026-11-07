@@ -1612,8 +1612,6 @@ def _tent_blur(alpha: np.ndarray, radius: float, outside: float) -> np.ndarray:
     lies past the canvas is ``outside``: empty for a matte drawn from the
     silhouette, full for one drawn from its complement.
     """
-    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
-
     if radius <= 0.0:
         return alpha
     radius = max(radius, _MIN_BOX_WIDTH)
@@ -1621,6 +1619,19 @@ def _tent_blur(alpha: np.ndarray, radius: float, outside: float) -> np.ndarray:
     taps = np.arange(-reach, reach + 1, dtype=np.float64)
     weights = 1.0 - np.abs(taps) / radius
     weights = (weights / weights.sum()).astype(np.float32)
+    if (
+        _cdistance is not None
+        and hasattr(_cdistance, "tent_blur")
+        and alpha.dtype == np.float32
+        and alpha.ndim == 2
+        and outside in (0.0, 1.0)
+    ):
+        # scipy's sums in its order; its float32 result in every case tested.
+        return _cdistance.tent_blur(
+            np.ascontiguousarray(alpha), weights.astype(np.float64), outside
+        )
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
     for axis in range(2):
         alpha = ndimage.correlate1d(
             alpha, weights, axis=axis, mode="constant", cval=outside

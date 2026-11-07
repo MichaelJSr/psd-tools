@@ -1,5 +1,5 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True, language_level=3
-"""C loops behind effects._nearest_boundary, effects._chamfer_transform and _chamfer_relax.
+"""C loops behind effects._nearest_boundary, _chamfer_transform, _chamfer_relax and _tent_blur.
 
 The numpy code's float32 (pruned minimum) and float64 (chamfer) operations in
 the same order, so the results are bit-identical. Memoryviews only, so the
@@ -7,6 +7,7 @@ module builds against the Limited API without numpy headers.
 """
 import numpy as np
 from libc.math cimport INFINITY, sqrt
+from libc.stdlib cimport free, malloc
 
 
 def prune_min(
@@ -240,4 +241,135 @@ def disk_reach(const unsigned char[:, ::1] stating, double radius):
             for j in range(w):
                 acc = acc + runs[y, j]
                 o[y, j] = acc > 0
+    return out
+
+
+cdef void _tent_rows(const float* src, float* dst, Py_ssize_t h, Py_ssize_t n, const double* w,
+                     Py_ssize_t s, const float* crow, double* acc, const float** rp) noexcept nogil:
+    # Along axis 0: each output row sums whole input rows, so the loop over a
+    # row's pixels is the vector one and each pixel sees scipy's order.
+    cdef Py_ssize_t i, k, jj, t, j
+    cdef double w0 = w[s], v, w1, w2, w3, w4
+    cdef const float* a1
+    cdef const float* b1
+    cdef const float* a2
+    cdef const float* b2
+    cdef const float* a3
+    cdef const float* b3
+    cdef const float* a4
+    cdef const float* b4
+    for i in range(h):
+        for t in range(2 * s + 1):
+            j = i - s + t
+            rp[t] = src + j * n if 0 <= j < h else crow
+        a1 = rp[s]
+        for k in range(n):
+            acc[k] = <double>a1[k] * w0
+        jj = -s
+        while jj + 4 <= 0:
+            a1 = rp[s + jj]
+            b1 = rp[s - jj]
+            a2 = rp[s + jj + 1]
+            b2 = rp[s - jj - 1]
+            a3 = rp[s + jj + 2]
+            b3 = rp[s - jj - 2]
+            a4 = rp[s + jj + 3]
+            b4 = rp[s - jj - 3]
+            w1 = w[s + jj]
+            w2 = w[s + jj + 1]
+            w3 = w[s + jj + 2]
+            w4 = w[s + jj + 3]
+            for k in range(n):
+                v = acc[k]
+                v = v + (<double>a1[k] + <double>b1[k]) * w1
+                v = v + (<double>a2[k] + <double>b2[k]) * w2
+                v = v + (<double>a3[k] + <double>b3[k]) * w3
+                v = v + (<double>a4[k] + <double>b4[k]) * w4
+                acc[k] = v
+            jj = jj + 4
+        while jj < 0:
+            a1 = rp[s + jj]
+            b1 = rp[s - jj]
+            w1 = w[s + jj]
+            for k in range(n):
+                acc[k] = acc[k] + (<double>a1[k] + <double>b1[k]) * w1
+            jj = jj + 1
+        for k in range(n):
+            dst[i * n + k] = <float>acc[k]
+
+
+cdef void _tent_cols(const float* src, float* dst, Py_ssize_t h, Py_ssize_t n, const double* w,
+                     Py_ssize_t s, double cval, double* acc, double* pad) noexcept nogil:
+    # Along axis 1, over one padded row at a time.
+    cdef Py_ssize_t i, k, jj
+    cdef double w0 = w[s], v, w1, w2, w3, w4
+    cdef double* p = pad + s
+    cdef const float* row
+    for k in range(s):
+        pad[k] = cval
+        pad[s + n + k] = cval
+    for i in range(h):
+        row = src + i * n
+        for k in range(n):
+            p[k] = <double>row[k]
+        for k in range(n):
+            acc[k] = p[k] * w0
+        jj = -s
+        while jj + 4 <= 0:
+            w1 = w[s + jj]
+            w2 = w[s + jj + 1]
+            w3 = w[s + jj + 2]
+            w4 = w[s + jj + 3]
+            for k in range(n):
+                v = acc[k]
+                v = v + (p[k + jj] + p[k - jj]) * w1
+                v = v + (p[k + jj + 1] + p[k - jj - 1]) * w2
+                v = v + (p[k + jj + 2] + p[k - jj - 2]) * w3
+                v = v + (p[k + jj + 3] + p[k - jj - 3]) * w4
+                acc[k] = v
+            jj = jj + 4
+        while jj < 0:
+            w1 = w[s + jj]
+            for k in range(n):
+                acc[k] = acc[k] + (p[k + jj] + p[k - jj]) * w1
+            jj = jj + 1
+        for k in range(n):
+            dst[i * n + k] = <float>acc[k]
+
+
+def tent_blur(const float[:, ::1] alpha, const double[::1] weights, float outside):
+    """ndimage.correlate1d over axis 0, then axis 1, mode "constant".
+
+    scipy's sum for an odd, symmetric kernel: in double, the centre tap,
+    then each pair from the farthest in, rounded to float32 after each axis.
+    Never fused, so every machine gets the same bits.
+    """
+    if weights.shape[0] % 2 == 0:
+        raise ValueError("odd kernel only")
+    cdef Py_ssize_t h = alpha.shape[0], n = alpha.shape[1], s = weights.shape[0] // 2, k
+    mid = np.empty((h, n), dtype=np.float32)
+    out = np.empty((h, n), dtype=np.float32)
+    if h == 0 or n == 0:
+        return out
+    cdef float[:, ::1] m = mid
+    cdef float[:, ::1] o = out
+    cdef double* acc = <double*>malloc(n * sizeof(double))
+    cdef double* pad = <double*>malloc((n + 2 * s) * sizeof(double))
+    cdef float* crow = <float*>malloc(n * sizeof(float))
+    cdef const float** rp = <const float**>malloc((2 * s + 1) * sizeof(float*))
+    if acc == NULL or pad == NULL or crow == NULL or rp == NULL:
+        free(acc)
+        free(pad)
+        free(crow)
+        free(rp)
+        raise MemoryError()
+    with nogil:
+        for k in range(n):
+            crow[k] = outside
+        _tent_rows(&alpha[0, 0], &m[0, 0], h, n, &weights[0], s, crow, acc, rp)
+        _tent_cols(&m[0, 0], &o[0, 0], h, n, &weights[0], s, outside, acc, pad)
+    free(acc)
+    free(pad)
+    free(crow)
+    free(rp)
     return out
