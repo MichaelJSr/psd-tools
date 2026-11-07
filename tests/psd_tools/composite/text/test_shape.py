@@ -172,7 +172,7 @@ def test_faux_bold_widens(fonts: FontMap) -> None:
 
 
 def test_segment_spans_colour_runs(fonts: FontMap) -> None:
-    # Colour, tracking and underline do not cut a segment: the pair is kerned.
+    # Colour and underline do not cut a segment: the pair is kerned.
     text = "AV"
     runs = runs_for(
         text,
@@ -186,12 +186,20 @@ def test_segment_spans_colour_runs(fonts: FontMap) -> None:
     assert shaping_key(runs[0].style) == shaping_key(runs[1].style)
 
 
-def test_baseline_shift_cuts_kerning(fonts: FontMap) -> None:
+@pytest.mark.parametrize("other", [{"baseline_shift": 2.0}, {"tracking": 100.0}])
+def test_shift_or_tracking_cuts_kerning(fonts: FontMap, other: dict[str, Any]) -> None:
     text = "AV"
-    runs = runs_for(text, style(), style(baseline_shift=2.0), cuts=(1,))
+    runs = runs_for(text, style(), style(**other), cuts=(1,))
     shaped = shape_piece(text, 0, 2, runs, fonts)
     assert shaped.glyphs[0].adv == pytest.approx(adv("A"))
     assert shaping_key(runs[0].style) != shaping_key(runs[1].style)
+
+
+def test_tracking_change_cuts_ligature(fonts: FontMap) -> None:
+    text = "fi"
+    runs = runs_for(text, style(), style(tracking=100.0), cuts=(1,))
+    shaped = shape_piece(text, 0, 2, runs, fonts)
+    assert [g.adv for g in shaped.glyphs] == [adv("f"), adv("i")]
 
 
 def test_size_change_cuts_segment(fonts: FontMap) -> None:
