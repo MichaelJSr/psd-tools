@@ -952,7 +952,7 @@ def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
 
 
 # The perceptual method blends opacity raised to 1 / this. Fitted to
-# Photoshop 2023's foreground-to-transparent fills.
+# Photoshop 2023's foreground-to-transparent fills and to the cards.
 _PERCEPTUAL_ALPHA_GAMMA = 1.728
 
 

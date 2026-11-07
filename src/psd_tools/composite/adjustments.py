@@ -86,6 +86,11 @@ _BRIGHTNESS_GRID = np.linspace(0.0, 1.0, 4097)
 _GRAY_COLOR_GAMMA = np.float32(1.75)
 _SRGB_COLOR_GAMMA = np.float32(2.2)
 
+# Photoshop's exposure brings RGB back from linear light along the power curve
+# or this line through black, whichever is lower. Read off 8-bit ramps through
+# exposures -7.88 to 1.68.
+_EXPOSURE_TOE_SLOPE = np.float32(94.5)
+
 # Gamma values lower and upper bounds.
 _GAMMA_LOWER = np.float32(0.01)
 _GAMMA_UPPER = np.float32(9.99)
@@ -519,9 +524,12 @@ def apply_exposure(
     lut *= np.float32(np.exp2(exposure))
     lut = (lut + offset).clip(_0, _1)
     lut **= _1 / gamma
+    toe = lut * _EXPOSURE_TOE_SLOPE
 
     # convert back to original space using inverse TRC approximation
     lut **= (_1 / color_gamma).clip(_0, _1)
+    if colormode != ColorMode.GRAYSCALE:
+        lut = np.minimum(lut, toe)
 
     channel_id = 1 if colormode == ColorMode.GRAYSCALE else 0
 

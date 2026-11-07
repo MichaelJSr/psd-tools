@@ -42,6 +42,7 @@ from psd_tools.psd.adjustments import ChannelMixer as ChannelMixerData
 from psd_tools.psd.adjustments import ColorBalance as ColorBalanceData
 from psd_tools.psd.adjustments import ColorStop, LevelRecord, TransparencyStop
 from psd_tools.psd.adjustments import Curves as CurvesData
+from psd_tools.psd.adjustments import Exposure as ExposureData
 from psd_tools.psd.adjustments import GradientMap as GradientMapData
 from psd_tools.psd.adjustments import HueSaturation as HueSaturationData
 from psd_tools.psd.adjustments import Levels as LevelsData
@@ -482,6 +483,23 @@ def test_exposure_composite_icc(name: str, colormode: str) -> None:
 def test_exposure_composite_error(name: str, colormode: str) -> None:
     filename = f"adjustments/{name}_{colormode}.psd"
     check_composite_quality(filename, exposure_tests[name], False)
+
+
+# Photoshop 2023's levels for an 8-bit RGB ramp 0-31 through exposure -3.91,
+# offset 0, gamma 1.
+PS_EXPOSURE_DARKS = [0] * 7 + [1] * 4 + [2] * 3 + [3, 3, 4, 4, 5, 5, 6, 6, 6]
+PS_EXPOSURE_DARKS += [7, 7, 7, 8, 8, 8, 8, 9, 9]
+
+
+def test_exposure_darks_match_photoshops_levels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[7]
+    assert isinstance(layer, adjustments.Exposure)
+    monkeypatch.setattr(layer, "_data", ExposureData(0, -3.91, 0.0, 1.0))
+    ramp = np.repeat(np.arange(32, dtype=np.float32)[None, :, None] / 255, 3, axis=2)
+    out = _applied(apply_exposure(ramp, ColorMode.RGB, layer))
+    assert np.rint(out[0, :, 0] * 255).astype(int).tolist() == PS_EXPOSURE_DARKS
 
 
 # Hue/Saturation
