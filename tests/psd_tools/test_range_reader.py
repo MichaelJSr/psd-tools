@@ -67,6 +67,15 @@ def test_windows_grow_while_sequential_and_reset_after_a_seek() -> None:
     assert reader.requests == len(log) and reader.fetched == sum(b - a for a, b in log)
 
 
+def test_default_head_and_window_are_512_kb() -> None:
+    data = bytes(1 << 22)
+    log: list = []
+    reader = RangeReader(local_fetch(data, log))
+    reader.seek(1 << 21)
+    reader.read(1)
+    assert log == [(0, 1 << 19), (1 << 21, (1 << 21) + (1 << 19))]
+
+
 def test_cached_bytes_are_not_fetched_again() -> None:
     data = bytes(range(256)) * 4
     log: list = []
