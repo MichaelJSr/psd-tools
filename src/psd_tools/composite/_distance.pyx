@@ -1,5 +1,5 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True, language_level=3
-"""C loops behind effects._nearest_boundary, effects._chamfer_transform and _chamfer_relax.
+"""C loops behind effects._nearest_boundary, _chamfer_transform, _chamfer_relax and _tent_blur.
 
 The numpy code's float32 (pruned minimum) and float64 (chamfer) operations in
 the same order, so the results are bit-identical. Memoryviews only, so the
@@ -340,10 +340,12 @@ cdef void _tent_cols(const float* src, float* dst, Py_ssize_t h, Py_ssize_t n, c
 def tent_blur(const float[:, ::1] alpha, const double[::1] weights, float outside):
     """ndimage.correlate1d over axis 0, then axis 1, mode "constant".
 
-    For an odd, symmetric kernel, scipy's sum: double precision, the centre
-    tap, then each pair from the farthest in, rounded to float32 after each
-    axis. Bit-identical.
+    scipy's sum for an odd, symmetric kernel: in double, the centre tap,
+    then each pair from the farthest in, rounded to float32 after each axis.
+    Never fused, so every machine gets the same bits.
     """
+    if weights.shape[0] % 2 == 0:
+        raise ValueError("odd kernel only")
     cdef Py_ssize_t h = alpha.shape[0], n = alpha.shape[1], s = weights.shape[0] // 2, k
     mid = np.empty((h, n), dtype=np.float32)
     out = np.empty((h, n), dtype=np.float32)

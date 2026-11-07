@@ -1626,7 +1626,7 @@ def _tent_blur(alpha: np.ndarray, radius: float, outside: float) -> np.ndarray:
         and alpha.ndim == 2
         and outside in (0.0, 1.0)
     ):
-        # scipy's own sums, in its order: the same bits.
+        # scipy's sums in its order; its float32 result in every case tested.
         return _cdistance.tent_blur(
             np.ascontiguousarray(alpha), weights.astype(np.float64), outside
         )
