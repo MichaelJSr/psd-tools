@@ -162,6 +162,24 @@ def _grey_row(desc: Descriptor) -> np.ndarray:
     return color[0, :, 0]
 
 
+@pytest.mark.parametrize("angle", [0.0, 90.0, 180.0, -90.0])
+def test_an_axis_ramp_repeats_the_full_grids_line(angle: float) -> None:
+    """Colour and shape alike, against a hair off the axis, which draws every pixel."""
+    box = (0, 0, 40, 30)
+    alphas = [_opacity_stop(100.0, 0), _opacity_stop(0.0, 4096)]
+    color, shape = paint.draw_gradient_fill(
+        box, ColorMode.RGB, _gradient(angle, transparency=alphas)
+    )
+    near_color, near_shape = paint.draw_gradient_fill(
+        box, ColorMode.RGB, _gradient(angle + 1e-6, transparency=alphas)
+    )
+    assert color is not None and shape is not None
+    assert near_color is not None and near_shape is not None
+    assert color.shape == (30, 40, 3) and shape.shape == (30, 40, 1)
+    np.testing.assert_allclose(color, near_color, atol=1e-5)
+    np.testing.assert_allclose(shape, near_shape, atol=1e-5)
+
+
 def test_a_vertical_ramp_spans_the_height_of_a_wide_box() -> None:
     """The last stop sits on the top row, the first one row below the bottom.
 

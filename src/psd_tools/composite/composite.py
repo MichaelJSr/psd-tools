@@ -1783,6 +1783,7 @@ def _apply_cached(
         if index >= settled_below or not _settled(layers, index):
             continue
         copies = []
+        compositor._owned.clear()
         for name in _CHECKPOINT:
             canvas = getattr(compositor, name)
             known = stored.get(name)
@@ -2265,41 +2266,42 @@ def _edge_evidence(
     if top >= bottom or left >= right:
         return None
     on = (slice(top, bottom), slice(left, right))
-    seen = (
-        reference[
-            top + viewport[1] : bottom + viewport[1],
-            left + viewport[0] : right + viewport[0],
-        ]
-        / 255.0
-    )
+    seen = reference[
+        top + viewport[1] : bottom + viewport[1],
+        left + viewport[0] : right + viewport[0],
+    ]
     channels = canvas.shape[2]
     edge = (alpha[on][..., 0] > 0.0) & (alpha[on][..., 0] < 1.0)
     edge &= alpha_new[on][..., 0] > 0.99
     if seen.shape[2] > channels:
-        edge &= seen[..., channels] > 0.99
-    if not edge.any():
+        edge &= seen[..., channels] / 255.0 > 0.99
+    at = np.nonzero(edge)
+    if not len(at[0]):
         return None
-    backdrop = color_b[on]
-    shape_on, alpha_on, alpha_b_on = shape[on], alpha[on], alpha_b[on]
+
+    def picked(array: np.ndarray) -> np.ndarray:
+        return array[on][at][None]
+
+    backdrop, source = picked(color_b), picked(color)
     lerped = _over(
-        shape_on,
-        alpha_on,
-        alpha_b_on,
+        picked(shape),
+        picked(alpha),
+        picked(alpha_b),
         backdrop,
-        color[on],
-        blend_fn(backdrop, color[on]),
-        alpha_previous[on],
-        canvas[on],
-        alpha_new[on],
-    )
-    gamma = mixed[on]
-    read = edge & (np.abs(gamma - lerped).max(axis=2) > _TEXT_DECISIVE)
+        source,
+        blend_fn(backdrop, source),
+        picked(alpha_previous),
+        picked(canvas),
+        picked(alpha_new),
+    )[0]
+    gamma = mixed[on][at]
+    read = np.abs(gamma - lerped).max(axis=1) > _TEXT_DECISIVE
     if int(read.sum()) < _TEXT_MIN_PIXELS:
         return None
     share, fit = _favours_straight(
-        gamma[read], lerped[read], seen[..., :channels][read]
+        gamma[read], lerped[read], seen[at][read, :channels] / 255.0
     )
-    rows, columns = np.nonzero(read)
+    rows, columns = at[0][read], at[1][read]
     return share, fit, rows + top + viewport[1], columns + left + viewport[0]
 
 
@@ -3230,6 +3232,8 @@ class Compositor:
         self._alpha_g = np.zeros((self.height, self.width, 1), dtype=np.float32)
         self._color = self._color_0
         self._alpha = self._alpha_0
+        # The canvases this compositor alone holds, written in place.
+        self._owned: dict[str, np.ndarray] = {}
 
     def apply(self, layer: Layer, clip_compositing: bool = False) -> None:
         """Composite a layer into the stack."""
@@ -3267,6 +3271,7 @@ class Compositor:
         sl = (slice(box[1] - y0, box[3] - y0), slice(box[0] - x0, box[2] - x0))
         sub = object.__new__(Compositor)
         sub.__dict__.update(self.__dict__)
+        sub._owned = {}
         sub._viewport = box
         for name in (
             "_color_0",
@@ -3301,7 +3306,9 @@ class Compositor:
             new = getattr(sub, name)
             if new is old:
                 continue
-            canvas = getattr(self, name).copy()
+            canvas = getattr(self, name)
+            if self._owned.get(name) is not canvas:
+                canvas = self._owned[name] = canvas.copy()
             canvas[sl] = new
             setattr(self, name, canvas)
 
@@ -3947,9 +3954,9 @@ class Compositor:
 
         The same mix as :py:meth:`_apply_source`, with every colour taken into
         the text blend space first and the result brought back. Computed in
-        double precision and only on the rows and columns the source covers:
-        the transform is a round trip for every pixel the source leaves
-        alone, which single precision does not return exactly.
+        double precision and only on the pixels the source touches: the
+        transform is a round trip for every other one, which single precision
+        does not return exactly.
 
         ``inside``, where given, is the glyph's coverage with the layer's
         opacity, and the colour the layer shows within it at full coverage,
@@ -3969,33 +3976,56 @@ class Compositor:
         if not len(rows) or not len(columns):
             return self._color
         box = (slice(rows[0], rows[-1] + 1), slice(columns[0], columns[-1] + 1))
-        color = color[box].astype(np.float64)
-        previous: np.ndarray = self._color[box].astype(np.float64)
-        shape = shape[box]
-        alpha = alpha[box]
-        alpha_new = self._alpha[box]
-        alpha_b = alpha_b[box].astype(np.float64)
+        result = self._color.copy()
+        # A pixel the source leaves alone keeps its colour: the round trip
+        # returns it to the bit but for the two cases set here.
+        now = self._alpha[box][..., 0]
+        touched = (shape[box][..., 0] != 0) | (alpha[box][..., 0] != 0)
+        touched |= alpha_previous[box][..., 0] != now
+        if isolated:
+            group = alpha_g_previous[box][..., 0]
+            touched |= (group != 0.0) & (group != 1.0)
+            unpainted = (group == 0.0) & ~touched
+            result[box][unpainted] = self._color_0[box][unpainted]
+            result[box][unpainted & (now <= 0.0)] = 1.0
+        else:
+            result[box][(now <= 0.0) & ~touched] = 1.0
+        if inside is not None:
+            touched = np.ones_like(touched)
+        at = np.nonzero(touched)
+
+        def picked(array: np.ndarray) -> np.ndarray:
+            return array[box][at][None]
+
+        color = picked(color).astype(np.float64)
+        previous: np.ndarray = picked(self._color).astype(np.float64)
+        shape = picked(shape)
+        alpha = picked(alpha)
+        alpha_previous = picked(alpha_previous)
+        alpha_new = picked(self._alpha)
+        alpha_now = alpha_new
+        alpha_b = picked(alpha_b).astype(np.float64)
         backdrop = (
-            previous if color_b is self._color else color_b[box].astype(np.float64)
+            previous if color_b is self._color else picked(color_b).astype(np.float64)
         )
         blended = (1.0 - alpha_b) * color + alpha_b * blend_fn(backdrop, color)
         source = to_text_space(blended, text_gamma)
         if isolated:
-            color_0 = self._color_0[box].astype(np.float64)
-            alpha_0 = self._alpha_0[box].astype(np.float64)
-            alpha_b = alpha_g_previous[box].astype(np.float64)
+            color_0 = picked(self._color_0).astype(np.float64)
+            alpha_0 = picked(self._alpha_0).astype(np.float64)
+            alpha_b = picked(alpha_g_previous).astype(np.float64)
             # The content so far, un-mixed from the backdrop it stands over;
             # where there is none its colour carries no weight below.
             previous = utils.divide(
-                previous * alpha_previous[box] - (1.0 - alpha_b) * alpha_0 * color_0,
+                previous * alpha_previous - (1.0 - alpha_b) * alpha_0 * color_0,
                 alpha_b,
                 fill=0.0,
             )
             backdrop = previous
-            alpha_new = self._alpha_g[box]
+            alpha_new = picked(self._alpha_g)
         # The canvas outside the shape stays, and the shape uncovers the
         # backdrop for what lies beyond the coverage.
-        share = alpha if inside is None else inside[0][box]
+        share = alpha if inside is None else picked(inside[0])
         prior = to_text_space(previous, text_gamma)
         if isolated:
             mixed = (1.0 - share) * alpha_b * prior
@@ -4003,7 +4033,7 @@ class Compositor:
             beneath = (
                 prior if backdrop is previous else to_text_space(backdrop, text_gamma)
             )
-            mixed = (1.0 - shape) * alpha_previous[box] * prior + (
+            mixed = (1.0 - shape) * alpha_previous * prior + (
                 shape - share
             ) * alpha_b * beneath
         if inside is None:
@@ -4013,7 +4043,7 @@ class Compositor:
                 alpha_new - (1.0 - share) * alpha_b
                 if isolated
                 else alpha_new
-                - (1.0 - shape) * alpha_previous[box]
+                - (1.0 - shape) * alpha_previous
                 - (shape - share) * alpha_b,
                 0.0,
             )
@@ -4024,17 +4054,16 @@ class Compositor:
                     fill=0.0,
                 )
             else:
-                within = inside[1][box].astype(np.float64)
+                within = picked(inside[1]).astype(np.float64)
             mixed = mixed + inner_alpha * to_text_space(within, text_gamma)
         mixed = from_text_space(utils.divide(mixed, alpha_new), text_gamma)
         if isolated:
             mixed = utils.divide(
                 alpha_new * mixed + (1.0 - alpha_new) * alpha_0 * color_0,
-                self._alpha[box],
+                alpha_now,
                 fill=mixed,
             )
-        result = self._color.copy()
-        result[box] = utils.clip(mixed)
+        result[box][at] = utils.clip(mixed)[0]
         return result
 
     def _apply_adjustment(
@@ -4378,8 +4407,9 @@ class Compositor:
         # Only a pass-through group inherits the enclosing alpha; an isolated
         # one starts transparent, so that paste is skipped rather than made and
         # thrown away.
+        same_box = viewport == self._viewport
         group_alpha = (
-            paste(viewport, self._viewport, alpha_b)
+            (alpha_b if same_box else paste(viewport, self._viewport, alpha_b))
             if is_passthrough
             else np.zeros(
                 (viewport[3] - viewport[1], viewport[2] - viewport[0], 1),
@@ -4399,7 +4429,9 @@ class Compositor:
             )
         group_compositor = Compositor(
             viewport,
-            color=paste(viewport, self._viewport, color_b, 1.0),
+            color=color_b
+            if same_box
+            else paste(viewport, self._viewport, color_b, 1.0),
             alpha=group_alpha,
             layer_filter=self._layer_filter,
             force=self._force,
@@ -4433,9 +4465,10 @@ class Compositor:
         if mixes:
             color = self._mix_isolated(layer, viewport, color, alpha, color_b)
 
-        color = paste(self._viewport, viewport, color, 1.0)
-        shape = paste(self._viewport, viewport, shape)
-        alpha = paste(self._viewport, viewport, alpha)
+        if not same_box:
+            color = paste(self._viewport, viewport, color, 1.0)
+            shape = paste(self._viewport, viewport, shape)
+            alpha = paste(self._viewport, viewport, alpha)
 
         return color, shape, alpha, isolate_adjustments
 

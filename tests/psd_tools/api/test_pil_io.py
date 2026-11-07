@@ -2,7 +2,9 @@ import logging
 import os
 import zlib
 
+import numpy as np
 import pytest
+from PIL import Image
 
 import psd_tools.compression as codecs
 from psd_tools.api import pil_io, utils
@@ -165,3 +167,25 @@ def test_a_pattern_is_charged_the_decode_depth_when_the_depths_disagree() -> Non
 def test_an_unsupported_depth_does_not_hide_the_conversion_transient() -> None:
     sixteen = pil_io._pattern_peak_bytes(8, 8, 1, 16, 1)
     assert pil_io._pattern_peak_bytes(8, 8, 1, 17, 1) >= sixteen
+
+
+@pytest.mark.parametrize("coverage", [None, 255, 0])
+def test_the_white_background_comes_out_of_partial_pixels_only(
+    coverage: int | None,
+) -> None:
+    """As over the whole planes, and the result carries none of the image's info."""
+    rng = np.random.default_rng(7)
+    pixels = rng.integers(0, 256, (16, 16, 4), dtype=np.uint8)
+    pixels[:4, :, 3] = 0
+    pixels[4:8, :, 3] = 255
+    if coverage is not None:
+        pixels[..., 3] = coverage
+    image = Image.fromarray(pixels)
+    image.info["icc_profile"] = b"profile"
+
+    bands = image.split()
+    expected = [pil_io._unwhitened(band, bands[3]) for band in bands[:3]]
+    result = pil_io._remove_white_background(image, ColorMode.RGB)
+
+    assert result.tobytes() == Image.merge("RGBA", [*expected, bands[3]]).tobytes()
+    assert result is not image and not result.info
