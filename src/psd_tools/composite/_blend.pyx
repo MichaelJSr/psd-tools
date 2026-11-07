@@ -3,16 +3,17 @@
 
 Each is the numpy expression it replaces in ``composite.py`` (``lut_levels``:
 ``adjustments._apply_lut``; ``to_bytes``: ``composite_pil``; ``divide`` and
-``clip``: ``utils``), its float32 operations in the same order, so the results
-are bit-identical. Memoryviews only, so the module builds against the Limited
-API without numpy headers.
+``clip``: ``utils``; ``vibrance_step``: ``adjustments._vibrance_step``), its
+operations in the same dtypes and order, so the results are bit-identical.
+Memoryviews only, so the module builds against the Limited API without numpy
+headers.
 
-Every canvas but ``lut_levels``' and ``to_bytes``' is read a row at a time, so
-a pixel's channels must be adjacent and its neighbour the next pixel along
-(``_rows``), as they are in a box cut from a canvas; ``utils.in_rows`` checks
-that first.
+Every canvas but ``lut_levels``', ``to_bytes``' and ``vibrance_step``'s is read
+a row at a time, so a pixel's channels must be adjacent and its neighbour the
+next pixel along (``_rows``), as they are in a box cut from a canvas;
+``utils.in_rows`` checks that first.
 """
-from libc.math cimport NAN, floorf, fmaxf, fminf, rintf
+from libc.math cimport NAN, ceilf, fabs, floorf, fmaxf, fminf, pow, powf, rintf, signbit
 
 import numpy as np
 
@@ -616,3 +617,195 @@ def effect_source(
                 o_sh[x] = _clip(r * (shape_scalar if scalar else p_s[x]))
                 o_al[x] = _clip(a)
     return out_color, out_shape, out_alpha
+
+
+ctypedef fused real:
+    float
+    double
+
+
+cdef inline Py_ssize_t _right(const double* nodes, Py_ssize_t n, double v) noexcept nogil:
+    # np.searchsorted(nodes, v, side="right"); NaN goes past the end.
+    cdef Py_ssize_t lo = 0, hi = n, mid
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if v < nodes[mid]:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+
+cdef inline double _node(double d) noexcept nogil:
+    # np.maximum(d, 0): NaN stays, -0.0 becomes 0.0.
+    return d if d > 0 or d != d else 0.0
+
+
+cdef inline float _bil32(
+    const float* t, Py_ssize_t ns, Py_ssize_t r, Py_ssize_t k, float dn, float ac
+) noexcept nogil:
+    cdef float oac = <float>1.0 - ac
+    cdef float top = t[r * ns + k] * oac + t[r * ns + k + 1] * ac
+    cdef float bottom = t[(r + 1) * ns + k] * oac + t[(r + 1) * ns + k + 1] * ac
+    return top * (<float>1.0 - dn) + bottom * dn
+
+
+cdef inline double _bil64(
+    const double* t, Py_ssize_t ns, Py_ssize_t r, Py_ssize_t k, float dn, float ac
+) noexcept nogil:
+    cdef double oac = <double>(<float>1.0 - ac)
+    cdef double top = t[r * ns + k] * oac + t[r * ns + k + 1] * <double>ac
+    cdef double bottom = t[(r + 1) * ns + k] * oac + t[(r + 1) * ns + k + 1] * <double>ac
+    return top * <double>(<float>1.0 - dn) + bottom * <double>dn
+
+
+cdef inline real _max(real a, real b) noexcept nogil:
+    # numpy's max reduction: NaN wins, max(-0.0, 0.0) is 0.0.
+    if a != a:
+        return a
+    if b != b:
+        return b
+    if a == b:
+        return b if signbit(a) else a
+    return a if a > b else b
+
+
+cdef inline real _min(real a, real b) noexcept nogil:
+    # numpy's min reduction: NaN wins, min(-0.0, 0.0) is -0.0.
+    if a != a:
+        return a
+    if b != b:
+        return b
+    if a == b:
+        return a if signbit(a) else b
+    return a if a < b else b
+
+
+def vibrance_step(
+    const real[:, :, ::1] linear,
+    double amount,
+    const double[:, ::1] at_amount,
+    const float[:, ::1] value_table,
+    const float[:, ::1] skin_amount,
+    const float[:, :, ::1] chroma,
+    const float[:, ::1] skin_rise,
+    const double[::1] values,
+    const double[::1] sats,
+    double slope,
+    double cutoff,
+    double gain,
+    double inv_gamma,
+    double offset,
+):
+    """``adjustments._vibrance_step`` past its amount's tables, float64 out.
+
+    ``at_amount`` is the chroma table at ``amount``, ``skin_amount`` and
+    ``skin_rise`` the spared reds' tables there (unread when lowering), and
+    ``chroma`` the four chroma tables; each pixel's own amount is read off
+    those as numpy does.
+    """
+    cdef Py_ssize_t h = linear.shape[0], w = linear.shape[1], n = h * w
+    cdef Py_ssize_t nv = values.shape[0], ns = sats.shape[0], tsz = nv * ns
+    cdef Py_ssize_t i, r, k, first
+    if linear.shape[2] != 3:
+        raise ValueError("not three channels")
+    if (
+        nv < 2
+        or ns < 2
+        or chroma.shape[0] != 4
+        or chroma.shape[1] != nv
+        or chroma.shape[2] != ns
+        or at_amount.shape[0] != nv
+        or at_amount.shape[1] != ns
+        or value_table.shape[0] != nv
+        or value_table.shape[1] != ns
+        or skin_amount.shape[0] != nv
+        or skin_amount.shape[1] != ns
+        or skin_rise.shape[0] != nv
+        or skin_rise.shape[1] != ns
+    ):
+        raise ValueError("vibrance tables do not match their nodes")
+    out = np.empty((h, w, 3), dtype=np.float64)
+    if n == 0:
+        return out
+    cdef double[:, :, ::1] o = out
+    cdef double* op = &o[0, 0, 0]
+    cdef const real* lp = &linear[0, 0, 0]
+    cdef const double* vp = &values[0]
+    cdef const double* sp = &sats[0]
+    cdef const double* atp = &at_amount[0, 0]
+    cdef const float* vtp = &value_table[0, 0]
+    cdef const float* skp = &skin_amount[0, 0]
+    cdef const float* chp = &chroma[0, 0, 0]
+    cdef const float* srp = &skin_rise[0, 0]
+    cdef bint raising = amount > 0
+    cdef double size = fabs(amount), scale, u, w0, w1, w2, total
+    cdef float sizef = <float>size, dn, ac, share, pos, firstf, own0, own1, own2
+    cdef real red, green, blue, high, low, span, sat, value, v255, rise, hue, spared, effective
+    cdef real rslope = <real>slope, rcut = <real>cutoff, rgain = <real>gain
+    cdef real rinv = <real>inv_gamma, roff = <real>offset, r255 = <real>(<float>255.0)
+    with nogil:
+        for i in range(n):
+            red = lp[3 * i]
+            green = lp[3 * i + 1]
+            blue = lp[3 * i + 2]
+            high = _max(_max(red, green), blue)
+            low = _min(_min(red, green), blue)
+            span = high - low
+            sat = span / high if high > 0 else <real>0.0
+            if high > rcut:
+                if real is float:
+                    value = rgain * powf(high, rinv) - roff
+                else:
+                    value = rgain * pow(high, rinv) - roff
+            else:
+                value = rslope * high
+            v255 = value * r255
+            # _vibrance_node
+            r = _right(vp, nv, <double>v255) - 1
+            r = 0 if r < 0 else (nv - 2 if r > nv - 2 else r)
+            k = _right(sp, ns, <double>sat) - 1
+            k = 0 if k < 0 else (ns - 2 if k > ns - 2 else k)
+            dn = <float>_node((<double>v255 - vp[r]) / (vp[r + 1] - vp[r]))
+            ac = <float>_node((<double>sat - sp[k]) / (sp[k + 1] - sp[k]))
+            scale = <double>(<float>1.0) + _bil64(atp, ns, r, k, dn, ac)
+            if real is float:
+                rise = (high * sizef) * _bil32(vtp, ns, r, k, dn, ac)
+            else:
+                rise = (high * <double>sizef) * <double>_bil32(vtp, ns, r, k, dn, ac)
+            if raising and red >= green and red >= blue and span > 0:
+                # _vibrance_spared
+                hue = ((((red + green) + blue) - high) - low - low) / (high - low)
+                if green >= blue:
+                    spared = <real>3.0 - <real>4.0 * hue
+                    spared = <real>0.0 if spared < 0 else (<real>1.0 if spared > 1 else spared)
+                else:
+                    spared = <real>1.0 - hue
+                share = _bil32(skp, ns, r, k, dn, ac)
+                effective = <real>size * (<real>1.0 - spared * <real>(<float>1.0 - share))
+                # _vibrance_amount_weights; a NaN index casts to 0 on arm64
+                pos = (<float>effective) * <float>4.0
+                firstf = ceilf(pos) - <float>1.0
+                if firstf != firstf:
+                    first = 0
+                else:
+                    first = 0 if firstf < 0 else (2 if firstf > 2 else <Py_ssize_t>firstf)
+                u = <double>pos - <double>first
+                w0 = (u - 1.0) * (u - 2.0) / 2.0
+                w1 = -u * (u - 2.0)
+                w2 = u * (u - 1.0) / 2.0
+                own0 = <float>0.0 if first == 0 else _bil32(chp + (first - 1) * tsz, ns, r, k, dn, ac)
+                own1 = _bil32(chp + first * tsz, ns, r, k, dn, ac)
+                own2 = _bil32(chp + (first + 1) * tsz, ns, r, k, dn, ac)
+                # Python's sum(): 0 + t0 + t1 + t2
+                total = 0.0 + w0 * <double>own0
+                total = total + w1 * <double>own1
+                total = total + w2 * <double>own2
+                scale = <double>(<float>1.0) + total
+                share = _bil32(srp, ns, r, k, dn, ac)
+                rise = rise * (<real>1.0 - spared * <real>(<float>1.0 - share))
+            value = high + rise
+            op[3 * i] = <double>value - scale * <double>(high - red)
+            op[3 * i + 1] = <double>value - scale * <double>(high - green)
+            op[3 * i + 2] = <double>value - scale * <double>(high - blue)
+    return out

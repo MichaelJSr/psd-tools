@@ -1,6 +1,7 @@
 """The compiled source arithmetic (``_blend.pyx``) is numpy's, bit for bit."""
 
 import importlib
+import itertools
 from collections.abc import Callable
 from typing import Any
 
@@ -9,7 +10,8 @@ import pytest
 
 from psd_tools.api import numpy_io
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import adjustments, utils
+from psd_tools.color_convert import SRGB_CUTOFF
+from psd_tools.composite import adjustments, paint, utils
 from psd_tools.composite.composite import _EffectCanvas, _over, _remix, _Source, _unmix
 from psd_tools.constants import BlendMode, ColorMode, Knockout
 
@@ -287,3 +289,32 @@ def test_bytes_are_numpys() -> None:
             composite._cblend.to_bytes(color, plane).tobytes()
             == plain.astype(np.uint8).tobytes()
         )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("amount", [-1.0, -0.6, -0.25, 0.1, 0.25, 0.37, 0.5, 0.75, 1.0])
+def test_vibrance_step_is_numpys(
+    monkeypatch: pytest.MonkeyPatch, dtype: type[np.floating], amount: float
+) -> None:
+    """The 8-bit cube in linear light and every triple of the specials."""
+    levels = paint._srgb_to_linear(np.arange(0, 256, 5, dtype=np.float32) / 255)
+    cube = np.stack(np.meshgrid(levels, levels, levels, indexing="ij"), -1)
+    cutoff = np.float32(SRGB_CUTOFF)
+    specials = np.r_[_SPECIAL, -np.inf, np.nextafter(cutoff, [0, 1], dtype=np.float32)]
+    triples = np.array(list(itertools.product(specials, repeat=3)))
+    linear = np.concatenate([cube.reshape(-1, 3), triples]).astype(dtype)[:, None]
+    kernel, calls = adjustments._cblend.vibrance_step, []
+
+    def spy(*args: object) -> np.ndarray:
+        calls.append(args)
+        return kernel(*args)
+
+    monkeypatch.setattr(adjustments._cblend, "vibrance_step", spy)
+    for view in (linear, linear[::2]):
+        compiled = adjustments._vibrance_step(view, amount)
+        with monkeypatch.context() as patch:
+            patch.setattr(adjustments, "_cblend", None)
+            plain = adjustments._vibrance_step(view, amount)
+        assert compiled.dtype == plain.dtype == np.float64
+        assert compiled.tobytes() == plain.tobytes()
+    assert len(calls) == 1, "a strided view stays with numpy"

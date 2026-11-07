@@ -1287,6 +1287,43 @@ def _vibrance_at(tables: np.ndarray, amount: float) -> np.ndarray:
 def _vibrance_step(linear: np.ndarray, amount: float) -> np.ndarray:
     """Linear light after the vibrance slider at ``amount``, in [-1, 1]."""
     tables = _vibrance_tables()
+    size = abs(amount)
+    name = "raise" if amount > 0 else "lower"
+    chroma = tables[f"{name}_chroma"]
+    anchors = np.concatenate([np.zeros_like(chroma[:1]), chroma])
+    weights, first = _vibrance_amount_weights(size)
+    at_amount = sum(w * anchors[first + j] for j, w in enumerate(weights))
+    kernel = getattr(_cblend, "vibrance_step", None)
+    if (
+        kernel is not None
+        and type(linear) is np.ndarray
+        and linear.dtype in (np.float32, np.float64)
+        and linear.ndim == 3
+        and linear.shape[2] == 3
+        and linear.flags.c_contiguous
+    ):
+        # The same steps per pixel, compiled; the tables above stay numpy's.
+        skin_amount = skin_rise = tables[f"{name}_value"]
+        if amount > 0:
+            skin_amount = _vibrance_at(tables["skin_amount"], size)
+            rises = np.concatenate([tables["skin_value"], np.ones_like(chroma[:1])])
+            skin_rise = _vibrance_at(rises, size)
+        return kernel(
+            linear,
+            float(amount),
+            at_amount,
+            tables[f"{name}_value"],
+            skin_amount,
+            chroma,
+            skin_rise,
+            _VIBRANCE_VALUES,
+            _VIBRANCE_SATURATIONS,
+            SRGB_SLOPE,
+            SRGB_CUTOFF,
+            1.0 + SRGB_OFFSET,
+            1.0 / SRGB_GAMMA,
+            SRGB_OFFSET,
+        )
     high = linear.max(axis=-1)
     low = linear.min(axis=-1)
     span = high - low
@@ -1300,12 +1337,6 @@ def _vibrance_step(linear: np.ndarray, amount: float) -> np.ndarray:
         1.0 / SRGB_GAMMA
     ) - SRGB_OFFSET
     node = _vibrance_node(value * _255, sat)
-    size = abs(amount)
-    name = "raise" if amount > 0 else "lower"
-    chroma = tables[f"{name}_chroma"]
-    anchors = np.concatenate([np.zeros_like(chroma[:1]), chroma])
-    weights, first = _vibrance_amount_weights(size)
-    at_amount = sum(w * anchors[first + j] for j, w in enumerate(weights))
     scale = _1 + _bilinear(at_amount, node)
     rise = high * np.float32(size) * _bilinear(tables[f"{name}_value"], node)
     if amount > 0:
