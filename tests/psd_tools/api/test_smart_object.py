@@ -494,14 +494,15 @@ class TestExternalReadConfinement:
     def test_data_ignores_malicious_absolute_fullpath(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """.data must not disclose an absolute fullPath outside the CWD."""
+        """.data never reads a linked file, so it cannot disclose one."""
         secret = tmp_path / "secret.txt"
         secret.write_bytes(b"TOP-SECRET")
         workdir = tmp_path / "work"
         workdir.mkdir()
         monkeypatch.chdir(workdir)
         so = _make_external_smart_object(str(secret), "missing.png")
-        with pytest.raises(FileNotFoundError):
+        so._layer = MagicMock(_psd=MagicMock(repo_path=None))
+        with pytest.raises(ValueError, match="places nowhere"):
             _ = so.data
 
     def test_open_default_confines_to_cwd(

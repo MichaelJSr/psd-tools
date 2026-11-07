@@ -440,6 +440,7 @@ class PSDProtocol(GroupMixinProtocol, Protocol):
     _max_alloc_bytes: int | Literal["unlimited"] | None  # See PSDImage.max_alloc_bytes.
     # See PSDImage.__init__.
     _opened_records: dict[int, tuple[LayerRecord, int | None, int, int]]
+    repo_path: str | None
 
     @property
     def max_alloc_bytes(self) -> int | Literal["unlimited"] | None:

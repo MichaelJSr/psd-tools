@@ -174,6 +174,7 @@ _DOCUMENT_BLOCKS = (
     Tag.LINKED_LAYER1,
     Tag.LINKED_LAYER2,
     Tag.LINKED_LAYER3,
+    Tag.LINKED_LAYER_EXTERNAL,
     Tag.FILTER_EFFECTS1,
     Tag.FILTER_EFFECTS2,
     Tag.FILTER_EFFECTS3,
@@ -188,13 +189,10 @@ _DOCUMENT_RESOURCES = (
 def doc_key(psd: PSDImage) -> bytes | None:
     """What every layer's render may read from the document.
 
-    None when the document links an external file, which no key can follow.
-    Photoshop writes an empty ``lnkE`` block into most documents; that links
-    nothing.
+    A linked layer draws its stored pixels, never its file, so its ``lnkE``
+    record is hashed like an embedded one.
     """
     blocks = psd.tagged_blocks
-    if blocks is not None and blocks.get_data(Tag.LINKED_LAYER_EXTERNAL):
-        return None
     record = psd._record
     version = record.header.version
     digest = hashlib.sha256()

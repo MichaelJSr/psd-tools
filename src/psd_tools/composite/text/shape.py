@@ -51,9 +51,16 @@ class Shaped:
     tab_adv: Callable[[int, int], Mapping[int, float]]
 
 
-def rendered_em(style: Style, sub_size: float = SUB_SIZE) -> float:
-    """The em a run is drawn at: ``FontSize`` scaled for super/subscript."""
-    return style.size * (sub_size if style.baseline in (1, 2) else 1.0)
+def rendered_em(
+    style: Style, sub_size: float = SUB_SIZE, super_size: float | None = None
+) -> float:
+    """The em a run is drawn at: ``FontSize`` scaled for super/subscript.
+
+    Superscript takes *super_size*, by default *sub_size*.
+    """
+    if style.baseline == 1:
+        return style.size * (sub_size if super_size is None else super_size)
+    return style.size * (sub_size if style.baseline == 2 else 1.0)
 
 
 def shaping_key(style: Style) -> tuple[object, ...]:
@@ -132,6 +139,7 @@ def shape_piece(
     fonts: FontMap,
     *,
     sub_size: float = SUB_SIZE,
+    super_size: float | None = None,
     tab_width: float = 0.0,
 ) -> Shaped:
     """Shape ``text[a:b]``, one segment per run of identical shaping style.
@@ -182,7 +190,7 @@ def shape_piece(
         hb.shape(face.hb, buf, features)
         infos, positions = buf.glyph_infos, buf.glyph_positions
 
-        em = rendered_em(style, sub_size)
+        em = rendered_em(style, sub_size, super_size)
         upem = face.metrics.upem
         kx = em * style.horizontal_scale / upem
         ky = em * style.vertical_scale / upem

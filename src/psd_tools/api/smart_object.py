@@ -4,24 +4,32 @@ import contextlib
 import io
 import logging
 import os
-from collections.abc import Iterator, Sequence
+import posixpath
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from copy import deepcopy
 from typing import IO
 
 import numpy as np
 
+from psd_tools.api import links
 from psd_tools.api._descriptor import get_scalar
 from psd_tools.api.numpy_io import _DECOMPRESS_PEAK
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.utils import check_pixel_size, get_color_channels
 from psd_tools.compression import _decompress, decompress_row_peak_bytes
-from psd_tools.constants import Compression, Tag
-from psd_tools.psd.descriptor import Descriptor
+from psd_tools.constants import Compression, LinkedLayerType, Tag
+from psd_tools.psd.descriptor import Descriptor, Double
 from psd_tools.psd.filter_effects import (
     FilterEffect,
     FilterEffectChannel,
     FilterEffectExtra,
 )
-from psd_tools.psd.tagged_blocks import TaggedBlocks
+from psd_tools.psd.linked_layer import LinkedLayer, LinkedLayers
+from psd_tools.psd.tagged_blocks import (
+    SmartObjectLayerData,
+    TaggedBlock,
+    TaggedBlocks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -214,21 +222,239 @@ class SmartObject:
         """Embedded file content as bytes.
 
         For ``kind == 'data'`` this returns the bytes stored in the PSD without
-        any filesystem access.  For ``kind == 'external'`` this calls
-        :py:meth:`open` with default confinement, so the read is restricted to
-        the current working directory and an absolute ``fullPath`` pointing
-        outside it is ignored.  Use :py:meth:`open` with an explicit
-        ``external_dir`` to read linked files from a known location, or
-        ``open(trust_full_path=True)`` to restore the historical unconfined
-        behaviour for fully trusted files.
+        any filesystem access. A linked file is never read here: use
+        :py:meth:`read` with a ``resolve`` callable, or :py:meth:`open`.
+
+        :raises ValueError: for a linked object, naming the repository path it
+            links (see :py:meth:`link_target`).
         """
         if self._data is None:
             raise ValueError("Smart object data not found")
         if self.kind == "data":
             return self._data.data
-        else:
-            with self.open() as f:
-                return f.read()
+        return self.read()
+
+    def read(
+        self,
+        resolve: Callable[[str], bytes] | None = None,
+        psd_path: str | None = None,
+        tree: "links.RepoTree | Iterable[str] | None" = None,
+    ) -> bytes:
+        """Return the object's file content, a linked file's through *resolve*.
+
+        :param resolve: called with the linked file's repository path
+            (:py:meth:`link_target`); returns its bytes.
+        :param psd_path: the PSD's repository path; default the document's
+            ``repo_path``.
+        :param tree: the repository's files, as :py:meth:`link_target` takes.
+        :raises ValueError: for a linked object without *resolve*, or whose
+            link places nowhere.
+        """
+        if self._data is None:
+            raise ValueError("Smart object data not found")
+        if self.kind == "data":
+            return self._data.data
+        if self.kind != "external":
+            raise NotImplementedError("alias is not supported.")
+        path = self.link_target(psd_path, tree)
+        if path is None:
+            stored = get_scalar(self._data.linked_file, b"relPath", str, "")
+            raise ValueError(f"Linked file {stored.strip(chr(0))!r} places nowhere")
+        if resolve is None:
+            raise ValueError(f"Smart object links {path!r}: read it with resolve=")
+        return resolve(path)
+
+    def link_target(
+        self,
+        psd_path: str | None = None,
+        tree: "links.RepoTree | Iterable[str] | None" = None,
+    ) -> str | None:
+        """Return the repository path of the file this object links.
+
+        Read off the record's strings, never the file system: ``relPath`` from
+        the PSD's folder (it may not climb above the root), then ``fullPath``
+        and ``originalPath``, an absolute path or ``file://`` URL cut after its
+        last ``/TTSCardMaker/``. With *tree*, matched blind to case, as
+        Photoshop's file systems are.
+
+        :param psd_path: the PSD's repository path; default the document's
+            ``repo_path``.
+        :param tree: the repository's files, a :py:class:`~psd_tools.api.links.RepoTree`
+            or paths; without it, the first repository path a string names.
+        :return: the path, or ``None`` when it places nowhere or the object is
+            embedded.
+        """
+        if self._data is None:
+            raise ValueError("Smart object data not found")
+        if self.kind != "external":
+            return None
+        return links.place(self._data.linked_file, self._psd_path(psd_path), tree)
+
+    @property
+    def content_id(self) -> str | None:
+        """The link record's ``contentID``, or ``None`` without one."""
+        if self._data is None or self._data.content_descriptor is None:
+            return None
+        value = get_scalar(self._data.content_descriptor, b"contentID", str, None)
+        return None if value is None else value.strip("\x00") or None
+
+    def link(
+        self,
+        path: str,
+        size: int,
+        *,
+        blob: str,
+        psd_path: str | None = None,
+        pixels: tuple[float, float] | None = None,
+        corners: "Corners | None" = None,
+        date: tuple = links.LINK_DATE,
+        name: str | None = None,
+        root: str = links.LINK_ROOT,
+    ) -> None:
+        """Make this embedded object a link to repository file *path*.
+
+        Written as Photoshop 2023 writes a link (``lnkE`` version 8) with the
+        same uuid, so every layer sharing the object follows: their ``SoLd``
+        becomes ``SoLE``, their ``PlLd`` goes and the embedded item is removed.
+        The layers keep their pixels. ``relPath`` runs from the PSD's folder,
+        ``fullPath`` and ``originalPath`` are ``root`` + *path*, and the
+        ``contentID`` is :py:func:`~psd_tools.api.links.link_content_id` of
+        *blob*, the PSD path and the uuid.
+
+        :param path: the linked file's repository path.
+        :param size: its size in bytes.
+        :param blob: its git blob sha.
+        :param psd_path: the PSD's repository path; default the document's
+            ``repo_path``.
+        :param pixels: the file's (width, height) when it is not the embedded
+            file's, written as each layer's ``Sz``.
+        :param corners: the new placement (``Trnf``): 8 numbers, or a callable
+            taking a layer's current 8 and returning its new ones, for an
+            object several layers share.
+        :param date: the record's date.
+        :param name: the record's file name; default *path*'s.
+        :raises ValueError: if the object is not embedded, has no uuid, the
+            PSD path is unknown, or a corner sequence is given for an object
+            several layers share.
+        """
+        if self._data is None:
+            raise ValueError("Smart object data not found")
+        if self.kind != "data":
+            raise ValueError("Only an embedded smart object can be linked")
+        psd_path = self._known_path(psd_path)
+        item = self._data
+        users = self._users()
+        placed = _placements(users, corners)
+        name = name or posixpath.basename(links.normal_path(path))
+        external = LinkedLayer(
+            kind=LinkedLayerType.EXTERNAL,
+            version=8,
+            uuid=item.uuid,
+            filename=name + "\x00",
+            filetype=_filetype(path, item.filetype),
+            creator=b"\x00\x00\x00\x00",
+            filesize=size,
+            open_file=deepcopy(item.open_file)
+            if item.open_file is not None
+            else links.comp_info(),
+            linked_file=links.linked_file(path, psd_path, name, root),
+            timestamp=tuple(date),
+            data=b"",
+            child_id="\x00",
+            mod_time=0.0,
+            lock_state=0,
+            content_descriptor=links.content_descriptor(
+                links.link_content_id(blob, psd_path, item.uuid)
+            ),
+        )
+        _swap_item(self._layer._psd, item, external)
+        for layer, new in zip(users, placed, strict=True):
+            _set_placement(layer, pixels, new, embedded=False)
+        self._refresh(users, external)
+
+    def relink(
+        self,
+        path: str | None = None,
+        size: int | None = None,
+        *,
+        blob: str | None = None,
+        psd_path: str | None = None,
+        pixels: tuple[float, float] | None = None,
+        corners: "Corners | None" = None,
+        date: tuple = links.LINK_DATE,
+        name: str | None = None,
+        root: str = links.LINK_ROOT,
+    ) -> None:
+        """Rewrite this link canonically, as :py:meth:`link` writes one.
+
+        The record's paths are rebuilt for *path* (default the file it links
+        now) from the PSD's repository path, with *date*. *size*, *blob*
+        (a new ``contentID``), *pixels* and *corners* are written when given;
+        the raster is never changed.
+
+        :raises ValueError: if the object is not linked, the PSD path is
+            unknown, or its link places nowhere and no *path* is given.
+        """
+        if self._data is None:
+            raise ValueError("Smart object data not found")
+        if self.kind != "external":
+            raise ValueError("Only a linked smart object can be relinked")
+        psd_path = self._known_path(psd_path)
+        item = self._data
+        if path is None:
+            path = self.link_target(psd_path)
+            if path is None:
+                raise ValueError("The link places nowhere: give its path")
+        users = self._users()
+        placed = _placements(users, corners)
+        name = name or posixpath.basename(links.normal_path(path))
+        item.filename = name + "\x00"
+        item.filetype = _filetype(path, item.filetype)
+        item.linked_file = links.linked_file(path, psd_path, name, root)
+        item.timestamp = tuple(date)
+        if size is not None:
+            item.filesize = size
+        if blob is not None:
+            if item.version < 8:
+                item.child_id = item.child_id if item.child_id is not None else "\x00"
+                item.mod_time = item.mod_time if item.mod_time is not None else 0.0
+                item.lock_state = item.lock_state if item.lock_state is not None else 0
+                item.version = 8
+            item.content_descriptor = links.content_descriptor(
+                links.link_content_id(blob, psd_path, item.uuid)
+            )
+        for layer, new in zip(users, placed, strict=True):
+            _set_placement(layer, pixels, new, embedded=False)
+        self._refresh(users, item)
+
+    def _psd_path(self, psd_path: str | None) -> str | None:
+        if psd_path is not None:
+            return psd_path
+        return getattr(getattr(self._layer, "_psd", None), "repo_path", None)
+
+    def _known_path(self, psd_path: str | None) -> str:
+        found = self._psd_path(psd_path)
+        if found is None:
+            raise ValueError("The PSD's repository path is unknown: set repo_path")
+        return links.normal_path(found)
+
+    def _users(self) -> list[LayerProtocol]:
+        """Every smart object layer of the document naming this object's item."""
+        unique_id = self.unique_id
+        psd = self._layer._psd
+        found = [
+            layer
+            for layer in psd.descendants()
+            if layer.kind == "smartobject" and _unique_id(layer) == unique_id
+        ]
+        return found or [self._layer]
+
+    def _refresh(self, users: Sequence[LayerProtocol], item: LinkedLayer) -> None:
+        self._data = item
+        self._placed_layer = None
+        for layer in users:
+            if getattr(layer, "_smart_object", None) is not self:
+                layer.__dict__.pop("_smart_object", None)
 
     def _read_unique_id(self) -> str | None:
         if self._config is None:
@@ -350,8 +576,10 @@ class SmartObject:
         """
         if self._placed_layer and hasattr(self._placed_layer, "transform"):
             return self._placed_layer.transform
-        else:
+        corners = None if self._config is None else self._config.data.get(b"Trnf")
+        if corners is None or len(corners) != 8:
             return None
+        return tuple(float(getattr(v, "value", v)) for v in corners)  # type: ignore[return-value]
 
     # -- Smart filters -----------------------------------------------------
 
@@ -607,6 +835,142 @@ class SmartObject:
 
     def __repr__(self) -> str:
         return f"SmartObject({self.filename!r} kind={self.kind!r} type={self.filetype!r} detected={self.detected_filetype!r} size={self.filesize})"
+
+
+#: A placement: 8 corner numbers, or a layer's current 8 -> its new ones.
+Corners = Sequence[float] | Callable[[tuple[float, ...]], Sequence[float]]
+
+_LIST_TAGS = (Tag.LINKED_LAYER1, Tag.LINKED_LAYER2, Tag.LINKED_LAYER3)
+_PLACED_TAGS = (Tag.PLACED_LAYER1, Tag.PLACED_LAYER2)
+
+
+def _unique_id(layer: LayerProtocol) -> str | None:
+    for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
+        config = layer.tagged_blocks.get_data(key)
+        if config is not None:
+            value = get_scalar(config.data, b"Idnt", str, None)
+            return None if value is None else value.strip("\x00")
+    return None
+
+
+def _filetype(path: str, current: bytes) -> bytes:
+    ext = posixpath.splitext(path)[1].lstrip(".").lower()
+    return links.FILETYPES.get(ext, current)
+
+
+def _placements(
+    users: Sequence[LayerProtocol], corners: Corners | None
+) -> list[tuple[float, ...] | None]:
+    """Each user's new corners, checked before anything is written."""
+    if corners is None:
+        return [None] * len(users)
+    if not callable(corners):
+        if len(users) > 1:
+            raise ValueError("Several layers share this object: give a callable")
+        out = [tuple(float(v) for v in corners)]
+    else:
+        out = []
+        for layer in users:
+            current = _config(layer).data.get(b"Trnf")
+            old = tuple(float(getattr(v, "value", v)) for v in current or ())
+            out.append(tuple(float(v) for v in corners(old)))
+    if any(len(c) != 8 for c in out):
+        raise ValueError("A placement has 8 corner numbers")
+    return out  # type: ignore[return-value]
+
+
+def _config(layer: LayerProtocol) -> SmartObjectLayerData:
+    for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
+        config = layer.tagged_blocks.get_data(key)
+        if config is not None:
+            return config
+    raise ValueError("Smart object config not found")
+
+
+def _set_placement(
+    layer: LayerProtocol,
+    pixels: tuple[float, float] | None,
+    corners: tuple[float, ...] | None,
+    embedded: bool,
+) -> None:
+    """``SoLE`` without ``PlLd`` (unless *embedded*), with *pixels* and *corners*."""
+    blocks = layer.tagged_blocks
+    if not embedded and Tag.SMART_OBJECT_LAYER_DATA1 in blocks:
+        items = list(blocks.items())
+        blocks.clear()
+        for key, block in items:
+            if key in _PLACED_TAGS:
+                continue
+            if key == Tag.SMART_OBJECT_LAYER_DATA1:
+                key = Tag.SMART_OBJECT_LAYER_DATA2
+                block = TaggedBlock(signature=block.signature, key=key, data=block.data)
+            blocks[key] = block
+    descriptor = _config(layer).data
+    if pixels is not None:
+        size = descriptor.get(b"Sz  ")
+        if not isinstance(size, Descriptor):
+            size = Descriptor(classID=b"Pnt ")
+            descriptor[b"Sz  "] = size
+        size[b"Wdth"] = Double(float(pixels[0]))
+        size[b"Hght"] = Double(float(pixels[1]))
+    if corners is not None:
+        for key in (b"Trnf", b"nonAffineTransform"):
+            values = descriptor.get(key)
+            if values is not None and len(values) == 8:
+                for i, value in enumerate(corners):
+                    values[i] = Double(value)
+        for key in _PLACED_TAGS:
+            placed = blocks.get_data(key)
+            if placed is not None:
+                placed.transform = tuple(corners)
+
+
+def _swap_item(psd: PSDProtocol, item: LinkedLayer, external: LinkedLayer) -> None:
+    """Put *external* in the document's ``lnkE`` in place of embedded *item*.
+
+    An emptied embedded block goes; a new ``lnkE`` follows the last embedded
+    block, where Photoshop writes it.
+    """
+    blocks = psd.tagged_blocks
+    if blocks is None:
+        raise ValueError("The document holds no smart object data")
+    rebuilt: list[tuple[object, TaggedBlock]] = []
+    after, signature = None, b"8BIM"
+    for key, block in blocks.items():
+        if key in _LIST_TAGS:
+            signature = block.signature
+            kept = [it for it in block.data if it is not item]
+            if len(kept) < len(block.data):
+                block = TaggedBlock(
+                    signature=signature, key=key, data=LinkedLayers(kept)
+                )
+            if kept:
+                rebuilt.append((key, block))
+            after = len(rebuilt)
+        else:
+            rebuilt.append((key, block))
+    existing = next(
+        (
+            b
+            for k, b in rebuilt
+            if k == Tag.LINKED_LAYER_EXTERNAL and b.data is not None
+        ),
+        None,
+    )
+    if existing is not None:
+        existing.data.append(external)
+    else:
+        rebuilt = [(k, b) for k, b in rebuilt if k != Tag.LINKED_LAYER_EXTERNAL]
+        items = LinkedLayers()
+        items.append(external)
+        block = TaggedBlock(
+            signature=signature, key=Tag.LINKED_LAYER_EXTERNAL, data=items
+        )
+        at = len(rebuilt) if after is None else min(after, len(rebuilt))
+        rebuilt.insert(at, (block.key, block))
+    blocks.clear()
+    for key, block in rebuilt:
+        blocks[key] = block
 
 
 def _has_filters(blocks: TaggedBlocks) -> bool:
