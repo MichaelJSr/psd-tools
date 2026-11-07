@@ -2263,12 +2263,18 @@ class GroupMixin(GroupMixinProtocol, Protocol):
             for layer in reversed(list(psd.descendants())):
                 print(layer)
         """
-        for layer in self:
-            if not include_clip and hasattr(layer, "clipping") and layer.clipping:
-                continue
-            yield layer
-            if isinstance(layer, GroupMixin):
-                yield from layer.descendants(include_clip=include_clip)
+        # is_group(), not the GroupMixin protocol check (about 5 us a layer).
+        stack: list[Iterator[Layer]] = [iter(self)]
+        while stack:
+            for layer in stack[-1]:
+                if not include_clip and hasattr(layer, "clipping") and layer.clipping:
+                    continue
+                yield layer
+                if layer.is_group():
+                    stack.append(iter(cast(Group, layer)))
+                    break
+            else:
+                stack.pop()
 
     def find(self, name: str) -> Layer | None:
         """
