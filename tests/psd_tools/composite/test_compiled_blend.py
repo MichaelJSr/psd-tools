@@ -1,13 +1,16 @@
 """The compiled source arithmetic (``_blend.pyx``) is numpy's, bit for bit."""
 
 import importlib
+import subprocess
+import sys
 from collections.abc import Callable
 
 import numpy as np
 import pytest
 
+from psd_tools.api import numpy_io
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import utils
+from psd_tools.composite import adjustments, utils
 from psd_tools.composite.composite import _over, _remix, _unmix
 
 from ..utils import full_name
@@ -111,6 +114,45 @@ def test_unions_are_numpys() -> None:
         _same(got, want)
 
 
+@pytest.mark.parametrize("channels", [1, 3, 4, 5])
+def test_planes8_is_numpys(channels: int) -> None:
+    rng = np.random.default_rng(channels)
+    h, w = 16, 17
+    planes = [rng.integers(0, 256, h * w, dtype=np.uint8) for _ in range(channels)]
+    planes[0][:256] = np.arange(256)
+    raw = [plane.tobytes() for plane in planes]
+    plain = np.stack([numpy_io._parse_array(b, 8, w) for b in raw], axis=1)
+    _same(composite._cblend.planes8(raw, h, w), plain.reshape(h, w, -1))
+    with pytest.raises(ValueError):
+        composite._cblend.planes8([*raw[:-1], raw[-1][:-1]], h, w)
+
+
+def test_a_read_does_not_load_the_compositor() -> None:
+    code = (
+        "import sys; from psd_tools import PSDImage; "
+        f"psd = PSDImage.open({full_name('layer-edit.psd')!r}); "
+        "[layer.numpy() for layer in psd.descendants()]; "
+        "assert 'psd_tools.composite' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("lut_size", [256, 65536])
+def test_lut_levels_are_numpys(
+    monkeypatch: pytest.MonkeyPatch, lut_size: int, ndim: int
+) -> None:
+    rng = np.random.default_rng(lut_size + ndim)
+    lut = rng.random(lut_size, dtype=np.float32)
+    values = _canvas(rng, 3)
+    if ndim == 2:
+        values = values[:, :, 1]
+    with monkeypatch.context() as patch:
+        patch.setattr(adjustments, "_lut_levels", None)
+        plain = adjustments._apply_lut(values, lut)
+    _same(adjustments._apply_lut(values, lut), plain)
+
+
 @pytest.mark.parametrize("operand", ["float64", "broadcast", "transposed"])
 def test_numpy_keeps_what_the_loops_do_not_take(
     monkeypatch: pytest.MonkeyPatch, operand: str
@@ -168,6 +210,8 @@ def test_a_render_is_numpys(
         compiled = psd.composite(force=force, ignore_preview=True, apply_icc=False)
         with monkeypatch.context() as patch:
             patch.setattr(composite, "_cblend", None)
+            patch.setattr(adjustments, "_lut_levels", None)
+            patch.setattr(numpy_io, "_planes8", lambda: None)
             plain = PSDImage.open(path).composite(
                 force=force, ignore_preview=True, apply_icc=False
             )

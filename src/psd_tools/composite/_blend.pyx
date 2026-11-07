@@ -1,9 +1,10 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True, language_level=3
 """C loops behind the compositor's source arithmetic.
 
-Each is the numpy expression it replaces in ``composite.py``, its float32
-operations in the same order, so the results are bit-identical. Memoryviews
-only, so the module builds against the Limited API without numpy headers.
+Each is the numpy expression it replaces (in ``composite.py`` unless named),
+its float32 operations in the same order, so the results are bit-identical.
+Memoryviews only, so the module builds against the Limited API without numpy
+headers.
 
 Every canvas is read a row at a time, so a pixel's channels must be adjacent
 and its neighbour the next pixel along (``_rows``), as they are in a
@@ -304,4 +305,91 @@ def remix(
                     i = x * n + c
                     q = a * p_ct[i] + k * p_bc[i]
                     o[i] = _clip(q / d if d > 0 else p_ct[i])
+    return result
+
+
+cdef extern from "math.h" nogil:
+    float floorf(float)
+
+
+cdef float _LEVEL[256]
+cdef int _i
+for _i in range(256):
+    _LEVEL[_i] = <float>_i / <float>255.0
+
+
+def planes8(list planes, Py_ssize_t h, Py_ssize_t w):
+    """8-bit planes as float32 levels, ``(h, w, len(planes))``: ``numpy_io``'s parse and stack."""
+    cdef Py_ssize_t n = len(planes), i, k, size = h * w
+    result = np.empty((h, w, n), dtype=np.float32)
+    if size == 0 or n == 0:
+        return result
+    cdef float[:, :, ::1] out = result
+    cdef float *o = &out[0, 0, 0]
+    cdef const unsigned char[::1] a
+    cdef const unsigned char[::1] b
+    cdef const unsigned char[::1] c
+    cdef const unsigned char *p
+    cdef const unsigned char *q
+    cdef const unsigned char *r
+    for k in range(n):
+        a = planes[k]
+        if a.shape[0] != size:
+            raise ValueError("plane is not h by w")
+    if n == 1:
+        a = planes[0]
+        p = &a[0]
+        with nogil:
+            for i in range(size):
+                o[i] = _LEVEL[p[i]]
+    elif n == 3:
+        a = planes[0]
+        b = planes[1]
+        c = planes[2]
+        p, q, r = &a[0], &b[0], &c[0]
+        with nogil:
+            for i in range(size):
+                o[3 * i] = _LEVEL[p[i]]
+                o[3 * i + 1] = _LEVEL[q[i]]
+                o[3 * i + 2] = _LEVEL[r[i]]
+    else:
+        for k in range(n):
+            a = planes[k]
+            p = &a[0]
+            with nogil:
+                for i in range(size):
+                    o[n * i + k] = _LEVEL[p[i]]
+    return result
+
+
+def lut_levels(const float[:, :, :] values, const float[::1] lut):
+    """``lut`` at the level nearest each value: ``adjustments._apply_lut``. NaN reads as NaN."""
+    cdef Py_ssize_t h = values.shape[0], w = values.shape[1], n = values.shape[2]
+    cdef Py_ssize_t size = lut.shape[0], y, x, c, k
+    cdef float top = <float>(size - 1), half = 0.5, t, v
+    cdef float nan = <float>float("nan")
+    result = np.empty((h, w, n), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return result
+    if size == 0:
+        raise ValueError("empty lut")
+    cdef float[:, :, ::1] out = result
+    with nogil:
+        for y in range(h):
+            for x in range(w):
+                for c in range(n):
+                    v = values[y, x, c]
+                    if v != v:
+                        # numpy's NaN, not the input's payload.
+                        out[y, x, c] = nan
+                        continue
+                    t = v * top
+                    t = t + half
+                    t = floorf(t)
+                    if t < 0:
+                        t = 0
+                    elif t > top:
+                        t = top
+                    k = <Py_ssize_t>t
+                    out[y, x, c] = lut[k]
     return result

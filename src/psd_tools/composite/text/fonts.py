@@ -374,11 +374,21 @@ class FontMap:
         self._lock = threading.Lock()
 
     def _indexes(self) -> tuple[_Index, _Index]:
+        # AutoCroissant reads these.
+        return self._user_index(), self._platform_index()
+
+    def _user_index(self) -> _Index:
         with self._lock:
-            if self._user is None or self._platform is None:
+            if self._user is None:
                 self._user = _Index(self.dirs)
+            return self._user
+
+    def _platform_index(self) -> _Index:
+        # Built on the first name the given folders miss.
+        with self._lock:
+            if self._platform is None:
                 self._platform = _Index(self.platform_dirs)
-            return self._user, self._platform
+            return self._platform
 
     def _face(self, key: tuple[str, int]) -> Face:
         with self._lock:
@@ -399,12 +409,13 @@ class FontMap:
             if alias.lower().endswith(FONT_EXTENSIONS) or os.path.isfile(alias):
                 return ((alias, 0), "exact") if os.path.isfile(alias) else None
             name = alias
-        user, platform = self._indexes()
+        user = self._user_index()
         if name in user.exact:
             return user.exact[name], "exact"
         for key in _loose_keys(name):
             if key in user.loose:
                 return user.loose[key], "loose"
+        platform = self._platform_index()
         if name in platform.exact:
             return platform.exact[name], "system"
         for key in _loose_keys(name):

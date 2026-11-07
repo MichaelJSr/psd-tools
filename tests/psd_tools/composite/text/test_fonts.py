@@ -167,6 +167,24 @@ def test_first_directory_wins(
     assert FontMap(dirs=[fixture_fonts_dir, other]).resolve(PS_TT).path == ttf_font_path
 
 
+def test_platform_index_waits_for_a_miss(
+    monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str
+) -> None:
+    built: list[tuple[str, ...]] = []
+    index = fonts_module._Index
+
+    def spy(dirs: tuple[str, ...]) -> object:
+        built.append(dirs)
+        return index(dirs)
+
+    monkeypatch.setattr(fonts_module, "_Index", spy)
+    fm = FontMap(dirs=[fixture_fonts_dir], policy="skip")
+    assert fm.resolve(PS_TT).how == "exact"
+    assert built == [fm.dirs]
+    fm.resolve("NoSuchFont")
+    assert built == [fm.dirs, fm.platform_dirs]
+
+
 def test_env_dirs(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) -> None:
     monkeypatch.setenv("PSD_TOOLS_FONT_DIRS", fixture_fonts_dir)
     fm = FontMap()

@@ -1,6 +1,7 @@
 """NumPy conversion of layers and documents."""
 
 import logging
+import sys
 import warnings
 from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -351,6 +352,12 @@ def check_shape_read(layer: "LayerProtocol", held: int) -> None:
     )
 
 
+def _planes8() -> Callable[[list[bytes], int, int], np.ndarray] | None:
+    """Return the compiled 8-bit plane reader once the compositor has loaded it."""
+    # Never imported here: psd_tools.composite costs a parse 50 ms and scipy.
+    return getattr(sys.modules.get("psd_tools.composite._blend"), "planes8", None)
+
+
 def get_layer_data(
     layer: "LayerProtocol",
     channel: str | None,
@@ -368,23 +375,38 @@ def get_layer_data(
         depth, version = layer._psd.depth, layer._psd.version
         _guard_channel_read(layer, width, height, condition, held)
         iterator = zip(layer._record.channel_info, layer._channels, strict=False)
-        channels = [
-            _parse_array(
-                data.get_data(width, height, depth, version),
-                cast(Literal[1, 8, 16, 32], depth),
-                width,
-            )
-            for info, data in iterator
-            if condition(info) and len(data.data) > 0
-        ]
+        planes8 = _planes8() if depth == 8 else None
+        if planes8 is not None:
+            planes = [
+                data.get_data(width, height, depth, version)
+                for info, data in iterator
+                if condition(info) and len(data.data) > 0
+            ]
+            size = width * height
+            if size > 0 and planes and all(len(plane) == size for plane in planes):
+                return _known_channels(layer, planes8(planes, height, width))
+            channels = [_parse_array(plane, 8, width) for plane in planes]
+        else:
+            channels = [
+                _parse_array(
+                    data.get_data(width, height, depth, version),
+                    cast(Literal[1, 8, 16, 32], depth),
+                    width,
+                )
+                for info, data in iterator
+                if condition(info) and len(data.data) > 0
+            ]
         if len(channels) and channels[0].size > 0:
             result = np.stack(channels, axis=1).reshape((height, width, -1))
-            expected_channels = EXPECTED_CHANNELS.get(layer._psd.color_mode)
-            if expected_channels is not None and result.shape[2] > expected_channels:
-                logger.debug("Extra channel found")
-                return result[:, :, :expected_channels]
-            return result
+            return _known_channels(layer, result)
         return None
+
+    def _known_channels(layer: "LayerProtocol", result: np.ndarray) -> np.ndarray:
+        expected_channels = EXPECTED_CHANNELS.get(layer._psd.color_mode)
+        if expected_channels is not None and result.shape[2] > expected_channels:
+            logger.debug("Extra channel found")
+            return result[:, :, :expected_channels]
+        return result
 
     if channel == "color":
         return _find_channel(layer, layer.width, layer.height, lambda x: x.id >= 0)

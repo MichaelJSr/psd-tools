@@ -492,7 +492,11 @@ def draw_solid_color_fill(
     """Create a solid color fill."""
     fill = _get_color(color_mode, desc)
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-    color = np.full((height, width, len(fill)), fill, dtype=np.float32)
+    color = np.empty((height, width, len(fill)), dtype=np.float32)
+    if height and width:
+        # One row, then rows copied: a fill per pixel is ten times slower.
+        color[0] = np.asarray(fill, dtype=np.float32)
+        color[1:] = color[0]
     return color, None
 
 
