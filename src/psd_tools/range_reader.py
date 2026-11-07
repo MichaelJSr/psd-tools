@@ -47,9 +47,9 @@ class RangeReader(io.RawIOBase):
     def __init__(
         self,
         fetch: Fetch,
-        chunk: int = 1 << 16,
+        chunk: int = 1 << 19,
         max_chunk: int = 1 << 22,
-        head: int = 1 << 18,
+        head: int = 1 << 19,
     ):
         super().__init__()
         if chunk <= 0 or max_chunk < chunk or head <= 0:

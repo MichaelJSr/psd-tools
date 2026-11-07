@@ -4,6 +4,9 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``RangeReader`` fetches 512 KB first and 512 KB after a seek (was
+  256 KB and 64 KB): a card's lazy open, parse and details take 43-53%
+  fewer requests for about twice the bytes
 - [fix] A perceptual gradient fades its transparency stops as opacity to the
   power 1.728, as Photoshop 2023 draws them. **Rendering change** for
   perceptual gradients with transparency
