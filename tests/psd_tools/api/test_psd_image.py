@@ -15,7 +15,7 @@ from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import get_transparency_index, has_transparency
 from psd_tools.constants import BlendMode, ColorMode, Compression, Tag
 from psd_tools.psd.descriptor import Double
-from psd_tools.psd.layer_and_mask import LayerInfo
+from psd_tools.psd.layer_and_mask import LayerAndMaskInformation, LayerInfo
 from psd_tools.terminology import Key
 
 from ..utils import full_name
@@ -68,6 +68,29 @@ def test_save(fixture: PSDImage, tmp_path: Path) -> None:
     fixture.save(output_path)
     with open(output_path, "wb") as f:
         fixture.save(f)
+
+
+def test_save_failure_leaves_the_path_whole(fixture: PSDImage, tmp_path: Path) -> None:
+    output = tmp_path / "output.psd"
+    fixture.save(output)
+    buffer = io.BytesIO()
+    fixture.save(buffer)
+    assert output.read_bytes() == buffer.getvalue()
+    with patch.object(LayerAndMaskInformation, "write", side_effect=OSError("x")):
+        with pytest.raises(OSError, match="x"):
+            fixture.save(output)
+    assert output.read_bytes() == buffer.getvalue()
+
+
+def test_save_lazy_over_its_own_file(tmp_path: Path) -> None:
+    source = full_name("layers/pixel-layer.psd")
+    expected = io.BytesIO()
+    PSDImage.open(source).save(expected)
+    path = tmp_path / "card.psd"
+    path.write_bytes(Path(source).read_bytes())
+    with open(path, "rb") as f:
+        PSDImage.open(f, lazy=True).save(path)
+    assert path.read_bytes() == expected.getvalue()
 
 
 def test_pilio(fixture: PSDImage) -> None:
