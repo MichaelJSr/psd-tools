@@ -18,6 +18,7 @@ from psd_tools import PSDImage
 from psd_tools.psd import descriptor, engine_data
 from psd_tools.psd.descriptor import Descriptor, DescriptorBlock, UnitFloat
 from psd_tools.psd.engine_data import EngineData, EngineData2
+from psd_tools.psd.lazy import load
 from psd_tools.psd.parse_limits import ParseLimits, current_budget, parse_context
 from psd_tools.terminology import Enum, Key, Klass, Unit
 
@@ -40,6 +41,8 @@ def tree(value: Any) -> Any:
     """``value`` as nested tuples of exact classes, fields and reprs."""
     kind = type(value)
     fields = getattr(kind, "__attrs_attrs__", None)
+    if getattr(value, "_held", None) is not None:
+        load(value)  # a block kept as bytes: parse it, as a field walker must
     if fields is not None:
         extra = sorted(vars(value).items()) if getattr(value, "__dict__", None) else []
         return (

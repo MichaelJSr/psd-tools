@@ -9,6 +9,7 @@ Tagged block data structure.
 
 import io
 import logging
+import struct
 from typing import IO, Any, ClassVar, Self
 
 from attrs import converters, define, field, validators
@@ -54,7 +55,13 @@ from psd_tools.psd.engine_data import EngineData, EngineData2
 from psd_tools.psd.filter_effects import FilterEffects
 from psd_tools.psd.lazy import Span, defer
 from psd_tools.psd.linked_layer import LinkedLayers
-from psd_tools.psd.parse_limits import ParseLimitError, consume_bytes, parse_context
+from psd_tools.psd.parse_limits import (
+    ParseLimitError,
+    consume_bytes,
+    current_budget,
+    parse_context,
+    resume_budget,
+)
 from psd_tools.psd.patterns import Patterns
 from psd_tools.psd.vector import VectorMaskSetting, VectorStrokeContentSetting
 from psd_tools.registry import new_registry
@@ -196,7 +203,9 @@ class TaggedBlocks(DictElement):
         if end_pos is not None:
             with bounded_reader(fp, end_pos - fp.tell()) as body:
                 return cls.read(body, version=version, padding=padding, **kwargs)
-        items = []
+        items: list[tuple[Any, TaggedBlock]] = []
+        if version == 1 and type(fp) is io.BytesIO and not _hold(fp, items, padding):
+            return cls(items)  # type: ignore[arg-type]
         while is_readable(fp, 8):  # len(signature) + len(key) = 8
             block = TaggedBlock.read(fp, version, padding)
             if block is None:
@@ -244,7 +253,9 @@ class TaggedBlock(BaseElement):
 
         Data. A lazy read (:py:mod:`psd_tools.psd.lazy`) leaves the payload
         blocks (``_LAZY_KEYS``: embedded smart object files, smart filter
-        pixels) in the file and reads and parses one on first access.
+        pixels) in the file and reads and parses one on first access. A
+        layer's blocks are kept as bytes and parsed on first access; one
+        never read is written back as it was read.
     """
 
     _SIGNATURES = (b"8BIM", b"8B64")
@@ -309,9 +320,20 @@ class TaggedBlock(BaseElement):
     key: bytes = b""
     _data: Any = field(default=b"", repr=True)
     _span: "tuple[Span, int] | None" = field(default=None, init=False)
+    _held: "tuple[bytes, int, Any] | None" = field(default=None, init=False, repr=False)
+
+    def _repr_pretty_(self, p: Any, cycle: bool) -> None:
+        if self._held is not None:
+            self._load()  # show the data, as an eager read does
+        super()._repr_pretty_(p, cycle)
 
     def _load(self) -> None:
-        if self._span is not None:
+        if self._held is not None:
+            raw, _, budget = self._held
+            with resume_budget(budget):
+                self._data = self._parse(self.key, raw, 1)
+            self._held = None
+        elif self._span is not None:
             span, version = self._span
             self._data, self._span = self._parse(self.key, span.read(), version), None
 
@@ -323,7 +345,7 @@ class TaggedBlock(BaseElement):
 
     @data.setter
     def data(self, value: Any) -> None:
-        self._data, self._span = value, None
+        self._data, self._span, self._held = value, None, None
 
     def __eq__(self, other: object) -> bool:
         if other.__class__ is not self.__class__:
@@ -376,9 +398,21 @@ class TaggedBlock(BaseElement):
                 return cls(signature, key, data)
             raw_data = read_exact(fp, length)
             read_padding(fp, length, padding)
+            if kls is not None and version == 1:
+                return cls._unparsed(signature, key, raw_data, padding)
         else:
             raw_data = read_length_block(fp, fmt=fmt, padding=padding)
+            if key is Tag.TEXT_ENGINE_DATA and version == 1:
+                # Only text edits read the document's text engine data.
+                return cls._unparsed(signature, key, raw_data, padding)
         return cls(signature, key, cls._parse(key, raw_data, version))
+
+    @classmethod
+    def _unparsed(cls, signature: bytes, key: Any, raw: bytes, padding: int) -> Self:
+        """Keep ``raw`` as it is until read, then parse it on the open's budget."""
+        self = cls(signature, key)
+        self._held = (raw, padding, current_budget())
+        return self
 
     @classmethod
     def _parse(cls, key: Any, raw_data: bytes, version: int) -> Any:
@@ -456,6 +490,9 @@ class TaggedBlock(BaseElement):
         written = write_fmt(fp, "4s4s", self.signature, key)
 
         def writer(f: IO[bytes]) -> int:
+            held = self._held
+            if held is not None and version == 1 and held[1] == padding:
+                return write_bytes(f, held[0])
             if hasattr(self.data, "write"):
                 # It seems padding size applies at the block level here.
                 inner_padding = 1 if padding == 4 else 4
@@ -1078,3 +1115,52 @@ class UserMask(BaseElement):
         written = self.color.write(fp)
         written += write_fmt(fp, "HBx", self.opacity, self.flag)
         return written
+
+
+_HEAD = struct.Struct(">4s4sI")
+_SIGNATURES = frozenset(TaggedBlock._SIGNATURES)
+# Keys held as bytes until read: every handled key but the layer tree's own
+# and the lazy payloads.
+_HELD = frozenset(
+    key.value
+    for key in TYPES
+    if key not in TaggedBlock._STRUCTURAL and key not in TaggedBlock._LAZY_KEYS
+)
+
+
+def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) -> bool:
+    """Read the blocks of ``fp``, keeping the ``_HELD`` keys' bytes unparsed.
+
+    Any other block, or one cut short, goes through :py:meth:`TaggedBlock.read`;
+    False where that returns None.
+    """
+    data = fp.getbuffer()
+    try:
+        position, end = fp.tell(), len(data)
+        budget = current_budget()
+        while position + 12 <= end:
+            signature, key, length = _HEAD.unpack_from(data, position)
+            start = position + 12
+            stop = start + length
+            gap = -length % padding
+            if signature not in _SIGNATURES or key not in _HELD or stop + gap > end:
+                fp.seek(position)
+                block = TaggedBlock.read(fp, 1, padding)
+                if block is None:
+                    return False
+                items.append((block.key, block))
+                position = fp.tell()
+                continue
+            if budget is not None:  # what TaggedBlock.read charges
+                budget.consume(3, 12)
+                budget.consume(0, length)
+                if gap:
+                    budget.consume(0, gap)
+            tag = _TAGS[key]
+            raw = bytes(data[start:stop])
+            items.append((tag, TaggedBlock._unparsed(signature, tag, raw, padding)))
+            position = stop + gap
+    finally:
+        data.release()
+    fp.seek(position)
+    return True

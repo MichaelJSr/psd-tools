@@ -116,7 +116,10 @@ def defer(fp: IO[bytes], length: int) -> Span | None:
 
 def load(node: Any) -> None:
     """Read ``node``'s deferred payload now, if it has one."""
-    if getattr(node, "_span", None) is not None:
+    if (
+        getattr(node, "_span", None) is not None
+        or getattr(node, "_held", None) is not None
+    ):
         node._load()
 
 
