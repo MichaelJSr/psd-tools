@@ -15,7 +15,6 @@ from psd_tools.api.layers import Layer, PixelLayer, TypeLayer
 from psd_tools.composite import composite
 from psd_tools.composite.rcache import CacheMismatch, RenderCache, doc_key
 from psd_tools.constants import BlendMode, Tag
-from psd_tools.psd.linked_layer import LinkedLayer, LinkedLayers
 
 from ..utils import full_name
 
@@ -178,17 +177,17 @@ def test_a_text_edit_keeps_the_document_key() -> None:
     assert doc_key(psd) == before
 
 
-def test_an_external_link_turns_the_cache_off() -> None:
-    psd = PSDImage.open(full_name("layer_effects.psd"))
+def test_an_external_link_is_part_of_the_document_key() -> None:
+    # A linked layer draws its stored pixels, so the cache stays on.
+    psd = PSDImage.open(full_name("placedLayer.psd"))
     assert psd.tagged_blocks is not None
-    psd.tagged_blocks.set_data(Tag.LINKED_LAYER_EXTERNAL, LinkedLayers())
-    assert doc_key(psd) is not None  # an empty block links nothing
-    links = LinkedLayers([LinkedLayer()])  # type: ignore[list-item]
-    psd.tagged_blocks.set_data(Tag.LINKED_LAYER_EXTERNAL, links)
-    assert doc_key(psd) is None
+    before = doc_key(psd)
+    assert before is not None
+    psd.tagged_blocks.get_data(Tag.LINKED_LAYER_EXTERNAL)[0].filesize += 1
+    assert doc_key(psd) not in (None, before)
     cache = RenderCache()
     _render(psd, cache)
-    assert not cache._store and not cache.misses
+    assert cache._store
 
 
 _PROPERTY_FILES = [
