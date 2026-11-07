@@ -4,6 +4,8 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] Vibrance's per-pixel step runs in ``_blend`` (numpy where it is
+  not built). Renders are unchanged
 - [fix] A perceptual gradient fades its transparency stops as opacity to the
   power 1.728, as Photoshop 2023 draws them. **Rendering change** for
   perceptual gradients with transparency
