@@ -84,6 +84,7 @@ from psd_tools.constants import (
     Tag,
 )
 from psd_tools.psd.color_mode_data import HDRT_DEFAULT, ColorModeData
+from psd_tools.psd.descriptor import String
 from psd_tools.psd.document import PSD
 from psd_tools.psd.header import FileHeader
 from psd_tools.psd.image_data import ImageData
@@ -96,7 +97,11 @@ from psd_tools.psd.layer_and_mask import (
     LayerRecords,
 )
 from psd_tools.psd.parse_limits import ParseLimits
-from psd_tools.psd.tagged_blocks import SectionDividerSetting, TaggedBlocks
+from psd_tools.psd.tagged_blocks import (
+    SectionDividerSetting,
+    SmartObjectLayerData,
+    TaggedBlocks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -387,15 +392,33 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
 
         Here, not in ``remove()``: ``move_to()`` removes and inserts. A smart
         object without an ID could name any item, so its kind stays whole.
+        A placed ID an FEid item names gets Photoshop's trailing NUL first:
+        Photoshop 2023 refuses the file without it. Other IDs stay as they are.
         """
         blocks = self.tagged_blocks
         if blocks is None:
             return
-        objects = [
-            layer.smart_object
+        smart = [
+            layer
             for layer in self.descendants()
             if isinstance(layer, layers.SmartObjectLayer)
         ]
+        named = {
+            (item.uuid or "").strip("\x00")
+            for tag in _FILTER_TAGS
+            for item in blocks.get_data(tag) or ()
+        }
+        for layer in smart:
+            if layer.smart_object.placed_id not in named:
+                continue
+            for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
+                config = layer.tagged_blocks.get_data(key)
+                if not isinstance(config, SmartObjectLayerData):
+                    continue
+                placed = config.data.get(b"placed")
+                if isinstance(placed, String) and not placed.value.endswith("\x00"):
+                    config.data[b"placed"] = String(placed.value + "\x00")
+        objects = [layer.smart_object for layer in smart]
         for tags, used in (
             (_LINKED_TAGS, {so._read_unique_id() for so in objects}),
             (_FILTER_TAGS, {so.placed_id for so in objects}),

@@ -378,7 +378,8 @@ def test_duplicate_smart_object_instance_id(nested: bool, tmp_path: Path) -> Non
     data = duplicate.tagged_blocks.get_data(Tag.SMART_OBJECT_LAYER_DATA1).data
     assert data[b"Idnt"].value == original_content
     assert data[b"placed"].value != original_instance
-    assert UUID(data[b"placed"].value).version == 4
+    assert data[b"placed"].value.endswith("\x00")
+    assert UUID(data[b"placed"].value.rstrip("\x00")).version == 4
     assert config.data[b"placed"].value == original_instance
     path = tmp_path / "instance.psd"
     psd.save(path)
