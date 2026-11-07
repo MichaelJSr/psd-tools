@@ -2,6 +2,7 @@
 
 import importlib
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pytest
@@ -9,7 +10,8 @@ import pytest
 from psd_tools.api import numpy_io
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import adjustments, utils
-from psd_tools.composite.composite import _over, _remix, _unmix
+from psd_tools.composite.composite import _EffectCanvas, _over, _remix, _Source, _unmix
+from psd_tools.constants import BlendMode, ColorMode, Knockout
 
 from ..utils import full_name
 
@@ -37,10 +39,11 @@ def _canvas(rng: np.random.Generator, channels: int) -> np.ndarray:
 
 
 def _numpy(
-    monkeypatch: pytest.MonkeyPatch, fn: Callable[..., np.ndarray], *args: np.ndarray
-) -> np.ndarray:
+    monkeypatch: pytest.MonkeyPatch, fn: Callable[..., Any], *args: object
+) -> Any:
     with monkeypatch.context() as patch:
         patch.setattr(composite, "_cblend", None)
+        patch.setattr(utils, "_cblend", None)
         return fn(*args)
 
 
@@ -99,6 +102,62 @@ def test_passthrough_is_numpys(monkeypatch: pytest.MonkeyPatch, mask: object) ->
     ) * color
     plain = np.clip(utils.divide(color_t, canvas_alpha, fill=color), 0, 1)
     _same(compiled, plain)
+
+
+@pytest.mark.parametrize("channels", [1, 3])
+def test_divide_and_clip_are_numpys(
+    monkeypatch: pytest.MonkeyPatch, channels: int
+) -> None:
+    rng = np.random.default_rng(13)
+    a, fill, b = _canvas(rng, channels), _canvas(rng, channels), _canvas(rng, 1)
+    assert utils.in_rows((b,), (a, fill))
+    for f in (0.0, 1.0, 0.1, fill):
+        _same(utils.divide(a, b, f), _numpy(monkeypatch, utils.divide, a, b, f))
+    _same(utils.clip(a), _numpy(monkeypatch, utils.clip, a))
+
+
+class _Fit:
+    _color_mode = ColorMode.RGB
+
+    def _fit_source(self, color: np.ndarray) -> np.ndarray:
+        return color
+
+
+@pytest.mark.parametrize(
+    "opacity, fill", [(1.0, 1.0), (0.6, 0.3), (0.0, 1.0), (1.0, 0)]
+)
+@pytest.mark.parametrize("channels", [1, 3])
+def test_effect_canvas_is_numpys(
+    monkeypatch: pytest.MonkeyPatch, opacity: float, fill: float, channels: int
+) -> None:
+    """Normal overs, one Multiply between them, and the source handed on."""
+    rng = np.random.default_rng(17)
+    shape = _canvas(rng, 1)
+    source = _Source(
+        color=_canvas(rng, channels),
+        shape=shape,
+        alpha=_canvas(rng, 1),
+        mask=1.0,
+        shape_mask=1.0,
+        fill_opacity=fill,
+        opacity=opacity,
+        knockout=Knockout.NONE,
+        adjustment_isolated=None,
+        knockout_shape=shape,
+        region=_canvas(rng, 1),
+    )
+    modes = (BlendMode.NORMAL, BlendMode.MULTIPLY, BlendMode.NORMAL)
+    paints = [(_canvas(rng, 1), _canvas(rng, channels), m, 0.75) for m in modes]
+
+    def paint() -> tuple[np.ndarray, ...]:
+        canvas = _EffectCanvas(_Fit(), source)  # type: ignore[arg-type]
+        for paint in paints:
+            canvas.over(*paint)
+        result = canvas.source()
+        return result.color, result.shape, result.alpha
+
+    for got, want in zip(paint(), _numpy(monkeypatch, paint), strict=True):
+        _same(got, want)
 
 
 def test_unions_are_numpys() -> None:
@@ -169,6 +228,7 @@ def test_a_render_is_numpys(
         compiled = psd.composite(force=force, ignore_preview=True, apply_icc=False)
         with monkeypatch.context() as patch:
             patch.setattr(composite, "_cblend", None)
+            patch.setattr(utils, "_cblend", None)
             patch.setattr(adjustments, "_cblend", None)
             patch.setattr(numpy_io, "_cnumpy_io", None)
             plain = PSDImage.open(path).composite(

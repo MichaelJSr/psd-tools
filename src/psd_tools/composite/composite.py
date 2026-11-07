@@ -50,6 +50,7 @@ from psd_tools.composite import paint, rcache, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
 from psd_tools.composite.blend import (
+    _NEUTRAL_SOURCE,
     fade_source,
     faded_color,
     get_blend_func,
@@ -2618,10 +2619,16 @@ class _EffectCanvas:
         # What is left is the layer's own alpha against its region, which is 1
         # inside it, faded by fill opacity.
         opacity = source.opacity
-        self._alpha = utils.divide(source.alpha, self.region, fill=0.0) * (
-            source.fill_opacity / opacity if opacity > 0.0 else 0.0
-        )
-        self._premultiplied = self._alpha * self._color
+        factor = source.fill_opacity / opacity if opacity > 0.0 else 0.0
+        if type(factor) is float and _compiled_fits(
+            (source.alpha, self.region), (self._color,)
+        ):
+            self._alpha, self._premultiplied = _cblend.effect_start(
+                source.alpha, self.region, self._color, factor
+            )
+        else:
+            self._alpha = utils.divide(source.alpha, self.region, fill=0.0) * factor
+            self._premultiplied = self._alpha * self._color
         # A scalar until something widens it, which is the same
         # allocation-avoidance path ``_get_mask()`` takes and for the same
         # reason: this canvas is held for the whole of the effect stack rather
@@ -2666,6 +2673,8 @@ class _EffectCanvas:
             return
         self._start()
         color = self._compositor._fit_source(color)
+        if self._over_compiled(coverage, color, blend_mode, opacity):
+            return
         alpha = coverage * opacity
         faded = faded_color(blend_mode, color, alpha)
         if faded is not None:
@@ -2689,6 +2698,38 @@ class _EffectCanvas:
         # effect's opacity fades what it paints without narrowing what it
         # covers, so the shape takes the coverage it was drawn on.
         self._shape = utils.union(self._shape, coverage)
+
+    def _over_compiled(
+        self,
+        coverage: np.ndarray,
+        color: np.ndarray,
+        blend_mode: BlendMode,
+        opacity: float | np.ndarray,
+    ) -> bool:
+        """:py:meth:`over` in one pass, for Normal at a scalar opacity."""
+        shape = self._shape
+        scalar = type(shape) in (float, int)
+        if not (
+            type(opacity) in (float, int)
+            and blend_mode not in _NEUTRAL_SOURCE
+            and get_blend_func(blend_mode, self._compositor._color_mode) is normal
+            and _compiled_fits(
+                (self._alpha, coverage) + (() if scalar else (shape,)),
+                (self._premultiplied, color),
+            )
+        ):
+            return False
+        self._alpha, self._premultiplied, self._shape = _cblend.effect_over(
+            self._alpha,
+            self._premultiplied,
+            None if scalar else shape,
+            shape if scalar else 0.0,
+            scalar,
+            coverage,
+            color,
+            opacity,
+        )
+        return True
 
     knocks_out = True
 
@@ -2716,6 +2757,25 @@ class _EffectCanvas:
         if not self._painted:
             return self._source
         opacity = self._source.opacity
+        shape = self._shape
+        scalar = type(shape) in (float, int)
+        if type(opacity) in (float, int) and _compiled_fits(
+            (self.region, self._alpha) + (() if scalar else (shape,)),
+            (self._premultiplied, self._color),
+        ):
+            color, shape, alpha = _cblend.effect_source(
+                self.region,
+                self._alpha,
+                self._premultiplied,
+                None if scalar else shape,
+                shape if scalar else 0.0,
+                scalar,
+                self._color,
+                opacity,
+            )
+            return replace(
+                self._source, color=color, shape=shape, alpha=alpha, fill_opacity=1.0
+            )
         alpha = self.region * self._alpha * opacity
         premultiplied = self.region * self._premultiplied * opacity
         return replace(
@@ -3083,36 +3143,11 @@ def _over(
 def _compiled_fits(
     ones: Sequence[object], wide: Sequence[object] = (), channels: int | None = None
 ) -> bool:
-    """Whether :py:mod:`._blend` takes these operands as numpy would.
+    """Whether :py:mod:`._blend` is built and takes these operands as numpy would.
 
-    Every one a float32 canvas of one height and width, ``ones`` a single
-    channel and ``wide`` ``channels``, by default the first one's, laid out
-    in rows of pixels as a box cut from a canvas is; anything else, a scalar,
-    a float64 or a broadcast canvas, stays with numpy's own promotion and
-    broadcasting.
+    See :py:func:`utils.in_rows`.
     """
-    if _cblend is None:
-        return False
-    first = ones[0]
-    if not isinstance(first, np.ndarray) or first.ndim != 3:
-        return False
-    size = first.shape[:2]
-    if channels is None:
-        channels = 1
-        if wide:
-            if not isinstance(wide[0], np.ndarray) or wide[0].ndim != 3:
-                return False
-            channels = wide[0].shape[2]
-    for array, width in [(a, 1) for a in ones] + [(a, channels) for a in wide]:
-        if not (
-            isinstance(array, np.ndarray)
-            and array.dtype == np.float32
-            and array.shape == (*size, width)
-            and (width == 1 or array.strides[2] == 4)
-            and (size[1] < 2 or array.strides[1] == 4 * width)
-        ):
-            return False
-    return True
+    return _cblend is not None and utils.in_rows(ones, wide, channels)
 
 
 class Compositor:
