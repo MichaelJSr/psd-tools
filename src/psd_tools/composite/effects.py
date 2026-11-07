@@ -870,36 +870,66 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     # What each pixel states: its coverage's 0.5 - alpha, which for an opaque
     # pixel is its own edge to the outside and for a clear one to the inside.
     near = (0.5 - np.clip(alpha, 0.0, 1.0)).astype(np.float32)
-    field = _nearest_boundary(alpha, partial, near, reach)
-    if not (alpha >= 1).any():
-        return field
-
-    # Every opaque pixel states the same half pixel outward and every clear
-    # one inward, so the nearest of each is a distance transform, which unlike
-    # the erosion does not scale with ``reach``. Any opaque or clear pixel
-    # that can be the nearest lies within a pixel of the boundary -- the
-    # partial pixels and the steps from opaque straight to clear -- so a crop
-    # ``reach`` and a pixel round them holds every path the transform needs.
-    boundary = partial | (alpha >= 1) & _grow(alpha <= 0)
-    height, width = alpha.shape
+    opaque = alpha >= 1
+    any_opaque = bool(opaque.any())
+    boundary = partial | opaque & _grow(alpha <= 0) if any_opaque else partial
     span = math.ceil(reach) + 1
-    rows, cols = np.nonzero(boundary)
-    crop = (
-        slice(max(rows.min() - span, 0), min(rows.max() + span + 1, height)),
-        slice(max(cols.min() - span, 0), min(cols.max() + span + 1, width)),
-    )
-    sub_alpha = alpha[crop]
-    inside = sub_alpha >= 1
+    # Boundaries further apart than the reach cannot meet, so each is measured
+    # on its own box; past every box a pixel is out of reach.
+    field = np.where(opaque, -np.inf, np.inf).astype(np.float32)
+    field[partial] = near[partial]
+    for box in _reach_boxes(boundary, span):
+        sub = _distance_on_box(alpha[box], partial[box], near[box], reach, any_opaque)
+        field[box] = sub
+    return field
+
+
+def _runs(line: np.ndarray, span: int) -> list[tuple[int, int]]:
+    """Each stretch of ``line``'s set entries, ``span`` wider, split where those can't meet."""
+    hits = np.flatnonzero(line)
+    if not len(hits):
+        return []
+    cuts = np.flatnonzero(np.diff(hits) > 2 * span + 1)
+    starts = [hits[0], *hits[cuts + 1]]
+    ends = [*hits[cuts], hits[-1]]
+    size = len(line)
+    return [
+        (max(int(a) - span, 0), min(int(b) + span + 1, size))
+        for a, b in zip(starts, ends, strict=True)
+    ]
+
+
+def _reach_boxes(boundary: np.ndarray, span: int) -> list[tuple[slice, slice]]:
+    """Disjoint boxes holding every pixel within ``span`` of ``boundary``."""
+    boxes = []
+    for r0, r1 in _runs(boundary.any(axis=1), span):
+        band = boundary[r0:r1]
+        for c0, c1 in _runs(band.any(axis=0), span):
+            for q0, q1 in _runs(band[:, c0:c1].any(axis=1), span):
+                boxes.append((slice(r0 + q0, r0 + q1), slice(c0, c1)))
+    return boxes
+
+
+def _distance_on_box(
+    alpha: np.ndarray,
+    partial: np.ndarray,
+    near: np.ndarray,
+    reach: float,
+    any_opaque: bool,
+) -> np.ndarray:
+    """:py:func:`_signed_distance` on one box of :py:func:`_reach_boxes`."""
+    field = _nearest_boundary(alpha, partial, near, reach)
+    if not any_opaque:
+        return field
+    inside = alpha >= 1
+    if not inside.any():
+        return field
     to_opaque = _chamfer_transform(~inside)
-    to_clear = _chamfer_transform(~(sub_alpha <= 0))
+    to_clear = _chamfer_transform(~(alpha <= 0))
     outward = np.where(to_opaque <= reach, to_opaque - 0.5, np.inf)
     inward = np.where(to_clear <= reach, 0.5 - to_clear, -np.inf)
-    sub_field = field[crop]
-    stated = np.where(
-        inside, np.maximum(sub_field, inward), np.minimum(sub_field, outward)
-    )
-    field[crop] = np.where(partial[crop], near[crop], stated)
-    return field
+    stated = np.where(inside, np.maximum(field, inward), np.minimum(field, outward))
+    return np.where(partial, near, stated)
 
 
 def _distance_band(distance: np.ndarray, lo: float, hi: float) -> np.ndarray:

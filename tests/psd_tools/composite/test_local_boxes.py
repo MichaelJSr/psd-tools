@@ -58,6 +58,20 @@ def test_a_layer_on_its_box_matches_the_whole_canvas(
         np.testing.assert_allclose(got, expected, rtol=0, atol=_ROUNDING)
 
 
+def test_a_canvas_written_in_place_is_never_the_seed() -> None:
+    """Boxed layers reuse their own copy; what the canvases were seeded with stays."""
+    psd = PSDImage.open(full_name("adjustment-fillers.psd"))
+    color = np.ones((psd.height, psd.width, 3), dtype=np.float32)
+    alpha = np.zeros((psd.height, psd.width, 1), dtype=np.float32)
+    compositor = composite_module.Compositor(psd.viewbox, color, alpha, force=True)
+    # A whole-canvas layer would replace the seed before a box could reach it.
+    for layer in psd:
+        if compositor._local_box(layer) is not None:
+            compositor.apply(layer)
+    assert compositor._owned, "no canvas was written in place"
+    assert (color == 1.0).all() and (alpha == 0.0).all()
+
+
 def test_the_drawn_box_holds_a_redrawn_shape_and_its_stroke() -> None:
     psd = PSDImage.open(full_name("adjustment-fillers.psd"))
     shapes = [layer for layer in psd.descendants() if layer.name.startswith("Polygon")]

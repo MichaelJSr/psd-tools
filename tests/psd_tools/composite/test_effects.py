@@ -806,6 +806,26 @@ def test_an_opaque_pixel_behind_a_corner_states_its_own_edge() -> None:
     assert float(steps_only[1, 17]) == pytest.approx(quarter, abs=1e-5)
 
 
+def test_boundaries_out_of_reach_of_each_other_are_measured_apart() -> None:
+    """Each on its own box, and the field is the whole canvas's.
+
+    The first two shapes lie within reach of each other, so they share a box.
+    """
+    alpha = np.zeros((60, 120), dtype=np.float32)
+    alpha[4:12, 6:14] = 1.0
+    alpha[4:12, 14] = 0.25
+    alpha[4:12, 18:22] = 1.0
+    alpha[5:9, 60:64] = 0.5
+    alpha[40:52, 90:110] = 1.0
+    reach = 6.0
+    partial = (alpha > 0) & (alpha < 1)
+    near = (0.5 - alpha).astype(np.float32)
+    boundary = partial | (alpha >= 1) & _grow(alpha <= 0)
+    assert len(effects._reach_boxes(boundary, math.ceil(reach) + 1)) == 3
+    whole = effects._distance_on_box(alpha, partial, near, reach, True)
+    assert np.array_equal(_signed_distance(alpha, reach), whole)
+
+
 def _corner_cells(psd: PSDImage) -> list[tuple[str, tuple[int, int, int, int]]]:
     """Each stroked layer or group of the fixture, as far as its stroke reaches."""
     cells = []

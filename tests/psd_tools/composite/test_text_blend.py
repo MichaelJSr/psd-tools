@@ -150,6 +150,37 @@ def _edge_errors(psd: PSDImage, text_gamma: float | None) -> list[float]:
     return [_edge_error(psd, color, layer) for layer in _type_layers(psd)]
 
 
+def test_a_pixel_the_source_leaves_alone_is_mixed_only_if_its_alpha_moved() -> None:
+    """The canvas's own bits come back; where its alpha moved the mix is still read."""
+    size = 6
+    color = np.linspace(0.01, 0.99, size * size * 3, dtype=np.float32).reshape(
+        size, size, 3
+    )
+    previous = np.full((size, size, 1), 0.5, dtype=np.float32)
+    compositor = Compositor((0, 0, size, size), color, previous)
+    shape = np.zeros((size, size, 1), dtype=np.float32)
+    shape[0, 0] = shape[-1, -1] = 1.0
+    compositor._alpha = previous.copy()
+    compositor._alpha[2, 2] = 0.75
+
+    mixed = compositor._mix_in_text_space(
+        color,
+        shape,
+        shape,
+        previous,
+        np.zeros_like(previous),
+        color,
+        previous,
+        get_blend_func(BlendMode.NORMAL),
+        TEXT_BLEND_GAMMA,
+        False,
+    )
+    moved = np.zeros((size, size), dtype=bool)
+    moved[0, 0] = moved[-1, -1] = moved[2, 2] = True
+    assert np.array_equal(mixed[~moved], color[~moved])
+    assert not np.array_equal(mixed[2, 2], color[2, 2])
+
+
 def test_a_substituted_font_keeps_its_stored_raster() -> None:
     """A flagged layer mixes straight; the same layer unflagged mixes in the gamma.
 

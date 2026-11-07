@@ -141,6 +141,11 @@ def over(
                     q1 = k * p_cv[i] + (t * p_cb[i] + a * (m * p_c[i] + ab * p_bl[i]))
                     i = i + 1
                     q2 = k * p_cv[i] + (t * p_cb[i] + a * (m * p_c[i] + ab * p_bl[i]))
+                    if d == 1:
+                        o[i - 2] = _clip(q)
+                        o[i - 1] = _clip(q1)
+                        o[i] = _clip(q2)
+                        continue
                     o[i - 2] = _clip(q / d if d > 0 else <float>1.0)
                     o[i - 1] = _clip(q1 / d if d > 0 else <float>1.0)
                     o[i] = _clip(q2 / d if d > 0 else <float>1.0)
@@ -206,6 +211,11 @@ def passthrough(
                 d = p_d[x]
                 p = mk1 * ab
                 r = mk * ab + a * (<float>1.0 - ab)
+                if d == 1:
+                    for c in range(n):
+                        i = x * n + c
+                        o[i] = _clip(p * p_cb[i] + r * p_c[i])
+                    continue
                 for c in range(n):
                     i = x * n + c
                     q = p * p_cb[i] + r * p_c[i]
@@ -285,6 +295,11 @@ def remix(
                 a = p_a[x]
                 k = (<float>1.0 - a) * p_ba[x]
                 d = p_d[x]
+                if d == 1:
+                    for c in range(n):
+                        i = x * n + c
+                        o[i] = _clip(a * p_ct[i] + k * p_bc[i])
+                    continue
                 for c in range(n):
                     i = x * n + c
                     q = a * p_ct[i] + k * p_bc[i]

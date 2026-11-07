@@ -1,5 +1,6 @@
 """Paint and fill operations for compositing."""
 
+import io
 import logging
 import math
 from collections.abc import Callable, Sequence
@@ -617,12 +618,17 @@ def draw_gradient_fill(
     offset = get_descriptor(desc, Key.Offset)
     shift_x = box_width * _offset_share(offset, Key.Horizontal)
     shift_y = box_height * _offset_share(offset, Key.Vertical)
-    X, Y = np.meshgrid(
-        _ramp_axis(viewport[0] - box[0] - shift_x, width, box_width, scale),
-        _ramp_axis(viewport[1] - box[1] - shift_y, height, box_height, scale),
-    )
-
+    across = _ramp_axis(viewport[0] - box[0] - shift_x, width, box_width, scale)
+    down = _ramp_axis(viewport[1] - box[1] - shift_y, height, box_height, scale)
     gradient_kind = desc.get(Key.Type).enum
+    # Along an axis the ramp is one line, repeated.
+    theta = math.radians(angle)
+    if gradient_kind == Enum.Linear and abs(math.cos(theta)) < 1e-9:
+        across = across[:1]
+    elif gradient_kind == Enum.Linear and abs(math.sin(theta)) < 1e-9:
+        down = down[:1]
+    X, Y = np.meshgrid(across, down)
+
     if gradient_kind == Enum.Linear:
         Z = _make_linear_gradient(X, Y, angle)
     elif gradient_kind == Enum.Radial:
@@ -647,6 +653,11 @@ def draw_gradient_fill(
     )
     color = G(Z) if G is not None else None
     shape = np.expand_dims(Ga(Z), 2) if Ga is not None else None
+    if Z.shape != (height, width):
+        if color is not None:
+            color = np.broadcast_to(color, (height, width, color.shape[2]))
+        if shape is not None:
+            shape = np.broadcast_to(shape, (height, width, 1))
     return color, shape
 
 
@@ -741,7 +752,26 @@ def _make_diamond_gradient(X: np.ndarray, Y: np.ndarray, angle: float) -> np.nda
     return Z
 
 
+# A card repeats a few ramps over many layers: what each one built to.
+_RAMPS: dict[tuple, tuple[Any | None, Any | None]] = {}
+_RAMPS_HELD = 64
+
+
 def _make_gradient_color(
+    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
+) -> tuple[Any | None, Any | None]:
+    written = io.BytesIO()
+    grad.write(written)
+    key = (color_mode, method, written.getvalue())
+    known = _RAMPS.get(key)
+    if known is None:
+        if len(_RAMPS) >= _RAMPS_HELD:
+            _RAMPS.clear()
+        known = _RAMPS[key] = _build_gradient_color(color_mode, grad, method)
+    return known
+
+
+def _build_gradient_color(
     color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
 ) -> tuple[Any | None, Any | None]:
     gradient_form = grad.get(Type.GradientForm).enum

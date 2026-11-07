@@ -157,9 +157,9 @@ def encode_opaque_channel(
 # here.
 _CONVERSION_TRANSIENT: int = 8
 
-# `_remove_white_background()`, in bytes per pixel: the four bands `split()`
-# hands back, the `ImageMath` expression promoting each of three to "I" at four
-# bytes a pixel, the three "L" results, and the `merge()` that reassembles them.
+# `_remove_white_background()`, in bytes per pixel, with every pixel partial: the
+# image's array and its copy, the partial pixels and their mask, and the
+# `ImageMath` expression promoting a band to "I" at four bytes a pixel.
 # Rounded well up because PIL's buffers are C-side and the instrument that
 # reads them is coarser than the one numpy gets.
 _WHITE_BACKGROUND_TRANSIENT: int = 35
@@ -850,6 +850,22 @@ def _apply_icc(image: Image.Image, icc_profile: bytes) -> Image.Image:
     return result
 
 
+def _unwhitened(x: Image.Image, a: Image.Image) -> Image.Image:
+    """Take the white background at coverage ``a`` out of the plane ``x``."""
+    return ImageMath.lambda_eval(
+        lambda args: args["convert"](
+            args["float"](args["x"] + args["a"] - 255)
+            * 255.0
+            / args["float"](args["max"](args["a"], 1))
+            * args["float"](args["min"](args["a"], 1))
+            + args["float"](args["x"]) * args["float"](1 - args["min"](args["a"], 1)),
+            "L",
+        ),
+        x=x,
+        a=a,
+    )
+
+
 def _remove_white_background(image: Image.Image, color_mode: ColorMode) -> Image.Image:
     """Remove white background in the preview image.
 
@@ -859,25 +875,25 @@ def _remove_white_background(image: Image.Image, color_mode: ColorMode) -> Image
     every transparent pixel), while duotone shares that PIL mode without an
     equivalent to read (#868).
     """
-    if image.mode == "RGBA" or (image.mode == "LA" and color_mode in _BACKGROUND_MODES):
+    if image.mode == "RGBA":
+        # Only a partial pixel changes: a clear or opaque one comes out as it went in.
+        pixels = np.asarray(image)
+        partial = (pixels[..., 3] > 0) & (pixels[..., 3] < 255)
+        if not partial.any():
+            return Image.fromarray(pixels)
+        picked = pixels[partial]
+        a = Image.fromarray(np.ascontiguousarray(picked[None, :, 3]))
+        for band in range(3):
+            x = Image.fromarray(np.ascontiguousarray(picked[None, :, band]))
+            picked[:, band] = np.asarray(_unwhitened(x, a))[0]
+        out = pixels.copy()
+        out[partial] = picked
+        return Image.fromarray(out)
+    if image.mode == "LA" and color_mode in _BACKGROUND_MODES:
         bands = image.split()
         a = bands[-1]
-        color = [
-            ImageMath.lambda_eval(
-                lambda args: args["convert"](
-                    args["float"](args["x"] + args["a"] - 255)
-                    * 255.0
-                    / args["float"](args["max"](args["a"], 1))
-                    * args["float"](args["min"](args["a"], 1))
-                    + args["float"](args["x"])
-                    * args["float"](1 - args["min"](args["a"], 1)),
-                    "L",
-                ),
-                x=x,
-                a=a,
-            )
-            for x in bands[:-1]
-        ]
-        return Image.merge(bands=[*color, a], mode=image.mode)
+        return Image.merge(
+            bands=[*(_unwhitened(x, a) for x in bands[:-1]), a], mode=image.mode
+        )
 
     return image
