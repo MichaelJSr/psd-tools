@@ -1,14 +1,17 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True, language_level=3
 """C loops behind the compositor's source arithmetic.
 
-Each is the numpy expression it replaces in ``composite.py``, its float32
-operations in the same order, so the results are bit-identical. Memoryviews
-only, so the module builds against the Limited API without numpy headers.
+Each is the numpy expression it replaces in ``composite.py`` (``lut_levels``:
+``adjustments._apply_lut``), its float32 operations in the same order, so the
+results are bit-identical. Memoryviews only, so the module builds against the
+Limited API without numpy headers.
 
-Every canvas is read a row at a time, so a pixel's channels must be adjacent
-and its neighbour the next pixel along (``_rows``), as they are in a
-box cut from a canvas; ``composite._compiled_fits`` checks that first.
+Every canvas but ``lut_levels``' is read a row at a time, so a pixel's channels
+must be adjacent and its neighbour the next pixel along (``_rows``), as they are
+in a box cut from a canvas; ``composite._compiled_fits`` checks that first.
 """
+from libc.math cimport NAN, floorf
+
 import numpy as np
 
 
@@ -304,4 +307,29 @@ def remix(
                     i = x * n + c
                     q = a * p_ct[i] + k * p_bc[i]
                     o[i] = _clip(q / d if d > 0 else p_ct[i])
+    return result
+
+
+def lut_levels(const float[:, :, :] values, const float[::1] lut):
+    """``adjustments._apply_lut`` for a float32 ``lut`` of at most 65536 levels."""
+    cdef Py_ssize_t h = values.shape[0], w = values.shape[1], n = values.shape[2]
+    cdef Py_ssize_t y, x, c
+    cdef float top = <float>(lut.shape[0] - 1), t
+    if lut.shape[0] == 0:
+        raise ValueError("empty lut")
+    result = np.empty((h, w, n), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return result
+    cdef float[:, :, ::1] out = result
+    with nogil:
+        for y in range(h):
+            for x in range(w):
+                for c in range(n):
+                    t = values[y, x, c]
+                    if t != t:
+                        # NaN has no level: np.nan, as numpy writes it.
+                        out[y, x, c] = NAN
+                        continue
+                    t = floorf(t * top + <float>0.5)
+                    out[y, x, c] = lut[0 if t < 0 else (<Py_ssize_t>top if t > top else <Py_ssize_t>t)]
     return result

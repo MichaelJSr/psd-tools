@@ -30,6 +30,12 @@ extensions = [
         py_limited_api=use_limited_api,
     ),
     Extension(
+        "psd_tools.api._numpy_io",
+        ["src/psd_tools/api/_numpy_io.pyx"],
+        define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
+        py_limited_api=use_limited_api,
+    ),
+    Extension(
         "psd_tools.psd._descriptor",
         ["src/psd_tools/psd/_descriptor.pyx"],
         define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
