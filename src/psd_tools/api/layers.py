@@ -3341,6 +3341,9 @@ class TypeLayer(Layer):
         the TySh bounds are left as they are. ``report.splice`` says what was
         kept.
 
+        A new raster also drops the story's strikes, see
+        :py:func:`~psd_tools.api.text_edit.drop_strikes`.
+
         :param fonts: :py:class:`~psd_tools.composite.text.FontMap`; the
             default scans ``PSD_TOOLS_FONT_DIRS`` and the platform fonts.
         :param options: :py:class:`~psd_tools.composite.text.Options`.
@@ -3366,6 +3369,7 @@ class TypeLayer(Layer):
                 return result.report
         self._store_raster(result.rgba, result.bbox)
         self._rewrite_text_bounds(result.bbox, result.report)
+        text_edit.drop_strikes(self, result.report.fonts)
         self._invalidate_bbox()
         self._psd.mark_updated()
         return result.report
