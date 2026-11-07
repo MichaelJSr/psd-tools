@@ -1328,21 +1328,35 @@ def composite_pil(
         logger.debug("PIL has no alpha variant of %r; not packing it inline.", mode)
         skip_alpha = True
     logger.debug("Skipping alpha: %s", skip_alpha)
-    if not skip_alpha:
-        color = np.concatenate((color, alpha), 2)
-        mode += "A"
     assert isinstance(color, np.ndarray)
-    if mode in ("1", "L"):
-        color = color[:, :, 0]
     if color.shape[0] == 0 or color.shape[1] == 0:
         return None
-    # Clipped, not cast straight: numpy *wraps* an out-of-range float, so 1.2
-    # would arrive as byte 50 rather than as white (#757). np.clip passes NaN
-    # through. Rounded, not truncated, as Photoshop's export is.
-    pixels = 255 * color
-    np.clip(pixels, 0, 255, out=pixels)
-    np.rint(pixels, out=pixels)
-    pixels = pixels.astype(np.uint8)
+    if (
+        _cblend is not None
+        and hasattr(_cblend, "to_bytes")
+        and mode in ("RGB", "L")
+        and color.dtype == np.float32
+        and (skip_alpha or alpha.dtype == np.float32)
+    ):
+        # The numpy below in one pass, with alpha appended as it goes.
+        pixels = _cblend.to_bytes(color, None if skip_alpha else alpha)
+        if not skip_alpha:
+            mode += "A"
+        if mode == "L":
+            pixels = pixels[:, :, 0]
+    else:
+        if not skip_alpha:
+            color = np.concatenate((color, alpha), 2)
+            mode += "A"
+        if mode in ("1", "L"):
+            color = color[:, :, 0]
+        # Clipped, not cast straight: numpy *wraps* an out-of-range float, so
+        # 1.2 would arrive as byte 50 rather than as white (#757). np.clip
+        # passes NaN through. Rounded, not truncated, as Photoshop's export is.
+        pixels = 255 * color
+        np.clip(pixels, 0, 255, out=pixels)
+        np.rint(pixels, out=pixels)
+        pixels = pixels.astype(np.uint8)
     if mode == "1":
         # `fromarray(uint8, "1")` does not mean "these bytes, as bilevel". PIL
         # takes the raw mode literally at one bit per pixel, so it consumes one
