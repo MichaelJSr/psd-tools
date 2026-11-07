@@ -926,7 +926,26 @@ def test_grey_stops_on_a_grayscale_canvas_blend_as_their_rgb_spelling_does(
 
 def _eased(opacity: np.ndarray) -> np.ndarray:
     """Photoshop's perceptual fade of a linearly blended opacity."""
-    return opacity ** (1.0 + 1.42 * (1.0 - opacity))
+    return opacity**paint._PERCEPTUAL_ALPHA_GAMMA
+
+
+# Photoshop 2023's alpha levels at 1/4, 1/2 and 3/4 of a 2048 px black fill
+# fading 100% to 0% at full smoothness, perceptual method.
+PS_PERCEPTUAL_FADE = [172, 77, 16]
+
+
+def test_a_smooth_perceptual_fade_matches_photoshops_levels() -> None:
+    fade = [_opacity_stop(100.0, 0), _opacity_stop(0.0, 4096)]
+    desc = _gradient(
+        stops=[_stop(BLACK, 0), _stop(BLACK, 4096)],
+        transparency=fade,
+        method=GradientMethod.PERCEPTUAL.value,
+        smoothness=1.0,
+    )
+    _, shape = paint.draw_gradient_fill((0, 0, 2048, 1), ColorMode.RGB, desc)
+    assert shape is not None
+    levels = np.rint(shape[0, [512, 1024, 1536], 0] * 255)
+    assert np.abs(levels - PS_PERCEPTUAL_FADE).max() <= 1
 
 
 def test_a_perceptual_fill_fades_along_the_fitted_ease() -> None:
@@ -969,7 +988,6 @@ def test_a_perceptual_transparency_ramp_is_the_eased_classic_one(
     along = np.arange(101) / 100
     assert np.allclose(classic[0, :, 0], along if ascending else 1.0 - along, atol=1e-5)
     assert np.allclose(perceptual[0, :, 0], _eased(classic[0, :, 0]), atol=1e-5)
-    assert perceptual[0, 50, 0] == pytest.approx(0.5 ** (1 + 1.42 * 0.5), abs=1e-5)
 
 
 def test_a_perceptual_ramp_between_partial_opacities_still_lands_on_its_stops() -> None:
