@@ -925,8 +925,8 @@ def test_grey_stops_on_a_grayscale_canvas_blend_as_their_rgb_spelling_does(
 
 
 def _eased(opacity: np.ndarray) -> np.ndarray:
-    """Photoshop's perceptual fade of a linearly blended opacity."""
-    return opacity ** (1.0 + 1.42 * (1.0 - opacity))
+    """Photoshop 2023's perceptual fade of a linearly blended opacity."""
+    return opacity**1.728
 
 
 def test_a_perceptual_fill_fades_along_the_fitted_ease() -> None:
@@ -969,7 +969,7 @@ def test_a_perceptual_transparency_ramp_is_the_eased_classic_one(
     along = np.arange(101) / 100
     assert np.allclose(classic[0, :, 0], along if ascending else 1.0 - along, atol=1e-5)
     assert np.allclose(perceptual[0, :, 0], _eased(classic[0, :, 0]), atol=1e-5)
-    assert perceptual[0, 50, 0] == pytest.approx(0.5 ** (1 + 1.42 * 0.5), abs=1e-5)
+    assert perceptual[0, 50, 0] == pytest.approx(0.5**1.728, abs=1e-5)
 
 
 def test_a_perceptual_ramp_between_partial_opacities_still_lands_on_its_stops() -> None:
@@ -991,6 +991,15 @@ def test_a_perceptual_ramp_between_partial_opacities_still_lands_on_its_stops() 
     assert (np.diff(ramp) <= 1e-6).all()
     # Convex: the fade sits below the straight line between its stops.
     assert ramp[50] < 0.5
+
+
+def test_a_perceptual_fade_matches_photoshop_2023() -> None:
+    """Photoshop 2023's own 50%-to-clear perceptual fill and its PNG of it."""
+    psd = PSDImage.open(full_name("layers/gradient-perceptual-fade.psd"))
+    ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
+    png = Image.open(full_name("layers/gradient-perceptual-fade.png"))
+    theirs = np.asarray(png.convert("RGBA"), dtype=int)
+    assert np.abs(ours[..., 3] - theirs[..., 3]).max() <= 2
 
 
 # The width each mode's color arrays carry; multichannel's is per file.
