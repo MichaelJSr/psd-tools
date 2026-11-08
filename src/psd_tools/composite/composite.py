@@ -4733,26 +4733,32 @@ class Compositor:
     def _read_rows(
         self, layer: Layer, viewport: tuple[int, int, int, int]
     ) -> tuple[np.ndarray, np.ndarray | None, tuple[int, int, int, int]] | None:
-        """:py:meth:`_read_object`'s stored pixels on the rows ``viewport`` crosses, and their box.
+        """:py:meth:`_read_object`'s stored pixels on the part ``viewport`` crosses, and its box.
 
-        A box render need not decode the rest of a tall layer. None where the
-        read runs whole: every row crossed or none, a fill, a smart filter
-        mask (:py:func:`_unfilter_under_mask` blends on the whole box), or data
-        only the whole decode reads.
+        A render need not decode the rest of a tall or wide layer. None where
+        the read runs whole: the whole box crossed or no row, a fill, a smart
+        filter mask (:py:func:`_unfilter_under_mask` blends on the whole box),
+        or data only the whole decode reads.
         """
         left, top, right, bottom = layer.bbox
         start = max(viewport[1], top) - top
         stop = min(viewport[3], bottom) - top
-        if start >= stop or (start == 0 and stop == bottom - top):
+        if start >= stop:
+            return None
+        x0 = max(viewport[0], left) - left
+        x1 = min(viewport[2], right) - left
+        if x0 >= x1:  # No column crossed: the rows, every column.
+            x0, x1 = 0, right - left
+        if start == 0 and stop == bottom - top and x0 == 0 and x1 == right - left:
             return None
         if not layer.has_pixels() or (self._force and utils.has_fill(layer)):
             return None
         if isinstance(layer, SmartObjectLayer) and _may_unfilter(layer):
             return None
-        rows = numpy_io.get_layer_rows(layer, start, stop)
+        rows = numpy_io.get_layer_rows(layer, start, stop, x0, x1)
         if rows is None:
             return None
-        return rows[0], rows[1], (left, top + start, right, top + stop)
+        return rows[0], rows[1], (left + x0, top + start, left + x1, top + stop)
 
     @staticmethod
     def _place_object_shape(
@@ -4863,7 +4869,9 @@ class Compositor:
             box = layer.bbox
         else:
             color, own_shape, box = rows
+            del rows
         shape = self._place_object_shape(color, own_shape, box, viewport)
+        del own_shape  # reads go once pasted
 
         if color is None:
             color = np.ones((height, width, 1), dtype=np.float32)

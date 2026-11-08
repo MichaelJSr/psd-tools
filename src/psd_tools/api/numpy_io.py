@@ -461,12 +461,17 @@ def get_layer_data(
 
 
 def get_layer_rows(
-    layer: "LayerProtocol", start: int, stop: int
+    layer: "LayerProtocol",
+    start: int,
+    stop: int,
+    left: int = 0,
+    right: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray | None] | None:
     """:func:`get_layer_data`'s ``color`` and ``shape``, rows ``start`` to ``stop`` only.
 
     Decodes just those rows of 8-bit RAW and RLE channels, so a box render
-    skips the rest of a tall layer. None wherever only the whole read can
+    skips the rest of a tall layer. Columns ``left`` to ``right`` are kept
+    before the float32 conversion. None wherever only the whole read can
     tell -- another depth or codec, a body short of its rows -- for the caller
     to make that read.
     """
@@ -483,6 +488,8 @@ def get_layer_rows(
     if not color or any(d.compression not in codecs for d in color + shape):
         return None
     expected = EXPECTED_CHANNELS.get(layer._psd.color_mode)
+    stop_x = width if right is None else right
+    cols = stop_x - left
 
     def read(selected: list[Any]) -> np.ndarray | None:
         planes = []
@@ -492,12 +499,15 @@ def get_layer_rows(
             )
             if plane is None:
                 return None
+            if cols != width:
+                rows = np.frombuffer(plane, np.uint8).reshape(stop - start, width)
+                plane = rows[:, left:stop_x].tobytes()
             planes.append(plane)
         if _cnumpy_io is not None:
-            result = _cnumpy_io.planes8(planes, stop - start, width)
+            result = _cnumpy_io.planes8(planes, stop - start, cols)
         else:
-            result = np.stack([_parse_array(p, 8, width) for p in planes], axis=1)
-            result = result.reshape((stop - start, width, -1))
+            result = np.stack([_parse_array(p, 8, cols) for p in planes], axis=1)
+            result = result.reshape((stop - start, cols, -1))
         if expected is not None and result.shape[2] > expected:
             return result[:, :, :expected]
         return result

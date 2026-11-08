@@ -124,8 +124,8 @@ with zeros. Code that needs coverage outside the viewport, such as a stroke
 effect traced past the canvas edge, cannot recover it by cropping; it must read
 the layer again on the larger box. A group has no stored coverage to re-read,
 so its contents are composited again on that box. A layer's stored pixels are
-decoded on the rows the box crosses alone (``_read_rows()``, 8-bit RAW and
-RLE); fills, smart filter masks and other codecs read whole.
+decoded on the rows and columns the box crosses alone (``_read_rows()``, 8-bit
+RAW and RLE); fills, smart filter masks and other codecs read whole.
 
 Local boxes
 ^^^^^^^^^^^
