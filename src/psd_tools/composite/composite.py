@@ -46,6 +46,7 @@ from psd_tools.api.utils import (
     get_transparency_index,
     has_transparency,
 )
+from psd_tools.color_convert import SRGB_CUTOFF, SRGB_GAMMA, SRGB_OFFSET, SRGB_SLOPE
 from psd_tools.composite import paint, rcache, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
@@ -3157,6 +3158,10 @@ def _over(
     )
 
 
+# Exponents numpy's ``**`` answers with its own ufunc, not ``pow``.
+_POW_SHORTCUTS = (0.0, 0.5, 2.0, -1.0)
+
+
 def _compiled_fits(
     ones: Sequence[object], wide: Sequence[object] = (), channels: int | None = None
 ) -> bool:
@@ -4049,6 +4054,55 @@ class Compositor:
             return self._color
         box = (slice(rows[0], rows[-1] + 1), slice(columns[0], columns[-1] + 1))
         result = self._color.copy()
+        if (
+            inside is None
+            and color_b is self._color
+            and blend_fn is normal
+            and self._channels == 3
+            and hasattr(_cblend, "text_mix")
+            and text_gamma not in _POW_SHORTCUTS
+            and 1.0 / text_gamma not in _POW_SHORTCUTS
+            and _compiled_fits(
+                (
+                    shape,
+                    alpha,
+                    alpha_previous,
+                    alpha_g_previous,
+                    alpha_b,
+                    self._alpha,
+                    self._alpha_g,
+                    self._alpha_0,
+                ),
+                (color, self._color, self._color_0),
+                3,
+            )
+        ):
+            # The common path, compiled: the same steps per pixel.
+            _cblend.text_mix(
+                result,
+                self._color,
+                self._alpha,
+                self._alpha_g,
+                self._color_0,
+                self._alpha_0,
+                color,
+                shape,
+                alpha,
+                alpha_previous,
+                alpha_g_previous,
+                alpha_b,
+                isolated,
+                int(rows[0]),
+                int(rows[-1]) + 1,
+                int(columns[0]),
+                int(columns[-1]) + 1,
+                text_gamma,
+                SRGB_SLOPE,
+                SRGB_CUTOFF,
+                SRGB_OFFSET,
+                SRGB_GAMMA,
+            )
+            return result
         # A pixel the source leaves alone keeps its colour: the round trip
         # returns it to the bit but for the two cases set here.
         now = self._alpha[box][..., 0]
