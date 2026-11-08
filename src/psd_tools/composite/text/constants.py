@@ -37,8 +37,9 @@ FAUX_BOLD_EM = 0.027
 # Faux italic shears the outline by tan 12 degrees.
 FAUX_ITALIC_SHEAR = 0.2126
 
-# AntA Strong and Smooth embolden the outline by this 26.6 amount in x and y.
-STRONG_EMBOLDEN_26_6 = 19
+# AntA Strong and Smooth embolden the outline by this 26.6 amount in x and y,
+# fitted to Photoshop 2023's relayouts; scaled to the sample render, rounded.
+STRONG_EMBOLDEN_26_6 = 17.5
 
 # AntA None keeps a pixel whose coverage exceeds 0.5 ** (1 / 1.25).
 NONE_THRESHOLD = 0.574

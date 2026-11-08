@@ -12,6 +12,7 @@ import math
 import sys
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import numpy as np
 import pytest
@@ -55,7 +56,7 @@ EM = 40.5
 STEM_W = 259 / 64
 STEM_H = 1814 / 64
 #: Strong moves each edge outward by half the 26.6 strength, floored.
-DILATE = (STRONG_EMBOLDEN_26_6 // 2) / 64
+DILATE = (round(STRONG_EMBOLDEN_26_6) // 2) / 64
 #: 8-bit coverage plus the 26.6 placement of an edge.
 TOL = 1 / 255 + 1 / 64
 
@@ -143,11 +144,29 @@ def test_phase_columns_strong(face: Face) -> None:
 
 
 def test_strong_coverage_is_point_sampled(face: Face) -> None:
-    """Four samples a column: the dilated stem spans 0.10 to 4.45 px."""
+    """Four samples a column: the dilated stem spans 0.11 to 4.44 px."""
     rgba, bbox = render([glyph(face, "I", 0.25, 100.0)], options=SAMPLES)
     assert bbox[0] == 0 and bbox[2] == 5
     assert rgba[5, :, 3] == pytest.approx([1, 1, 1, 1, 0.5], abs=1 / 255)
     assert (rgba[..., :3][rgba[..., 3] > 0] == RED).all()
+
+
+@pytest.mark.parametrize(("options", "strength"), [(SAMPLES, 70), (AREA, 18)])
+def test_strong_embolden_strength(
+    face: Face, monkeypatch: pytest.MonkeyPatch, options: Options, strength: int
+) -> None:
+    """17.5 scales to the 4x sample render, then rounds to whole 26.6."""
+    seen: list[tuple[int, int]] = []
+    real = raster_module._render_glyph
+
+    def spy(*args: Any) -> Any:
+        seen.append(args[-1])
+        return real(*args)
+
+    monkeypatch.setattr(raster_module, "_render_glyph", spy)
+    render([glyph(face, "I", 0.25, 100.0)], options=options)
+    assert seen == [(strength, strength)]
+    assert all(type(v) is int for v in seen[0])
 
 
 @pytest.mark.parametrize("antialias", [CRISP, STRONG, SMOOTH])

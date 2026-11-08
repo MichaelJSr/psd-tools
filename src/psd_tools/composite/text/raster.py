@@ -106,7 +106,7 @@ class _Mode:
     """How one AntA value loads, dilates and places a glyph."""
 
     flags: int
-    embolden: int  #: 26.6 total widening in x and in y
+    embolden: float  #: 26.6 total widening in x and in y
     origin: _Origin
     threshold: float | None  #: binarise the final coverage above this
     samples: int = 1  #: point samples a side per pixel; 1 is the exact area
@@ -439,7 +439,13 @@ def _glyph_items(
             key,
             lambda: _point_sampled(
                 _render_glyph(
-                    g.face, g.gid, size66, matrix, delta, mode.flags, (ex * n, ey * n)
+                    g.face,
+                    g.gid,
+                    size66,
+                    matrix,
+                    delta,
+                    mode.flags,
+                    (round(ex * n), round(ey * n)),
                 ),
                 n,
             ),
