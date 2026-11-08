@@ -117,6 +117,22 @@ def test_a_canvas_written_in_place_is_never_the_seed() -> None:
     assert (color == 1.0).all() and (alpha == 0.0).all()
 
 
+@pytest.mark.parametrize("filename", ["clipping-mask5.psd", "gradient-fill.psd"])
+def test_a_whole_canvas_layer_frees_the_copies_it_replaces(filename: str) -> None:
+    """Only current canvases stay owned, so a replaced copy is not kept alive."""
+    psd = PSDImage.open(full_name(filename))
+    color = np.ones((psd.height, psd.width, 3), dtype=np.float32)
+    alpha = np.zeros((psd.height, psd.width, 1), dtype=np.float32)
+    compositor = composite_module.Compositor(psd.viewbox, color, alpha, force=True)
+    kinds = ""
+    for layer in psd:
+        kinds += "w" if compositor._local_box(layer) is None else "b"
+        compositor.apply(layer)
+        for name, canvas in compositor._owned.items():
+            assert canvas is getattr(compositor, name), (layer.name, name)
+    assert "bw" in kinds, "no whole-canvas layer follows a boxed one"
+
+
 def test_the_drawn_box_holds_a_redrawn_shape_and_its_stroke() -> None:
     psd = PSDImage.open(full_name("adjustment-fillers.psd"))
     shapes = [layer for layer in psd.descendants() if layer.name.startswith("Polygon")]

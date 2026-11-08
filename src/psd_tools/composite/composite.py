@@ -3315,8 +3315,10 @@ class Compositor:
             if box is not None:
                 self._apply_in_box(layer, box)
                 return
+            self._owned.clear()
             self._apply_layer(layer)
             return
+        self._owned.clear()
         held = self._hold_channels(excluded, clip_compositing)
         self._apply_layer(layer)
         self._restore_channels(held)
