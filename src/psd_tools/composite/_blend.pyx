@@ -6,13 +6,14 @@ Each is the numpy expression it replaces in ``composite.py`` (``lut_levels``:
 ``clip``: ``utils``; ``vibrance_step``: ``adjustments._vibrance_step``;
 ``text_mix``: ``Compositor._mix_in_text_space``), its
 operations in the same dtypes and order, so the results are bit-identical.
+``distinct_pixels`` numbers a canvas' distinct colours for ``composite._adjust``.
 Memoryviews only, so the module builds against the Limited API without numpy
 headers.
 
-Every canvas but ``lut_levels``', ``to_bytes``' and ``vibrance_step``'s is read
-a row at a time, so a pixel's channels must be adjacent and its neighbour the
-next pixel along (``_rows``), as they are in a box cut from a canvas;
-``utils.in_rows`` checks that first.
+Every canvas but ``lut_levels``', ``to_bytes``', ``vibrance_step``'s and
+``distinct_pixels``' is read a row at a time, so a pixel's channels must be
+adjacent and its neighbour the next pixel along (``_rows``), as they are in a
+box cut from a canvas; ``utils.in_rows`` checks that first.
 """
 from libc.math cimport NAN, ceilf, fabs, floorf, fmaxf, fminf, pow, powf, rintf, signbit
 
@@ -998,3 +999,66 @@ def text_mix(
                         num = <double>ag * mixed + <double>ag1 * a0 * <double>color_0[y, x, c]
                         mixed = num / <double>now if now > 0 else mixed
                     result[y, x, c] = <float>(0.0 if mixed < 0 else (1.0 if mixed > 1 else mixed))
+
+
+def distinct_pixels(const float[:, ::1] pixels, Py_ssize_t limit):
+    """``(index, first)``: each pixel's number among the distinct ones, equal
+    bits being one, and each distinct pixel's first row; None past ``limit``.
+    """
+    cdef Py_ssize_t n = pixels.shape[0], c = pixels.shape[1]
+    cdef Py_ssize_t cap = 1, mask, p, k, slot, d, count = 0
+    cdef unsigned int hv
+    cdef const unsigned int* bits
+    cdef const unsigned int* own
+    cdef const unsigned int* seen
+    cdef bint same
+    if limit < 0 or limit > 0x3FFFFFFF:
+        raise ValueError("limit out of range")
+    while cap < 2 * limit:
+        cap <<= 1
+    mask = cap - 1
+    index_ = np.empty(n, dtype=np.int32)
+    first_ = np.empty(min(limit, n), dtype=np.intp)
+    if n == 0 or c == 0:
+        return index_, first_[:0]
+    if limit == 0:
+        return None
+    table_ = np.full(cap, -1, dtype=np.int32)
+    cdef int[::1] table = table_
+    cdef int[::1] index = index_
+    cdef Py_ssize_t[::1] first = first_
+    bits = <const unsigned int*>&pixels[0, 0]
+    with nogil:
+        for p in range(n):
+            own = bits + p * c
+            hv = 2166136261u
+            for k in range(c):
+                hv = (hv ^ own[k]) * 16777619u
+                hv = hv ^ (hv >> 15)
+            slot = hv & mask
+            while True:
+                d = table[slot]
+                if d < 0:
+                    if count == limit:
+                        count = -1
+                        break
+                    table[slot] = <int>count
+                    first[count] = p
+                    index[p] = <int>count
+                    count += 1
+                    break
+                seen = bits + first[d] * c
+                same = True
+                for k in range(c):
+                    if seen[k] != own[k]:
+                        same = False
+                        break
+                if same:
+                    index[p] = <int>d
+                    break
+                slot = (slot + 1) & mask
+            if count < 0:
+                break
+    if count < 0:
+        return None
+    return index_, first_[:count]
