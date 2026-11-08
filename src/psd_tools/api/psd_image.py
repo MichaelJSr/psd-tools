@@ -285,7 +285,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             must be a file-like object kept open while the document is used,
             e.g. a :py:class:`~psd_tools.range_reader.RangeReader`. A payload
             is checked when it is read, so a document whose unread payloads
-            are corrupt opens.
+            are corrupt opens. An ``io.BytesIO`` is read this way from its
+            bytes, without ``lazy``.
         :param parse_limits: structural read and object limits; ``None`` uses
             :py:class:`~psd_tools.ParseLimits` defaults. Exceeding a limit
             raises :py:class:`~psd_tools.ParseLimitError` before the allocation.
@@ -328,6 +329,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
                 reader = cast(IO[bytes], FileReader(f))
                 self = cls(PSD.read(reader, parse_limits=parse_limits, **kwargs))
         else:
+            # A BytesIO's payloads stay in its bytes until used.
+            lazy = lazy or type(fp) is io.BytesIO
             self = cls(PSD.read(fp, parse_limits=parse_limits, lazy=lazy, **kwargs))
         self._max_alloc_bytes = max_alloc_bytes
         return self

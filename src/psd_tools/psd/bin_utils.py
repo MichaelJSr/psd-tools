@@ -212,7 +212,7 @@ def write_fmt(fp: IO[bytes], fmt: str, *args: Any) -> int:
     return written
 
 
-def write_bytes(fp: IO[bytes], data: bytes) -> int:
+def write_bytes(fp: IO[bytes], data: bytes | memoryview) -> int:
     """
     Write bytes to the file object and returns bytes written.
 
