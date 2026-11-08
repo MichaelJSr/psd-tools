@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from psd_tools.constants import LinkedLayerType, Tag
-from psd_tools.psd import PSD
+from psd_tools.psd import PSD, descriptor, linked_layer
 from psd_tools.psd.descriptor import DescriptorBlock
 from psd_tools.psd.linked_layer import LinkedLayer, LinkedLayers
 from psd_tools.psd.parse_limits import ParseLimitError, ParseLimits, parse_context
@@ -230,11 +230,16 @@ def test_streamed_block_rejects_a_forged_length() -> None:
         TaggedBlock.read(stream, version=2)
 
 
-def test_linked_layers_rejects_an_item_that_under_consumes() -> None:
+@pytest.mark.parametrize("copied", [True, False])
+def test_linked_layers_rejects_an_item_that_under_consumes(
+    monkeypatch: pytest.MonkeyPatch, copied: bool
+) -> None:
     """A byte inside the item's window the parser did not read is leftover.
 
     It is unexplained, not padding, so the item read fails (#899).
     """
+    if not copied:
+        monkeypatch.setattr(linked_layer, "_SMALL_ITEM", 0)
     item = LinkedLayer(kind=LinkedLayerType.DATA, data=b"abcd").tobytes()
     stream = io.BytesIO(struct.pack(">Q", len(item) + 1) + item + b"\x00")
     with pytest.raises(ValueError, match="consumed"):
@@ -283,3 +288,31 @@ def test_streamed_block_over_the_limit_leaves_the_stream_at_the_block_end() -> N
             TaggedBlock.read(stream, version=1)
     assert stream.tell() == len(block)
     assert TaggedBlock.read(stream, version=1).data == b"data"
+
+
+@pytest.mark.parametrize("copied", [True, False])
+def test_small_items_take_the_compiled_descriptor_reader(
+    monkeypatch: pytest.MonkeyPatch, copied: bool
+) -> None:
+    """An item up to _SMALL_ITEM is read from a copy.
+
+    Its descriptors reach the compiled reader; a larger one streams. Both
+    read alike.
+    """
+    items = LinkedLayers([LinkedLayer.frombytes(V8_DATA_ENTRY)])  # type: ignore[list-item]
+    if not copied:
+        monkeypatch.setattr(linked_layer, "_SMALL_ITEM", 0)
+    calls = []
+    real = descriptor._compiled_body
+
+    def spy(fp: io.BytesIO) -> Any:
+        calls.append(fp)
+        return real(fp)
+
+    monkeypatch.setattr(descriptor, "_compiled_body", spy)
+    stream = io.BytesIO(_lnk2_block(items.tobytes(), 1) + _SIBLING)
+    first = TaggedBlock.read(stream, version=1)
+    assert first.data == items
+    assert first.data[0].content_descriptor[b"contentID"].value == CONTENT_ID
+    assert TaggedBlock.read(stream, version=1).data == b"data"
+    assert bool(calls) is copied
