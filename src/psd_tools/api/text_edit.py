@@ -32,8 +32,10 @@ if TYPE_CHECKING:
 
 __all__ = [
     "add_font",
+    "composer_gaps",
     "drop_strikes",
     "kerning_methods",
+    "pin_composer",
     "set_run_style",
     "set_span_style",
     "set_text",
@@ -668,24 +670,17 @@ class _Story:
         return paint
 
 
-def _pin_composer(story: _Story, layer: TypeLayer) -> None:
-    """Give each story paragraph run without a composer flag TySh's.
+def _composer_gaps(story: _Story) -> list[tuple[int, engine_data.Dict]]:
+    """Each paragraph run's first unit and features, where the flag is unset.
 
-    Photoshop re-lays such a run Every-line, whatever TySh says, and may
-    break its lines elsewhere. Named-key stories are left alone.
+    Named-key stories have none.
     """
     k = story.k
     section = story.model.get(k.paragraphs)
-    tysh = layer.engine_dict.get("ParagraphRun")
-    if not (
-        k.numbered and story._is_runs(section) and isinstance(tysh, engine_data.Dict)
-    ):
-        return
-    try:
-        spans = _spans(tysh, utf16_prefix(story.text)[-1])
-    except (ValueError, KeyError, TypeError):
-        return
+    if not (k.numbered and story._is_runs(section)):
+        return []
     _, sheet_key, _, features_key = k.paragraph_sheets
+    out = []
     unit = 0
     for run in section[k.runs]:
         data = run.get(k.data)
@@ -694,12 +689,34 @@ def _pin_composer(story: _Story, layer: TypeLayer) -> None:
             sheet.get(features_key) if isinstance(sheet, engine_data.Dict) else None
         )
         if isinstance(features, engine_data.Dict) and _COMPOSER not in features:
-            flag = _data_at(spans, unit)
-            for key in ("ParagraphSheet", "Properties", "EveryLineComposer"):
-                flag = flag.get(key) if isinstance(flag, engine_data.Dict) else None
-            if isinstance(getattr(flag, "value", None), bool):
-                features[_COMPOSER] = engine_data.Bool(flag.value)
+            out.append((unit, features))
         unit += int(run[k.length].value)
+    return out
+
+
+def _pin_composer(story: _Story, layer: TypeLayer) -> int:
+    """Give each story paragraph run without a composer flag TySh's.
+
+    Photoshop re-lays such a run Every-line, whatever TySh says, and may
+    break its lines elsewhere. Returns how many runs got one.
+    """
+    gaps = _composer_gaps(story)
+    tysh = layer.engine_dict.get("ParagraphRun")
+    if not gaps or not isinstance(tysh, engine_data.Dict):
+        return 0
+    try:
+        spans = _spans(tysh, utf16_prefix(story.text)[-1])
+    except (ValueError, KeyError, TypeError):
+        return 0
+    n = 0
+    for unit, features in gaps:
+        flag = _data_at(spans, unit)
+        for key in ("ParagraphSheet", "Properties", "EveryLineComposer"):
+            flag = flag.get(key) if isinstance(flag, engine_data.Dict) else None
+        if isinstance(getattr(flag, "value", None), bool):
+            features[_COMPOSER] = engine_data.Bool(flag.value)
+            n += 1
+    return n
 
 
 def _story(layer: TypeLayer) -> _Story | None:
@@ -1202,6 +1219,31 @@ def drop_strikes(layer: TypeLayer, fonts: Iterable[str]) -> None:
     if isinstance(view, engine_data.Dict) and story.k.strikes in view:
         del view[story.k.strikes]
         _touch(layer)
+
+
+def composer_gaps(layer: TypeLayer) -> int:
+    """Story paragraph runs without a composer flag; 0 without a story of its own."""
+    try:
+        story = _story(layer)
+    except ValueError:
+        return 0
+    return 0 if story is None else len(_composer_gaps(story))
+
+
+def pin_composer(layer: TypeLayer) -> int:
+    """Give the story's paragraph runs TySh's composer flag where unset.
+
+    Older writes left them without one (``tools/sweep_strikes.py``).
+    Returns how many runs got one; a shared story is left alone.
+    """
+    try:
+        story = _story(layer)
+    except ValueError:
+        return 0
+    n = 0 if story is None else _pin_composer(story, layer)
+    if n:
+        _touch(layer)
+    return n
 
 
 def _touch(layer: TypeLayer) -> None:

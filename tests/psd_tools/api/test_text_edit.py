@@ -8,7 +8,9 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
 from psd_tools.api.text_edit import (
     add_font,
+    composer_gaps,
     drop_strikes,
+    pin_composer,
     set_span_style,
     set_text,
     utf16_prefix,
@@ -469,6 +471,23 @@ def test_story_paragraphs_get_the_tysh_composer(edit: str) -> None:
         assert composers(layer) == [None, None]
         assert layer.sync_story()
     assert composers(layer) == [False, True]
+
+
+def test_pin_composer_fills_the_gaps_alone() -> None:
+    # tools/sweep_strikes.py: older writes left story paragraphs unflagged.
+    layer = story_layer("Ability")
+    psd = cast(PSDImage, layer._psd)
+    for run in story(layer)["0"]["5"]["0"]:
+        del run["0"]["0"]["5"]["29"]
+    want = copy.deepcopy(story(layer))
+    for run, flag in zip(want["0"]["5"]["0"], (False, True), strict=True):
+        run["0"]["0"]["5"]["29"] = engine_data.Bool(flag)
+    props = layer.engine_dict["ParagraphRun"]["RunArray"][1]["ParagraphSheet"]
+    props["Properties"]["EveryLineComposer"] = engine_data.Bool(True)
+    assert composer_gaps(layer) == 2 and not psd.is_updated()
+    assert pin_composer(layer) == 2
+    assert raw(story(layer)) == raw(want) and psd.is_updated()
+    assert composer_gaps(layer) == pin_composer(layer) == 0
 
 
 def test_story_marks_stay_on_their_characters() -> None:
