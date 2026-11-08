@@ -6,6 +6,7 @@ from collections.abc import Callable
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, ClassVar, cast
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -2593,3 +2594,21 @@ def test_a_kept_stroke_band_is_redrawn_for_another_shape() -> None:
         redrawn, effects.stroke_band(viewport, other, desc), strict=True
     ):
         assert np.array_equal(got, expected)
+
+
+@pytest.mark.skipif(
+    effects._cdistance is None or not hasattr(effects._cdistance, "distance_box"),
+    reason="compiled distance not built",
+)
+def test_the_compiled_signed_distance_is_the_numpy_one() -> None:
+    rng = np.random.default_rng(11)
+    for _ in range(300):
+        h, w = int(rng.integers(1, 60)), int(rng.integers(1, 60))
+        alpha = rng.random((h, w)).astype(np.float32)
+        alpha[rng.random((h, w)) < 0.4] = 0.0
+        alpha[rng.random((h, w)) < 0.3] = 1.0
+        reach = float(rng.choice([0.5, 2.0, 4.7, 8.0, 12.3, 47.9]))
+        compiled = effects._signed_distance(alpha, reach)
+        with mock.patch.object(effects, "_compiled_distance", lambda *_: None):
+            plain = effects._signed_distance(alpha, reach)
+        assert compiled.tobytes() == plain.tobytes()
