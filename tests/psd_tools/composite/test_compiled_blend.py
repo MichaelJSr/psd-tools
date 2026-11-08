@@ -71,9 +71,12 @@ def test_over_is_numpys(
 
 
 @pytest.mark.parametrize("seed", range(6))
-def test_unmix_and_remix_are_numpys(monkeypatch: pytest.MonkeyPatch, seed: int) -> None:
+@pytest.mark.parametrize("channels", [1, 3, 4])
+def test_unmix_and_remix_are_numpys(
+    monkeypatch: pytest.MonkeyPatch, seed: int, channels: int
+) -> None:
     rng = np.random.default_rng(seed)
-    color, backdrop_color = _canvas(rng, 3), _canvas(rng, 3)
+    color, backdrop_color = _canvas(rng, channels), _canvas(rng, channels)
     backdrop_alpha, alpha, canvas_alpha = (_canvas(rng, 1) for _ in range(3))
     unmixed = (color, backdrop_color, backdrop_alpha, alpha)
     _same(_unmix(*unmixed), _numpy(monkeypatch, _unmix, *unmixed))
