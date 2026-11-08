@@ -1157,8 +1157,8 @@ def apply_vibrance(
     if space is None:
         out = _vibrance(linear, vibrance, saturation)
     else:
-        out = _vibrance(linear @ space.T, vibrance, saturation)
-        out = np.clip(out @ np.linalg.inv(space).T, _0, _1)
+        out = _vibrance(_dot3(linear, space.T), vibrance, saturation)
+        out = np.clip(_dot3(out, np.linalg.inv(space).T), _0, _1)
     return paint._linear_to_srgb(out).astype(np.float32, copy=False)
 
 
@@ -1250,9 +1250,21 @@ def _vibrance(linear: np.ndarray, vibrance: float, saturation: float) -> np.ndar
     """Linear-light result of the vibrance and saturation sliders."""
     out = _vibrance_step(linear, vibrance) if vibrance else linear
     if saturation:
-        gray = out @ _VIBRANCE_GRAY_WEIGHTS
+        gray = _dot3(out, _VIBRANCE_GRAY_WEIGHTS)
         out = gray[..., None] + (out - gray[..., None]) * (_1 + saturation)
     return np.clip(out, _0, _1)
+
+
+def _dot3(rgb: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """``rgb @ weights`` (3, or 3 by n), each pixel's sum in channel order.
+
+    BLAS may fuse or block those sums by the array's shape; the compositor
+    runs each distinct colour alone (``composite._adjust``).
+    """
+    out = rgb[..., 0:1] * weights[0]
+    out += rgb[..., 1:2] * weights[1]
+    out += rgb[..., 2:3] * weights[2]
+    return out[..., 0] if weights.ndim == 1 else out
 
 
 @functools.cache

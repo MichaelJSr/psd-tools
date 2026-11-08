@@ -2964,6 +2964,48 @@ class _HeldChannels(NamedTuple):
     premultiplied: np.ndarray | None
 
 
+# Adjustments that map each pixel by its own colour alone, at a cost per pixel
+# worth finding the distinct colours first (the LUT ones are not).
+_POINTWISE = frozenset(
+    {"vibrance", "huesaturation", "blackandwhite", "brightnesscontrast"}
+)
+# Past this many distinct colours, or half the pixels, the canvas runs whole;
+# the table stays within 8 MB.
+_DISTINCT_LIMIT = 1 << 20
+
+
+def _adjust(
+    fn: Callable[..., np.ndarray | None],
+    layer: AdjustmentLayer,
+    content: np.ndarray,
+    colormode: ColorMode,
+) -> np.ndarray | None:
+    """``fn(content, colormode, layer)``; a pointwise one runs once per colour."""
+    if (
+        layer.kind in _POINTWISE
+        and _cblend is not None
+        and hasattr(_cblend, "distinct_pixels")
+        and type(content) is np.ndarray
+        and content.dtype == np.float32
+        and content.ndim == 3
+        and content.size
+        and content.flags.c_contiguous
+    ):
+        h, w, c = content.shape
+        pixels = content.reshape(-1, c)
+        found = _cblend.distinct_pixels(pixels, min(h * w // 2, _DISTINCT_LIMIT))
+        if found is not None:
+            index, first = found
+            picked = pixels[first][None]
+            out = fn(picked, colormode, layer)
+            if out is None:
+                return None
+            if out is picked:
+                return content
+            return out[0][index].reshape(h, w, out.shape[2])
+    return fn(content, colormode, layer)
+
+
 def _unmix(
     color: np.ndarray,
     backdrop_color: np.ndarray,
@@ -4178,7 +4220,7 @@ class Compositor:
         else:
             content_alpha = self._alpha
             content = self._color
-        transformed_color = adjustment_fn(content, colormode, layer)
+        transformed_color = _adjust(adjustment_fn, layer, content, colormode)
         # An adjustment that is not rendered leaves the content as it is; its
         # clip layers still go over that, as they go over a neutral one. With
         # none there is nothing to blend: the content would blend with itself.

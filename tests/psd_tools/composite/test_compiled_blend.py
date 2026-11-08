@@ -250,6 +250,7 @@ _NEWEST = (
     "effect_over",
     "effect_source",
     "vibrance_step",
+    "distinct_pixels",
 )
 
 
@@ -359,3 +360,52 @@ def test_vibrance_step_is_numpys(
         assert compiled.dtype == plain.dtype == np.float64
         assert compiled.tobytes() == plain.tobytes()
     assert len(calls) == 1, "a strided view stays with numpy"
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4])
+def test_distinct_pixels_number_equal_bits(channels: int) -> None:
+    """First seen first, -0.0 apart from 0.0, None past the limit."""
+    rng = np.random.default_rng(channels)
+    palette = rng.choice(_SPECIAL, size=(40, channels))
+    pixels = palette[rng.integers(0, 40, 5000)]
+    bits = pixels.view(np.uint32)
+    first = np.unique(bits, axis=0, return_index=True)[1]
+    index, found = composite._cblend.distinct_pixels(pixels, len(first))
+    assert np.array_equal(found, np.sort(first))
+    assert np.array_equal(bits[found][index], bits)
+    assert composite._cblend.distinct_pixels(pixels, len(first) - 1) is None
+
+
+def test_a_pointwise_adjustment_runs_once_per_colour() -> None:
+    """Hue ranges, a profile's space, black & white, brightness: bit for bit."""
+    names = [
+        "huesaturation",
+        "vibrance_display",
+        "vibrance_display_saturation",
+        "brightnesscontrast",
+        "brightnesscontrast_legacy",
+    ]
+    layers = [
+        layer
+        for name in names
+        for layer in PSDImage.open(full_name(f"adjustments/{name}_rgb.psd"))
+        if layer.kind in composite._POINTWISE
+    ]
+    layers.append(PSDImage.open(full_name("fill_adjustments.psd"))[11])
+    rng = np.random.default_rng(0)
+    palette = rng.random((50, 3), dtype=np.float32)
+    palette[:2] = [[0.0, 0.5, 1.0], [-0.0, 0.5, 1.0]]
+    image = palette[rng.integers(0, 50, (37, 41))]
+    for layer in layers:
+        fn, sizes = adjustments.ADJUSTMENT_FUNC[layer.kind], []
+
+        def spy(img: np.ndarray, *args: Any) -> Any:
+            sizes.append(img.shape)
+            return fn(img, *args)
+
+        out = composite._adjust(spy, layer, image, ColorMode.RGB)
+        plain = fn(image, ColorMode.RGB, layer)
+        assert sizes == [(1, 50, 3)], layer.name
+        assert out is not None and plain is not None
+        assert out.dtype == plain.dtype
+        assert out.tobytes() == plain.tobytes(), layer.name
