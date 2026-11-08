@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 __all__ = [
     "add_font",
     "drop_strikes",
+    "kerning_methods",
     "set_run_style",
     "set_span_style",
     "set_text",
@@ -178,6 +179,8 @@ _STORY_ONLY = frozenset({"StylisticAlternates"})
 #: Txt2 paragraph feature ``EveryLineComposer``: a run without it is re-laid
 #: Every-line by Photoshop, whatever TySh says.
 _COMPOSER = "29"
+#: Txt2 character feature: the kerning method, 0 none, 1 Metrics, 2 Optical.
+_KERNING = "11"
 
 
 def utf16_prefix(text: str) -> list[int]:
@@ -339,6 +342,58 @@ def stylistic_alternates(layer: TypeLayer) -> tuple[tuple[int, int], ...] | None
             if out and out[-1][1] == a:
                 a = out.pop()[0]
             out.append((a, b))
+    return tuple(out)
+
+
+def kerning_methods(layer: TypeLayer) -> tuple[tuple[int, int, int], ...] | None:
+    """Return ``(start, end, method)`` ``str`` spans of the story's kerning.
+
+    Photoshop lays text out by the Txt2 story's method: 0 kerns no pair
+    (``0`` in the Character panel) even where TySh says ``AutoKerning``,
+    1 is Metrics, 2 Optical. A run without its own takes its style sheet's.
+    None without a story, when the story holds other text than the layer,
+    or for a story with named (pre-CC) keys.
+    """
+    try:
+        story = _story(layer)
+        text = None if story is None else _editor_text(layer)
+        if story is None or story.text != text or not story.k.numbered:
+            return None
+        k = story.k
+        units = utf16_prefix(text)
+        spans = story._spans(story.model[k.styles], units[-1])
+        sheets = _resource_items(story.root, k, k.style_sheets[0])
+    except (ValueError, IndexError, KeyError, TypeError):
+        return None
+    _, sheet_key, parent_key, features_key = k.style_sheets
+
+    def method(sheet: Any, depth: int = 0) -> int | None:
+        if not isinstance(sheet, engine_data.Dict) or depth > 8:
+            return None
+        inner = sheet.get(features_key)
+        value = inner.get(_KERNING) if isinstance(inner, engine_data.Dict) else None
+        value = getattr(value, "value", value)
+        if isinstance(value, (int, float)):
+            return int(value)
+        parent = sheet.get(parent_key)
+        i = getattr(parent, "value", parent)
+        if not isinstance(i, int) or not 0 <= i < len(sheets):
+            return None
+        item = sheets[i]
+        return method(
+            item.get(k.item) if isinstance(item, engine_data.Dict) else None, depth + 1
+        )
+
+    out: list[tuple[int, int, int]] = []
+    for u0, u1, data in spans:
+        sheet = data.get(sheet_key) if isinstance(data, engine_data.Dict) else None
+        m = method(sheet)
+        if m is None:
+            continue
+        a, b = _str_index(units, u0), _str_index(units, u1)
+        if out and out[-1][1] == a and out[-1][2] == m:
+            a = out.pop()[0]
+        out.append((a, b, m))
     return tuple(out)
 
 
