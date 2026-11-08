@@ -3,7 +3,8 @@
 
 Each is the numpy expression it replaces in ``composite.py`` (``lut_levels``:
 ``adjustments._apply_lut``; ``to_bytes``: ``composite_pil``; ``divide`` and
-``clip``: ``utils``; ``vibrance_step``: ``adjustments._vibrance_step``), its
+``clip``: ``utils``; ``vibrance_step``: ``adjustments._vibrance_step``;
+``text_mix``: ``Compositor._mix_in_text_space``), its
 operations in the same dtypes and order, so the results are bit-identical.
 Memoryviews only, so the module builds against the Limited API without numpy
 headers.
@@ -831,3 +832,169 @@ def vibrance_step(
             op[3 * i + 1] = <double>value - scale * <double>(high - green)
             op[3 * i + 2] = <double>value - scale * <double>(high - blue)
     return out
+
+
+ctypedef struct _TextSpace:
+    double knee, slope, cutoff, off, off1, sg, inv_sg, g, inv_g
+
+
+cdef inline double _max0(double x) noexcept nogil:
+    # np.maximum(x, 0.0): NaN passes, -0.0 becomes +0.0.
+    return x if (x > 0 or x != x) else 0.0
+
+
+cdef inline double _to_text(double x, const _TextSpace* t) noexcept nogil:
+    """``text_blend.to_text_space``: the branch its np.where keeps."""
+    x = _max0(x)
+    if x <= t.knee:
+        x = x / t.slope
+    else:
+        x = pow((x + t.off) / t.off1, t.sg)
+    return pow(x, t.inv_g)
+
+
+cdef inline double _from_text(double v, const _TextSpace* t) noexcept nogil:
+    """``text_blend.from_text_space``."""
+    v = pow(_max0(v), t.g)
+    v = 0.0 if v < 0 else (1.0 if v > 1 else v)
+    if v <= t.cutoff:
+        return v * t.slope
+    return t.off1 * pow(v, t.inv_sg) - t.off
+
+
+def text_mix(
+    float[:, :, ::1] result,
+    const float[:, :, :] canvas,
+    const float[:, :, :] canvas_alpha,
+    const float[:, :, :] alpha_g,
+    const float[:, :, :] color_0,
+    const float[:, :, :] alpha_0,
+    const float[:, :, :] color,
+    const float[:, :, :] shape,
+    const float[:, :, :] alpha,
+    const float[:, :, :] alpha_previous,
+    const float[:, :, :] alpha_g_previous,
+    const float[:, :, :] alpha_b,
+    bint isolated,
+    Py_ssize_t top,
+    Py_ssize_t bottom,
+    Py_ssize_t left,
+    Py_ssize_t right,
+    double gamma,
+    double slope,
+    double cutoff,
+    double offset,
+    double srgb_gamma,
+):
+    """``Compositor._mix_in_text_space`` in Normal over the canvas, no ``inside``.
+
+    Writes ``result``, a copy of ``canvas``, within the box. Three channels.
+    """
+    cdef Py_ssize_t h = canvas.shape[0], w = canvas.shape[1], y, x, c
+    cdef float s, a, ap, now, agp, ag, share1, ag1, s1, sap, ssh
+    cdef double ab, agpd, a0, col, prev, blended, source, prior, mixed, q, num
+    cdef _TextSpace t
+    # Each transfer's last input and answer per channel: a glyph's colour and a
+    # flat backdrop repeat. Equal inputs (±0 too) give equal answers.
+    cdef double kb[3]
+    cdef double vb[3]
+    cdef double kp[3]
+    cdef double vp[3]
+    cdef double kq[3]
+    cdef double vq[3]
+    _rows(canvas, h, w, 3)
+    _rows(result, h, w, 3)
+    _rows(color, h, w, 3)
+    _rows(color_0, h, w, 3)
+    _rows(canvas_alpha, h, w, 1)
+    _rows(alpha_g, h, w, 1)
+    _rows(alpha_0, h, w, 1)
+    _rows(shape, h, w, 1)
+    _rows(alpha, h, w, 1)
+    _rows(alpha_previous, h, w, 1)
+    _rows(alpha_g_previous, h, w, 1)
+    _rows(alpha_b, h, w, 1)
+    if not (0 <= top <= bottom <= h and 0 <= left <= right <= w):
+        raise ValueError("box is off the canvas")
+    t.knee = slope * cutoff
+    t.slope = slope
+    t.cutoff = cutoff
+    t.off = offset
+    t.off1 = 1.0 + offset
+    t.sg = srgb_gamma
+    t.inv_sg = 1.0 / srgb_gamma
+    t.g = gamma
+    t.inv_g = 1.0 / gamma
+    for c in range(3):
+        kb[c] = NAN
+        kp[c] = NAN
+        kq[c] = NAN
+        vb[c] = vp[c] = vq[c] = 0.0
+    with nogil:
+        for y in range(top, bottom):
+            for x in range(left, right):
+                s = shape[y, x, 0]
+                a = alpha[y, x, 0]
+                ap = alpha_previous[y, x, 0]
+                now = canvas_alpha[y, x, 0]
+                agp = alpha_g_previous[y, x, 0]
+                if not (
+                    s != 0 or a != 0 or ap != now
+                    or isolated and agp != 0 and agp != 1
+                ):
+                    # Untouched: the canvas stays, but for these two.
+                    if isolated and agp == 0:
+                        for c in range(3):
+                            result[y, x, c] = color_0[y, x, c]
+                    if (agp == 0 or not isolated) and now <= 0:
+                        for c in range(3):
+                            result[y, x, c] = <float>1.0
+                    continue
+                ab = <double>alpha_b[y, x, 0]
+                if isolated:
+                    agpd = <double>agp
+                    a0 = <double>alpha_0[y, x, 0]
+                    ag = alpha_g[y, x, 0]
+                    share1 = <float>1.0 - a
+                    ag1 = <float>1.0 - ag
+                else:
+                    s1 = <float>1.0 - s
+                    sap = s1 * ap
+                    ssh = s - a
+                for c in range(3):
+                    col = <double>color[y, x, c]
+                    prev = <double>canvas[y, x, c]
+                    blended = (1.0 - ab) * col + ab * col
+                    if blended == kb[c]:
+                        source = vb[c]
+                    else:
+                        source = _to_text(blended, &t)
+                        kb[c] = blended
+                        vb[c] = source
+                    if isolated:
+                        num = prev * <double>ap - (1.0 - agpd) * a0 * <double>color_0[y, x, c]
+                        prev = num / agpd if agpd > 0 else 0.0
+                    if prev == kp[c]:
+                        prior = vp[c]
+                    else:
+                        prior = _to_text(prev, &t)
+                        kp[c] = prev
+                        vp[c] = prior
+                    if isolated:
+                        mixed = <double>share1 * agpd * prior
+                        mixed = mixed + <double>a * source
+                        q = mixed / <double>ag if ag > 0 else 1.0
+                    else:
+                        mixed = <double>sap * prior + <double>ssh * ab * prior
+                        mixed = mixed + <double>a * source
+                        q = mixed / <double>now if now > 0 else 1.0
+                    if q == kq[c]:
+                        mixed = vq[c]
+                    else:
+                        mixed = _from_text(q, &t)
+                        kq[c] = q
+                        vq[c] = mixed
+                    if isolated:
+                        num = <double>ag * mixed + <double>ag1 * a0 * <double>color_0[y, x, c]
+                        mixed = num / <double>now if now > 0 else mixed
+                    result[y, x, c] = <float>(0.0 if mixed < 0 else (1.0 if mixed > 1 else mixed))

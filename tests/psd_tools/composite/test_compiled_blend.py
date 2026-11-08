@@ -3,6 +3,7 @@
 import importlib
 import itertools
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -11,7 +12,7 @@ import pytest
 from psd_tools.api import numpy_io
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.color_convert import SRGB_CUTOFF
-from psd_tools.composite import adjustments, paint, utils
+from psd_tools.composite import adjustments, blend, paint, utils
 from psd_tools.composite.composite import _EffectCanvas, _over, _remix, _Source, _unmix
 from psd_tools.constants import BlendMode, ColorMode, Knockout
 
@@ -119,6 +120,48 @@ def test_divide_and_clip_are_numpys(
     for f in (0.0, 1.0, 0.1, fill):
         _same(utils.divide(a, b, f), _numpy(monkeypatch, utils.divide, a, b, f))
     _same(utils.clip(a), _numpy(monkeypatch, utils.clip, a))
+
+
+@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("gamma", [1.45, 1.0, 3.0, 0.5])
+@pytest.mark.parametrize("isolated", [False, True])
+def test_text_mix_is_numpys(
+    monkeypatch: pytest.MonkeyPatch, seed: int, gamma: float, isolated: bool
+) -> None:
+    """A type layer's mix in the text space; a gamma ``**`` shortcuts stays numpy's."""
+    rng = np.random.default_rng(seed)
+    ones = [_canvas(rng, 1) for _ in range(8)]
+    shape, alpha, alpha_previous, group_previous, alpha_b, now, alpha_g, alpha_0 = ones
+    color, canvas, color_0 = (_canvas(rng, 3) for _ in range(3))
+    # Pixels the layer leaves alone, some with nothing under them; empty rows.
+    alone = rng.random(shape.shape[:2]) < 0.4
+    shape[alone] = alpha[alone] = 0.0
+    now[alone & (rng.random(alone.shape) < 0.3)] = 0.0
+    alpha_previous[alone] = now[alone]
+    group_previous[alone] = rng.choice(
+        np.array([0, 1], np.float32), (int(alone.sum()), 1)
+    )
+    shape[:2] = 0.0
+    compositor = SimpleNamespace(
+        _color=canvas,
+        _alpha=now,
+        _alpha_g=alpha_g,
+        _color_0=color_0,
+        _alpha_0=alpha_0,
+        _channels=3,
+    )
+    args: tuple[Any, ...] = (color, shape, alpha, alpha_previous, group_previous)
+    args += (canvas, alpha_b, blend.normal, gamma, isolated)
+    kernel, calls = composite._cblend.text_mix, []
+
+    def spy(*args: object) -> None:
+        calls.append(args)
+        kernel(*args)
+
+    monkeypatch.setattr(composite._cblend, "text_mix", spy)
+    mix = composite.Compositor._mix_in_text_space
+    _same(mix(compositor, *args), _numpy(monkeypatch, mix, compositor, *args))
+    assert len(calls) == (gamma != 0.5)
 
 
 class _Fit:
@@ -250,6 +293,7 @@ _NEWEST = (
     "effect_over",
     "effect_source",
     "vibrance_step",
+    "text_mix",
 )
 
 
