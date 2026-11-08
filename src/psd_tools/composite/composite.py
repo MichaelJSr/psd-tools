@@ -4052,7 +4052,7 @@ class Compositor:
             group = alpha_g_previous[box][..., 0]
             touched |= (group != 0.0) & (group != 1.0)
             unpainted = (group == 0.0) & ~touched
-            result[box][unpainted] = self._color_0[box][unpainted]
+            np.copyto(result[box], self._color_0[box], where=unpainted[..., None])
             result[box][unpainted & (now <= 0.0)] = 1.0
         else:
             result[box][(now <= 0.0) & ~touched] = 1.0
