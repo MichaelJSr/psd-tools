@@ -64,9 +64,10 @@ API which provides easier access to this data.
 
 import io
 import logging
+import struct
 from typing import IO, Any, Self, TypeVar
 
-from attrs import astuple, define, field
+from attrs import astuple, define, field, fields
 
 from psd_tools.compression import compress, decompress
 from psd_tools.constants import (
@@ -79,6 +80,7 @@ from psd_tools.constants import (
 )
 from psd_tools.psd.base import BaseElement, ListElement
 from psd_tools.psd.bin_utils import (
+    _remaining_bytes,
     bounded_reader,
     is_readable,
     read_exact,
@@ -92,7 +94,12 @@ from psd_tools.psd.bin_utils import (
     write_pascal_string,
 )
 from psd_tools.psd.lazy import LazyPayload, Span, defer
-from psd_tools.psd.parse_limits import parse_container, parse_context
+from psd_tools.psd.parse_limits import (
+    charge,
+    current_budget,
+    parse_container,
+    parse_context,
+)
 from psd_tools.psd.tagged_blocks import TaggedBlocks, register
 from psd_tools.validators import in_, range_
 
@@ -370,6 +377,19 @@ class ChannelInfo(BaseElement):
         return write_fmt(fp, ("hI", "hQ")[version - 1], *astuple(self))
 
 
+def _flag_values(flags: int) -> tuple[bool, ...]:
+    return (
+        bool(flags & 1),
+        not bool(flags & 2),  # why "not"?
+        bool(flags & 4),
+        bool(flags & 8),
+        bool(flags & 16),
+        bool(flags & 32),
+        bool(flags & 64),
+        bool(flags & 128),
+    )
+
+
 @define(repr=False)
 class LayerFlags(BaseElement):
     """
@@ -394,17 +414,7 @@ class LayerFlags(BaseElement):
     @classmethod
     def read(cls, fp: IO[bytes], **kwargs: Any) -> Self:
         """Read the structure from a file-like object."""
-        flags = read_fmt("B", fp)[0]
-        return cls(
-            bool(flags & 1),
-            not bool(flags & 2),  # why "not"?
-            bool(flags & 4),
-            bool(flags & 8),
-            bool(flags & 16),
-            bool(flags & 32),
-            bool(flags & 64),
-            bool(flags & 128),
-        )
+        return cls(*_flag_values(read_fmt("B", fp)[0]))
 
     def write(self, fp: IO[bytes], **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""
@@ -598,20 +608,32 @@ class LayerRecord(BaseElement):
     ) -> Self:
         """Read the structure from a file-like object."""
         start_pos = fp.tell()
-        top, left, bottom, right, num_channels = read_fmt("4iH", fp)
-        channel_info = [ChannelInfo.read(fp, version) for i in range(num_channels)]
-        signature, blend_mode, opacity, clipping = read_fmt("4s4sBB", fp)
-        flags = LayerFlags.read(fp)
-
-        data = read_length_block(fp, fmt="xI")
-        logger.debug("  read layer record, len=%d" % (fp.tell() - start_pos))
-        has_real_mask = any(
-            channel.id == ChannelID.REAL_USER_LAYER_MASK for channel in channel_info
-        )
+        head = _record_head(fp) if version == 1 else None
+        if head is None:
+            top, left, bottom, right, num_channels = read_fmt("4iH", fp)
+            channel_info = [ChannelInfo.read(fp, version) for i in range(num_channels)]
+            signature, blend_mode, opacity, clipping = read_fmt("4s4sBB", fp)
+            flags = LayerFlags.read(fp)
+            data = read_length_block(fp, fmt="xI")
+        else:
+            top, left, bottom, right, channel_info = head[:5]
+            signature, blend_mode, opacity, clipping, flags, data = head[5:]
+        logger.debug("  read layer record, len=%d", fp.tell() - start_pos)
+        extra = _record_extra(data, encoding) if version == 1 else None
         with io.BytesIO(data) as f:
-            mask_data, blending_ranges, name, tagged_blocks = cls._read_extra(
-                f, encoding, version, has_real_mask=has_real_mask
-            )
+            if extra is None:
+                has_real_mask = any(
+                    channel.id == ChannelID.REAL_USER_LAYER_MASK
+                    for channel in channel_info
+                )
+                mask_data, blending_ranges, name, tagged_blocks = cls._read_extra(
+                    f, encoding, version, has_real_mask=has_real_mask
+                )
+            else:
+                mask_data = None
+                blending_ranges, name, position = extra
+                f.seek(position)
+                tagged_blocks = TaggedBlocks.read(f, version=version, padding=1)
             self = cls(
                 top=top,
                 left=left,
@@ -749,6 +771,124 @@ class LayerRecord(BaseElement):
             else:
                 sizes.append((self.width, self.height))
         return sizes
+
+
+# Version 1 records in a few struct reads. Elements are built without their
+# __init__ (no budget charge, no attrs hooks): charge() takes what the readers
+# would. Anything odd returns None, and the readers run and raise as before.
+_RECORD_HEAD = struct.Struct(">4iH")
+_RECORD_CHANNEL = struct.Struct(">hI")
+_RECORD_TAIL = struct.Struct(">4s4sBBBxI")
+_EXTRA_HEAD = struct.Struct(">II")
+_RANGE = struct.Struct(">4H")
+_CHANNEL_IDS = {channel.value: channel for channel in ChannelID}
+_FLAG_NAMES = tuple(item.name for item in fields(LayerFlags))
+_FLAG_VALUES = tuple(_flag_values(flags) for flags in range(256))
+
+
+def _record_head(fp: IO[bytes]) -> tuple[Any, ...] | None:
+    """Read a record up to its extra block's bytes; None leaves ``fp``."""
+    start = fp.tell()
+    head = _record_fields(fp, _remaining_bytes(fp))
+    if head is None:
+        fp.seek(start)
+    return head
+
+
+def _record_fields(fp: IO[bytes], remaining: int) -> tuple[Any, ...] | None:
+    head = fp.read(18) if remaining >= 18 else b""
+    if len(head) != 18:
+        return None
+    top, left, bottom, right, count = _RECORD_HEAD.unpack(head)
+    size = 6 * count + 16
+    rest = fp.read(size) if 18 + size <= remaining else b""
+    if len(rest) != size:
+        return None
+    new, set_ = object.__new__, object.__setattr__
+    channel_info = []
+    for offset in range(0, 6 * count, 6):
+        number, length = _RECORD_CHANNEL.unpack_from(rest, offset)
+        if number not in _CHANNEL_IDS:
+            return None  # ChannelID() raises
+        channel = new(ChannelInfo)
+        set_(channel, "id", _CHANNEL_IDS[number])
+        set_(channel, "length", length)
+        channel_info.append(channel)
+    signature, blend_mode, opacity, clipping, flag_byte, extra = (
+        _RECORD_TAIL.unpack_from(rest, 6 * count)
+    )
+    total = 18 + size + extra
+    # Values: 5 for 4iH, 2 a channel, 4 for 4s4sBB, 1 for B, 1 for xI;
+    # elements: a ChannelInfo a channel and the LayerFlags.
+    if total > remaining or (
+        current_budget() is not None
+        and not charge(total, 12 + 3 * count, max(18, extra))
+    ):
+        return None
+    data = fp.read(extra)
+    if len(data) != extra:
+        raise OSError(
+            "Failed to read data section: read=%d, expected=%d." % (len(data), extra)
+        )
+    flags = new(LayerFlags)
+    for name, value in zip(_FLAG_NAMES, _FLAG_VALUES[flag_byte], strict=True):
+        set_(flags, name, value)
+    return (
+        top,
+        left,
+        bottom,
+        right,
+        channel_info,
+        signature,
+        blend_mode,
+        opacity,
+        clipping,
+        flags,
+        data,
+    )
+
+
+def _record_extra(
+    data: bytes, encoding: str
+) -> tuple[LayerBlendingRanges, str, int] | None:
+    """Read the ranges and name of an extra block without a mask.
+
+    Returns them and where the tagged blocks start; None where the readers
+    should run.
+    """
+    size = len(data)
+    if size < 8:
+        return None
+    mask_length, ranges_length = _EXTRA_HEAD.unpack_from(data)
+    name_at = 8 + ranges_length
+    if mask_length or name_at >= size or 0 < ranges_length < 8:
+        return None
+    name_length = data[name_at]
+    name_end = name_at + 1 + name_length
+    end = name_end + -(1 + name_length) % 4
+    count = ranges_length // 8
+    # Values: 2 lengths, 4 a range, 1 for the name's length; the ranges
+    # element; the ranges' bytes twice (the block, then its values).
+    if end > size or (
+        current_budget() is not None
+        and not charge(
+            end + 8 * count, 4 + 4 * count, max(4, ranges_length, name_length)
+        )
+    ):
+        return None
+    composite: Any = None
+    channel_ranges: Any = None
+    if count:
+        values = _RANGE.unpack_from(data, 8)
+        composite = [values[0:2], values[2:4]]
+        channel_ranges = []
+        for offset in range(16, 8 + 8 * count, 8):
+            values = _RANGE.unpack_from(data, offset)
+            channel_ranges.append([values[0:2], values[2:4]])
+    ranges = object.__new__(LayerBlendingRanges)
+    object.__setattr__(ranges, "composite_ranges", composite)
+    object.__setattr__(ranges, "channel_ranges", channel_ranges)
+    return ranges, data[name_at + 1 : name_end].decode(encoding), end
 
 
 @define(repr=False)

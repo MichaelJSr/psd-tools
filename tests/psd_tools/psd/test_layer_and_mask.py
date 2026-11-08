@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from psd_tools.constants import ChannelID, Compression, Tag
+from psd_tools.psd import layer_and_mask
 from psd_tools.psd.layer_and_mask import (
     ChannelData,
     ChannelDataList,
@@ -22,6 +23,7 @@ from psd_tools.psd.layer_and_mask import (
     MaskFlags,
     MaskParameters,
 )
+from psd_tools.psd.parse_limits import ParseLimits, current_budget, parse_context
 from psd_tools.psd.tagged_blocks import IntegerElement, TaggedBlock, TaggedBlocks
 
 from ..utils import check_read_write, check_write_read
@@ -113,6 +115,70 @@ def test_layer_record() -> None:
     check_write_read(LayerRecord())
     check_write_read(LayerRecord(name="foo", tagged_blocks=tagged_blocks))
     check_write_read(LayerRecord(tagged_blocks=tagged_blocks), version=2)
+
+
+def _record_bytes(
+    ranges: bytes = bytes(40),
+    name: bytes = b"\x03abc",
+    mask: bytes = b"",
+    channels: tuple[tuple[int, int], ...] = ((-1, 2), (0, 2)),
+    blocks: bytes = b"8BIMlyid" + struct.pack(">II", 4, 7),
+) -> bytes:
+    extra = struct.pack(">I", len(mask)) + mask + struct.pack(">I", len(ranges))
+    extra += ranges + name + blocks
+    head = struct.pack(">4iH", 1, 2, 3, 4, len(channels))
+    head += b"".join(struct.pack(">hI", *channel) for channel in channels)
+    return head + b"8BIMnorm\xff\x00\x08\x00" + struct.pack(">I", len(extra)) + extra
+
+
+@pytest.mark.parametrize(
+    ("data", "taken"),
+    [
+        (_record_bytes(), 2),
+        (_record_bytes(ranges=b"", name=bytes(4)), 2),
+        (_record_bytes(ranges=bytes(range(12)), name=b"\x01a\x00\x00"), 2),
+        (_record_bytes(name=b"\x09ab"), 2),
+        (_record_bytes(ranges=b"", name=bytes(4), channels=((0, 2),) * 9), 2),
+        (_record_bytes(ranges=b"", name=bytes(4), blocks=b""), 2),
+        (_record_bytes(ranges=bytes(4)), 1),
+        (_record_bytes(mask=bytes(20), channels=((-2, 2), (0, 2))), 1),
+        (_record_bytes(channels=((99, 2),)), 0),
+    ],
+)
+def test_layer_record_fast_read_matches_readers(
+    data: bytes, taken: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The struct reads give the readers' record, error, position and charges."""
+    head = layer_and_mask._record_head(io.BytesIO(data))
+    extra = head and layer_and_mask._record_extra(head[-1], "macroman")
+    assert (head is not None) + (extra is not None) == taken
+
+    def outcome(data: bytes, limits: ParseLimits) -> tuple[Any, ...]:
+        fp = io.BytesIO(data)
+        budgets = []
+        try:
+            with parse_context(limits):
+                budgets.append(current_budget())
+                record = LayerRecord.read(fp)
+        except (OSError, ValueError) as e:
+            result: Any = (type(e), str(e))
+        else:  # held blocks stay unread: the budget is spent
+            channels = [(type(c.id), c.id, c.length) for c in record.channel_info]
+            result = (record.tobytes(), channels, record.flags, record.name)
+            result += (record.blending_ranges, record.mask_data)
+        budget = budgets[0]
+        assert budget is not None
+        return result, fp.tell(), budget.objects, budget.total_bytes
+
+    cases = [(data[:size], ParseLimits()) for size in range(len(data))]
+    cases += [(data, ParseLimits(max_objects=n)) for n in range(1, 70)]
+    cases += [(data, ParseLimits(max_total_bytes=n)) for n in range(1, 400)]
+    cases += [(data, ParseLimits(max_read_bytes=n)) for n in range(1, 120)]
+    cases.append((data, ParseLimits()))
+    fast = [outcome(*case) for case in cases]
+    monkeypatch.setattr(layer_and_mask, "_record_head", lambda fp: None)
+    monkeypatch.setattr(layer_and_mask, "_record_extra", lambda data, encoding: None)
+    assert fast == [outcome(*case) for case in cases]
 
 
 def test_layer_record_channel_sizes() -> None:
