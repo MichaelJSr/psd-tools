@@ -11,7 +11,8 @@ in the document's Txt2 block (the layer's ``TextIndex`` is the story's
 index). Photoshop reads the story and rewrites TySh from it on save, so the
 edits here change both; :func:`sync_story` brings back a story that an
 older version left behind. A story paragraph an edit writes gets TySh's
-composer flag when it has none, else Photoshop re-lays it Every-line.
+composer flag when it has none, else Photoshop re-lays it Every-line. An
+edit to a story drops its strikes (:func:`drop_strikes`).
 """
 
 from __future__ import annotations
@@ -232,6 +233,7 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
         writes.append(story.respan(layer, new, keep))
     for write in writes:
         write()
+    _drop_stale(layer)
     _touch(layer)
 
 
@@ -281,6 +283,7 @@ def set_span_style(
         _write_spans(style, _restyled(spans, a, b, values, _sheet), merge=True)
     if write_story is not None:
         write_story()
+    _drop_stale(layer)
     _touch(layer)
 
 
@@ -350,6 +353,7 @@ def sync_story(layer: TypeLayer) -> bool:
     if story is None or story.text == text:
         return False
     story.respan(layer, text, "runs")()
+    _drop_stale(layer)
     _touch(layer)
     return True
 
@@ -1113,11 +1117,20 @@ def _set_stored_text(layer: TypeLayer, text: str) -> None:
         item.value = text[:-1] + ("\x00" if old.endswith("\x00") else "")
 
 
+def _drop_stale(layer: TypeLayer) -> None:
+    # An edited story's strikes are stale: Photoshop would mix the raster straight.
+    try:
+        names = [str(f["Name"].value) for f in layer.resource_dict["FontSet"]]
+    except (KeyError, TypeError, AttributeError):
+        names = []
+    drop_strikes(layer, names)
+
+
 def drop_strikes(layer: TypeLayer, fonts: Iterable[str]) -> None:
     """Drop the story's frame and glyph strikes: they no longer match it.
 
-    The layer was redrawn, or its story changed under its raster
-    (``tools/sweep_strikes.py``). Photoshop mixes a raster under stale
+    The layer was redrawn, its story edited, or its story changed under its
+    raster (``tools/sweep_strikes.py``). Photoshop mixes a raster under stale
     strikes straight, and composes a story without strikes at open, in the
     text gamma. ``fonts`` are the faces the story is set in; a story in
     :data:`_KEEP_STRIKES` keeps them.
