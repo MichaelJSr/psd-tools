@@ -56,7 +56,7 @@ import io
 import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
-from typing import IO, Any, Literal, Self
+from typing import IO, Any, Literal, Self, cast
 
 import numpy as np
 from PIL import Image
@@ -84,6 +84,7 @@ from psd_tools.constants import (
     SectionDivider,
     Tag,
 )
+from psd_tools.psd.bin_utils import FileReader
 from psd_tools.psd.color_mode_data import HDRT_DEFAULT, ColorModeData
 from psd_tools.psd.descriptor import String
 from psd_tools.psd.document import PSD
@@ -324,7 +325,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             if lazy:
                 raise ValueError("lazy reads need a file-like object kept open")
             with open(fp, "rb") as f:
-                self = cls(PSD.read(f, parse_limits=parse_limits, **kwargs))
+                reader = cast(IO[bytes], FileReader(f))
+                self = cls(PSD.read(reader, parse_limits=parse_limits, **kwargs))
         else:
             self = cls(PSD.read(fp, parse_limits=parse_limits, lazy=lazy, **kwargs))
         self._max_alloc_bytes = max_alloc_bytes

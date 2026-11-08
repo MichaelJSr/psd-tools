@@ -57,6 +57,50 @@ def read_remaining(fp: IO[bytes]) -> bytes:
     return read_exact(fp, _remaining_bytes(fp))
 
 
+class FileReader:
+    """A file read through a position kept here, not the file's.
+
+    A file's ``tell()`` is a system call, and its ``seek()`` to the end drops
+    the read buffer. Only for a file nothing else reads or moves meanwhile.
+    """
+
+    __slots__ = ("_fp", "_pos", "_at", "_size")
+
+    def __init__(self, fp: IO[bytes]):
+        self._fp = fp
+        self._pos = self._at = fp.tell()
+        self._size: int | None = None
+
+    def tell(self) -> int:
+        """Return the position."""
+        return self._pos
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        """Move the position; the file moves at the next read."""
+        if whence == 1:
+            offset += self._pos
+        elif whence == 2:
+            if self._size is None:
+                self._size = self._fp.seek(0, 2)
+                self._at = self._size
+            offset += self._size
+        elif whence != 0:  # as the file does
+            self._pos = self._at = self._fp.seek(offset, whence)
+            return self._pos
+        if offset < 0:
+            self._fp.seek(offset)  # raises as the file does
+        self._pos = offset
+        return offset
+
+    def read(self, size: int = -1) -> bytes:
+        """Read from the position."""
+        if self._at != self._pos:
+            self._fp.seek(self._pos)
+        data = self._fp.read(size)
+        self._pos = self._at = self._pos + len(data)
+        return data
+
+
 class _BoundedReader(io.IOBase):
     """Expose a section of a seekable stream using absolute positions."""
 
