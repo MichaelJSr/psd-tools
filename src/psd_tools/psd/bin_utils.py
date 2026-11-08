@@ -184,6 +184,15 @@ def write_bytes(fp: IO[bytes], data: bytes) -> int:
     return written
 
 
+def write_joined(fp: IO[bytes], pieces: list[bytes]) -> int:
+    """Write ``pieces`` in one call, empty the list and return the bytes written."""
+    if not pieces:
+        return 0
+    data = b"".join(pieces)
+    pieces.clear()
+    return write_bytes(fp, data)
+
+
 def read_length_block(fp: IO[bytes], fmt: str = "I", padding: int = 1) -> bytes:
     """
     Read a block of data with a length marker at the beginning.
