@@ -31,6 +31,7 @@ from psd_tools.psd.base import (
     ListElement,
     StringElement,
     ValueElement,
+    _tag_value,
 )
 from psd_tools.psd.bin_utils import (
     bounded_reader,
@@ -164,15 +165,25 @@ class TaggedBlocks(DictElement):
         A block that has a handler but failed to parse keeps its raw bytes
         (see ``tagged_blocks[key].data``) and reads as missing here.
         """
-        if key in self:
-            value = self[key].data
-            if isinstance(value, bytes) and key in TYPES:
-                return default
-            if isinstance(value, ValueElement):
-                return value.value
-            else:
-                return value
-        return default
+        block = self._items.get(_tag_value(key))
+        if block is None:
+            return default
+        value = block.data
+        if isinstance(value, bytes) and key in TYPES:
+            return default
+        if isinstance(value, ValueElement):
+            return value.value
+        return value
+
+    def __contains__(self, key: Any) -> bool:
+        return _tag_value(key) in self._items
+
+    def __getitem__(self, key: Any) -> Any:
+        return self._items[_tag_value(key)]
+
+    def get(self, key: Any, *args: Any) -> Any:
+        """Return the value of a key, or the default."""
+        return self._items.get(_tag_value(key), *args)
 
     def set_data(self, key: Any, *args: Any, **kwargs: Any) -> None:
         """
@@ -215,7 +226,7 @@ class TaggedBlocks(DictElement):
 
     @classmethod
     def _key_converter(cls, key: Any) -> Any:
-        return getattr(key, "value", key)
+        return _tag_value(key)
 
     def _repr_pretty_(self, p: Any, cycle: bool) -> None:
         if cycle:

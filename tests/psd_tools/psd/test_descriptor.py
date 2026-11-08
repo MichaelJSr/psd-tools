@@ -15,7 +15,7 @@ from psd_tools.psd.descriptor import (
     UnitFloat,
     UnitFloats,
 )
-from psd_tools.terminology import Enum, Unit
+from psd_tools.terminology import Enum, Key, Unit
 
 from ..utils import TEST_ROOT, check_read_write, check_write_read
 
@@ -130,3 +130,10 @@ def test_unit_rejects_a_bad_code_at_construction(cls: type[Any], unit: Any) -> N
     """Construction complains, rather than ``write()`` with ``AttributeError``."""
     with pytest.raises(ValueError, match="is not a valid Unit or Enum"):
         cls(unit=unit)
+
+
+@pytest.mark.parametrize("key", [b"Nm  ", "Nm  ", Key.Name])
+def test_descriptor_keys_by_bytes_str_or_enum(key: Any) -> None:
+    descriptor = Descriptor([(b"Nm  ", String("a"))])  # type: ignore[arg-type]
+    assert key in descriptor
+    assert descriptor[key] == "a"
