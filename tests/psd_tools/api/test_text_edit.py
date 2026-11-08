@@ -294,7 +294,7 @@ def test_name_edit_writes_both_blocks_and_nothing_else() -> None:
     )
     assert name.text == "B.F.B." and name.story_text == "B.F.B.\r"
     # Txt2 parses unchanged but for the edited story's text and run lengths;
-    # its view (Photoshop's glyph layout, rebuilt on load) stays as it was.
+    # its view loses its strikes, now stale, and keeps the rest.
     new = txt2(name)
     assert raw(new["0"]) == raw(old["0"])
     assert [raw(new["1"][k]) for k in ("0", "2", "3")] == [
@@ -304,7 +304,10 @@ def test_name_edit_writes_both_blocks_and_nothing_else() -> None:
     for i, (a, b) in enumerate(zip(old["1"]["1"], new["1"]["1"], strict=True)):
         if i != index:
             assert raw(a) == raw(b)
-    assert raw(new["1"]["1"][index]["1"]) == raw(old["1"]["1"][index]["1"])
+    view = old["1"]["1"][index]["1"]
+    assert "2" in view and "2" not in new["1"]["1"][index]["1"]
+    del view["2"]
+    assert raw(new["1"]["1"][index]["1"]) == raw(view)
     model = new["1"]["1"][index]["0"]
     model["0"].value = "B.F.B\r"
     for key in ("5", "6"):
@@ -346,6 +349,15 @@ def test_span_style_writes_the_story_fill() -> None:
     again = saved(layer)
     ability = next(x for x in again.descendants() if x.name == "Ability")
     assert story_runs(cast(TypeLayer, ability)) == [25, 6, 12]
+
+
+def test_a_story_edit_drops_the_strikes() -> None:
+    # Photoshop mixes the raster under stale strikes straight.
+    layer = story_layer("Ability")
+    layer.set_text(ABILITY)  # no change: they stay
+    assert "2" in story(layer)["1"]
+    layer.set_span_style(33, 37, fill=(1, 0, 0))
+    assert "2" not in story(layer)["1"]
 
 
 def test_span_style_keys_map_to_story_features() -> None:
