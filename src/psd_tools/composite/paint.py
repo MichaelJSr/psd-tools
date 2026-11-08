@@ -411,18 +411,21 @@ def _box_peak_bytes(panel: np.ndarray, width: int) -> int:
 
 
 def _tile_axis(
-    start: int, length: int, origin: int, size: int, scale: float
+    start: int, length: int, origin: int, size: int, scale: float, step: int = 1
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Panel indices and weights along one axis for a tiling scaled by ``scale``.
 
     The sample at ``origin`` is the panel's first, and each output pixel
-    blends the two panel samples either side of its scaled position.
+    blends the two samples either side of its scaled position on a grid
+    ``step`` samples apart, as Photoshop 2023 samples a reduction's level.
     """
-    position = (np.arange(start, start + length, dtype=np.float64) - origin) / scale
+    position = (
+        (np.arange(start, start + length, dtype=np.float64) - origin) / scale / step
+    )
     first = np.floor(position)
     weight = (position - first).astype(np.float32)
-    index = first.astype(np.int64) % size
-    return index, (index + 1) % size, weight
+    index = first.astype(np.int64) * step % size
+    return index, (index + step) % size, weight
 
 
 def _sample_tiling(
@@ -430,8 +433,12 @@ def _sample_tiling(
     viewport: tuple[int, int, int, int],
     origin: tuple[int, int],
     scale: float,
+    step: int = 1,
 ) -> np.ndarray:
-    """The panel tiled across ``viewport`` from ``origin``, bilinear and wrapping."""
+    """The panel tiled across ``viewport`` from ``origin``, bilinear and wrapping.
+
+    ``step`` is the reduction box: the samples blended are that far apart.
+    """
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
     if scale == 1.0:
         # Every sample lands on a panel pixel: the panel rolled to the
@@ -450,10 +457,10 @@ def _sample_tiling(
             rows * panel.shape[0], columns * panel.shape[1], panel.shape[2]
         )[:height, :width]
     top, bottom, down = _tile_axis(
-        viewport[1], height, origin[1], panel.shape[0], scale
+        viewport[1], height, origin[1], panel.shape[0], scale, step
     )
     left, right, across = _tile_axis(
-        viewport[0], width, origin[0], panel.shape[1], scale
+        viewport[0], width, origin[0], panel.shape[1], scale, step
     )
     rows = panel[top] * (1 - down)[:, None, None] + panel[bottom] * down[:, None, None]
     return (
@@ -514,7 +521,8 @@ def draw_pattern_fill(
     top-left of ``anchor``, which defaults to ``viewport``, so a viewport
     larger than the anchor continues the same tiling. ``Angl`` turns the
     tiles about that point, in right angles only; ``Scl `` scales them about
-    it, with a bilinear sample of the panel's box average on a reduction.
+    it. A reduction is bilinear between samples of the panel's box average
+    one box apart.
 
     Example descriptor::
 
@@ -580,7 +588,7 @@ def draw_pattern_fill(
     # never split off, and the array reached the canvas one plane too wide and
     # was rejected as inconsistent with it (#741).
     channels = numpy_io.get_pattern_color_channels(pattern)
-    pixels = _sample_tiling(panel, viewport, origin, scale)
+    pixels = _sample_tiling(panel, viewport, origin, scale, box)
     if pixels.shape[2] > channels:
         return pixels[:, :, :channels], pixels[:, :, -1:]
     return pixels, None
