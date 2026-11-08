@@ -416,11 +416,12 @@ class Layer(LayerProtocol):
 
         :return: `bool`
         """
-        if not self.visible:
-            return False
-        elif self.parent is not None:
-            return self.parent.is_visible()
-        return True
+        layer: Any = self
+        while layer.visible:
+            layer = layer.parent
+            if layer is None:
+                return True
+        return False
 
     @property
     def opacity(self) -> int:

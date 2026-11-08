@@ -201,6 +201,23 @@ def test_an_unknown_block_still_reads_as_bytes() -> None:
     assert blocks.get_data(b"zzzz") == b"abc"
 
 
+class _Valued:
+    value = b"lyid"
+
+
+@pytest.mark.parametrize("key", [Tag.LAYER_ID, b"lyid", _Valued()])
+def test_a_tag_its_bytes_or_a_value_find_one_block(key: Any) -> None:
+    block = TaggedBlock(key=Tag.LAYER_ID, data=IntegerElement(7))  # type: ignore[arg-type]
+    blocks = TaggedBlocks([(Tag.LAYER_ID, block)])  # type: ignore[arg-type]
+    assert key in blocks
+    assert blocks[key] is block and blocks.get(key) is block
+    assert blocks.get_data(key) == 7
+    assert Tag.LAYER_VERSION not in blocks and b"lnsr" not in blocks
+    assert blocks.get(b"lnsr", 0) == 0 and blocks.get_data(Tag.LAYER_VERSION, 0) == 0
+    with pytest.raises(KeyError):
+        blocks[Tag.LAYER_VERSION]
+
+
 def test_an_unread_layer_block_is_written_as_read() -> None:
     # A layer id with 4 bytes its parser skips.
     raw = _raw_block(Tag.LAYER_ID.value, struct.pack(">II", 7, 1)).getvalue()

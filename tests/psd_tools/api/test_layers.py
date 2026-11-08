@@ -140,6 +140,18 @@ def test_layer_is_visible(pixel_layer: PixelLayer) -> None:
     assert pixel_layer.is_visible()
 
 
+def test_is_visible_needs_every_ancestor_visible() -> None:
+    psd = PSDImage.open(full_name("clipping-mask.psd"))
+    outer, inner = psd[1], psd[1][0]  # type: ignore[index]
+    leaf = inner[0]
+    assert leaf.is_visible()
+    outer.visible = False
+    assert not leaf.is_visible() and not inner.is_visible()
+    outer.visible = True
+    leaf.visible = False
+    assert not leaf.is_visible() and inner.is_visible()
+
+
 @pytest.fixture(params=["pixel_layer", "group"])
 def is_group_args(request: Any) -> tuple[Any, bool | None]:
     return (

@@ -34,6 +34,7 @@ from psd_tools.psd.base import (
     ListElement,
     NumericElement,
     StringElement,
+    _tag_value,
     plain_init,
 )
 from psd_tools.psd.bin_utils import (
@@ -148,9 +149,11 @@ class _DescriptorMixin(DictElement):
 
     @classmethod
     def _key_converter(cls, key: Any) -> bytes:
+        if type(key) is bytes:
+            return key
         if hasattr(key, "encode"):
             return key.encode("ascii")
-        return getattr(key, "value", key)
+        return _tag_value(key)
 
     def _repr_pretty_(self, p: Any, cycle: bool) -> None:
         if cycle:

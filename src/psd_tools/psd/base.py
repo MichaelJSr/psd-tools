@@ -643,6 +643,15 @@ class ListElement(BaseElement):
         return written
 
 
+_NO_VALUE = object()
+
+
+def _tag_value(key: Any) -> Any:
+    """``getattr(key, "value", key)``; an enum's ``_value_`` skips its property."""
+    value = getattr(key, "_value_", _NO_VALUE)
+    return getattr(key, "value", key) if value is _NO_VALUE else value
+
+
 @define(repr=False)
 class DictElement(BaseElement):
     """Dict-like element that has `items` OrderedDict."""
