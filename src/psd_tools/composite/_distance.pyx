@@ -586,27 +586,193 @@ cdef inline void _relax_row1(double* cur, const double* p1, Py_ssize_t width, do
         cur[j] = m
 
 
+cdef int _gather_box(const float[:, ::1] alpha, float[:, ::1] field, const unsigned char[:, ::1] partial,
+                     Py_ssize_t oy, Py_ssize_t ox, Py_ssize_t hc, Py_ssize_t wc, const int[:, ::1] runs_v,
+                     Py_ssize_t span, const Py_ssize_t[:, ::1] offsets, const float[::1] lengths) except -1:
+    # Each active pixel's pruned minimum over the stating pixels in the table.
+    cdef Py_ssize_t m = lengths.shape[0], k, i, y, x, wp, hp
+    cdef int acc
+    cdef float best, cand, length
+    cdef unsigned char* spad
+    cdef float* npad
+    cdef Py_ssize_t* lin
+    wp = wc + 2 * span
+    hp = hc + 2 * span
+    spad = <unsigned char*>calloc(hp * wp, sizeof(unsigned char))
+    npad = <float*>calloc(hp * wp, sizeof(float))
+    lin = <Py_ssize_t*>malloc((m if m > 0 else 1) * sizeof(Py_ssize_t))
+    if spad == NULL or npad == NULL or lin == NULL:
+        free(spad)
+        free(npad)
+        free(lin)
+        raise MemoryError()
+    with nogil:
+        for k in range(m):
+            lin[k] = offsets[k, 0] * wp + offsets[k, 1]
+        for y in range(hc):
+            for x in range(wc):
+                if partial[oy + y, ox + x]:
+                    spad[(y + span) * wp + x + span] = 1
+                    npad[(y + span) * wp + x + span] = <float>0.5 - alpha[oy + y, ox + x]
+        for y in range(hc):
+            acc = 0
+            for x in range(wc):
+                acc = acc + runs_v[y, x]
+                i = (y + span) * wp + x + span
+                if acc <= 0 or spad[i]:
+                    continue
+                if alpha[oy + y, ox + x] >= 1:
+                    best = -INFINITY
+                    for k in range(m):
+                        length = lengths[k]
+                        if spad[i + lin[k]]:
+                            cand = npad[i + lin[k]] - length
+                            if cand > best:
+                                best = cand
+                        if best >= <float>0.5 - length:
+                            break
+                else:
+                    best = INFINITY
+                    for k in range(m):
+                        length = lengths[k]
+                        if spad[i + lin[k]]:
+                            cand = npad[i + lin[k]] + length
+                            if cand < best:
+                                best = cand
+                        if best <= length - <float>0.5:
+                            break
+                field[oy + y, ox + x] = best
+    free(spad)
+    free(npad)
+    free(lin)
+    return 0
+
+
+# The scatter runs while the stating pixels' offers number at most this many per active pixel.
+cdef Py_ssize_t _SCATTER_PER_ACTIVE = 64
+
+
+def _set_scatter_limit(Py_ssize_t limit):
+    """Set _SCATTER_PER_ACTIVE (0: always gather), returning the old one. For tests."""
+    global _SCATTER_PER_ACTIVE
+    old = _SCATTER_PER_ACTIVE
+    _SCATTER_PER_ACTIVE = limit
+    return old
+
+
+cdef int _scatter_box(const float[:, ::1] alpha, float[:, ::1] field, const unsigned char[:, ::1] partial,
+                      Py_ssize_t oy, Py_ssize_t ox, Py_ssize_t hc, Py_ssize_t wc, const int[:, ::1] runs_v,
+                      const Py_ssize_t[:, ::1] offsets, const float[::1] lengths) except -1:
+    # _gather_box turned round: each stating pixel offers near + length and near - length to the
+    # pixels at the table's offsets. A symmetric table gives the same candidates, and min and max
+    # are exact, so the same bits. 0 (nothing written) where the gather is cheaper or the table
+    # is not symmetric.
+    cdef Py_ssize_t m = lengths.shape[0], k, i, y, x, dy, dx, n, side = 0, row, py, px, xa, xb
+    cdef Py_ssize_t nstat = 0, nact = 0
+    cdef int acc
+    cdef bint symmetric = True
+    cdef float nq, c
+    cdef Py_ssize_t* xr
+    cdef float* lrow
+    cdef float* lo
+    cdef float* hi
+    cdef const float* lr
+    cdef float* plo
+    cdef float* phi
+    with nogil:
+        for y in range(hc):
+            acc = 0
+            for x in range(wc):
+                acc = acc + runs_v[y, x]
+                if partial[oy + y, ox + x]:
+                    nstat = nstat + 1
+                elif acc > 0:
+                    nact = nact + 1
+    if nact == 0:
+        return 1
+    if m == 0 or nstat * m > nact * _SCATTER_PER_ACTIVE:
+        return 0
+    for k in range(m):
+        side = max(side, offsets[k, 0], -offsets[k, 0], offsets[k, 1], -offsets[k, 1])
+    n = 2 * side + 1
+    xr = <Py_ssize_t*>malloc(n * sizeof(Py_ssize_t))
+    lrow = <float*>malloc(n * n * sizeof(float))
+    lo = <float*>malloc(hc * wc * sizeof(float))
+    hi = <float*>malloc(hc * wc * sizeof(float))
+    if xr == NULL or lrow == NULL or lo == NULL or hi == NULL:
+        free(xr)
+        free(lrow)
+        free(lo)
+        free(hi)
+        raise MemoryError()
+    with nogil:
+        # Each row's lengths, -xr..xr; inf where the table has no offset (no candidate).
+        for row in range(n):
+            xr[row] = -1
+        for i in range(n * n):
+            lrow[i] = INFINITY
+        for k in range(m):
+            dy = offsets[k, 0] + side
+            dx = offsets[k, 1]
+            xr[dy] = max(xr[dy], dx, -dx)
+            i = dy * n + dx + side
+            if lengths[k] < lrow[i]:
+                lrow[i] = lengths[k]
+        for i in range(n * n):
+            if lrow[i] != lrow[n * n - 1 - i]:
+                symmetric = False
+        if symmetric:
+            for i in range(hc * wc):
+                lo[i] = INFINITY
+                hi[i] = -INFINITY
+            for y in range(hc):
+                for x in range(wc):
+                    if not partial[oy + y, ox + x]:
+                        continue
+                    nq = <float>0.5 - alpha[oy + y, ox + x]
+                    for row in range(n):
+                        py = y + row - side
+                        if xr[row] < 0 or py < 0 or py >= hc:
+                            continue
+                        xa = max(x - xr[row], 0)
+                        xb = min(x + xr[row] + 1, wc)
+                        lr = lrow + row * n + side - x
+                        plo = lo + py * wc
+                        phi = hi + py * wc
+                        for px in range(xa, xb):
+                            c = nq + lr[px]
+                            plo[px] = c if c < plo[px] else plo[px]
+                            c = nq - lr[px]
+                            phi[px] = c if c > phi[px] else phi[px]
+            for y in range(hc):
+                acc = 0
+                for x in range(wc):
+                    acc = acc + runs_v[y, x]
+                    if acc > 0 and not partial[oy + y, ox + x]:
+                        i = y * wc + x
+                        field[oy + y, ox + x] = hi[i] if alpha[oy + y, ox + x] >= 1 else lo[i]
+    free(xr)
+    free(lrow)
+    free(lo)
+    free(hi)
+    return 1 if symmetric else 0
+
+
 def distance_box(const float[:, ::1] alpha, float[:, ::1] field, const unsigned char[:, ::1] partial,
                  Py_ssize_t y0, Py_ssize_t y1, Py_ssize_t x0, Py_ssize_t x1, double radius, bint any_opaque,
                  Py_ssize_t span, const Py_ssize_t[:, ::1] offsets, const float[::1] lengths,
                  double diag, double knight):
     """effects._distance_on_box on alpha[y0:y1, x0:x1], written into field there, for a radius the disk
     marking takes and no ball search: the same float32 and float64 steps as the numpy code."""
-    cdef Py_ssize_t h = y1 - y0, w = x1 - x0, y, x, rmin, rmax, cmin, cmax, r0, r1, c0, c1, hc, wc
-    cdef Py_ssize_t m = lengths.shape[0], k, i, n
+    cdef Py_ssize_t h = y1 - y0, w = x1 - x0, y, x, rmin, rmax, cmin, cmax, r0, r1, c0, c1, hc, wc, i, n
     cdef Py_ssize_t R = <Py_ssize_t>radius + 1
-    cdef float a, best, cand, length, o, c
+    cdef float a, cand, o, c
     cdef float freach = <float>radius
     cdef bint anyin
     cdef double* to_o
     cdef double* to_c
-    cdef int acc
     cdef Py_ssize_t[::1] tab
     cdef int[:, ::1] runs_v
-    cdef Py_ssize_t wp, hp
-    cdef unsigned char* spad
-    cdef float* npad
-    cdef Py_ssize_t* lin
     if h <= 0 or w <= 0:
         return
     # The stating pixels' box, out by span.
@@ -633,7 +799,7 @@ def distance_box(const float[:, ::1] alpha, float[:, ::1] field, const unsigned 
         c1 = cmax + span + 1 if cmax + span + 1 < w else w
         hc = r1 - r0
         wc = c1 - c0
-        # disk_reach's marking of the crop, then each active pixel's pruned minimum.
+        # disk_reach's marking of the crop, then each active pixel's least candidate.
         reach_tab = np.full(2 * R + 1, -1, dtype=np.intp)
         tab = reach_tab
         _disk_table(tab, R, radius)
@@ -641,55 +807,8 @@ def distance_box(const float[:, ::1] alpha, float[:, ::1] field, const unsigned 
         runs_v = runs_arr
         with nogil:
             _disk_runs(partial, y0 + r0, x0 + c0, hc, wc, tab, R, runs_v)
-        wp = wc + 2 * span
-        hp = hc + 2 * span
-        spad = <unsigned char*>calloc(hp * wp, sizeof(unsigned char))
-        npad = <float*>calloc(hp * wp, sizeof(float))
-        lin = <Py_ssize_t*>malloc((m if m > 0 else 1) * sizeof(Py_ssize_t))
-        if spad == NULL or npad == NULL or lin == NULL:
-            free(spad)
-            free(npad)
-            free(lin)
-            raise MemoryError()
-        with nogil:
-            for k in range(m):
-                lin[k] = offsets[k, 0] * wp + offsets[k, 1]
-            for y in range(hc):
-                for x in range(wc):
-                    if partial[y0 + r0 + y, x0 + c0 + x]:
-                        spad[(y + span) * wp + x + span] = 1
-                        npad[(y + span) * wp + x + span] = <float>0.5 - alpha[y0 + r0 + y, x0 + c0 + x]
-            for y in range(hc):
-                acc = 0
-                for x in range(wc):
-                    acc = acc + runs_v[y, x]
-                    i = (y + span) * wp + x + span
-                    if acc <= 0 or spad[i]:
-                        continue
-                    if alpha[y0 + r0 + y, x0 + c0 + x] >= 1:
-                        best = -INFINITY
-                        for k in range(m):
-                            length = lengths[k]
-                            if spad[i + lin[k]]:
-                                cand = npad[i + lin[k]] - length
-                                if cand > best:
-                                    best = cand
-                            if best >= <float>0.5 - length:
-                                break
-                    else:
-                        best = INFINITY
-                        for k in range(m):
-                            length = lengths[k]
-                            if spad[i + lin[k]]:
-                                cand = npad[i + lin[k]] + length
-                                if cand < best:
-                                    best = cand
-                            if best <= length - <float>0.5:
-                                break
-                    field[y0 + r0 + y, x0 + c0 + x] = best
-        free(spad)
-        free(npad)
-        free(lin)
+        if not _scatter_box(alpha, field, partial, y0 + r0, x0 + c0, hc, wc, runs_v, offsets, lengths):
+            _gather_box(alpha, field, partial, y0 + r0, x0 + c0, hc, wc, runs_v, span, offsets, lengths)
     if not any_opaque:
         return
     anyin = False
