@@ -401,6 +401,33 @@ def test_same_text_heals_a_stale_story() -> None:
     assert raw(layer._record) == record  # TySh was right already
 
 
+def composers(layer: TypeLayer) -> list[Any]:
+    """Each story paragraph's composer flag (feature 29), None when unset."""
+    runs = story(layer)["0"]["5"]["0"]
+    return [getattr(r["0"]["0"]["5"].get("29"), "value", None) for r in runs]
+
+
+@pytest.mark.parametrize("edit", ["text", "style", "sync"])
+def test_story_paragraphs_get_the_tysh_composer(edit: str) -> None:
+    # Photoshop re-lays a paragraph without the flag Every-line; most cards'
+    # stories lack it, while TySh says single-line.
+    layer = story_layer("Ability")
+    for run in story(layer)["0"]["5"]["0"]:
+        del run["0"]["0"]["5"]["29"]
+    props = layer.engine_dict["ParagraphRun"]["RunArray"][1]["ParagraphSheet"]
+    props["Properties"]["EveryLineComposer"] = engine_data.Bool(True)
+    stale = copy.deepcopy(story(layer))
+    if edit == "style":
+        layer.set_span_style(0, 4, fill=(1, 0, 0))
+    else:
+        layer.set_text(ABILITY + "!")
+    if edit == "sync":
+        txt2(layer)["1"]["1"][int(layer._data.text_data[b"TextIndex"])] = stale
+        assert composers(layer) == [None, None]
+        assert layer.sync_story()
+    assert composers(layer) == [False, True]
+
+
 def test_story_marks_stay_on_their_characters() -> None:
     layer = story_layer("Ability")
     model = story(layer)["0"]
