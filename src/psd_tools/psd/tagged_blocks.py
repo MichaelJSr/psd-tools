@@ -193,8 +193,8 @@ class TaggedBlocks(DictElement):
             kls = TYPES.get(key)
             self[key] = TaggedBlocks(key=key, data=kls(value))
 
-        A value that already is the key's type is stored as it is (its
-        version and name kept); a new effects block (``lfx2``, ``lmfx``,
+        A value that already is the key's type is stored as it is, not
+        copied (its version and name kept); a new effects block (``lfx2``, ``lmfx``,
         ``lfxs``) takes Photoshop's version 0 and name, as Photoshop 2023
         refuses to read a layer's effects at any other version.
         """

@@ -1256,6 +1256,14 @@ def test_lock_layer(pixel_layer: PixelLayer) -> None:
     assert locks.complete
 
 
+def test_lock_a_layer_without_a_lock_setting(pixel_layer: PixelLayer) -> None:
+    if Tag.PROTECTED_SETTING in pixel_layer.tagged_blocks:
+        del pixel_layer.tagged_blocks[Tag.PROTECTED_SETTING]
+    pixel_layer.lock(ProtectedFlags.POSITION)
+    locks = pixel_layer.locks
+    assert locks is not None and locks.position
+
+
 def test_group_move_between_psdimages() -> None:
     psdimage = PSDImage.new(mode="RGB", size=(100, 100))
     layer = psdimage.create_pixel_layer(
