@@ -1,5 +1,6 @@
 """Linked layer structure."""
 
+import io
 import logging
 from typing import IO, Any, Self
 
@@ -27,6 +28,8 @@ from psd_tools.validators import in_, range_
 
 logger = logging.getLogger(__name__)
 
+_SMALL_ITEM = 1 << 20  # items up to this are parsed from a copy
+
 
 class LinkedLayers(ListElement):
     """List of LinkedLayer structure. See :py:class:`.LinkedLayer`."""
@@ -35,9 +38,10 @@ class LinkedLayers(ListElement):
     def read(cls, fp: IO[bytes], **kwargs: Any) -> Self:
         """Read the structure from a file-like object.
 
-        Each item is parsed from a bounded substream over *fp* instead of a
-        copy of its bytes, so a payload that dominates the file is
-        materialized once, by :py:meth:`LinkedLayer.read` itself (#899).
+        An item up to ``_SMALL_ITEM`` is parsed from a copy of its bytes, so
+        its descriptors take the compiled reader. A larger one is parsed from
+        a bounded substream over *fp*, so a payload that dominates the file
+        is materialized once, by :py:meth:`LinkedLayer.read` itself (#899).
         """
         items = []
         while is_readable(fp, 8):
@@ -45,13 +49,19 @@ class LinkedLayers(ListElement):
             start = fp.tell()
             if not is_readable(fp, length):
                 raise OSError("Invalid data section size: %d" % length)
-            with bounded_reader(fp, length) as body:
-                item = LinkedLayer.read(body)
-                if body.tell() - start != length:
-                    raise ValueError(
-                        "Linked layer item consumed %d of %d bytes"
-                        % (body.tell() - start, length)
-                    )
+            if length <= _SMALL_ITEM:
+                # In memory: its descriptors take the compiled reader.
+                with io.BytesIO(fp.read(length)) as body:
+                    item = LinkedLayer.read(body)
+                    consumed = body.tell()
+            else:
+                with bounded_reader(fp, length) as body:
+                    item = LinkedLayer.read(body)
+                    consumed = body.tell() - start
+            if consumed != length:
+                raise ValueError(
+                    "Linked layer item consumed %d of %d bytes" % (consumed, length)
+                )
             read_padding(fp, length, 4)
             items.append(item)
         fp.read()  # a tail too short to frame another item is dropped
