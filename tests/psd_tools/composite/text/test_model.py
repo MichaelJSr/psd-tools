@@ -8,8 +8,13 @@ pytest.importorskip("freetype")
 pytest.importorskip("uharfbuzz")
 
 from psd_tools import PSDImage
+from psd_tools.api import text_edit
 from psd_tools.api.layers import TypeLayer
-from psd_tools.api.text_edit import set_span_style, stylistic_alternates
+from psd_tools.api.text_edit import (
+    kerning_methods,
+    set_span_style,
+    stylistic_alternates,
+)
 from psd_tools.composite.text import model as model_module
 from psd_tools.composite.text.layout import frame
 from psd_tools.composite.text.model import TextModel, utf16_to_str
@@ -298,3 +303,20 @@ def test_stylistic_alternates_without_story(text_layer: TypeLayer) -> None:
     assert not any(
         r.style.stylistic_alternates for r in TextModel.from_layer(text_layer).runs
     )
+
+
+def test_kerning_method_from_story() -> None:
+    # Photoshop kerns by the story's feature 11, whatever TySh's AutoKerning says.
+    layer = _type_layer("text-stylistic-alternates.psd")
+    story = text_edit._story(layer)
+    assert story is not None
+    features = story.model["6"]["0"][0]["0"]["0"]["6"]
+    features["11"] = engine_data.Integer(0)
+    assert kerning_methods(layer) == ((0, 10, 0),)
+    runs = TextModel.from_layer(layer).runs
+    assert [(r.start, r.end, r.style.auto_kerning) for r in runs] == [(0, 10, False)]
+    # Without its own, the run takes its style sheet's.
+    del features["11"]
+    sheets = story.root["0"]["5"]["0"]
+    sheets[0]["0"]["6"]["11"] = engine_data.Integer(0)
+    assert [r.style.auto_kerning for r in TextModel.from_layer(layer).runs] == [False]

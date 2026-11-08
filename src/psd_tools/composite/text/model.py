@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
-from psd_tools.api.text_edit import stylistic_alternates
+from psd_tools.api.text_edit import kerning_methods, stylistic_alternates
 from psd_tools.composite.text.constants import (
     AUTO_LEADING,
     SUB_POSITION,
@@ -117,6 +117,7 @@ class TextModel:
 
         runs = _runs(text, offsets, _get(engine, "StyleRun", None), normal, font_set)
         runs = _with_alternates(runs, stylistic_alternates(layer))
+        runs = _with_kerning(runs, kerning_methods(layer))
         paragraphs = _paragraphs(
             text, offsets, _get(engine, "ParagraphRun", None), pnormal
         )
@@ -254,6 +255,33 @@ def _with_alternates(
             style = run.style
             if style.stylistic_alternates != on:
                 style = replace(style, stylistic_alternates=on)
+            out.append(Run(a, b, style))
+    return out
+
+
+def _with_kerning(
+    runs: list[Run], spans: tuple[tuple[int, int, int], ...] | None
+) -> list[Run]:
+    """Runs cut where the story's kerning method differs from TySh's.
+
+    Photoshop lays out by the story (0 kerns no pair, else Metrics), and
+    its own saves can leave TySh's ``AutoKerning`` on where the story is 0.
+    """
+    if not spans:
+        return runs
+    cuts = sorted({i for s, e, _ in spans for i in (s, e)})
+    out: list[Run] = []
+    for run in runs:
+        bounds = [run.start, *(c for c in cuts if run.start < c < run.end), run.end]
+        for a, b in pairwise(bounds):
+            style = run.style
+            for s, e, method in spans:
+                if s <= a and b <= e:
+                    if style.auto_kerning != bool(method):
+                        style = replace(style, auto_kerning=bool(method))
+                    break
+            if out and out[-1].end == a and out[-1].style == style and a > run.start:
+                a = out.pop().start
             out.append(Run(a, b, style))
     return out
 
