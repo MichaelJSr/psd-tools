@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Underlines sit where Photoshop 2023 draws them: centred between the
+  top edge (CFF: the Top DICT's ``UnderlinePosition``, else ``post``'s) and
+  the font box bottom (CFF: ``FontBBox``), that bottom at least half a
+  thickness down; no thickness is 0.05 em; top and thickness on quarter
+  pixels when the text is not rotated. **Rendering change** for underlined
+  text; ``FontMetrics.underline_position`` and ``underline_thickness`` are
+  floats
 - [refactor] Vibrance's per-pixel step runs in ``_blend`` (numpy where it is
   not built). Renders are unchanged
 - [api] ``RangeReader`` fetches 512 KB first and 512 KB after a seek (was
