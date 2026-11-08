@@ -3182,9 +3182,15 @@ class TypeLayer(Layer):
                 index += length
     """
 
-    def __init__(self, *args: Any):
-        super().__init__(*args)
-        self._type_data = self.tagged_blocks.get_data(Tag.TYPE_TOOL_OBJECT_SETTING)
+    @property
+    def _type_data(self) -> TypeToolObjectSetting | None:
+        # Read on first use: an open or an unedited save parses no TySh.
+        try:
+            return self.__dict__["_tysh"]
+        except KeyError:
+            data = self.tagged_blocks.get_data(Tag.TYPE_TOOL_OBJECT_SETTING)
+            self.__dict__["_tysh"] = data
+            return data
 
     @property
     def _data(self) -> TypeToolObjectSetting:
