@@ -132,7 +132,8 @@ Local boxes
 
 ``Compositor.apply()`` composites a layer on the box it can change
 (``_change_bbox()``) rather than the whole viewport when that box is small,
-through views of the canvases. Whatever a layer paints must stay inside that
+through views of the canvases, and skips it when that box misses the viewport,
+groups and adjustments included. Whatever a layer paints must stay inside that
 box: its effects as the bbox functions measure them, a redrawn path as
 ``vector.drawn_bbox()`` does. A layer that knocks out, or a group holding one,
 reads its backdrop and is composited whole. A change that lets a layer paint

@@ -3310,6 +3310,8 @@ class Compositor:
         excluded = _excluded_channels(layer, self._channels)
         if not excluded:
             box = self._local_box(layer) if _LOCAL_BOXES else None
+            if box == (0, 0, 0, 0):
+                return
             if box is not None:
                 self._apply_in_box(layer, box)
                 return
@@ -3320,12 +3322,16 @@ class Compositor:
         self._restore_channels(held)
 
     def _local_box(self, layer: Layer) -> tuple[int, int, int, int] | None:
-        """The box ``layer`` paints within, when compositing it there is safe."""
+        """The box ``layer`` paints within, when compositing it there is safe.
+
+        (0, 0, 0, 0) when that box misses the viewport: the layer changes
+        nothing here.
+        """
         if not _box_safe(layer, self._cache):
             return None
         box = utils.intersect(self._viewport, _change_bbox(layer, self._cache))
         if box == (0, 0, 0, 0):
-            return None
+            return box
         area = (box[2] - box[0]) * (box[3] - box[1])
         if area > _LOCAL_SHARE * self.width * self.height:
             return None
