@@ -83,6 +83,7 @@ The effects system integrates with the main compositing pipeline and is
 automatically applied when rendering layers that have effects enabled.
 """
 
+import functools
 import logging
 import math
 from itertools import chain, pairwise
@@ -851,6 +852,17 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
         # No band named, so no bound: far enough that nothing is out of range.
         reach = float(math.hypot(*alpha.shape))
     _require_scipy("Stroke effects")
+    if (
+        _cdistance is not None
+        and hasattr(_cdistance, "distance_box")
+        and alpha.dtype == np.float32
+        and alpha.ndim == 2
+        and 0.0 <= reach < _BALL_SEARCH_REACH
+        and reach <= _DISK_REACH_MAX
+    ):
+        compiled = _compiled_distance(np.ascontiguousarray(alpha), reach)
+        if compiled is not None:
+            return compiled
 
     partial = (alpha > 0) & (alpha < 1)
     if not partial.any():
@@ -882,6 +894,60 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
         sub = _distance_on_box(alpha[box], partial[box], near[box], reach, any_opaque)
         field[box] = sub
     return field
+
+
+def _compiled_distance(alpha: np.ndarray, reach: float) -> np.ndarray | None:
+    """:py:func:`_signed_distance` in the compiled loops, None where they do not apply.
+
+    The same steps as the numpy code, box by box: no ball search and no
+    erosion below the reach this is called for, so the pruned minimum and the
+    chamfer transforms are all there is.
+    """
+    field = np.empty(alpha.shape, dtype=np.float32)
+    partial = np.empty(alpha.shape, dtype=np.uint8)
+    boundary = np.empty(alpha.shape, dtype=np.uint8)
+    any_partial, any_opaque = _cdistance.sd_prepare(alpha, field, partial, boundary)
+    if not any_partial:
+        return None
+    span = math.ceil(reach) + 1
+    for rows, cols in _reach_boxes(boundary.view(bool), span):
+        y0, y1, x0, x1 = rows.start, rows.stop, cols.start, cols.stop
+        inner = math.ceil(min(reach, max(y1 - y0, x1 - x0) - 1))
+        offsets, lengths = _offset_table(inner, reach)
+        _cdistance.distance_box(
+            alpha,
+            field,
+            partial,
+            y0,
+            y1,
+            x0,
+            x1,
+            reach,
+            any_opaque,
+            inner,
+            offsets,
+            lengths,
+            _DIAGONAL,
+            _KNIGHT,
+        )
+    return field
+
+
+@functools.lru_cache(maxsize=32)
+def _offset_table(span: int, radius: float) -> tuple[np.ndarray, np.ndarray]:
+    """:py:func:`_nearest_boundary`'s offsets within ``radius``, by ascending length."""
+    offsets = np.mgrid[-span : span + 1, -span : span + 1].reshape(2, -1).T
+    lengths = _chamfer_length(offsets[:, 0], offsets[:, 1])
+    within = lengths <= radius
+    offsets, lengths = offsets[within], lengths[within]
+    ascending = np.argsort(lengths, kind="stable")
+    tables = (
+        np.ascontiguousarray(offsets[ascending], dtype=np.intp),
+        np.ascontiguousarray(lengths[ascending], dtype=np.float32),
+    )
+    for table in tables:
+        table.flags.writeable = False  # shared by the cache
+    return tables
 
 
 def _runs(line: np.ndarray, span: int) -> list[tuple[int, int]]:
