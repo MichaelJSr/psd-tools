@@ -377,6 +377,9 @@ def test_rules(face: Face) -> None:
     assert bbox == (1, 13, 31, 19)
     rgba, _ = render(rules=[Rule(0.0, 10.0, 5.25, 1.0, GREEN)], antialias=NONE)
     assert rgba[:, 3, 3].tolist() == [0, 1]
+    # Photoshop's quarter pixels: 1.1 thick about 5.3 is 1.0 from 4.75.
+    rgba, _ = render(rules=[Rule(0.0, 10.0, 5.3, 1.1, GREEN)])
+    assert rgba[:, 3, 3].tolist() == pytest.approx([0.25, 0.75], abs=1 / 255)
 
 
 def test_rule_and_glyph_share_canvas(face: Face) -> None:

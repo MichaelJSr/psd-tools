@@ -59,7 +59,11 @@ def test_exact_truetype(fixture_fonts_dir: str, ttf_font_path: str) -> None:
     m = r.face.metrics
     assert m.upem == UPEM
     assert (m.ascent_units, m.ascent_glyph) == (GLYPHS["d"][1][3], "d")  # type: ignore[index]
-    assert m.underline_position == UNDERLINE_POSITION - UNDERLINE_THICKNESS // 2
+    # Midway from post's top edge to the box bottom, at least half a thickness
+    # below it.
+    box = min(r[1] for _, r in GLYPHS.values() if r)
+    bottom = min(box, UNDERLINE_POSITION - UNDERLINE_THICKNESS / 2)
+    assert m.underline_position == (UNDERLINE_POSITION + bottom) / 2
     assert m.underline_thickness == UNDERLINE_THICKNESS
     assert not m.has_svg
     assert m.strikes == frozenset()
@@ -73,6 +77,36 @@ def test_exact_cff(fixture_fonts_dir: str, cff_font_path: str) -> None:
     assert r.path == cff_font_path
     assert r.face is not None
     assert r.face.metrics.ascent_glyph == "d"
+
+
+def test_cff_underline(cff_font_path: str, tmp_path: str) -> None:
+    # CFF: the Top DICT's values, not post's, scaled by FontMatrix; the box
+    # bottom is FontBBox's.
+    ttLib = pytest.importorskip("fontTools.ttLib")
+    font = ttLib.TTFont(cff_font_path, recalcBBoxes=False)
+    top = font["CFF "].cff.topDictIndex[0]
+    top.FontMatrix = [0.0005, 0, 0, 0.0005, 0, 0]
+    top.UnderlinePosition, top.UnderlineThickness = -150, 60.5
+    top.FontBBox = [0, -400, 1300, 1500]
+    font["post"].underlinePosition = -75
+    path = os.path.join(tmp_path, "top.otf")
+    font.save(path)
+    m = load_face(path).metrics
+    # Top -75, thickness 30.25, box bottom -200.
+    assert m.underline_position == pytest.approx((-75 - 200) / 2)
+    assert m.underline_thickness == pytest.approx(30.25)
+
+
+def test_underline_fallbacks(ttf_font_path: str, tmp_path: str) -> None:
+    # No thickness: 0.05 em; no top edge either: -0.15 em.
+    ttLib = pytest.importorskip("fontTools.ttLib")
+    font = ttLib.TTFont(ttf_font_path)
+    font["post"].underlinePosition = font["post"].underlineThickness = 0
+    path = os.path.join(tmp_path, "zero.ttf")
+    font.save(path)
+    m = load_face(path).metrics
+    assert m.underline_position == pytest.approx((-150 - 175) / 2)
+    assert m.underline_thickness == pytest.approx(50)
 
 
 def test_ascent_fallbacks(make_font: Callable[..., str]) -> None:

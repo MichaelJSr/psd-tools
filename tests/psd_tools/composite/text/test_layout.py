@@ -396,7 +396,9 @@ def test_underline_rule(fonts: FontMap) -> None:
     lay = layout(model("IA I\r", style(underline=True), style(), cuts=(2,)), fonts)
     assert len(lay.rules) == 1
     rule = lay.rules[0]
-    position = (UNDERLINE_POSITION - UNDERLINE_THICKNESS // 2) / UPEM * SIZE
+    box = min(r[1] for _, r in GLYPHS.values() if r)
+    bottom = min(box, UNDERLINE_POSITION - UNDERLINE_THICKNESS / 2)
+    position = (UNDERLINE_POSITION + bottom) / 2 / UPEM * SIZE
     assert (rule.x0, rule.x1) == pytest.approx((0.0, 9.0))
     assert rule.y == pytest.approx(-position)
     assert rule.thickness == pytest.approx(UNDERLINE_THICKNESS / UPEM * SIZE)

@@ -512,6 +512,12 @@ def _rule_items(
                 xy * quad[:, 0] + yy * quad[:, 1] + ty,
             ]
         )
+        if xy == 0 and yx == 0:
+            # Photoshop puts a rule's top and thickness on quarter pixels.
+            top, bottom = sorted((pts[0, 1], pts[2, 1]))
+            thick = max(math.floor((bottom - top) * 4 + 0.5), 1) / 4
+            top = math.floor(((top + bottom) / 2 - thick / 2) * 4 + 0.5) / 4
+            pts[:, 1] = (top, top, top + thick, top + thick)
         x0, y0 = math.floor(pts[:, 0].min()), math.floor(pts[:, 1].min())
         x1, y1 = math.ceil(pts[:, 0].max()), math.ceil(pts[:, 1].max())
         w, h = x1 - x0, y1 - y0

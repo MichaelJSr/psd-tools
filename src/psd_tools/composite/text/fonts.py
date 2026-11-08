@@ -60,10 +60,10 @@ class FontMetrics:
     #: (``"ascender"`` for the final fallback).
     ascent_units: float
     ascent_glyph: str
-    #: Centre of the underline relative to the baseline, as FreeType reports
-    #: it: ``post``'s top edge minus half the thickness.
-    underline_position: int
-    underline_thickness: int
+    #: Centre of the underline relative to the baseline and its thickness, as
+    #: Photoshop 2023 draws it (see :func:`_underline`).
+    underline_position: float
+    underline_thickness: float
     #: The face carries an ``SVG `` table of colour glyphs.
     has_svg: bool
     #: ``y_ppem`` of each embedded bitmap strike.
@@ -245,16 +245,145 @@ def _moved(face: freetype.Face, gid: int) -> np.ndarray | None:
     return points
 
 
-def sfnt_table(face: freetype.Face, tag: bytes) -> bytes | None:
-    """The raw bytes of the face's ``tag`` table, or ``None`` when it has none."""
+def sfnt_table(
+    face: freetype.Face, tag: bytes, limit: int | None = None
+) -> bytes | None:
+    """The raw bytes of the face's ``tag`` table, or ``None`` when it has none.
+
+    ``limit`` reads at most that many bytes from the table's start.
+    """
     code = int.from_bytes(tag, "big")
     length = c_ulong(0)
     if freetype.FT_Load_Sfnt_Table(face._FT_Face, code, 0, None, byref(length)):
         return None
+    if limit is not None and limit < length.value:
+        length = c_ulong(limit)
     buffer = (c_ubyte * length.value)()
     if freetype.FT_Load_Sfnt_Table(face._FT_Face, code, 0, buffer, byref(length)):
         return None
     return bytes(buffer)
+
+
+#: CFF Top DICT operators, ``12 x`` as ``1200 + x``.
+_FONT_BBOX, _UNDERLINE_POSITION, _UNDERLINE_THICKNESS, _FONT_MATRIX = (
+    5,
+    1203,
+    1204,
+    1207,
+)
+#: Bytes of a ``CFF `` table read first: the Top DICT follows the header and
+#: the Name INDEX.
+_CFF_HEAD = 4096
+#: A real operand's nibbles; ``"?"`` (reserved) fails ``float``.
+_REAL_NIBBLES = (*"0123456789.E", "E-", "?", "-", "")
+
+
+def _cff_dict(data: bytes) -> dict[int, list[float]]:
+    """A CFF DICT's operands by operator. Raises ``IndexError``/``ValueError``."""
+    out: dict[int, list[float]] = {}
+    operands: list[float] = []
+    i = 0
+    while i < len(data):
+        b0 = data[i]
+        if b0 <= 21:
+            if b0 == 12:
+                i += 1
+                b0 = 1200 + data[i]
+            out[b0], operands = operands, []
+            i += 1
+        elif b0 == 28 or b0 == 29:
+            n = 2 if b0 == 28 else 4
+            operands.append(int.from_bytes(data[i + 1 : i + 1 + n], "big", signed=True))
+            i += 1 + n
+        elif b0 == 30:
+            text = ""
+            while True:
+                i += 1
+                hi, lo = data[i] >> 4, data[i] & 0x0F
+                text += _REAL_NIBBLES[hi] + _REAL_NIBBLES[lo] * (hi != 0x0F)
+                if 0x0F in (hi, lo):
+                    break
+            operands.append(float(text))
+            i += 1
+        elif 32 <= b0 <= 246:
+            operands.append(b0 - 139)
+            i += 1
+        elif 247 <= b0 <= 250:
+            operands.append((b0 - 247) * 256 + data[i + 1] + 108)
+            i += 2
+        elif 251 <= b0 <= 254:
+            operands.append(-(b0 - 251) * 256 - data[i + 1] - 108)
+            i += 2
+        else:
+            raise ValueError(f"reserved DICT byte {b0}")
+    if i != len(data):
+        raise ValueError("truncated DICT")
+    return out
+
+
+def _cff_top_dict(face: freetype.Face) -> dict[int, list[float]] | None:
+    """The ``CFF `` table's Top DICT, ``None`` when missing or unreadable."""
+    for limit in (_CFF_HEAD, None):
+        data = sfnt_table(face, b"CFF ", limit)
+        if data is None:
+            return None
+        try:
+            p = data[2]  # header size: the Name INDEX follows
+            for _ in range(2):  # Name INDEX, then Top DICT INDEX
+                count, size = int.from_bytes(data[p : p + 2], "big"), data[p + 2]
+                base = p + 3 + (count + 1) * size - 1
+                offsets = [
+                    int.from_bytes(data[q : q + size], "big")
+                    for q in range(p + 3, base + 1, size)
+                ]
+                p = base + offsets[-1]
+            if p >= len(data):  # more INDEXes follow the Top DICT's
+                raise IndexError("short read")
+            return _cff_dict(data[base + offsets[0] : base + offsets[1]])
+        except (IndexError, ValueError):
+            if limit is None or len(data) < limit:
+                return None
+    return None
+
+
+def _operand(top_dict: dict[int, list[float]], op: int, default: float) -> float:
+    value = top_dict.get(op, [])
+    return value[0] if len(value) == 1 else default
+
+
+def _underline(face: freetype.Face, truetype: bool) -> tuple[float, float]:
+    """The underline's centre and thickness, in font units, as Photoshop 2023.
+
+    From its top edge and thickness (CFF: the Top DICT's, defaults -100 and
+    50, else ``post``'s) and the font box bottom (CFF: ``FontBBox``, else
+    ``head``'s): the centre is midway between the top edge and the box
+    bottom, that bottom at least half a thickness below the top edge. No
+    thickness is 0.05 em, and then no top edge -0.15 em.
+    """
+    upem = face.units_per_EM
+    top_dict = None if truetype else _cff_top_dict(face)
+    if top_dict is not None:
+        matrix = top_dict.get(_FONT_MATRIX, [])
+        # No FontMatrix: the outlines are in head units, as FreeType reads them.
+        ok = len(matrix) == 6 and matrix[3] > 0
+        scale = matrix[3] * upem if ok else 1.0
+        top = _operand(top_dict, _UNDERLINE_POSITION, -100) * scale
+        thick = _operand(top_dict, _UNDERLINE_THICKNESS, 50) * scale
+        bbox = top_dict.get(_FONT_BBOX, [])
+        box = bbox[1] * scale if len(bbox) == 4 else 0.0
+    else:
+        post = sfnt_table(face, b"post", 12)
+        if post is None or len(post) < 12:
+            post = bytes(12)
+        top = int.from_bytes(post[8:10], "big", signed=True)
+        thick = int.from_bytes(post[10:12], "big", signed=True)
+        box = int(face.bbox.yMin)
+    if thick <= 0:
+        thick = 0.05 * upem
+        if not top:
+            top = -0.15 * upem
+    bottom = min(box, top - thick / 2)
+    return (top + bottom) / 2, thick
 
 
 def _metrics(face: freetype.Face) -> FontMetrics:
@@ -275,12 +404,13 @@ def _metrics(face: freetype.Face) -> FontMetrics:
                     ascent = hit[1]
             break
     has_svg = _has_table(face, b"SVG ")
+    position, thickness = _underline(face, truetype)
     return FontMetrics(
         upem=int(face.units_per_EM),
         ascent_units=ascent,
         ascent_glyph=glyph,
-        underline_position=int(face.underline_position),
-        underline_thickness=int(face.underline_thickness),
+        underline_position=position,
+        underline_thickness=thickness,
         has_svg=has_svg,
         strikes=frozenset(round(s.y_ppem / 64) for s in face.available_sizes),
         truetype=truetype,
