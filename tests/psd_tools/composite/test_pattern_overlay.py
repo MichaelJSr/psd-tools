@@ -223,3 +223,20 @@ def test_a_half_scale_is_the_mean_of_each_pair() -> None:
     pairs = panel[:40, :40].reshape(20, 2, 20, 2, 3).mean(axis=(1, 3))
     assert drawn is not None
     assert np.allclose(drawn, pairs, atol=1e-6)
+
+
+def test_a_reduction_blends_level_samples_a_box_apart() -> None:
+    """Photoshop 2023: at 30% (box 2) a pixel lerps level samples 2k and 2k + 2."""
+    psd, _, desc = _overlay()
+    desc[b"Scl "] = Double(30.0)
+    panel = _panel(psd, desc).astype(np.float64)
+    level = (panel + np.roll(panel, -1, axis=0)) / 2
+    level = (level + np.roll(level, -1, axis=1)) / 2
+    position = np.arange(20) / 0.3 / 2
+    t = position - np.floor(position)
+    k = np.floor(position).astype(int) * 2
+    rows = level[k] * (1 - t)[:, None, None] + level[k + 2] * t[:, None, None]
+    expected = rows[:, k] * (1 - t)[None, :, None] + rows[:, k + 2] * t[None, :, None]
+    drawn, _ = paint.draw_pattern_fill((0, 0, 20, 20), psd, desc, origin=(0, 0))
+    assert drawn is not None
+    assert np.allclose(drawn, expected, atol=1e-5)
