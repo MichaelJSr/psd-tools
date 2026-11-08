@@ -2612,3 +2612,30 @@ def test_the_compiled_signed_distance_is_the_numpy_one() -> None:
         with mock.patch.object(effects, "_compiled_distance", lambda *_: None):
             plain = effects._signed_distance(alpha, reach)
         assert compiled.tobytes() == plain.tobytes()
+
+
+@pytest.mark.skipif(
+    effects._cdistance is None or not hasattr(effects._cdistance, "_set_scatter_limit"),
+    reason="compiled distance not built",
+)
+@pytest.mark.parametrize("limit", [0, 1 << 40], ids=["gather", "scatter"])
+def test_the_scatter_and_the_gather_are_the_numpy_distance(limit: int) -> None:
+    """Antialiased rims, cut by the box's edges, measure the same either way."""
+    rng = np.random.default_rng(12)
+    old = effects._cdistance._set_scatter_limit(limit)
+    try:
+        for _ in range(150):
+            h, w = int(rng.integers(1, 50)), int(rng.integers(1, 50))
+            yy, xx = np.ogrid[:h, :w]
+            alpha = np.zeros((h, w), dtype=np.float32)
+            for _ in range(3):
+                y, x = rng.uniform(-5, h + 5), rng.uniform(-5, w + 5)
+                rim = np.clip(rng.uniform(0.3, 12) - np.hypot(yy - y, xx - x), 0, 1)
+                alpha = np.maximum(alpha, rim.astype(np.float32))
+            reach = float(rng.choice([0.5, 1.0, 3.0, 7.0, 12.0]))
+            compiled = effects._signed_distance(alpha, reach)
+            with mock.patch.object(effects, "_compiled_distance", lambda *_: None):
+                plain = effects._signed_distance(alpha, reach)
+            assert compiled.tobytes() == plain.tobytes()
+    finally:
+        effects._cdistance._set_scatter_limit(old)
