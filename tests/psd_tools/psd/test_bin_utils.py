@@ -1,10 +1,13 @@
 import array
 import io
+import random
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from psd_tools.psd.bin_utils import (
+    FileReader,
     _remaining_bytes,
     be_array_to_bytes,
     bounded_reader,
@@ -227,3 +230,56 @@ def test_a_section_in_a_section_reads_the_file() -> None:
                 inner.seek(9)
         assert outer.tell() == 8
     assert fp.tell() == 12
+
+
+def _outcome(fp: Any, op: str, *args: int) -> tuple[Any, ...]:
+    try:
+        return ("ok", getattr(fp, op)(*args), fp.tell())
+    except (OSError, ValueError) as e:
+        return (type(e).__name__, str(e), fp.tell())
+
+
+def test_file_reader_moves_as_the_file_does(tmp_path: Path) -> None:
+    path = tmp_path / "data.bin"
+    path.write_bytes(bytes(range(256)) * 64)
+    rng = random.Random(7)
+    with open(path, "rb") as plain, open(path, "rb") as f:
+        reader = FileReader(f)
+        for _ in range(3000):
+            op = rng.choice(["seek", "seek", "read", "read", "tell"])
+            args: tuple[int, ...]
+            if op == "seek":
+                args = (rng.randrange(-20000, 20000), rng.choice([0, 1, 2, 7]))
+            elif op == "read":
+                args = (rng.choice([-1, 0, 1, 3, 100, 5000]),)
+            else:
+                args = ()
+            assert _outcome(reader, op, *args) == _outcome(plain, op, *args)
+
+
+def test_file_reader_moves_the_file_only_to_read(tmp_path: Path) -> None:
+    calls: list[tuple[int, int]] = []
+
+    class File(io.BufferedReader):
+        def tell(self) -> int:
+            calls.append((-1, -1))
+            return super().tell()
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            calls.append((offset, whence))
+            return super().seek(offset, whence)
+
+    path = tmp_path / "data.bin"
+    path.write_bytes(bytes(range(100)))
+    with File(io.FileIO(path, "rb")) as f:
+        reader = FileReader(f)
+        calls.clear()
+        assert reader.seek(0, 2) == 100
+        assert reader.seek(-4, 1) == 96
+        assert reader.tell() == 96
+        assert reader.seek(0, 2) == 100
+        assert reader.seek(10) == 10
+        assert calls == [(0, 2)]
+        assert reader.read(2) == bytes([10, 11])
+        assert reader.read(2) == bytes([12, 13])
+        assert calls == [(0, 2), (10, 0)]
