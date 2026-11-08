@@ -10,7 +10,8 @@ A layer's text is stored twice: in its own TySh EngineData and in its story
 in the document's Txt2 block (the layer's ``TextIndex`` is the story's
 index). Photoshop reads the story and rewrites TySh from it on save, so the
 edits here change both; :func:`sync_story` brings back a story that an
-older version left behind.
+older version left behind. A story paragraph an edit writes gets TySh's
+composer flag when it has none, else Photoshop re-lays it Every-line.
 """
 
 from __future__ import annotations
@@ -173,6 +174,9 @@ _FEATURES = {
 }
 #: Features Photoshop keeps in the Txt2 story only, never in TySh.
 _STORY_ONLY = frozenset({"StylisticAlternates"})
+#: Txt2 paragraph feature ``EveryLineComposer``: a run without it is re-laid
+#: Every-line by Photoshop, whatever TySh says.
+_COMPOSER = "29"
 
 
 def utf16_prefix(text: str) -> list[int]:
@@ -225,7 +229,7 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
 
         writes.append(write_tysh)
     if story is not None:
-        writes.append(story.respan(new, keep))
+        writes.append(story.respan(layer, new, keep))
     for write in writes:
         write()
     _touch(layer)
@@ -345,7 +349,7 @@ def sync_story(layer: TypeLayer) -> bool:
     text = _editor_text(layer)
     if story is None or story.text == text:
         return False
-    story.respan(text, "runs")()
+    story.respan(layer, text, "runs")()
     _touch(layer)
     return True
 
@@ -472,7 +476,7 @@ class _Story:
             out.append(run)
         section[self.k.runs] = engine_data.List(out)
 
-    def respan(self, new: str, keep: Keep) -> Callable[[], None]:
+    def respan(self, layer: TypeLayer, new: str, keep: Keep) -> Callable[[], None]:
         """Check the story can take ``new``; return the write that sets it."""
         k = self.k
         edit = _Splice(self.text, new, keep)
@@ -502,6 +506,7 @@ class _Story:
             for section, spans, merge in plans:
                 self._write(section, spans, merge)
             self.model[k.text].value = new
+            _pin_composer(self, layer)
 
         return write
 
@@ -545,7 +550,12 @@ class _Story:
             return inner
 
         out = _restyled(spans, a, b, values, features)
-        return lambda: self._write(section, out, merge=True)
+
+        def write() -> None:
+            self._write(section, out, merge=True)
+            _pin_composer(self, layer)
+
+        return write
 
     def _font_index(self, layer: TypeLayer, value: Any) -> int:
         """Return the story's FontSet index of a ``Font`` name or TySh index."""
@@ -597,6 +607,40 @@ class _Story:
         paint[tag] = engine_data.Property("SimplePaint")
         paint[color_key] = color
         return paint
+
+
+def _pin_composer(story: _Story, layer: TypeLayer) -> None:
+    """Give each story paragraph run without a composer flag TySh's.
+
+    Photoshop re-lays such a run Every-line, whatever TySh says, and may
+    break its lines elsewhere. Named-key stories are left alone.
+    """
+    k = story.k
+    section = story.model.get(k.paragraphs)
+    tysh = layer.engine_dict.get("ParagraphRun")
+    if not (
+        k.numbered and story._is_runs(section) and isinstance(tysh, engine_data.Dict)
+    ):
+        return
+    try:
+        spans = _spans(tysh, utf16_prefix(story.text)[-1])
+    except (ValueError, KeyError, TypeError):
+        return
+    _, sheet_key, _, features_key = k.paragraph_sheets
+    unit = 0
+    for run in section[k.runs]:
+        data = run.get(k.data)
+        sheet = data.get(sheet_key) if isinstance(data, engine_data.Dict) else None
+        features = (
+            sheet.get(features_key) if isinstance(sheet, engine_data.Dict) else None
+        )
+        if isinstance(features, engine_data.Dict) and _COMPOSER not in features:
+            flag = _data_at(spans, unit)
+            for key in ("ParagraphSheet", "Properties", "EveryLineComposer"):
+                flag = flag.get(key) if isinstance(flag, engine_data.Dict) else None
+            if isinstance(getattr(flag, "value", None), bool):
+                features[_COMPOSER] = engine_data.Bool(flag.value)
+        unit += int(run[k.length].value)
 
 
 def _story(layer: TypeLayer) -> _Story | None:
