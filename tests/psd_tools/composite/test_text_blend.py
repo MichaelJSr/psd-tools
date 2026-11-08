@@ -181,6 +181,45 @@ def test_a_pixel_the_source_leaves_alone_is_mixed_only_if_its_alpha_moved() -> N
     assert not np.array_equal(mixed[2, 2], color[2, 2])
 
 
+def test_an_isolated_mix_keeps_the_backdrop_where_nothing_was_painted() -> None:
+    """Untouched pixels: the backdrop where nothing was painted, white where none."""
+    size = 6
+    backdrop = np.linspace(0.01, 0.99, size * size * 3, dtype=np.float32).reshape(
+        size, size, 3
+    )
+    backdrop_alpha = np.ones((size, size, 1), dtype=np.float32)
+    backdrop_alpha[:, -1] = 0.0
+    compositor = Compositor((0, 0, size, size), backdrop, backdrop_alpha)
+    compositor._color = canvas = backdrop * 0.5
+    painted = np.zeros((size, size, 1), dtype=np.float32)
+    painted[2] = 1.0
+    shape = np.zeros((size, size, 1), dtype=np.float32)
+    shape[0, 0] = shape[-1, -1] = 1.0
+    compositor._alpha = np.maximum(backdrop_alpha, shape)
+
+    mixed = compositor._mix_in_text_space(
+        canvas,
+        shape,
+        shape,
+        backdrop_alpha,
+        painted,
+        canvas,
+        backdrop_alpha,
+        get_blend_func(BlendMode.NORMAL),
+        TEXT_BLEND_GAMMA,
+        True,
+    )
+    unpainted = painted[..., 0] == 0.0
+    unpainted[0, 0] = unpainted[-1, -1] = False
+    bare = unpainted.copy()
+    bare[:, :-1] = False
+    assert np.array_equal(mixed[unpainted & ~bare], backdrop[unpainted & ~bare])
+    assert np.all(mixed[bare] == 1.0)
+    kept = ~unpainted
+    kept[0, 0] = kept[-1, -1] = False
+    assert np.array_equal(mixed[kept], canvas[kept])
+
+
 def test_a_substituted_font_keeps_its_stored_raster() -> None:
     """A flagged layer mixes straight; the same layer unflagged mixes in the gamma.
 
