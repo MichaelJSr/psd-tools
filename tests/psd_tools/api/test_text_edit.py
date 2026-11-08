@@ -6,7 +6,13 @@ import pytest
 
 from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
-from psd_tools.api.text_edit import add_font, set_span_style, set_text, utf16_prefix
+from psd_tools.api.text_edit import (
+    add_font,
+    drop_strikes,
+    set_span_style,
+    set_text,
+    utf16_prefix,
+)
 from psd_tools.constants import Tag
 from psd_tools.psd import engine_data
 
@@ -315,6 +321,31 @@ def test_name_edit_writes_both_blocks_and_nothing_else() -> None:
     for x in others:
         y = next(z for z in again.descendants() if z.name == x.name)
         assert raw(x._record) == raw(y._record)
+
+
+def test_drop_strikes_rewrites_its_strikes_alone() -> None:
+    # tools/sweep_strikes.py: a card loses one story's strikes, nothing else.
+    layer = story_layer("Ability")
+    psd = cast(PSDImage, layer._psd)
+    old = copy.deepcopy(txt2(layer))
+    drop_strikes(layer, [])
+    buf = io.BytesIO()
+    psd.save(buf, update_preview=False)
+    buf.seek(0)
+    new, was = PSDImage.open(buf)._record, PSDImage.open(full_name(STORY))._record
+    for part in ("header", "color_mode_data", "image_resources", "image_data"):
+        assert raw(getattr(new, part)) == raw(getattr(was, part))
+    a, b = new.layer_and_mask_information, was.layer_and_mask_information
+    assert a.layer_info is not None and b.layer_info is not None
+    assert raw(a.layer_info) == raw(b.layer_info)
+    assert a.tagged_blocks is not None and b.tagged_blocks is not None
+    for key in b.tagged_blocks:
+        if key != Tag.TEXT_ENGINE_DATA:
+            assert raw(a.tagged_blocks.get(key)) == raw(b.tagged_blocks.get(key))
+    index = int(layer._data.text_data[b"TextIndex"])
+    assert "2" in old["1"]["1"][index]["1"]
+    del old["1"]["1"][index]["1"]["2"]
+    assert raw(a.tagged_blocks.get_data(Tag.TEXT_ENGINE_DATA)) == raw(old)
 
 
 def test_story_runs_follow_a_replacement() -> None:

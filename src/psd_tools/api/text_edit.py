@@ -1114,11 +1114,13 @@ def _set_stored_text(layer: TypeLayer, text: str) -> None:
 
 
 def drop_strikes(layer: TypeLayer, fonts: Iterable[str]) -> None:
-    """Drop the story's frame and glyph strikes: the layer was redrawn.
+    """Drop the story's frame and glyph strikes: they no longer match it.
 
-    Photoshop mixes a raster under stale strikes straight, and composes a
-    story without strikes at open, in the text gamma. ``fonts`` are the
-    faces the story is set in; a story in :data:`_KEEP_STRIKES` keeps them.
+    The layer was redrawn, or its story changed under its raster
+    (``tools/sweep_strikes.py``). Photoshop mixes a raster under stale
+    strikes straight, and composes a story without strikes at open, in the
+    text gamma. ``fonts`` are the faces the story is set in; a story in
+    :data:`_KEEP_STRIKES` keeps them.
     """
     if _KEEP_STRIKES.intersection(fonts):
         return
