@@ -18,6 +18,7 @@ Pretty printing is the best approach to check the descriptor content::
 
 import io
 import logging
+import struct
 from collections import OrderedDict
 from collections.abc import Iterator
 from typing import IO, Any, Self
@@ -43,6 +44,7 @@ from psd_tools.psd.bin_utils import (
     trimmed_repr,
     write_bytes,
     write_fmt,
+    write_joined,
     write_length_block,
     write_padding,
     write_unicode_string,
@@ -131,6 +133,10 @@ class _DescriptorMixin(DictElement):
             return {"name": name, "classID": classID, "items": items}
 
     def _write_body(self, fp: IO[bytes]) -> int:
+        if type(self) in _FAST_BODIES:
+            out: list[bytes] = []
+            written = _body_bytes(self, out, fp)
+            return written + write_joined(fp, out)
         written = write_unicode_string(fp, self.name, padding=1)
         written += write_length_and_key(fp, self.classID)
         written += write_fmt(fp, "I", len(self))
@@ -901,6 +907,82 @@ class DescriptorBlock2(Descriptor):
         written += self._write_body(fp)
         written += write_padding(fp, written, padding)
         return written
+
+
+# The fast writer below takes these exact classes; others write themselves.
+_FAST_BODIES = frozenset(
+    {Descriptor, GlobalObject, ObjectArray, DescriptorBlock, DescriptorBlock2}
+)
+_U32 = struct.Struct(">I").pack
+_I32 = struct.Struct(">i").pack
+_I64 = struct.Struct(">q").pack
+_F64 = struct.Struct(">d").pack
+_UNIT_F64 = struct.Struct(">4sd").pack
+
+
+def _key_bytes(value: bytes, out: list[bytes]) -> None:
+    """Write a key into ``out`` as ``write_length_and_key`` does."""
+    compact = value in _TERMS or isinstance(value, _ZeroLengthKey)
+    out.append(_U32(0 if compact else len(value)))
+    out.append(value)
+
+
+def _body_bytes(d: Any, out: list[bytes], fp: IO[bytes]) -> int:
+    """Write a body into ``out``; return what other values wrote to ``fp``."""
+    name = d.name.encode("utf-16-be")
+    out.append(_U32(len(name) // 2))
+    out.append(name)
+    _key_bytes(d.classID, out)
+    items = d._items
+    out.append(_U32(len(items)))
+    written = 0
+    for key, value in items.items():
+        _key_bytes(key, out)
+        out.append(value.ostype.value)
+        written += _value_bytes(value, out, fp)
+    return written
+
+
+def _value_bytes(v: Any, out: list[bytes], fp: IO[bytes]) -> int:
+    """Write ``v`` into ``out`` if its class is exact; others flush and write."""
+    t = type(v)
+    if t is UnitFloat:
+        out.append(_UNIT_F64(v.unit.value, v.value))
+    elif t is Enumerated:
+        _key_bytes(v.typeID, out)
+        _key_bytes(v.enum, out)
+    elif t is Double:
+        out.append(_F64(v.value))
+    elif t is Descriptor or t is GlobalObject:
+        return _body_bytes(v, out, fp)
+    elif t is Bool and type(v.value) is bool:
+        out.append(b"\x01" if v.value else b"\x00")
+    elif t is Integer:
+        out.append(_I32(v.value))
+    elif t is String and type(v.value) is str:
+        data = v.value.encode("utf-16-be")
+        out.append(_U32(len(data) // 2))
+        out.append(data)
+    elif t is List:
+        items = v._items
+        out.append(_U32(len(items)))
+        written = 0
+        for item in items:
+            out.append(item.ostype.value)
+            written += _value_bytes(item, out, fp)
+        return written
+    elif t is LargeInteger:
+        out.append(_I64(v.value))
+    elif t is ObjectArray:
+        out.append(_U32(v.items_count))
+        return _body_bytes(v, out, fp)
+    elif t is RawData and type(v.value) is bytes:
+        out.append(_U32(len(v.value)))
+        out.append(v.value)
+    else:
+        written = write_joined(fp, out)
+        return written + v.write(fp)  # type: ignore[no-any-return]
+    return 0
 
 
 def _compiled_body(fp: io.BytesIO) -> dict[str, Any] | None:
