@@ -1,3 +1,4 @@
+import io
 import logging
 from collections.abc import Iterator
 from pathlib import Path
@@ -283,6 +284,18 @@ def test_type_layer(type_layer: TypeLayer) -> None:
     assert type_layer.resource_dict
     assert type_layer.document_resources
     assert type_layer.warp
+
+
+def test_type_layer_reads_its_tysh_on_first_use() -> None:
+    psd = PSDImage.open(full_name("layers/type-layer.psd"))
+    layer = psd[0]
+    assert isinstance(layer, TypeLayer)
+    block = layer.tagged_blocks[Tag.TYPE_TOOL_OBJECT_SETTING]
+    psd.save(io.BytesIO())
+    assert block._held is not None  # open and save left it as bytes
+    assert layer.text == "A"
+    assert block._held is None
+    assert layer._type_data is block.data
 
 
 def test_group_writable_properties(group: Group) -> None:

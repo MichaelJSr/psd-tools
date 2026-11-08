@@ -611,7 +611,16 @@ class SmartObject:
 
 def _has_filters(blocks: TaggedBlocks) -> bool:
     """Whether a layer's smart object data carries smart filters."""
-    for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2):
+    keys = [
+        key
+        for key in (Tag.SMART_OBJECT_LAYER_DATA1, Tag.SMART_OBJECT_LAYER_DATA2)
+        if key in blocks
+    ]
+    if len(keys) == 1:
+        held = blocks[keys[0]]._held
+        if held is not None and b"filterFX" not in held[0]:
+            return False  # unparsed, and no such key in its bytes
+    for key in keys:
         config = blocks.get_data(key)
         if config is not None:
             return isinstance(config.data.get(b"filterFX"), Descriptor)

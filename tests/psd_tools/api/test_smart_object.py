@@ -14,7 +14,7 @@ import pytest
 
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.api.smart_object import SmartObject
+from psd_tools.api.smart_object import SmartObject, _has_filters
 from psd_tools.constants import LinkedLayerType, Tag
 from psd_tools.psd.descriptor import Bool, String
 from psd_tools.psd.filter_effects import FilterEffect
@@ -147,6 +147,20 @@ def test_smart_filter_accessors_read_the_document_block(version: int) -> None:
     x0, y0, x1, y1 = layer.bbox
     assert painted[0] == (x0, y0 - 1, x1, y1 + 1)
     assert np.array_equal(painted[1], filtered.mask)
+
+
+def test_open_finds_smart_filters_without_parsing_others() -> None:
+    psd = PSDImage.open(full_name("layers/smartobject-layer.psd"))
+    layer = psd[0]
+    assert isinstance(layer, SmartObjectLayer)
+    assert layer.tagged_blocks[Tag.SMART_OBJECT_LAYER_DATA1]._held is not None
+    assert psd._opened_records[id(layer._record)][1] is None
+    enable_filters(layer)
+    assert _has_filters(layer.tagged_blocks)  # parsed: read as before
+    out = io.BytesIO()
+    psd.save(out)
+    psd = PSDImage.open(io.BytesIO(out.getvalue()))
+    assert psd._opened_records[id(psd[0]._record)][1] == 0
 
 
 def test_smart_filter_item_is_named_after_the_placed_id() -> None:
