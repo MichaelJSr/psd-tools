@@ -82,3 +82,26 @@ def test_rows_decode_in_one_call(monkeypatch: pytest.MonkeyPatch, version: int) 
             patch.setattr(codecs, "rle_impl", rle)
             assert codecs.decode_rle(data, width, height, 8, version) == batched
         assert len(batched) == height * width
+
+
+@compiled
+def test_rows_decode_packets_of_every_length() -> None:
+    """Short and long runs and literals, rows clipped or cut short, the data's end."""
+    rng = random.Random(0)
+    for _ in range(300):
+        width = rng.choice([1, 2, 8, 15, 16, 17, 31, 64, 300])
+        rows = []
+        for _ in range(rng.randint(1, 5)):
+            raw = bytearray()
+            while len(raw) < width + 20:
+                n = rng.randint(1, 140)
+                raw += rng.randbytes(1) * n if rng.random() < 0.5 else rng.randbytes(n)
+            rows.append(rle.encode(bytes(raw[: rng.randint(0, width + 20)])))
+        counts = [len(row) for row in rows]
+        data = b"".join(rows)
+        data = data[: rng.randint(len(data) // 2, len(data))]
+        expected, pos = [], 0
+        for count in counts:
+            expected.append(rle.decode(data[pos : pos + count], width))
+            pos = min(pos + count, len(data))
+        assert _rle.decode_rows(data, 0, counts, width) == b"".join(expected)

@@ -1,6 +1,9 @@
 # distutils: language=c++
 # cython: wraparound=False, binding=False
 
+from cpython.bytes cimport PyBytes_AsString, PyBytes_FromStringAndSize
+from libc.stdint cimport uint64_t
+from libc.string cimport memcpy, memset
 from libcpp.string cimport string
 from libcpp.algorithm cimport copy_n, fill_n
 
@@ -38,6 +41,51 @@ cdef void _decode_into(
         # bit == 128: no-op
 
 
+cdef Py_ssize_t _decode_fast(
+    const unsigned char* data, Py_ssize_t length, Py_ssize_t readable,
+    char* out, Py_ssize_t size, Py_ssize_t writable
+) noexcept nogil:
+    """_decode_into, but a packet of 16 bytes or less is two 8-byte stores that
+    may write ahead into bytes written later; ``readable`` and ``writable``
+    bound the reads and writes. Returns the bytes decoded, unzeroed."""
+    cdef Py_ssize_t i = 0
+    cdef Py_ssize_t j = 0
+    cdef Py_ssize_t actual, available
+    cdef unsigned char bit
+    cdef uint64_t word
+
+    if length == 1:
+        return 0
+
+    while i < length and j < size:
+        i, bit = i+1, data[i]
+        if bit > 128:
+            bit = 256 - bit
+            if i >= length:
+                break
+            actual = min(1+bit, size-j)
+            if actual <= 16 and j + 16 <= writable:
+                word = <uint64_t>data[i] * <uint64_t>0x0101010101010101
+                memcpy(out+j, &word, 8)
+                memcpy(out+j+8, &word, 8)
+            else:
+                memset(out+j, data[i], actual)
+            j += actual
+            i += 1
+        elif bit < 128:
+            if i >= length:
+                break
+            available = min(length-i, 1+bit)
+            actual = min(available, size-j)
+            if actual <= 16 and j + 16 <= writable and i + 16 <= readable:
+                memcpy(out+j, &data[i], 16)
+            else:
+                memcpy(out+j, &data[i], actual)
+            j += actual
+            i += available
+    return j
+
+
 def decode(const unsigned char[:] data, Py_ssize_t size) -> string:
     """decode(data, size) -> bytes
 
@@ -57,7 +105,7 @@ def decode(const unsigned char[:] data, Py_ssize_t size) -> string:
 
 def decode_rows(
     const unsigned char[:] data, Py_ssize_t start, counts, Py_ssize_t size
-) -> string:
+):
     """decode_rows(data, start, counts, size) -> bytes
 
     :func:`decode` of each row in turn, joined: the rows follow one another
@@ -66,15 +114,26 @@ def decode_rows(
     """
     cdef Py_ssize_t length = data.shape[0]
     cdef Py_ssize_t pos = min(max(start, 0), length)
-    cdef Py_ssize_t row = 0, count, end
-    cdef string result
-    result.resize(len(counts) * size)  # zero-initialised
+    cdef Py_ssize_t row = 0, count, end, done
+    cdef Py_ssize_t rows = len(counts)
+    cdef Py_ssize_t total = rows * size
+    result = PyBytes_FromStringAndSize(NULL, total)
+    cdef char* buf = PyBytes_AsString(result)
+    cdef char* out
     for count in counts:
+        if row == rows:
+            break
         end = min(pos + count, length)
+        out = buf + row * size
+        done = 0
         if end > pos:
-            _decode_into(&data[pos], end - pos, &result[row * size], size)
+            done = _decode_fast(
+                &data[pos], end - pos, length - pos, out, size, total - row * size
+            )
+        memset(out + done, 0, size - done)  # tail, write-ahead included
         pos = end
         row += 1
+    memset(buf + row * size, 0, (rows - row) * size)
     return result
 
 
