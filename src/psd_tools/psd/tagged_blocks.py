@@ -410,8 +410,14 @@ class TaggedBlock(BaseElement):
     @classmethod
     def _unparsed(cls, signature: bytes, key: Any, raw: bytes, padding: int) -> Self:
         """Keep ``raw`` as it is until read, then parse it on the open's budget."""
-        self = cls(signature, key)
-        self._held = (raw, padding, current_budget())
+        # Without attrs' __init__: callers checked the signature. __new__ charges.
+        self = cls.__new__(cls)
+        set_ = object.__setattr__
+        set_(self, "signature", signature)
+        set_(self, "key", key)
+        set_(self, "_data", b"")
+        set_(self, "_span", None)
+        set_(self, "_held", (raw, padding, current_budget()))
         return self
 
     @classmethod
