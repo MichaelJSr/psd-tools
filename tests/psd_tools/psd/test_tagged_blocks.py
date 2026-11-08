@@ -235,3 +235,14 @@ def test_nested_layer_info_blocks_raise_a_parse_limit_error() -> None:
     record.tagged_blocks[Tag.LAYER_16] = TaggedBlock(b"8BIM", Tag.LAYER_16, inner)
     with pytest.raises(ParseLimitError):
         PSD.frombytes(psd.tobytes())
+
+
+def test_set_data_keeps_an_effects_block() -> None:
+    """Photoshop 2023 refuses a layer's effects written back at version 1."""
+    fx = DescriptorBlock2(version=0, data_version=16, name="\x00")
+    blocks = TaggedBlocks()
+    blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, fx)
+    assert blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO) is fx
+    blocks.set_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1, {})
+    made = blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1)
+    assert (made.version, made.data_version, made.name) == (0, 16, "\x00")
