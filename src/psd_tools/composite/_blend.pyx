@@ -229,6 +229,25 @@ def passthrough(
     return result
 
 
+cdef inline void _unmix3(
+    const float* p_c, const float* p_bc, const float* p_ba, const float* p_a, float* o, Py_ssize_t w,
+) noexcept nogil:
+    # Three channels spelled out, so the pixel loop vectorizes.
+    cdef Py_ssize_t x, i
+    cdef float ba, a, r, q
+    for x in range(w):
+        ba = p_ba[x]
+        a = p_a[x]
+        r = (ba / a if a > 0 else <float>1.0) - ba
+        i = 3 * x
+        q = p_c[i]
+        o[i] = _clip(q + (q - p_bc[i]) * r)
+        q = p_c[i + 1]
+        o[i + 1] = _clip(q + (q - p_bc[i + 1]) * r)
+        q = p_c[i + 2]
+        o[i + 2] = _clip(q + (q - p_bc[i + 2]) * r)
+
+
 def unmix(
     const float[:, :, :] color,
     const float[:, :, :] backdrop_color,
@@ -256,6 +275,9 @@ def unmix(
         for y in range(h):
             p_c, p_bc = &color[y, 0, 0], &backdrop_color[y, 0, 0]
             p_ba, p_a, o = &backdrop_alpha[y, 0, 0], &alpha[y, 0, 0], &out[y, 0, 0]
+            if n == 3:
+                _unmix3(p_c, p_bc, p_ba, p_a, o, w)
+                continue
             for x in range(w):
                 ba = p_ba[x]
                 a = p_a[x]
