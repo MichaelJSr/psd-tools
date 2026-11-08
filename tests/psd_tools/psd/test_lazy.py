@@ -3,6 +3,7 @@
 import copy
 import io
 import os
+import pickle
 from typing import IO, cast
 
 import numpy as np
@@ -206,3 +207,32 @@ def test_lazy_payload_is_checked_when_read() -> None:
     )
     with pytest.raises(ValueError):
         channel.data
+
+
+@pytest.mark.parametrize(
+    "filename", ["layers/pixel-layer.psd", "layers/type-layer.psd"]
+)
+def test_bytesio_open_defers_in_memory(filename: str) -> None:
+    """A BytesIO open defers payloads, keeps no channel read, saves as read, pickles."""
+    with open(full_name(filename), "rb") as f:
+        raw = f.read()
+    eager = PSDImage(PSD.read(io.BytesIO(raw)))
+    expected = io.BytesIO()
+    eager.save(expected)
+    buf = io.BytesIO(raw)
+    psd = PSDImage.open(buf)
+    assert _payloads(psd._record)
+    buf.seek(0)
+    buf.write(b"\0" * len(raw))  # the caller's buffer is not the source
+    unread = [c for _, cs in psd._record._iter_layers() for c in cs if c._span]
+    assert unread
+    for layer, like in zip(psd.descendants(), eager.descendants(), strict=True):
+        a, b = layer.numpy(), like.numpy()
+        assert (a is None) == (b is None)
+        assert a is None or b is None or a.tobytes() == b.tobytes()
+    assert all(c._span is not None for c in unread)  # read, none kept
+    out = io.BytesIO()
+    psd.save(out)
+    assert out.getvalue() == expected.getvalue()
+    again = pickle.loads(pickle.dumps(psd))
+    assert again.numpy().tobytes() == eager.numpy().tobytes()

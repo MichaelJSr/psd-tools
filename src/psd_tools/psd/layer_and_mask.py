@@ -1359,6 +1359,8 @@ class ChannelData(LazyPayload, BaseElement):
     _data: bytes = b""
     _span: Span | None = field(default=None, init=False)
 
+    _KEEP_READS = False  # a channel read again is sliced again: held once
+
     @classmethod
     def read(cls, fp: IO[bytes], length: int = 0, **kwargs: Any) -> Self:
         """Read the structure from a file-like object."""
@@ -1381,6 +1383,8 @@ class ChannelData(LazyPayload, BaseElement):
 
     def write(self, fp: IO[bytes], **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""
+        if self._span is not None:  # unread: as read
+            return write_bytes(fp, self._span.view())
         written = write_fmt(fp, "H", self.compression.value)
         written += write_bytes(fp, self.data)
         # written += write_padding(fp, written, 2)  # Seems no padding here.

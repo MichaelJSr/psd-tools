@@ -5,7 +5,8 @@ Lazy reads: pixel payloads left in the file until something reads them.
 structure as usual but skips the layers' channel data and the merged image
 data. Each skipped payload is a :py:class:`Span` of the file, read at first
 use of ``ChannelData.data`` or ``ImageData.data``. The file must stay open as
-long as the document is used.
+long as the document is used; an ``io.BytesIO``'s bytes are kept instead, and
+a payload never read is saved as it was read.
 
 This pays off when reading the file is expensive, e.g. over HTTP range
 requests (:py:class:`~psd_tools.range_reader.RangeReader`): opening a card
@@ -22,12 +23,13 @@ Code that walks fields (``attrs.fields``) instead of reading ``data`` calls
 :py:func:`load` on each node first.
 """
 
+import io
 import struct
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import IO, Any
+from typing import IO, Any, ClassVar
 
 from psd_tools.constants import Compression
 from psd_tools.psd.bin_utils import _BoundedReader, _remaining_bytes
@@ -35,13 +37,22 @@ from psd_tools.psd.parse_limits import consume_bytes
 
 
 class _Source:
-    """The document's file and the lock that serializes its seek-then-read."""
+    """The document's file and the lock that serializes its seek-then-read.
 
-    __slots__ = ("fp", "lock")
+    A ``BytesIO`` keeps its bytes in ``data``: spans are views of them.
+    """
+
+    __slots__ = ("fp", "lock", "data")
 
     def __init__(self, fp: IO[bytes]):
         self.fp = fp
         self.lock = threading.Lock()
+        self.data: bytes | None = fp.getvalue() if type(fp) is io.BytesIO else None
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        if self.data is None:
+            raise TypeError("a lazy read of an open file does not pickle")
+        return (_Source, (io.BytesIO(self.data),))
 
 
 class Span:
@@ -56,16 +67,27 @@ class Span:
 
     def read(self) -> bytes:
         """Read the bytes; raise OSError when the file has fewer."""
-        with self._source.lock:
-            fp = self._source.fp
-            fp.seek(self.offset)
-            data = fp.read(self.length)
+        whole = self._source.data
+        if whole is not None:
+            data = whole[self.offset : self.offset + self.length]
+        else:
+            with self._source.lock:
+                fp = self._source.fp
+                fp.seek(self.offset)
+                data = fp.read(self.length)
         if len(data) != self.length:
             raise OSError(
                 "Failed to read data section: read=%d, expected=%d."
                 % (len(data), self.length)
             )
         return data
+
+    def view(self) -> bytes | memoryview:
+        """Return the bytes, uncopied when the source is in memory, else :py:meth:`read`."""
+        whole = self._source.data
+        if whole is not None and self.offset + self.length <= len(whole):
+            return memoryview(whole)[self.offset : self.offset + self.length]
+        return self.read()
 
     def __copy__(self) -> "Span":
         return self
@@ -135,17 +157,28 @@ class LazyPayload:
     _compression: Compression
     _data: bytes
     _span: Span | None
+    # Whether a read from bytes in memory is kept (True), or sliced again on
+    # each read, so the payload is held once (False).
+    _KEEP_READS: ClassVar[bool] = True
 
     def _load(self) -> None:
         span = self._span
         if span is not None:
-            raw = span.read()
+            raw = span.view()
             compression = Compression(struct.unpack(">H", raw[:2])[0])
-            self._compression, self._data, self._span = compression, raw[2:], None
+            self._compression, self._data, self._span = (
+                compression,
+                bytes(raw[2:]),
+                None,
+            )
 
     @property
     def compression(self) -> Compression:
         """Compression type. See :py:class:`~psd_tools.constants.Compression`."""
+        span = self._span
+        if span is not None and not self._KEEP_READS and span._source.data is not None:
+            whole = span._source.data
+            return Compression(int.from_bytes(whole[span.offset : span.offset + 2]))
         self._load()
         return self._compression
 
@@ -157,6 +190,14 @@ class LazyPayload:
     @property
     def data(self) -> bytes:
         """Data, as compressed with ``compression``."""
+        span = self._span
+        if span is not None and not self._KEEP_READS and span._source.data is not None:
+            # In memory: a copy each time, none kept (the bytes are held once).
+            whole = span._source.data
+            end = span.offset + span.length
+            if end <= len(whole):
+                Compression(int.from_bytes(whole[span.offset : span.offset + 2]))
+                return whole[span.offset + 2 : end]
         self._load()
         return self._data
 

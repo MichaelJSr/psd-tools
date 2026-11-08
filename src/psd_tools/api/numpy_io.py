@@ -319,7 +319,7 @@ def _guard_channel_read(
     selected = [
         data
         for info, data in zip(layer._record.channel_info, layer._channels, strict=False)
-        if condition(info) and len(data.data) > 0
+        if condition(info) and data._data_length > 0
     ]
     # An empty box allocates nothing, and check_pixel_size() rejects it.
     if selected and width >= 1 and height >= 1:
@@ -383,7 +383,7 @@ def get_layer_data(
         _guard_channel_read(layer, width, height, condition, held)
         iterator = zip(layer._record.channel_info, layer._channels, strict=False)
         selected = [
-            data for info, data in iterator if condition(info) and len(data.data) > 0
+            data for info, data in iterator if condition(info) and data._data_length > 0
         ]
         if depth == 8 and _cnumpy_io is not None:
             # Every plane decoded, then levelled into one array in one pass.

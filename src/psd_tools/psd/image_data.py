@@ -97,8 +97,11 @@ class ImageData(LazyPayload, BaseElement):
     def write(self, fp: IO[bytes], **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""
         start_pos = fp.tell()
-        written = write_fmt(fp, "H", self.compression.value)
-        written += write_bytes(fp, self.data)
+        if self._span is not None:  # unread: as read
+            written = write_bytes(fp, self._span.view())
+        else:
+            written = write_fmt(fp, "H", self.compression.value)
+            written += write_bytes(fp, self.data)
         logger.debug("  wrote image data, len=%d" % (fp.tell() - start_pos))
         return written
 

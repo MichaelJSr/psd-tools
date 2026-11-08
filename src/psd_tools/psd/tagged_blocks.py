@@ -499,6 +499,8 @@ class TaggedBlock(BaseElement):
             held = self._held
             if held is not None and version == 1 and held[1] == padding:
                 return write_bytes(f, held[0])
+            if self._span is not None and self._span[1] == version:
+                return write_bytes(f, self._span[0].view())  # unread: as read
             if hasattr(self.data, "write"):
                 # It seems padding size applies at the block level here.
                 inner_padding = 1 if padding == 4 else 4
