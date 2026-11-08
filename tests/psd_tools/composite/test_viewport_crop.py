@@ -340,8 +340,8 @@ def test_a_box_render_decodes_only_the_rows_it_draws(
     read = numpy_io.get_layer_rows
     rows: list[int] = []
 
-    def spy(layer: Layer, start: int, stop: int) -> Any:
-        result = read(layer, start, stop)
+    def spy(layer: Layer, start: int, stop: int, *columns: int) -> Any:
+        result = read(layer, start, stop, *columns)
         if result is not None:
             rows.append(stop - start)
         return result
@@ -361,3 +361,33 @@ def test_a_box_render_decodes_only_the_rows_it_draws(
             assert np.array_equal(full[top:bottom, left:right], cut), box
     # The one-row box read one row of some layer.
     assert 1 in rows
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "clipping-mask4.psd",
+        "semi-transparent-layers.psd",
+        "effects/group-stroke-off-canvas.psd",
+    ],
+)
+def test_a_layer_off_the_canvas_sideways_is_read_on_its_columns(
+    filename: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A whole render reads such a layer on the canvas's columns, and draws as the whole read."""
+    read = numpy_io.get_layer_rows
+    widths: list[tuple[int, int]] = []
+
+    def spy(layer: Layer, start: int, stop: int, *columns: int) -> Any:
+        result = read(layer, start, stop, *columns)
+        if result is not None:
+            widths.append((result[0].shape[1], layer.width))
+        return result
+
+    monkeypatch.setattr(numpy_io, "get_layer_rows", spy)
+    psd = PSDImage.open(full_name(filename))
+    windowed = composite(psd)
+    assert any(cut < whole for cut, whole in widths)
+    monkeypatch.setattr(Compositor, "_read_rows", lambda *_: None)
+    for cut, whole in zip(windowed, composite(psd), strict=True):
+        assert np.array_equal(cut, whole)
