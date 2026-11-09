@@ -756,6 +756,29 @@ def _shape_layout(
     return box[0], box[1], box[2], box[3]
 
 
+def _scaled_layout(
+    box: _Box, descriptor: Any
+) -> tuple[float, float, float, float] | _Box:
+    """A scaled ramp's box on a layer's opaque box, as Photoshop 2023 lays it.
+
+    Along a ramp at 0 or 90 degrees the scaled half-length falls to whole
+    pixels, and each end, the box's centre less or plus it, is cut to an
+    integer toward zero. 100% and any other angle keep ``box``.
+    """
+    scale = paint._finite(descriptor, Key.Scale, 100.0) / 100.0
+    angle = paint._finite(descriptor, Key.Angle, 0.0) % 180.0
+    if scale == 1.0 or not scale > 0.0 or angle not in (0.0, 90.0):
+        return box
+    lo, hi = (1, 3) if angle == 90.0 else (0, 2)
+    centre = (box[lo] + box[hi]) / 2.0
+    half = math.floor((box[hi] - box[lo]) * scale / 2.0 + 1e-9)
+    start, end = math.trunc(centre - half), math.trunc(centre + half)
+    middle, reach = (start + end) / 2.0, (end - start) / scale / 2.0
+    out: list[float] = [float(v) for v in box]
+    out[lo], out[hi] = middle - reach, middle + reach
+    return out[0], out[1], out[2], out[3]
+
+
 def _draw_gradient_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -765,6 +788,8 @@ def _draw_gradient_overlay(
         path = _shape_layout(layer, descriptor)
         if path is None:
             layout = _opaque_bounds(layer, layout)
+            if isinstance(layer, (PixelLayer, SmartObjectLayer, TypeLayer)):
+                path = _scaled_layout(layout, descriptor)
     return paint.draw_gradient_fill(
         box,
         layer._psd.color_mode,

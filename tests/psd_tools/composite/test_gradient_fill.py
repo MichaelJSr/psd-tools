@@ -23,6 +23,7 @@ from psd_tools.composite.composite import (
     _draw_gradient_overlay,
     _opaque_bounds,
     _path_bbox,
+    _scaled_layout,
     composite,
 )
 from psd_tools.composite.effects import draw_stroke_effect
@@ -1129,6 +1130,31 @@ def test_a_pixel_layers_overlay_is_laid_out_on_its_over_half_opaque_pixels() -> 
     assert np.array_equal(color, expected)
     rows = np.clip(1.0 - (np.arange(10) - 1) / 7, 0.0, 1.0)
     assert np.allclose(color[..., 0], rows[:, None], atol=1e-6)
+
+
+def test_a_scaled_overlay_ends_on_whole_pixels_cut_toward_zero() -> None:
+    """At 150% the ends are the centre -/+ the floored half, cut toward zero.
+
+    As Photoshop 2023 draws 245 fitted layers on 129 cards.
+    """
+    psd, layer = _soft_edged_layer()
+    desc = _gradient(angle=90.0, scale=150.0)
+    # Opaque rows 4-11: centre 7.5, half 5, ends 2 and 12.
+    box = _scaled_layout(_opaque_bounds(layer, layer.bbox), desc)
+    assert np.allclose(box, (5, 7 - 10 / 3, 15, 7 + 10 / 3))
+    color, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
+    expected, _ = paint.draw_gradient_fill(layer.bbox, psd.color_mode, desc, box)
+    assert color is not None and expected is not None
+    assert np.array_equal(color, expected)
+    # Above the document the start rounds up: -4.5 to -4.
+    assert np.allclose(_scaled_layout((0, -3, 10, 4), desc), (0, -2.5, 10, 3.5))
+    assert _scaled_layout((0, -3, 10, 4), _gradient(angle=90.0)) == (0, -3, 10, 4)
+    assert _scaled_layout((0, -3, 10, 4), _gradient(angle=45.0, scale=150.0)) == (
+        0,
+        -3,
+        10,
+        4,
+    )
 
 
 def test_an_overlay_keeps_its_layout_without_pixels_over_half_opaque() -> None:
