@@ -4189,6 +4189,10 @@ class Compositor:
         self._unite(shape, alpha)
 
         scalar = type(mask) is float
+        if scalar and mask == 1.0 and color.dtype == np.float32:
+            # At 100% the mix gives back ``color`` (to a float32 step): keep it.
+            self._color = color
+            return
         if _compiled_fits(
             (alpha, alpha_b, self._alpha) + (() if scalar else (mask,)),
             (color_b, color),

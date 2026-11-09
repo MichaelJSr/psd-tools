@@ -556,6 +556,20 @@ def test_passthrough_over_nothing_keeps_the_group_colour() -> None:
     assert np.allclose(compositor.result_over_backdrop(), rgb(BLUE))
 
 
+def test_passthrough_at_full_opacity_keeps_the_group_canvas() -> None:
+    """At 100% the group, already over the backdrop, is kept as it is; less mixes."""
+    group = rgb(BLUE)
+    compositor = Compositor((0, 0, 2, 2), rgb(RED), gray(0.5))
+    compositor._apply_passthrough_source(group, gray(0.5), gray(0.5), 1.0)
+    assert compositor.result_over_backdrop() is group
+    assert np.allclose(compositor._alpha, 0.75)
+
+    compositor = Compositor((0, 0, 2, 2), rgb(RED), gray(0.5))
+    compositor._apply_passthrough_source(group, gray(0.25), gray(0.25), 0.5)
+    assert np.allclose(compositor.result_over_backdrop(), rgb((0.4, 0.0, 0.6)))
+    assert np.allclose(compositor._alpha, 0.625)
+
+
 @pytest.mark.parametrize("source_alpha", [0.0, 0.25, 0.5, 0.75, 1.0])
 def test_apply_source_matches_the_textbook_over_operator(source_alpha: float) -> None:
     """Cross-check against straight-alpha "over" computed independently.
