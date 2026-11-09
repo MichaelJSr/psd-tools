@@ -157,3 +157,55 @@ def test_a_layer_without_a_path_has_no_drawn_box() -> None:
     psd = PSDImage.open(full_name("adjustment-fillers.psd"))
     background = next(layer for layer in psd if layer.name == "Background")
     assert vector.drawn_bbox(background) is None
+
+
+@pytest.mark.parametrize(
+    "filename", ["layer-edit.psd", "effects/stroke-effects.psd", "masks.psd"]
+)
+def test_a_group_split_into_parts_matches_it_whole(
+    monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    """Every group goes on in the parts its children change, bit for bit."""
+    psd = PSDImage.open(full_name(filename))
+    split: list[str] = []
+    real_split = composite_module.Compositor._split_boxes
+    real_local = composite_module.Compositor._local_box
+
+    def spy(self: object, layer: Layer) -> object:
+        parts = real_split(self, layer)  # type: ignore[arg-type]
+        if parts is not None and len(parts) > 1:
+            split.append(layer.name)
+        return parts
+
+    def local(self: object, layer: Layer) -> object:
+        return None if layer.is_group() else real_local(self, layer)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(composite_module.Compositor, "_split_boxes", spy)
+    monkeypatch.setattr(composite_module.Compositor, "_local_box", local)
+    monkeypatch.setattr(composite_module, "_SPLIT_GAIN", 0)
+    monkeypatch.setattr(composite_module, "_LOCAL_SHARE", 1.0)
+    parted = composite_module.composite(psd, force=True)
+    assert split
+
+    monkeypatch.setattr(composite_module, "_SPLIT_BOXES", False)
+    whole = composite_module.composite(psd, force=True)
+    for got, expected in zip(parted, whole, strict=True):
+        np.testing.assert_array_equal(got, expected)
+
+
+def test_a_group_no_part_of_which_is_in_view_goes_on_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As before the split: whole, not skipped (colour under alpha 0 stays)."""
+    psd = PSDImage.open(full_name("layer-edit.psd"))
+    answers: dict[str, object] = {}
+    real_split = composite_module.Compositor._split_boxes
+
+    def spy(self: object, layer: Layer) -> object:
+        answers[layer.name] = real_split(self, layer)  # type: ignore[arg-type]
+        return answers[layer.name]
+
+    monkeypatch.setattr(composite_module.Compositor, "_split_boxes", spy)
+    composite_module.composite(psd, viewport=(25, 3, 27, 5), force=True)
+    assert "Text" in answers
+    assert answers["Text"] is None
