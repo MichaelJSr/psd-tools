@@ -6,8 +6,9 @@ the same order, so the results are bit-identical. Memoryviews only, so the
 module builds against the Limited API without numpy headers.
 """
 import numpy as np
-from libc.math cimport INFINITY, sqrt
+from libc.math cimport INFINITY, signbit, sqrt
 from libc.stdlib cimport calloc, free, malloc
+from libc.string cimport memcpy
 
 
 def prune_min(
@@ -195,12 +196,350 @@ cdef void _tent_cols(const float* src, float* dst, Py_ssize_t h, Py_ssize_t n, c
             dst[i * n + k] = <float>acc[k]
 
 
+cdef void _rows_span(const float** rp, float* out, Py_ssize_t k0, Py_ssize_t k1, const double* w,
+                     Py_ssize_t s, double* acc, const Py_ssize_t* taps, const Py_ssize_t* tlo,
+                     const Py_ssize_t* thi, Py_ssize_t ntaps) noexcept nogil:
+    # _tent_rows' sum on columns k0 to k1 over the pairs in taps, each read only in [tlo, thi): both +0 elsewhere.
+    cdef Py_ssize_t k, t, jj, lo, hi
+    cdef double w0 = w[s], v, w1, w2, w3, w4
+    cdef const float* a1 = rp[s]
+    cdef const float* b1
+    cdef const float* a2
+    cdef const float* b2
+    cdef const float* a3
+    cdef const float* b3
+    cdef const float* a4
+    cdef const float* b4
+    for k in range(k0, k1):
+        acc[k] = <double>a1[k] * w0
+    t = 0
+    while t + 4 <= ntaps:
+        lo = tlo[t]
+        hi = thi[t]
+        for k in range(t + 1, t + 4):
+            if tlo[k] < lo:
+                lo = tlo[k]
+            if thi[k] > hi:
+                hi = thi[k]
+        if lo < k0:
+            lo = k0
+        if hi > k1:
+            hi = k1
+        if lo < hi:
+            jj = taps[t]
+            a1 = rp[s + jj]
+            b1 = rp[s - jj]
+            w1 = w[s + jj]
+            jj = taps[t + 1]
+            a2 = rp[s + jj]
+            b2 = rp[s - jj]
+            w2 = w[s + jj]
+            jj = taps[t + 2]
+            a3 = rp[s + jj]
+            b3 = rp[s - jj]
+            w3 = w[s + jj]
+            jj = taps[t + 3]
+            a4 = rp[s + jj]
+            b4 = rp[s - jj]
+            w4 = w[s + jj]
+            for k in range(lo, hi):
+                v = acc[k]
+                v = v + (<double>a1[k] + <double>b1[k]) * w1
+                v = v + (<double>a2[k] + <double>b2[k]) * w2
+                v = v + (<double>a3[k] + <double>b3[k]) * w3
+                v = v + (<double>a4[k] + <double>b4[k]) * w4
+                acc[k] = v
+        t = t + 4
+    while t < ntaps:
+        lo = tlo[t] if tlo[t] > k0 else k0
+        hi = thi[t] if thi[t] < k1 else k1
+        jj = taps[t]
+        a1 = rp[s + jj]
+        b1 = rp[s - jj]
+        w1 = w[s + jj]
+        for k in range(lo, hi):
+            acc[k] = acc[k] + (<double>a1[k] + <double>b1[k]) * w1
+        t = t + 1
+    for k in range(k0, k1):
+        out[k] = <float>acc[k]
+
+
+cdef inline void _cols_taps(const double* p, double* acc, Py_ssize_t lo, Py_ssize_t hi, Py_ssize_t jj,
+                            double w1, double w2, double w3, double w4) noexcept nogil:
+    cdef Py_ssize_t k
+    cdef double v
+    for k in range(lo, hi):
+        v = acc[k]
+        v = v + (p[k + jj] + p[k - jj]) * w1
+        v = v + (p[k + jj + 1] + p[k - jj - 1]) * w2
+        v = v + (p[k + jj + 2] + p[k - jj - 2]) * w3
+        v = v + (p[k + jj + 3] + p[k - jj - 3]) * w4
+        acc[k] = v
+
+
+cdef void _cols_span(const double* p, float* out, Py_ssize_t k0, Py_ssize_t k1, const double* w,
+                     Py_ssize_t s, double* acc, Py_ssize_t lo, Py_ssize_t hi) noexcept nogil:
+    # _tent_cols' sum on columns k0 to k1. p is +0 outside [lo, hi), pads too, so a pair m = -jj
+    # apart is read only for k in [lo - m, hi - m) or [lo + m, hi + m).
+    cdef Py_ssize_t k, jj, mx, mn, la, lb, ra, rb
+    cdef double w0 = w[s], w1, w2, w3, w4
+    for k in range(k0, k1):
+        acc[k] = p[k] * w0
+    jj = -s
+    while jj + 4 <= 0:
+        w1 = w[s + jj]
+        w2 = w[s + jj + 1]
+        w3 = w[s + jj + 2]
+        w4 = w[s + jj + 3]
+        mx = -jj
+        mn = -(jj + 3)
+        la = lo - mx
+        lb = hi - mn
+        ra = lo + mn
+        rb = hi + mx
+        if lb >= ra:
+            lb = rb
+            ra = rb
+        if la < k0:
+            la = k0
+        if lb > k1:
+            lb = k1
+        if ra < k0:
+            ra = k0
+        if rb > k1:
+            rb = k1
+        if la < lb:
+            _cols_taps(p, acc, la, lb, jj, w1, w2, w3, w4)
+        if ra < rb:
+            _cols_taps(p, acc, ra, rb, jj, w1, w2, w3, w4)
+        jj = jj + 4
+    while jj < 0:
+        w1 = w[s + jj]
+        mx = -jj
+        la = lo - mx
+        lb = hi - mx
+        ra = lo + mx
+        rb = hi + mx
+        if lb >= ra:
+            lb = rb
+            ra = rb
+        if la < k0:
+            la = k0
+        if lb > k1:
+            lb = k1
+        if ra < k0:
+            ra = k0
+        if rb > k1:
+            rb = k1
+        for k in range(la, lb):
+            acc[k] = acc[k] + (p[k + jj] + p[k - jj]) * w1
+        for k in range(ra, rb):
+            acc[k] = acc[k] + (p[k + jj] + p[k - jj]) * w1
+        jj = jj + 1
+    for k in range(k0, k1):
+        out[k] = <float>acc[k]
+
+
+cdef double _flat_sum(double v, const double* w, Py_ssize_t s) noexcept nogil:
+    # The sum over a window of v alone, in the spans' order (unrolled by 4, then the rest).
+    cdef double acc = v * w[s]
+    cdef Py_ssize_t jj = -s
+    while jj + 4 <= 0:
+        acc = acc + (v + v) * w[s + jj]
+        acc = acc + (v + v) * w[s + jj + 1]
+        acc = acc + (v + v) * w[s + jj + 2]
+        acc = acc + (v + v) * w[s + jj + 3]
+        jj = jj + 4
+    while jj < 0:
+        acc = acc + (v + v) * w[s + jj]
+        jj = jj + 1
+    return acc
+
+
+cdef inline unsigned int _bits(float v) noexcept nogil:
+    cdef unsigned int b
+    memcpy(&b, &v, 4)
+    return b
+
+
+cdef void _flat_rows(const float* src, const unsigned int* bits, float* dst, Py_ssize_t h, Py_ssize_t n,
+                     const double* w, Py_ssize_t s, const float* crow, unsigned int outside_bits,
+                     unsigned int one_bits, double* acc, const float** rp, int* cz, int* co,
+                     unsigned char* zr, Py_ssize_t* taps, Py_ssize_t* rlo, Py_ssize_t* rhi, Py_ssize_t* tlo,
+                     Py_ssize_t* thi, bint skip) noexcept nogil:
+    # _tent_rows; a window of one value (+0 or 1, by bits) takes its sum, worked once. The rest go
+    # through _rows_span, with skip leaving out pairs of +0 rows (no sum is -0, so +0 adds nothing).
+    cdef Py_ssize_t i, k, t, j, k0, nout, ntaps, lo, hi, width = 2 * s + 1
+    cdef int zo = outside_bits == 0, oo = outside_bits == one_bits, ez, eo
+    cdef float zero_v = <float>_flat_sum(0.0, w, s), one_v = <float>_flat_sum(1.0, w, s)
+    cdef const unsigned int* row
+    cdef unsigned int b
+    cdef float* out
+    cdef bint za, zb
+    for k in range(n):
+        cz[k] = 0
+        co[k] = 0
+    for j in range(h):
+        row = bits + j * n
+        rlo[j] = n
+        rhi[j] = 0
+        for k in range(n):
+            if row[k] != 0:
+                rlo[j] = k
+                break
+        k = n - 1
+        while k >= rlo[j]:
+            if row[k] != 0:
+                rhi[j] = k + 1
+                break
+            k = k - 1
+        zr[j] = rlo[j] >= rhi[j]
+    for j in range(0, s + 1 if s + 1 < h else h):
+        row = bits + j * n
+        for k in range(n):
+            b = row[k]
+            cz[k] += b == 0
+            co[k] += b == one_bits
+    for i in range(h):
+        for t in range(2 * s + 1):
+            j = i - s + t
+            rp[t] = src + j * n if 0 <= j < h else crow
+        nout = (s - i if s > i else 0) + (i + s - (h - 1) if i + s > h - 1 else 0)
+        ez = <int>(width - (nout if zo else 0))
+        eo = <int>(width - (nout if oo else 0))
+        out = dst + i * n
+        ntaps = -1
+        k0 = -1
+        for k in range(n + 1):
+            if k < n and cz[k] != ez and co[k] != eo:
+                if k0 < 0:
+                    k0 = k
+                continue
+            if k0 >= 0:
+                if ntaps < 0:
+                    ntaps = 0
+                    for t in range(-s, 0):
+                        if skip:
+                            j = i + t
+                            za = zr[j] if 0 <= j < h else zo
+                            lo = rlo[j] if 0 <= j < h else (n if zo else 0)
+                            hi = rhi[j] if 0 <= j < h else (0 if zo else n)
+                            j = i - t
+                            zb = zr[j] if 0 <= j < h else zo
+                            if za and zb:
+                                continue
+                            if 0 <= j < h:
+                                lo = rlo[j] if rlo[j] < lo else lo
+                                hi = rhi[j] if rhi[j] > hi else hi
+                            elif not zo:
+                                lo = 0
+                                hi = n
+                        else:
+                            lo = 0
+                            hi = n
+                        taps[ntaps] = t
+                        tlo[ntaps] = lo
+                        thi[ntaps] = hi
+                        ntaps = ntaps + 1
+                _rows_span(rp, out, k0, k, w, s, acc, taps, tlo, thi, ntaps)
+                k0 = -1
+            if k < n:
+                out[k] = zero_v if cz[k] == ez else one_v
+        # slide: row i - s leaves, row i + s + 1 comes in
+        j = i - s
+        if 0 <= j < h:
+            row = bits + j * n
+            for k in range(n):
+                b = row[k]
+                cz[k] -= b == 0
+                co[k] -= b == one_bits
+        j = i + s + 1
+        if 0 <= j < h:
+            row = bits + j * n
+            for k in range(n):
+                b = row[k]
+                cz[k] += b == 0
+                co[k] += b == one_bits
+
+
+cdef void _flat_cols(const float* src, float* dst, Py_ssize_t h, Py_ssize_t n, const double* w,
+                     Py_ssize_t s, double cval, double* acc, double* pad, bint skip) noexcept nogil:
+    # _tent_cols; a window of one value (by bits, pads included) takes its sum, once per run.
+    cdef Py_ssize_t i, k, k0, t, changes, lo, hi
+    cdef double* p = pad + s
+    cdef const float* row
+    cdef unsigned int pad_bits = _bits(<float>cval), last_bits = 0, b
+    cdef float last_v = <float>_flat_sum(0.0, w, s)
+    cdef float* out
+    for k in range(s):
+        pad[k] = cval
+        pad[s + n + k] = cval
+    for i in range(h):
+        row = src + i * n
+        for k in range(n):
+            p[k] = <double>row[k]
+        out = dst + i * n
+        # the row's span of nonzero bits; with pads not +0 (or skip off), all of it
+        lo = -s
+        hi = n + s
+        if skip and pad_bits == 0:
+            lo = n
+            hi = 0
+            for k in range(n):
+                if _bits(row[k]) != 0:
+                    lo = k
+                    break
+            k = n - 1
+            while k >= lo:
+                if _bits(row[k]) != 0:
+                    hi = k + 1
+                    break
+                k = k - 1
+        # neighbours that differ inside the window [k - s, k + s]
+        changes = 0
+        for t in range(-s + 1, s + 1):
+            changes += _qbits(row, n, t, pad_bits) != _qbits(row, n, t - 1, pad_bits)
+        k0 = -1
+        for k in range(n + 1):
+            if k < n and changes != 0:
+                if k0 < 0:
+                    k0 = k
+            else:
+                if k0 >= 0:
+                    _cols_span(p, out, k0, k, w, s, acc, lo, hi)
+                    k0 = -1
+                if k < n:
+                    b = _bits(row[k])
+                    if b != last_bits:
+                        last_bits = b
+                        last_v = <float>_flat_sum(p[k], w, s)
+                    out[k] = last_v
+            if k < n:
+                t = k + s + 1
+                changes += _qbits(row, n, t, pad_bits) != _qbits(row, n, t - 1, pad_bits)
+                t = k - s + 1
+                changes -= _qbits(row, n, t, pad_bits) != _qbits(row, n, t - 1, pad_bits)
+
+
+cdef inline unsigned int _qbits(const float* row, Py_ssize_t n, Py_ssize_t t, unsigned int pad_bits) noexcept nogil:
+    return _bits(row[t]) if 0 <= t < n else pad_bits
+
+
+cdef unsigned int NEG_ZERO = 0x80000000
+
+# Below this reach the plain loops cost less than the window counts.
+FLAT_MIN_REACH = 8
+
+
 def tent_blur(const float[:, ::1] alpha, const double[::1] weights, float outside):
     """ndimage.correlate1d over axis 0, then axis 1, mode "constant".
 
     scipy's sum for an odd, symmetric kernel: in double, the centre tap,
     then each pair from the farthest in, rounded to float32 after each axis.
-    Never fused, so every machine gets the same bits.
+    Never fused, so every machine gets the same bits. From a reach of
+    FLAT_MIN_REACH, a window holding one value (by its bits; +0 or 1 on
+    axis 0) takes that value's sum, worked once in the same order, and with
+    no sign bit anywhere terms that are +0 are left out. Same bits.
     """
     if weights.shape[0] % 2 == 0:
         raise ValueError("odd kernel only")
@@ -211,25 +550,70 @@ def tent_blur(const float[:, ::1] alpha, const double[::1] weights, float outsid
         return out
     cdef float[:, ::1] m = mid
     cdef float[:, ::1] o = out
+    cdef const unsigned int[:, ::1] bits
+    cdef bint flat = s >= FLAT_MIN_REACH
+    cdef unsigned int one_bits = 0x3F800000
+    if flat:
+        bits = np.asarray(alpha).view(np.uint32)
     cdef double* acc = <double*>malloc(n * sizeof(double))
     cdef double* pad = <double*>malloc((n + 2 * s) * sizeof(double))
     cdef float* crow = <float*>malloc(n * sizeof(float))
     cdef const float** rp = <const float**>malloc((2 * s + 1) * sizeof(float*))
-    if acc == NULL or pad == NULL or crow == NULL or rp == NULL:
+    cdef int* cz = <int*>malloc(n * sizeof(int))
+    cdef int* co = <int*>malloc(n * sizeof(int))
+    cdef unsigned char* zr = <unsigned char*>malloc(h * sizeof(unsigned char))
+    cdef Py_ssize_t* taps = <Py_ssize_t*>malloc((s + 1) * sizeof(Py_ssize_t))
+    cdef Py_ssize_t* tlo = <Py_ssize_t*>malloc((s + 1) * sizeof(Py_ssize_t))
+    cdef Py_ssize_t* thi = <Py_ssize_t*>malloc((s + 1) * sizeof(Py_ssize_t))
+    cdef Py_ssize_t* rlo = <Py_ssize_t*>malloc((h + 1) * sizeof(Py_ssize_t))
+    cdef Py_ssize_t* rhi = <Py_ssize_t*>malloc((h + 1) * sizeof(Py_ssize_t))
+    cdef bint skip = False
+    if acc == NULL or pad == NULL or crow == NULL or rp == NULL or cz == NULL or co == NULL or zr == NULL or taps == NULL \
+            or tlo == NULL or thi == NULL or rlo == NULL or rhi == NULL:
         free(acc)
         free(pad)
         free(crow)
         free(rp)
+        free(cz)
+        free(co)
+        free(zr)
+        free(taps)
+        free(tlo)
+        free(thi)
+        free(rlo)
+        free(rhi)
         raise MemoryError()
     with nogil:
         for k in range(n):
             crow[k] = outside
-        _tent_rows(&alpha[0, 0], &m[0, 0], h, n, &weights[0], s, crow, acc, rp)
-        _tent_cols(&m[0, 0], &o[0, 0], h, n, &weights[0], s, outside, acc, pad)
+        if flat:
+            # skip only with no sign bit in alpha, outside or weights, and finite weights: no sum is -0
+            skip = (_bits(outside) & NEG_ZERO) == 0
+            for k in range(2 * s + 1):
+                if not weights[k] < INFINITY or signbit(weights[k]):
+                    skip = False
+            for k in range(h * n if skip else 0):
+                if (&bits[0, 0])[k] & NEG_ZERO:
+                    skip = False
+                    break
+            _flat_rows(&alpha[0, 0], &bits[0, 0], &m[0, 0], h, n, &weights[0], s, crow, _bits(outside),
+                       one_bits, acc, rp, cz, co, zr, taps, rlo, rhi, tlo, thi, skip)
+            _flat_cols(&m[0, 0], &o[0, 0], h, n, &weights[0], s, outside, acc, pad, skip)
+        else:
+            _tent_rows(&alpha[0, 0], &m[0, 0], h, n, &weights[0], s, crow, acc, rp)
+            _tent_cols(&m[0, 0], &o[0, 0], h, n, &weights[0], s, outside, acc, pad)
     free(acc)
     free(pad)
     free(crow)
     free(rp)
+    free(cz)
+    free(co)
+    free(zr)
+    free(taps)
+    free(tlo)
+    free(thi)
+    free(rlo)
+    free(rhi)
     return out
 
 
