@@ -1147,6 +1147,19 @@ def _content_bbox(
 _LOCAL_BOXES = True
 _LOCAL_SHARE = 0.6
 
+# Whether a group alpha pass skips colour (see Compositor._alpha_only).
+_ALPHA_ONLY = True
+_WHITE = np.float32(1.0)
+
+
+def _blank(height: int, width: int, channels: int) -> np.ndarray:
+    """A colour no one reads, where an alpha-only pass hands one on."""
+    return np.broadcast_to(_WHITE, (height, width, channels))
+
+
+# A layer's colour, there but not decoded.
+_UNREAD = np.empty((0, 0, 1), dtype=np.float32)
+
 
 def _box_safe(layer: Layer, cache: "_PassCache") -> bool:
     """Whether everything ``layer`` changes stays inside :py:func:`_change_bbox`.
@@ -2610,7 +2623,6 @@ class _EffectCanvas:
         if self._painted:
             return
         source = self._source
-        self._color = self._compositor._fit_source(source.color)
         # Inside the region and relative to it, with the layer opacity divided
         # back out: that opacity fades the layer and its effects alike, so it
         # applies once, to the whole stack, in source() below. Leaving it in
@@ -2621,18 +2633,23 @@ class _EffectCanvas:
         # inside it, faded by fill opacity.
         opacity = source.opacity
         factor = source.fill_opacity / opacity if opacity > 0.0 else 0.0
-        # hasattr: a _blend built before these loops runs numpy's.
-        if (
-            type(factor) is float
-            and hasattr(_cblend, "effect_start")
-            and _compiled_fits((source.alpha, self.region), (self._color,))
-        ):
-            self._alpha, self._premultiplied = _cblend.effect_start(
-                source.alpha, self.region, self._color, factor
-            )
-        else:
+        if self._compositor._alpha_only:
+            # No colour: the alpha alone, as the numpy below has it.
             self._alpha = utils.divide(source.alpha, self.region, fill=0.0) * factor
-            self._premultiplied = self._alpha * self._color
+        else:
+            self._color = self._compositor._fit_source(source.color)
+            # hasattr: a _blend built before these loops runs numpy's.
+            if (
+                type(factor) is float
+                and hasattr(_cblend, "effect_start")
+                and _compiled_fits((source.alpha, self.region), (self._color,))
+            ):
+                self._alpha, self._premultiplied = _cblend.effect_start(
+                    source.alpha, self.region, self._color, factor
+                )
+            else:
+                self._alpha = utils.divide(source.alpha, self.region, fill=0.0) * factor
+                self._premultiplied = self._alpha * self._color
         # A scalar until something widens it, which is the same
         # allocation-avoidance path ``_get_mask()`` takes and for the same
         # reason: this canvas is held for the whole of the effect stack rather
@@ -2676,6 +2693,14 @@ class _EffectCanvas:
         if not coverage.any():
             return
         self._start()
+        if self._compositor._alpha_only:
+            # The alpha and shape below, which effect_over matches bit for bit.
+            alpha = coverage * opacity
+            if blend_mode in _NEUTRAL_SOURCE:
+                alpha = (alpha > 0.0).astype(np.float32)
+            self._alpha = alpha + (1.0 - alpha) * self._alpha
+            self._shape = utils.union(self._shape, coverage)
+            return
         color = self._compositor._fit_source(color)
         if self._over_compiled(coverage, color, blend_mode, opacity):
             return
@@ -2750,10 +2775,11 @@ class _EffectCanvas:
         if not coverage.any():
             return
         self._start()
-        color = self._compositor._fit_source(color)
         kept = 1.0 - coverage
         alpha = coverage * opacity
-        self._premultiplied = kept * self._premultiplied + alpha * color
+        if not self._compositor._alpha_only:
+            color = self._compositor._fit_source(color)
+            self._premultiplied = kept * self._premultiplied + alpha * color
         self._alpha = kept * self._alpha + alpha
         self._shape = utils.union(self._shape, coverage)
 
@@ -2763,6 +2789,14 @@ class _EffectCanvas:
             return self._source
         opacity = self._source.opacity
         shape = self._shape
+        if self._compositor._alpha_only:
+            # As effect_source and the numpy below have them.
+            return replace(
+                self._source,
+                shape=utils.clip(self.region * shape),
+                alpha=utils.clip(self.region * self._alpha * opacity),
+                fill_opacity=1.0,
+            )
         scalar = type(shape) in (float, int)
         if (
             type(opacity) in (float, int)
@@ -2902,9 +2936,13 @@ class _ApartCanvas(_AdjustmentCanvas):
         if not coverage.any():
             return
         alpha = coverage * opacity
-        faded = faded_color(blend_mode, self._compositor._fit_source(color), alpha)
-        if faded is not None:
-            color, alpha = faded, (alpha > 0.0).astype(np.float32)
+        if self._compositor._alpha_only:
+            if blend_mode in _NEUTRAL_SOURCE:
+                alpha = (alpha > 0.0).astype(np.float32)
+        else:
+            faded = faded_color(blend_mode, self._compositor._fit_source(color), alpha)
+            if faded is not None:
+                color, alpha = faded, (alpha > 0.0).astype(np.float32)
         self._compositor._apply_source(color, coverage, alpha, blend_mode)
 
     knocks_out = True
@@ -2921,18 +2959,20 @@ class _ApartCanvas(_AdjustmentCanvas):
         if not coverage.any():
             return
         canvas = self._compositor
-        color = canvas._fit_source(color)
         kept = 1.0 - coverage
         alpha = coverage * opacity
-        premultiplied = (
-            kept * canvas._alpha * canvas._color
-            + (coverage - alpha) * canvas._alpha_0 * canvas._color_0
-            + alpha * color
-        )
+        if not canvas._alpha_only:
+            color = canvas._fit_source(color)
+            premultiplied = (
+                kept * canvas._alpha * canvas._color
+                + (coverage - alpha) * canvas._alpha_0 * canvas._color_0
+                + alpha * color
+            )
         canvas._shape_g = cast(np.ndarray, utils.union(canvas._shape_g, coverage))
         canvas._alpha_g = kept * canvas._alpha_g + alpha
         canvas._alpha = cast(np.ndarray, utils.union(canvas._alpha_0, canvas._alpha_g))
-        canvas._color = utils.clip(utils.divide(premultiplied, canvas._alpha))
+        if not canvas._alpha_only:
+            canvas._color = utils.clip(utils.divide(premultiplied, canvas._alpha))
 
 
 @dataclass
@@ -3273,8 +3313,12 @@ class Compositor:
         text_gamma: float | None = TEXT_BLEND_GAMMA,
         text_isolated: bool = False,
         mixing: bool = False,
+        alpha_only: bool = False,
     ):
         self._viewport = viewport
+        # Only shape and alpha are wanted: colour is left as seeded, and work
+        # that only feeds colour is skipped. Every sub-compositor inherits it.
+        self._alpha_only = alpha_only
         # Whether this compositor renders inside a group that mixes in its
         # isolated render (:py:meth:`_mix_isolated`): Photoshop mixes once, at
         # the outermost such group.
@@ -3366,6 +3410,9 @@ class Compositor:
             self._apply_layer(layer)
             return
         self._owned.clear()
+        if self._alpha_only:
+            self._apply_layer(layer)
+            return
         held = self._hold_channels(excluded, clip_compositing)
         self._apply_layer(layer)
         self._restore_channels(held)
@@ -3853,6 +3900,9 @@ class Compositor:
         alpha: np.ndarray,
         mask: float | np.ndarray,
     ) -> None:
+        if self._alpha_only:
+            self._unite(shape, alpha)
+            return
         color = self._fit_source(color)
         # ``color`` is the group already composited over this backdrop, because a
         # pass-through group is rendered by a non-isolated sub-compositor seeded
@@ -3981,7 +4031,8 @@ class Compositor:
         the modes :py:func:`~psd_tools.composite.blend.fade_source` names: an
         effect's coverage and opacity, per pixel.
         """
-        color = self._fit_source(color)
+        if not self._alpha_only:
+            color = self._fit_source(color)
         knockout_color, knockout_alpha = self._knockout_backdrop(knockout)
         knockout_alpha_g = knockout_alpha
         if under is not None:
@@ -4000,6 +4051,8 @@ class Compositor:
             self._alpha = cast(np.ndarray, utils.union(self._alpha_0, self._alpha_g))
         else:
             self._unite(shape, alpha)
+        if self._alpha_only:
+            return
 
         alpha_b = knockout_alpha if knocks_out else alpha_previous
         color_b = knockout_color if knocks_out else self._color
@@ -4244,6 +4297,8 @@ class Compositor:
         ``opacity`` stands in for the layer's own where the caller fades the
         layer later, with its style (:py:meth:`_apply_styled_adjustment`).
         """
+        if self._alpha_only:
+            return
         adjustment_fn = ADJUSTMENT_FUNC.get(layer.kind)
         colormode = layer._psd.color_mode
 
@@ -4385,6 +4440,7 @@ class Compositor:
             cache=self._cache,
             text_gamma=None,
             mixing=self._mixing,
+            alpha_only=self._alpha_only,
         )
         scratch._apply_source(
             source.color, paint, paint, layer.blend_mode, text_gamma=source.text_gamma
@@ -4398,13 +4454,16 @@ class Compositor:
         # The scratch canvas is ``own`` of what went on over ``1 - own`` of
         # its seed; taking that back out leaves what went on.
         own = scratch._alpha_g
-        color = utils.clip(
-            utils.divide(
-                scratch._alpha * scratch._color - (1.0 - own) * seed_alpha * seed_color,
-                own,
-                fill=scratch._color,
+        color = scratch._color
+        if not self._alpha_only:
+            color = utils.clip(
+                utils.divide(
+                    scratch._alpha * scratch._color
+                    - (1.0 - own) * seed_alpha * seed_color,
+                    own,
+                    fill=scratch._color,
+                )
             )
-        )
         alpha = source.alpha * own
         shape = utils.clip(region * scratch._shape_g) if under is None else region
         self._apply_outer_effects(outer, alpha if under is None else shape)
@@ -4435,13 +4494,15 @@ class Compositor:
         summed to for the alphas; the group's shape and alpha interpolate
         the same way, as ``union`` is affine in what joins it.
         """
-        premultiplied = alpha * color + share * (
-            self._alpha * self._color - alpha * color
-        )
+        if not self._alpha_only:
+            premultiplied = alpha * color + share * (
+                self._alpha * self._color - alpha * color
+            )
         self._alpha = alpha + share * (self._alpha - alpha)
-        self._color = utils.clip(
-            utils.divide(premultiplied, self._alpha, fill=self._color)
-        )
+        if not self._alpha_only:
+            self._color = utils.clip(
+                utils.divide(premultiplied, self._alpha, fill=self._color)
+            )
         self._shape_g = shape_g + share * (self._shape_g - shape_g)
         self._alpha_g = alpha_g + share * (self._alpha_g - alpha_g)
 
@@ -4591,17 +4652,27 @@ class Compositor:
         # only a pass-through child inherits the enclosing isolation.
         adjustment_isolated: bool | _Isolation = isolate_adjustments
         if not isolate_adjustments and is_passthrough and self._adjustment_isolated:
-            backdrop_color, backdrop_alpha = self._isolation_backdrop()
-            adjustment_isolated = _Isolation(
-                alpha=paste(viewport, self._viewport, self._isolation_alpha()),
-                backdrop_color=paste(viewport, self._viewport, backdrop_color, 1.0),
-                backdrop_alpha=paste(viewport, self._viewport, backdrop_alpha),
+            if self._alpha_only:
+                # Only colour reads an _Isolation.
+                adjustment_isolated = True
+            else:
+                backdrop_color, backdrop_alpha = self._isolation_backdrop()
+                adjustment_isolated = _Isolation(
+                    alpha=paste(viewport, self._viewport, self._isolation_alpha()),
+                    backdrop_color=paste(viewport, self._viewport, backdrop_color, 1.0),
+                    backdrop_alpha=paste(viewport, self._viewport, backdrop_alpha),
+                )
+        if self._alpha_only:
+            seed = _blank(
+                viewport[3] - viewport[1], viewport[2] - viewport[0], self._channels
+            )
+        else:
+            seed = (
+                color_b if same_box else paste(viewport, self._viewport, color_b, 1.0)
             )
         group_compositor = Compositor(
             viewport,
-            color=color_b
-            if same_box
-            else paste(viewport, self._viewport, color_b, 1.0),
+            color=seed,
             alpha=group_alpha,
             layer_filter=self._layer_filter,
             force=self._force,
@@ -4615,10 +4686,17 @@ class Compositor:
             # layer, and so is every group inside it.
             text_isolated=self._text_isolated or isolate_adjustments,
             mixing=self._mixing or mixes,
+            alpha_only=self._alpha_only,
         )
 
         for sublayer in cast(GroupMixin, layer):
             group_compositor.apply(sublayer)
+        if self._alpha_only:
+            shape, alpha = group_compositor.shape, group_compositor.alpha
+            if not same_box:
+                shape = paste(self._viewport, viewport, shape)
+                alpha = paste(self._viewport, viewport, alpha)
+            return self._color, shape, alpha, isolate_adjustments
 
         # When adjustments are isolated the group is composited as an ordinary
         # source, so the backdrop it was seeded with has to come back out
@@ -4731,14 +4809,15 @@ class Compositor:
         return color, shape
 
     def _read_rows(
-        self, layer: Layer, viewport: tuple[int, int, int, int]
+        self, layer: Layer, viewport: tuple[int, int, int, int], color: bool = True
     ) -> tuple[np.ndarray, np.ndarray | None, tuple[int, int, int, int]] | None:
         """:py:meth:`_read_object`'s stored pixels on the part ``viewport`` crosses, and its box.
 
         A render need not decode the rest of a tall or wide layer. None where
         the read runs whole: the whole box crossed or no row, a fill, a smart
         filter mask (:py:func:`_unfilter_under_mask` blends on the whole box),
-        or data only the whole decode reads.
+        or data only the whole decode reads. Without ``color`` the colour is
+        ``_UNREAD``.
         """
         left, top, right, bottom = layer.bbox
         start = max(viewport[1], top) - top
@@ -4755,10 +4834,34 @@ class Compositor:
             return None
         if isinstance(layer, SmartObjectLayer) and _may_unfilter(layer):
             return None
-        rows = numpy_io.get_layer_rows(layer, start, stop, x0, x1)
+        rows = numpy_io.get_layer_rows(layer, start, stop, x0, x1, color=color)
         if rows is None:
             return None
-        return rows[0], rows[1], (left + x0, top + start, left + x1, top + stop)
+        return (
+            _UNREAD if rows[0] is None else rows[0],
+            rows[1],
+            (left + x0, top + start, left + x1, top + stop),
+        )
+
+    def _shape_alone(self, layer: Layer) -> bool:
+        """Whether :py:meth:`_read_object`'s coverage is the stored one, read without colour.
+
+        Not for a redrawn fill or a smart filter mask, which make both at once.
+        """
+        if (self._force or not layer.has_pixels()) and utils.has_fill(layer):
+            return False
+        return not (isinstance(layer, SmartObjectLayer) and _may_unfilter(layer))
+
+    def _read_shape(self, layer: Layer) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """:py:meth:`_read_object` for a :py:meth:`_shape_alone` layer, its colour unread.
+
+        A layer with no shape channel reads its colour too: whether it has
+        one decides what it covers.
+        """
+        shape = layer.numpy("shape")
+        if shape is None:
+            return self._read_object(layer)
+        return _UNREAD, shape
 
     @staticmethod
     def _place_object_shape(
@@ -4854,7 +4957,11 @@ class Compositor:
         compositor's viewport. They go on the fill and under a redrawn stroke,
         which Photoshop draws over them; with the fill off they go on the
         stroke, the layer's only paint.
+
+        Alpha-only, the color is a blank no one reads, and stored pixels are
+        decoded for their coverage alone.
         """
+        colour = not self._alpha_only
         if clip_layers and layer.has_clip_layers():
             assert viewport is None, "clip layers paint on this compositor's viewport"
             clip: Layer | None = layer
@@ -4863,9 +4970,13 @@ class Compositor:
         if viewport is None:
             viewport = self._viewport
         height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-        rows = self._read_rows(layer, viewport)
+        alone = not colour and self._shape_alone(layer)
+        rows = self._read_rows(layer, viewport, not alone)
         if rows is None:
-            color, own_shape = self._read_object(layer)
+            if alone:
+                color, own_shape = self._read_shape(layer)
+            else:
+                color, own_shape = self._read_object(layer)
             box = layer.bbox
         else:
             color, own_shape, box = rows
@@ -4873,7 +4984,9 @@ class Compositor:
         shape = self._place_object_shape(color, own_shape, box, viewport)
         del own_shape  # reads go once pasted
 
-        if color is None:
+        if not colour:
+            color = _blank(height, width, self._channels)
+        elif color is None:
             color = np.ones((height, width, 1), dtype=np.float32)
         else:
             color = paste(viewport, box, color, 1.0)
@@ -4899,24 +5012,26 @@ class Compositor:
             # fill's own alpha, so the stroke is painted onto it whole (#883).
             assert path is not None
             covered = alpha if inner else alpha * path
-            if clip is not None:
-                # Under the stroke: Photoshop draws it over the clip layers.
-                color = self._apply_clip_layers(clip, color)
-            compositor = Compositor(
-                viewport,
-                self._widen(color, self.channels),
-                covered,
-                widen=self._widen,
-                color_mode=self._color_mode,
-            )
-            # Photoshop paints a vector stroke Normal whatever its
-            # ``strokeStyleBlendMode`` says, against the fill and the backdrop alike.
-            compositor._apply_source(color_s, shape_s, alpha_s, BlendMode.NORMAL)
-            # Seeded with the fill's color and alpha, so the result is wanted
-            # as it stands on that seed: the stroke is painted onto the fill it
-            # outlines, and a pixel it covers in part is that much of the
-            # stroke over that fill (#883).
-            color = compositor.result_over_backdrop()
+            if colour:
+                if clip is not None:
+                    # Under the stroke: Photoshop draws it over the clip layers.
+                    color = self._apply_clip_layers(clip, color)
+                compositor = Compositor(
+                    viewport,
+                    self._widen(color, self.channels),
+                    covered,
+                    widen=self._widen,
+                    color_mode=self._color_mode,
+                )
+                # Photoshop paints a vector stroke Normal whatever its
+                # ``strokeStyleBlendMode`` says, against the fill and the
+                # backdrop alike.
+                compositor._apply_source(color_s, shape_s, alpha_s, BlendMode.NORMAL)
+                # Seeded with the fill's color and alpha, so the result is
+                # wanted as it stands on that seed: the stroke is painted onto
+                # the fill it outlines, and a pixel it covers in part is that
+                # much of the stroke over that fill (#883).
+                color = compositor.result_over_backdrop()
             # What the fill leaves uncovered -- outside the path, or under a
             # transparent part of it -- is the stroke's own.
             uncovered = 1.0 - covered
@@ -4947,6 +5062,8 @@ class Compositor:
         Group, Photoshop's default.
         """
         # TODO: Consider Tag.BLEND_CLIPPING_ELEMENTS, which this reads as on.
+        if self._alpha_only:
+            return color
         compositor = Compositor(
             self._viewport,
             self._widen(color, self.channels),
@@ -5086,6 +5203,19 @@ class Compositor:
         opacity = layer.opacity / 255.0
         return float(shape), opacity
 
+    def _solid_color(self, layer: Layer, descriptor: Descriptor) -> np.ndarray:
+        """An effect's solid colour on this viewport; read but not drawn when alpha-only.
+
+        The read fails as the draw does, so the effect is skipped either way.
+        """
+        if self._alpha_only:
+            paint._get_color(layer._psd.color_mode, descriptor)
+            return _blank(self.height, self.width, self._channels)
+        color, _ = paint.draw_solid_color_fill(
+            self._viewport, layer._psd.color_mode, descriptor
+        )
+        return color
+
     def _get_stroke(
         self,
         layer: Layer,
@@ -5184,9 +5314,14 @@ class Compositor:
             # fill decodes the pattern's own pixels, and a file whose pattern
             # data is corrupt loses the effect here rather than the document.
             try:
-                fill, shape_e = draw(
-                    layer, effect.descriptor, self.channels, box, layout
-                )
+                if not (self._alpha_only and draw is _draw_color_overlay):
+                    fill, shape_e = draw(
+                        layer, effect.descriptor, self.channels, box, layout
+                    )
+                else:
+                    # Read, so it fails as the draw would; no shape of its own.
+                    paint._get_color(layer._psd.color_mode, effect.descriptor)
+                    fill, shape_e = _UNREAD, None
                 opacity = effect.opacity / 100.0
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:
@@ -5200,7 +5335,10 @@ class Compositor:
             if fill is None:
                 logger.debug("Skipping undrawable %s effect in %s", effect_name, layer)
                 continue
-            color = paste(self._viewport, box, fill, 1.0)
+            if self._alpha_only:
+                color = _blank(self.height, self.width, self._channels)
+            else:
+                color = paste(self._viewport, box, fill, 1.0)
             if shape_e is None:
                 shape_e = np.ones((self.height, self.width, 1), dtype=np.float32)
             else:
@@ -5311,7 +5449,7 @@ class Compositor:
     def _get_group_alpha(
         self, layer: Layer, viewport: tuple[int, int, int, int]
     ) -> np.ndarray:
-        """The group's own alpha on ``viewport``, composited a second time.
+        """The group's own alpha on ``viewport``, composited a second time, without colour.
 
         What a group's stroke is traced from and its shadows and glows are
         cast from: how opaque its contents are, not what they cover, so a
@@ -5384,7 +5522,9 @@ class Compositor:
             inner_h, inner_w = inner[3] - inner[1], inner[2] - inner[0]
             group_compositor = Compositor(
                 inner,
-                np.ones((inner_h, inner_w, self._channels), dtype=np.float32),
+                _blank(inner_h, inner_w, self._channels)
+                if _ALPHA_ONLY
+                else np.ones((inner_h, inner_w, self._channels), dtype=np.float32),
                 np.zeros((inner_h, inner_w, 1), dtype=np.float32),
                 layer_filter=self._layer_filter,
                 force=self._force,
@@ -5395,6 +5535,7 @@ class Compositor:
                 text_gamma=None,
                 # As :py:meth:`_get_group` renders the children.
                 mixing=self._mixing or self._mixes_isolated(layer),
+                alpha_only=_ALPHA_ONLY,
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
@@ -5724,9 +5865,7 @@ class Compositor:
                     anti_aliased=anti_aliased,
                     noise=noise,
                 )
-                color, _ = paint.draw_solid_color_fill(
-                    self._viewport, layer._psd.color_mode, shadow.descriptor
-                )
+                color = self._solid_color(layer, shadow.descriptor)
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a drop shadow of %s: %s", layer, error)
                 continue
@@ -5840,7 +5979,7 @@ class Compositor:
             if coverage.any():
                 faded = coverage * effect_opacity
                 self._apply_source(
-                    paste(self._viewport, bbox, color),
+                    color if self._alpha_only else paste(self._viewport, bbox, color),
                     coverage,
                     faded * opacity,
                     blend_mode,
@@ -5882,9 +6021,7 @@ class Compositor:
                 silhouette = silhouettes[bbox] = self._cast_shape(layer, bbox)
             try:
                 coverage = draw(bbox, silhouette)
-                color, _ = paint.draw_solid_color_fill(
-                    self._viewport, layer._psd.color_mode, effect.descriptor
-                )
+                color = self._solid_color(layer, effect.descriptor)
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an inner effect of %s: %s", layer, error)
                 continue
@@ -5972,9 +6109,7 @@ class Compositor:
                     contour=contour,
                     anti_aliased=anti_aliased,
                 )
-                color, _ = paint.draw_solid_color_fill(
-                    self._viewport, layer._psd.color_mode, satin.descriptor
-                )
+                color = self._solid_color(layer, satin.descriptor)
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a satin of %s: %s", layer, error)
                 continue
@@ -6089,9 +6224,7 @@ class Compositor:
                         raise ValueError("opacity %r is not finite" % opacity)
                     paint_desc = Descriptor()
                     paint_desc[Key.Color] = color_desc
-                    color, _ = paint.draw_solid_color_fill(
-                        self._viewport, layer._psd.color_mode, paint_desc
-                    )
+                    color = self._solid_color(layer, paint_desc)
                     halves.append((color, blend_mode, opacity))
                 bbox = self._inner_box(layer, bevel_reach(size, soften, technique))
             except _UNREADABLE as error:
@@ -6299,7 +6432,10 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a stroke effect of %s: %s", layer, error)
                 continue
-            color = paste(self._viewport, bbox, color)
+            if self._alpha_only:
+                color = _blank(self.height, self.width, self._channels)
+            else:
+                color = paste(self._viewport, bbox, color)
             mask = paste(self._viewport, bbox, mask_in_bbox)
             inside = paste(self._viewport, bbox, inside_in_bbox)
             if top is None:
