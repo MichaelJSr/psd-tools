@@ -162,6 +162,37 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         self._init()
         self._stash_links()
 
+    def close(self) -> None:
+        """
+        Unlink the layer tree, so the document is freed once it is dropped.
+
+        Layers point back at their group and their document, and a layer's
+        mask and smart object at the layer, so a dropped document otherwise
+        waits for the cyclic garbage collector, its bytes with it. The
+        document and its layers are not usable afterwards.
+        ``with PSDImage.open(...) as psd:`` closes it on exit.
+        """
+        stack: list[Any] = list(self._layers)
+        while stack:
+            layer = stack.pop()
+            children = getattr(layer, "_layers", None)
+            if children:
+                stack.extend(children)
+                layer._layers = []
+            layer._parent = None
+            layer._psd = None
+            held = vars(layer)
+            held.pop("_mask", None)
+            held.pop("_smart_object", None)
+        self._layers = []
+        self._psd = None  # type: ignore[assignment]
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     @classmethod
     def new(
         cls,

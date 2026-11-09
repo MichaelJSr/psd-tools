@@ -4,6 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``PSDImage.close()`` unlinks the layer tree, so a dropped document is
+  freed at once, not at the cyclic collector's next pass;
+  ``with PSDImage.open(...) as psd:`` closes it on exit. A closed document
+  and its layers are not usable
 - [fix] Underlines sit where Photoshop 2023 draws them: centred between the
   top edge (CFF: the Top DICT's ``UnderlinePosition``, else ``post``'s) and
   the font box bottom (CFF: ``FontBBox``), that bottom at least half a
