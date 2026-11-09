@@ -163,8 +163,8 @@ _COVERS_BENEATH = frozenset({BlendMode.NORMAL, BlendMode.DISSOLVE})
 # The channel value each mode blends to itself whatever lies beneath.
 _FIXED_POINTS = {BlendMode.MULTIPLY: 0.0, BlendMode.SCREEN: 1.0}
 
-# The modes Photoshop fades by fill opacity, which inside a styled pass-through
-# group keep their pass-through blend (:py:func:`_mixes_isolated`).
+# The modes Photoshop fades by fill opacity, which inside a styled or clipped
+# pass-through group keep their pass-through blend (:py:func:`_mixes_isolated`).
 _FILL_FADED = frozenset(
     {
         BlendMode.COLOR_DODGE,
@@ -403,12 +403,13 @@ def _blends_through(layer: Layer, color_mode: ColorMode) -> tuple[bool, bool]:
 
 
 def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
-    """Whether a styled pass-through group mixes in its isolated render.
+    """Whether a styled or clipped pass-through group mixes in its isolated render.
 
     Photoshop renders a pass-through group whose style draws
-    (:py:func:`_style_draws`) between its children blended through to the
-    backdrop and the group composited on its own
-    (:py:meth:`Compositor._mix_isolated`). Only content that blends with the
+    (:py:func:`_style_draws`), or that any layer clips to, shown or hidden,
+    between its children blended through to the backdrop and the group
+    composited on its own (:py:meth:`Compositor._mix_isolated`); a clipped
+    group lands exactly where a styled one does. Only content that blends with the
     backdrop tells the two apart: a child in a mode other than Normal, or an
     effect in one. Photoshop keeps a type layer's own paint in such a mode,
     a group in one, and a mode faded by fill opacity, as they pass through,
@@ -425,7 +426,9 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
         or layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) < 255
     ):
         return False
-    if not (_has_enabled_effects(layer) and _style_draws(layer)):
+    if not (
+        layer.has_clip_layers() or (_has_enabled_effects(layer) and _style_draws(layer))
+    ):
         return False
     color_mode = layer._psd.color_mode
     mixes = False
@@ -5772,7 +5775,10 @@ class Compositor:
                 _content_bbox(layer, self._cache.content_bboxes),
                 utils.union_bbox(layer._psd.viewbox, viewport),
             )
-            rkey = self._rkey("group_alpha", layer, inner)
+            # Whether it mixes hangs on its clip layers too, outside its key.
+            rkey = self._rkey(
+                "group_alpha", layer, inner, self._mixing or self._mixes_isolated(layer)
+            )
         key = (id(layer), inner)
         alpha = self._cache.group_alphas.get(key)
         if alpha is None and rkey is not None:

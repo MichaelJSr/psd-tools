@@ -4,6 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A pass-through group that any layer clips to, shown or hidden, renders
+  as a styled pass-through group does, as Photoshop 2023 renders it.
+  **Rendering change** for such groups over children or effects in blend
+  modes other than Normal, such as Screen glows
 - [api] ``PSDImage.close()`` unlinks the layer tree, so a dropped document is
   freed at once, not at the cyclic collector's next pass;
   ``with PSDImage.open(...) as psd:`` closes it on exit. A closed document
