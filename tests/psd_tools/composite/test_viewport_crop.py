@@ -331,6 +331,58 @@ def test_a_traced_group_is_memoised_per_box() -> None:
 
 
 @pytest.mark.parametrize(
+    "filename",
+    [
+        "layer-edit.psd",
+        "masks.psb",
+        "clipping-mask.psd",
+        "transparency/knockout-isolated-groups.psd",
+        "effects/styled-pass-through.psd",
+    ],
+)
+def test_a_group_alpha_without_colour_is_the_one_with_it(
+    filename: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every group's alpha pass gives the same alpha, bit for bit, without colour."""
+    module = importlib.import_module("psd_tools.composite.composite")
+    apply_layer = Compositor._apply_layer
+    compared: list[str] = []
+
+    def check(self: Compositor, layer: Layer) -> None:
+        if layer.is_group() and not self._alpha_only:
+            alphas = []
+            for alpha_only in (False, True):
+                monkeypatch.setattr(module, "_ALPHA_ONLY", alpha_only)
+                self._cache.group_alphas.clear()
+                alphas.append(self._get_group_alpha(layer, self._viewport))
+            plain, alone = alphas
+            assert plain.dtype == alone.dtype and plain.shape == alone.shape
+            assert plain.tobytes() == alone.tobytes(), layer.name
+            compared.append(layer.name)
+        apply_layer(self, layer)
+
+    monkeypatch.setattr(Compositor, "_apply_layer", check)
+    composite(PSDImage.open(full_name(filename)))
+    assert compared
+
+
+def test_a_rows_read_without_colour_keeps_the_shape() -> None:
+    """Only the transparency channel is decoded; the colour comes back None."""
+    psd = PSDImage.open(full_name("semi-transparent-layers.psd"))
+    layer = next(
+        layer
+        for layer in psd.descendants()
+        if layer.has_pixels() and layer.numpy("shape") is not None
+    )
+    whole = numpy_io.get_layer_rows(layer, 1, layer.height - 1)
+    alone = numpy_io.get_layer_rows(layer, 1, layer.height - 1, color=False)
+    assert whole is not None and alone is not None
+    assert whole[0] is not None and alone[0] is None
+    assert whole[1] is not None and alone[1] is not None
+    assert np.array_equal(whole[1], alone[1])
+
+
+@pytest.mark.parametrize(
     "filename", ["masks.psd", "layer_params.psb", "clipping-mask2.psd"]
 )
 def test_a_box_render_decodes_only_the_rows_it_draws(
@@ -340,8 +392,8 @@ def test_a_box_render_decodes_only_the_rows_it_draws(
     read = numpy_io.get_layer_rows
     rows: list[int] = []
 
-    def spy(layer: Layer, start: int, stop: int, *columns: int) -> Any:
-        result = read(layer, start, stop, *columns)
+    def spy(layer: Layer, start: int, stop: int, *columns: int, **kw: bool) -> Any:
+        result = read(layer, start, stop, *columns, **kw)
         if result is not None:
             rows.append(stop - start)
         return result
@@ -378,9 +430,9 @@ def test_a_layer_off_the_canvas_sideways_is_read_on_its_columns(
     read = numpy_io.get_layer_rows
     widths: list[tuple[int, int]] = []
 
-    def spy(layer: Layer, start: int, stop: int, *columns: int) -> Any:
-        result = read(layer, start, stop, *columns)
-        if result is not None:
+    def spy(layer: Layer, start: int, stop: int, *columns: int, **kw: bool) -> Any:
+        result = read(layer, start, stop, *columns, **kw)
+        if result is not None and result[0] is not None:
             widths.append((result[0].shape[1], layer.width))
         return result
 

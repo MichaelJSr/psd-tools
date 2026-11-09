@@ -166,6 +166,7 @@ def test_text_mix_is_numpys(
 
 class _Fit:
     _color_mode = ColorMode.RGB
+    _alpha_only = False
 
     def _fit_source(self, color: np.ndarray) -> np.ndarray:
         return color
@@ -205,6 +206,45 @@ def test_effect_canvas_is_numpys(
         return result.color, result.shape, result.alpha
 
     for got, want in zip(paint(), _numpy(monkeypatch, paint), strict=True):
+        _same(got, want)
+
+
+class _AlphaOnly(_Fit):
+    _alpha_only = True
+
+
+@pytest.mark.parametrize("opacity, fill", [(1.0, 1.0), (0.6, 0.3), (0.0, 1.0)])
+def test_an_alpha_only_effect_canvas_keeps_shape_and_alpha(
+    opacity: float, fill: float
+) -> None:
+    """Without colour, the shape and alpha handed on are the compiled ones, bit for bit."""
+    rng = np.random.default_rng(23)
+    shape = _canvas(rng, 1)
+    source = _Source(
+        color=_canvas(rng, 3),
+        shape=shape,
+        alpha=_canvas(rng, 1),
+        mask=1.0,
+        shape_mask=1.0,
+        fill_opacity=fill,
+        opacity=opacity,
+        knockout=Knockout.NONE,
+        adjustment_isolated=None,
+        knockout_shape=shape,
+        region=_canvas(rng, 1),
+    )
+    modes = (BlendMode.NORMAL, BlendMode.COLOR_DODGE, BlendMode.NORMAL)
+    paints = [(_canvas(rng, 1), _canvas(rng, 3), m, 0.75) for m in modes]
+
+    def paint(fit: _Fit) -> tuple[np.ndarray, ...]:
+        canvas = _EffectCanvas(fit, source)  # type: ignore[arg-type]
+        for paint in paints:
+            canvas.over(*paint)
+        canvas.replace(paints[0][0], paints[0][1], 0.5)
+        result = canvas.source()
+        return result.shape, result.alpha
+
+    for got, want in zip(paint(_AlphaOnly()), paint(_Fit()), strict=True):
         _same(got, want)
 
 

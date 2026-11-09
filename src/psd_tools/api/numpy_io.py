@@ -466,26 +466,29 @@ def get_layer_rows(
     stop: int,
     left: int = 0,
     right: int | None = None,
-) -> tuple[np.ndarray, np.ndarray | None] | None:
+    *,
+    color: bool = True,
+) -> tuple[np.ndarray | None, np.ndarray | None] | None:
     """:func:`get_layer_data`'s ``color`` and ``shape``, rows ``start`` to ``stop`` only.
 
     Decodes just those rows of 8-bit RAW and RLE channels, so a box render
     skips the rest of a tall layer. Columns ``left`` to ``right`` are kept
     before the float32 conversion. None wherever only the whole read can
     tell -- another depth or codec, a body short of its rows -- for the caller
-    to make that read.
+    to make that read. Without ``color`` the colour is not decoded and comes
+    back None; the layer still has one.
     """
     width, height = layer.width, layer.height
     depth, version = layer._psd.depth, layer._psd.version
     if depth != 8:
         return None
     pairs = list(zip(layer._record.channel_info, layer._channels, strict=False))
-    color = [d for i, d in pairs if i.id >= 0 and len(d.data) > 0]
+    colors = [d for i, d in pairs if i.id >= 0 and len(d.data) > 0]
     shape = [
         d for i, d in pairs if i.id == ChannelID.TRANSPARENCY_MASK and len(d.data) > 0
     ]
     codecs = (Compression.RAW, Compression.RLE)
-    if not color or any(d.compression not in codecs for d in color + shape):
+    if not colors or any(d.compression not in codecs for d in colors + shape):
         return None
     expected = EXPECTED_CHANNELS.get(layer._psd.color_mode)
     stop_x = width if right is None else right
@@ -514,13 +517,15 @@ def get_layer_rows(
 
     # The whole read's guards, so what it refuses stays refused.
     _guard_channel_read(layer, width, height, lambda x: x.id >= 0)
-    color_rows = read(color)
-    if color_rows is None:
-        return None
+    color_rows = None
+    if color:
+        color_rows = read(colors)
+        if color_rows is None:
+            return None
     shape_rows = None
     if shape:
         # The whole read holds its colour, float32, through the shape read.
-        held = width * height * len(color) * 4
+        held = width * height * len(colors) * 4
         _guard_channel_read(
             layer, width, height, lambda x: x.id == ChannelID.TRANSPARENCY_MASK, held
         )
