@@ -608,7 +608,7 @@ def draw_gradient_fill(
     viewport: tuple[int, int, int, int],
     color_mode: ColorMode,
     desc: Descriptor,
-    anchor: tuple[int, int, int, int] | None = None,
+    anchor: tuple[float, float, float, float] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """
     Create a gradient fill image.
@@ -717,7 +717,7 @@ def _offset_share(point: Descriptor | None, key: bytes) -> float:
     return min(_OFFSET_LIMIT, max(-_OFFSET_LIMIT, value)) / 100.0
 
 
-def _ramp_axis(start: float, count: int, extent: int, scale: float) -> np.ndarray:
+def _ramp_axis(start: float, count: int, extent: float, scale: float) -> np.ndarray:
     """``count`` ramp coordinates from pixel ``start``.
 
     Photoshop samples a pixel at its index, not its centre: the box's edges

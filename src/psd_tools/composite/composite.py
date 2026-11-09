@@ -719,17 +719,57 @@ def _opaque_bounds(layer: Layer, layout: _Box) -> _Box:
     )
 
 
+def _shape_layout(
+    layer: Layer, descriptor: Any
+) -> tuple[float, float, float, float] | None:
+    """A shape layer's gradient box: its path's, the ramp's ends on whole pixels.
+
+    Photoshop lays the overlay out on the path, not on the record's box, which
+    a vector stroke widens. None for any other layer, an angled ramp or a path
+    that cannot be measured.
+    """
+    if not isinstance(layer, ShapeLayer) or not layer.has_vector_mask():
+        return None
+    mask = layer.vector_mask
+    if mask is None or not any(len(path) for path in mask.paths):
+        return None
+    angle = paint._finite(descriptor, Key.Angle, 0.0) % 180.0
+    if angle not in (0.0, 90.0):
+        return None
+    left, top, right, bottom = mask.bbox
+    width, height = layer._psd.width, layer._psd.height
+    box = [left * width, top * height, right * width, bottom * height]
+    if not all(math.isfinite(v) for v in box) or box[2] <= box[0] or box[3] <= box[1]:
+        return None
+    lo, hi = (1, 3) if angle == 90.0 else (0, 2)
+    scale = paint._finite(descriptor, Key.Scale, 100.0) / 100.0
+    middle, half = (box[lo] + box[hi]) / 2.0, scale * (box[hi] - box[lo]) / 2.0
+    # The ends move inward to whole pixels; a forged scale keeps the path's.
+    # Path points are fixed point, so an end this near a pixel is on it.
+    near = 1e-3
+    if scale > 0.0 and math.isfinite(middle + half):
+        extent = (
+            math.floor(middle + half + near) - math.ceil(middle - half - near)
+        ) / scale
+        if extent > 0.0:
+            box[lo], box[hi] = middle - extent / 2.0, middle + extent / 2.0
+    return box[0], box[1], box[2], box[3]
+
+
 def _draw_gradient_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     # With Algn off the ramp spans the document, so the pixels go unread.
+    path = None
     if bool(descriptor.get(Key.Alignment, True)):
-        layout = _opaque_bounds(layer, layout)
+        path = _shape_layout(layer, descriptor)
+        if path is None:
+            layout = _opaque_bounds(layer, layout)
     return paint.draw_gradient_fill(
         box,
         layer._psd.color_mode,
         descriptor,
-        paint.gradient_anchor(layer._psd, descriptor, layout),
+        path or paint.gradient_anchor(layer._psd, descriptor, layout),
     )
 
 

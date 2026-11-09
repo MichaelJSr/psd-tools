@@ -1234,6 +1234,48 @@ def test_a_vector_stroke_gradient_not_aligned_with_its_layer_is_laid_out_on_the_
     assert not np.array_equal(on_document, on_layer)
 
 
+def test_a_shape_layers_overlay_is_laid_out_on_its_path_with_whole_pixel_ends() -> None:
+    """The stroke widens the record past the path; the ramp follows the path.
+
+    The path spans rows 145.759 to 206.241, centre 176: the ramp runs from
+    row 146, white, to row 206, black. An angled ramp keeps the record's box.
+    """
+    psd = PSDImage.open(full_name("stroke.psd"))
+    layer = next(x for x in psd if x.name == "Shape 1")
+    assert layer.bbox == (185, 144, 222, 208)
+    color, _ = _draw_gradient_overlay(
+        layer, _gradient(angle=90.0), 3, layer.bbox, layer.bbox
+    )
+    assert color is not None
+    rows = np.clip((206 - np.arange(144, 208)) / 60, 0.0, 1.0)
+    assert np.allclose(color[:, 0, 0], rows, atol=1e-6)
+
+    desc = _gradient(angle=45.0)
+    color, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
+    expected, _ = paint.draw_gradient_fill(layer.bbox, psd.color_mode, desc, layer.bbox)
+    assert color is not None and expected is not None
+    assert np.array_equal(color, expected)
+
+
+def test_a_shape_layers_path_end_a_fixed_point_step_off_a_pixel_sits_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rows 44 to 82, read as fixed point leaves them, keep a 38-row ramp.
+
+    A card's 84-row bar reads 1577.99993 to 1661.99999 the same way.
+    """
+    psd = PSDImage.open(full_name("stroke.psd"))
+    layer = next(x for x in psd if x.name == "Rectangle 1")
+    record = layer.bbox
+    assert record == (43, 43, 118, 83)
+    off = (44 / 256, (44 - 7e-5) / 256, 117 / 256, (82 - 1e-5) / 256)
+    monkeypatch.setattr(type(layer.vector_mask), "bbox", property(lambda _: off))
+    color, _ = _draw_gradient_overlay(layer, _gradient(angle=90.0), 3, record, record)
+    assert color is not None
+    rows = np.clip((82 - np.arange(43, 83)) / 38, 0.0, 1.0)
+    assert np.allclose(color[:, 0, 0], rows, atol=1e-4)
+
+
 def test_a_shape_stroke_gradient_not_aligned_with_its_layer_is_laid_out_on_the_document() -> (
     None
 ):
