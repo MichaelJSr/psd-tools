@@ -484,6 +484,28 @@ def test_alpha_grid_samples_points() -> None:
     assert sampled[1, 0, :3] / sampled[1, 0, 3] == pytest.approx([0, 1, 0], abs=1e-6)
 
 
+def test_strong_colours_mix_grown_samples_in_srgb() -> None:
+    """Photoshop 2023's Strong badge edges are quarter mixes in sRGB.
+
+    Fills grow by half the embolden a side (0.137 px); a stroke ring does not.
+    """
+    blue, strong = "#2563eb", 17.5 / 64
+    # White over [1, 1.5] of column 1 grows to 1.637: 3 of 4 sample columns.
+    white = '<rect x="0" y="0" width="1.5" height="3" fill="#fff"/>'
+    drawing = _drawing(_square(blue, 0, 0, 3), white)
+    _, _, rgba = svg.rasterize(drawing, svg.IDENTITY, 4, embolden=strong)
+    assert rgba[1, 1, :3] == pytest.approx(0.25 * _hex(blue) + 0.75, abs=1e-6)
+    # The ring covers [1, 1.5] of column 1, over the red fill: half and half.
+    ring = '<rect x="1" y="1" width="4" height="4" fill="#f00" stroke="#00f"/>'
+    drawing = _drawing(ring)
+    assert [i.stroke for i in drawing.items if isinstance(i, svg.Shape)] == [
+        False,
+        True,
+    ]
+    _, _, rgba = svg.rasterize(drawing, svg.IDENTITY, 4, embolden=strong)
+    assert rgba[3, 1] == pytest.approx([0.5, 0, 0.5, 1], abs=1e-6)
+
+
 def test_gradient_in_object_bounding_box_units() -> None:
     drawing = _drawing(
         '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
@@ -989,6 +1011,16 @@ def test_alpha_grid_follows_the_antialias_mode(color_face: Face) -> None:
     assert np.allclose(partial * 16, np.round(partial * 16), atol=1e-4)
     sharp_partial = sharp[..., 3][(sharp[..., 3] > 0) & (sharp[..., 3] < 1)]
     assert not np.allclose(sharp_partial * 16, np.round(sharp_partial * 16), atol=1e-4)
+
+
+def test_smooth_colour_glyphs_are_strong_from_100_px(color_face: Face) -> None:
+    """Smooth emboldens a colour glyph only where it emboldens plain ones."""
+    smooth = 3
+    for em, same in ((50.0, False), (120.0, True)):
+        glyphs = [_glyph(color_face, "A", 0.3, 100.0, em)]
+        a, box_a = _render(glyphs, STRONG)
+        b, box_b = _render(glyphs, smooth)
+        assert (box_a == box_b and np.array_equal(a, b)) is same
 
 
 def test_the_glyph_budget_counts_the_alpha_grid(color_face: Face) -> None:

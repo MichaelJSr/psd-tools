@@ -52,7 +52,7 @@ NONE_THRESHOLD = 0.574
 
 # AntA Crisp, Strong and Smooth take coverage from this many point samples
 # a side per pixel: Photoshop stores their edges in sixteenths. A colour
-# glyph's colours keep the exact coverage.
+# glyph's colours keep the exact coverage, except where it is emboldened.
 COVERAGE_SAMPLES = 4
 
 # AntA Crisp snaps glyph origins to whole pixels in y and, in x, to a grid

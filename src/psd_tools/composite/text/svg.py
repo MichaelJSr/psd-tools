@@ -159,6 +159,8 @@ class Shape:
     opacity: float
     nonzero: bool
     bbox: tuple[float, float, float, float]  #: of the geometry, user space
+    #: A rectangle's stroke ring, which embolden does not grow.
+    stroke: bool = False
 
 
 @dataclass(frozen=True)
@@ -886,7 +888,7 @@ class _Parser:
             )
         if rect is not None and paint is not None:
             self.items.append(
-                Shape(_rect_ring(rect, width), m, paint, opacity, True, bbox)
+                Shape(_rect_ring(rect, width), m, paint, opacity, True, bbox, True)
             )
 
     def _paint(self, value: str, bbox: tuple[float, float, float, float]) -> Paint:
@@ -1025,6 +1027,41 @@ def _device_contours(shape: Shape, m: Affine) -> list[np.ndarray]:
         pts = _apply(full, c.reshape(-1, 2)).reshape(-1, 4, 2)
         out.append(flatten_cubics(pts[:, 0], pts[:, 1], pts[:, 2], pts[:, 3]))
     return out
+
+
+def _signed_area(c: np.ndarray) -> float:
+    x, y = c[:, 0], c[:, 1]
+    return 0.5 * float((x * np.roll(y, -1) - np.roll(x, -1) * y).sum())
+
+
+def _grown(contours: list[np.ndarray], d: float) -> list[np.ndarray]:
+    """``contours`` moved ``d`` px away from their fill, as FreeType emboldens.
+
+    Each vertex moves along the bisector of its edges' normals by ``d`` over
+    the cosine of half the turn, at most ``4 d``. The largest contour's
+    winding says which side is out, so a hole wound against it shrinks.
+    """
+    if not contours:
+        return contours
+    sign = 1.0 if max((_signed_area(c) for c in contours), key=abs) > 0 else -1.0
+    grown = []
+    for c in contours:
+        if len(c) < 3:
+            grown.append(c)
+            continue
+        edge = np.roll(c, -1, axis=0) - c
+        c = c[np.hypot(edge[:, 0], edge[:, 1]) > 1e-9]
+        edge = np.roll(c, -1, axis=0) - c
+        length = np.hypot(edge[:, 0], edge[:, 1])
+        length[length == 0] = 1
+        normal = np.stack([edge[:, 1], -edge[:, 0]], -1) * (sign / length)[:, None]
+        bisector = np.roll(normal, 1, axis=0) + normal
+        size = np.hypot(bisector[:, 0], bisector[:, 1])
+        size[size < 1e-9] = 1
+        bisector /= size[:, None]
+        cos = (bisector * normal).sum(-1).clip(0.25, 1)
+        grown.append(c + bisector * (d / cos)[:, None])
+    return grown
 
 
 def _gradient_t(g: Gradient, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -1390,11 +1427,17 @@ def _encode(out: np.ndarray, decode: bool) -> None:
     out[..., :3][ink] = color * alpha[ink]
 
 
-def _sampled_alpha(
-    drawing: Drawing, m: Affine, x0: int, y0: int, w: int, h: int, grid: int
+def _inside(
+    shape: Shape,
+    m: Affine,
+    x0: int,
+    y0: int,
+    w: int,
+    h: int,
+    n: int,
+    grow: float = 0.0,
 ) -> np.ndarray:
-    """The shapes' joint alpha from a ``grid`` x ``grid`` point sample per pixel."""
-    n = grid
+    """Which of ``n`` x ``n`` samples a pixel ``shape`` covers, grown ``grow`` px a side."""
     hi: Affine = (
         m[0] * n,
         m[1] * n,
@@ -1403,27 +1446,38 @@ def _sampled_alpha(
         (m[4] - x0) * n,
         (m[5] - y0) * n,
     )
+    contours = _device_contours(shape, hi)
+    if grow:
+        contours = _grown(contours, grow * n)
+    # A cell's area coverage passes one half where its centre is inside.
+    return fill_coverage(contours, w * n, h * n, nonzero=shape.nonzero) >= 0.5
+
+
+def _sampled_alpha(
+    drawing: Drawing, m: Affine, x0: int, y0: int, w: int, h: int, grid: int
+) -> np.ndarray:
+    """The shapes' joint alpha from a ``grid`` x ``grid`` point sample per pixel."""
+    n = grid
     keep = np.ones((h * n, w * n), np.float32)
     for item in drawing.items:
         if not isinstance(item, Shape) or item.paint is None:
             continue
-        # A cell's area coverage passes one half where its centre is inside.
-        inside = (
-            fill_coverage(
-                _device_contours(item, hi), w * n, h * n, nonzero=item.nonzero
-            )
-            >= 0.5
-        )
+        inside = _inside(item, m, x0, y0, w, h, n)
         if not inside.any():
             continue
         alpha = _paint_rgba(item.paint, item, m, x0, y0, w, h)[..., 3] * item.opacity
-        if alpha.min() == alpha.max():
-            clear = np.float32(1 - alpha.flat[0])
-            np.multiply(keep, clear, out=keep, where=inside)
-        else:
-            grown = np.repeat(np.repeat(1 - alpha, n, axis=0), n, axis=1)
-            np.multiply(keep, grown, out=keep, where=inside)
+        _clear(keep, inside, alpha, n)
     return 1 - keep.reshape(h, n, w, n).mean(axis=(1, 3))
+
+
+def _clear(keep: np.ndarray, inside: np.ndarray, alpha: np.ndarray, n: int) -> None:
+    """Take ``alpha`` (per pixel) off ``keep`` at the samples ``inside``, in place."""
+    if alpha.min() == alpha.max():
+        clear = np.float32(1 - alpha.flat[0])
+        np.multiply(keep, clear, out=keep, where=inside)
+    else:
+        grown = np.repeat(np.repeat(1 - alpha, n, axis=0), n, axis=1)
+        np.multiply(keep, grown, out=keep, where=inside)
 
 
 # Bytes :func:`rasterize` holds at its peak, counted from the arrays alive
@@ -1464,6 +1518,7 @@ def rasterize(
     m: Affine,
     alpha_grid: int = 0,
     nudge: tuple[float, float] = (0.0, 0.0),
+    embolden: float = 0.0,
 ) -> tuple[int, int, np.ndarray]:
     """``(left, top, premultiplied float32 HxWx4)`` of ``drawing`` under ``m``.
 
@@ -1471,39 +1526,64 @@ def rasterize(
     interpolated in sRGB and composited in linear light, as Photoshop does.
     With ``alpha_grid`` the shapes' alpha comes from that many point samples
     a side per pixel, as Photoshop's Crisp, Strong and Smooth text has it,
-    while their colours keep the exact coverage. ``nudge`` is what the exact
-    place adds to ``m``'s translation where the caller rounded it: images
-    Photoshop draws by nearest neighbour or copies take it.
+    while their colours keep the exact coverage. With ``embolden`` too (px
+    in all, Strong text's) each filled shape grows by half of it a side and
+    the colours take the same point samples and composite in sRGB, as
+    Photoshop 2023 draws them. ``nudge`` is what the exact place adds to
+    ``m``'s translation where the caller rounded it: images Photoshop draws
+    by nearest neighbour or copies take it.
     """
     box = device_bbox(drawing, m, nudge)
     if box is None or box[2] <= box[0] or box[3] <= box[1]:
         return 0, 0, np.zeros((0, 0, 4), np.float32)
     x0, y0, x1, y1 = box
     w, h = x1 - x0, y1 - y0
+    n = alpha_grid
+    strong = n > 1 and embolden > 0
     out = np.zeros((h, w, 4), np.float32)
     pictures = np.ones((h, w, 1), np.float32)
+    # Strong: the joint alpha's samples, gathered in the same pass.
+    keep = np.ones((h * n, w * n), np.float32) if strong else None
     for item in drawing.items:
         if isinstance(item, Picture):
             layer = picture_layer(item, m, x0, y0, w, h, nudge)
-            _encode(layer, decode=True)
+            if not strong:
+                _encode(layer, decode=True)
             out *= 1 - layer[..., 3:]
             out += layer
             pictures *= 1 - layer[..., 3:]
             continue
-        contours = [c - (x0, y0) for c in _device_contours(item, m)]
-        cov = fill_coverage(contours, w, h, nonzero=item.nonzero)
-        if not cov.any():
-            continue
-        rgba = _paint_rgba(item.paint, item, m, x0, y0, w, h)
+        if keep is None:
+            contours = [c - (x0, y0) for c in _device_contours(item, m)]
+            cov = fill_coverage(contours, w, h, nonzero=item.nonzero)
+            if not cov.any():
+                continue
+            rgba = _paint_rgba(item.paint, item, m, x0, y0, w, h)
+            color = to_linear(rgba[..., :3])
+        else:
+            inside = _inside(item, m, x0, y0, w, h, n)
+            ink = inside
+            if not item.stroke:
+                ink = _inside(item, m, x0, y0, w, h, n, embolden / 2)
+            if not (inside.any() or ink.any()):
+                continue
+            rgba = _paint_rgba(item.paint, item, m, x0, y0, w, h)
+            _clear(keep, inside, rgba[..., 3] * item.opacity, n)
+            cov = ink.reshape(h, n, w, n).mean(axis=(1, 3), dtype=np.float32)
+            color = rgba[..., :3]
         alpha = (cov * item.opacity)[..., None] * rgba[..., 3:]
         out *= 1 - alpha
-        out[..., :3] += alpha * to_linear(rgba[..., :3])
+        out[..., :3] += alpha * color
         out[..., 3:] += alpha
-    if alpha_grid > 1 and any(isinstance(i, Shape) for i in drawing.items):
-        shapes = _sampled_alpha(drawing, m, x0, y0, w, h, alpha_grid)[..., None]
+    if n > 1 and any(isinstance(i, Shape) for i in drawing.items):
+        if keep is not None:
+            shapes = (1 - keep.reshape(h, n, w, n).mean(axis=(1, 3)))[..., None]
+        else:
+            shapes = _sampled_alpha(drawing, m, x0, y0, w, h, n)[..., None]
         alpha = 1 - (1 - shapes) * pictures
-        exact = out[..., 3:]
-        color = np.where(exact > 0, out[..., :3] / np.maximum(exact, 1e-12), 0.0)
+        drawn = out[..., 3:]
+        color = np.where(drawn > 0, out[..., :3] / np.maximum(drawn, 1e-12), 0.0)
         out = np.concatenate([color * alpha, alpha], axis=-1).astype(np.float32)
-    _encode(out, decode=False)
+    if not strong:
+        _encode(out, decode=False)
     return x0, y0, out

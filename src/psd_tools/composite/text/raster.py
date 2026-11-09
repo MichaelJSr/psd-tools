@@ -497,10 +497,13 @@ def _color_item(
     if w <= 0 or h <= 0:
         return None
     grid = _samples(mode, options)
+    # Emboldened where a plain glyph would be (_glyph_items), in px.
+    px = max(g.em_w * math.hypot(xx, xy), g.em_h * math.hypot(yx, yy))
+    embolden = 0.0 if px < mode.small_px else mode.embolden / 64
     _guard("glyph", w, h, svg.peak_bytes(drawing, w, h, grid), options, budget)
-    key = ("svg", g.face.key, g.gid, matrix, nudge, g.fill, grid)
+    key = ("svg", g.face.key, g.gid, matrix, nudge, g.fill, grid, embolden)
     left, top, rgba = cache.get(
-        key, lambda: svg.rasterize(drawing, matrix, grid, nudge)
+        key, lambda: svg.rasterize(drawing, matrix, grid, nudge, embolden)
     )
     if not rgba.size:
         return None
