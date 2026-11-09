@@ -1,6 +1,7 @@
 """Composite implementation for layer rendering and blending."""
 
 import contextlib
+import contextvars
 import functools
 import hashlib
 import logging
@@ -16,6 +17,7 @@ from PIL import Image
 
 from psd_tools.api import numpy_io, pil_io
 from psd_tools.api._descriptor import get_blend_mode
+from psd_tools.api.effects import _TYPES as _EFFECT_TYPES
 from psd_tools.api.effects import (
     BevelEmboss,
     ColorOverlay,
@@ -25,6 +27,7 @@ from psd_tools.api.effects import (
     OuterGlow,
     Satin,
     Stroke,
+    _master_switch,
 )
 from psd_tools.api.layers import (
     AdjustmentLayer,
@@ -522,7 +525,51 @@ def _has_enabled_effects(layer: Layer) -> bool:
         return False
 
 
+# For the pass under way, by id(): each layer's listed effects, the answers
+# _readable() gave, and each layer's effect reach. A layer holds still for a pass.
+_LISTED: contextvars.ContextVar[dict[Any, tuple[Layer, Any]] | None] = (
+    contextvars.ContextVar("_LISTED", default=None)
+)
+_KINDS = {kls.__name__.lower(): kls for kls in _EFFECT_TYPES.values()}
+
+
 def _readable(layer: Layer, name: str) -> list[_StyledEffect]:
+    """:py:func:`_read_effects`, listing a layer's effects once a pass."""
+    memo = _LISTED.get()
+    if memo is None:
+        return _read_effects(layer, name)
+    answer = memo.get((id(layer), name))
+    if answer is not None:
+        return list(answer[1])
+    found = _listed(memo, layer, name)
+    memo[(id(layer), name)] = (layer, found)
+    return list(found)
+
+
+def _listed(memo: dict, layer: Layer, name: str) -> list[_StyledEffect]:
+    """The layer's enabled effects of one kind, off its listing held in ``memo``."""
+    known = memo.get(id(layer))
+    if known is None:
+        try:
+            effects = layer.effects
+            data = effects._data
+            items = effects._list(data) if _master_switch(data) else []
+        except _UNREADABLE as error:
+            logger.debug("Cannot list the %s effects of %s: %s", name, layer, error)
+            items = None
+        known = memo[id(layer)] = (layer, items)
+    items = known[1]
+    kind = _KINDS.get(name.lower())
+    if items is None or kind is None:
+        return []
+    try:
+        return [item for item in items if isinstance(item, kind) and item.enabled][::-1]
+    except _UNREADABLE as error:
+        logger.debug("Cannot list the %s effects of %s: %s", name, layer, error)
+        return []
+
+
+def _read_effects(layer: Layer, name: str) -> list[_StyledEffect]:
     """The layer's enabled effects of one kind, empty if they cannot be listed.
 
     In the order they are painted, bottom first: Photoshop shows the instance
@@ -981,10 +1028,19 @@ def _effect_reach(
     shadow loses it as surely as one that clips its stroke, and a layer whose
     own box has cleared the viewport can still cast a shadow back into it.
     """
-    return utils.union_bbox(
+    listed = _LISTED.get()
+    key = ("reach", id(layer))
+    if listed is not None:
+        known = listed.get(key)
+        if known is not None:
+            return known[1]
+    reach = utils.union_bbox(
         utils.union_bbox(_stroke_reach(layer, memo), _beneath_reach(layer, memo)),
         _bevel_reach(layer, memo),
     )
+    if listed is not None:
+        listed[key] = (layer, reach)
+    return reach
 
 
 _ContentBBoxes = dict[int, tuple[int, int, int, int]]
@@ -1623,7 +1679,18 @@ def composite(
     return cached
 
 
-def _composite(
+def _composite(*args: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """:py:func:`_composite_pass` with the pass's effect listings memoised."""
+    if _LISTED.get() is not None:
+        return _composite_pass(*args)
+    token = _LISTED.set({})
+    try:
+        return _composite_pass(*args)
+    finally:
+        _LISTED.reset(token)
+
+
+def _composite_pass(
     group: Layer | PSDImage,
     color: float | Sequence[float] | np.ndarray,
     alpha: float | np.ndarray,
