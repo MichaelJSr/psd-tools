@@ -634,6 +634,35 @@ class LayerRecord(BaseElement):
                 blending_ranges, name, position = extra
                 f.seek(position)
                 tagged_blocks = TaggedBlocks.read(f, version=version, padding=1)
+                mode, clip = _BLEND_MODES.get(blend_mode), _CLIPPINGS.get(clipping)
+                if (
+                    cls is LayerRecord
+                    and mode is not None
+                    and clip is not None
+                    and signature == b"8BIM"
+                    and 0 <= opacity <= 255
+                ):
+                    # What cls(...) leaves, without attrs' hooks; __new__ charges.
+                    self = cls.__new__(cls)
+                    set_ = object.__setattr__
+                    for key, value in (
+                        ("top", top),
+                        ("left", left),
+                        ("bottom", bottom),
+                        ("right", right),
+                        ("channel_info", channel_info),
+                        ("signature", signature),
+                        ("blend_mode", mode),
+                        ("opacity", opacity),
+                        ("clipping", clip),
+                        ("flags", flags),
+                        ("mask_data", None),
+                        ("blending_ranges", blending_ranges),
+                        ("name", name),
+                        ("tagged_blocks", tagged_blocks),
+                    ):
+                        set_(self, key, value)
+                    return self
             self = cls(
                 top=top,
                 left=left,
@@ -782,6 +811,8 @@ _RECORD_TAIL = struct.Struct(">4s4sBBBxI")
 _EXTRA_HEAD = struct.Struct(">II")
 _RANGE = struct.Struct(">4H")
 _CHANNEL_IDS = {channel.value: channel for channel in ChannelID}
+_BLEND_MODES = {mode.value: mode for mode in BlendMode}
+_CLIPPINGS = {clip.value: clip for clip in Clipping}
 _FLAG_NAMES = tuple(item.name for item in fields(LayerFlags))
 _FLAG_VALUES = tuple(_flag_values(flags) for flags in range(256))
 
