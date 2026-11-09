@@ -2312,8 +2312,11 @@ def _to_canvas(
         # `color=1.0` -- the public default -- would come out (255, 255, 255),
         # maximum chroma at maximum lightness, where the one-channel array
         # spelling of it gives the (255, 128, 128) that is white (#753).
-        single = np.full((shape[0], shape[1], 1), array, dtype=np.float32)
-        return widen(single, shape[2])
+        # Widening is per pixel: widen one row, then copy it down.
+        row = widen(np.full((1, shape[1], 1), array, dtype=np.float32), shape[2])
+        canvas = np.empty(shape, dtype=row.dtype)
+        canvas[...] = row
+        return canvas
     try:
         return np.full(shape, array, dtype=np.float32)
     except ValueError:

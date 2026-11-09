@@ -320,6 +320,21 @@ def test_normalize_backdrop_converts_a_scalar_like_a_single_channel_canvas() -> 
         assert scalar[0, 0, 2] == pytest.approx(128.0 / 255.0)
 
 
+def test_normalize_backdrop_widens_a_scalar_on_one_row() -> None:
+    """One row is widened and copied down; the canvas is still its own."""
+    seen: list[tuple[int, ...]] = []
+
+    def lab_widen(color: np.ndarray, channels: int) -> np.ndarray:
+        seen.append(color.shape)
+        neutral = np.full_like(color, 128.0 / 255.0)
+        return np.concatenate((color, neutral, neutral), axis=2)
+
+    result, _ = _normalize_backdrop(0.25, 0.0, 4, 3, 3, widen=lab_widen)
+    assert seen == [(1, 3, 1)]
+    assert np.array_equal(result, lab_widen(gray(0.25, size=(4, 3)), 3))
+    assert result.flags.c_contiguous and result.flags.writeable
+
+
 def test_normalize_backdrop_leaves_a_per_channel_sequence_alone() -> None:
     """Only a *single* component is converted; a full tuple is already canvas.
 
