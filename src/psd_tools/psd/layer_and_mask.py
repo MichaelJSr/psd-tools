@@ -93,7 +93,7 @@ from psd_tools.psd.bin_utils import (
     write_padding,
     write_pascal_string,
 )
-from psd_tools.psd.lazy import LazyPayload, Span, defer
+from psd_tools.psd.lazy import LazyPayload, Span, defer, lazy_source
 from psd_tools.psd.parse_limits import (
     charge,
     current_budget,
@@ -1268,10 +1268,14 @@ class ChannelImageData(ListElement):
     ) -> Self:
         """Read the structure from a file-like object."""
         start_pos = fp.tell()
-        items = []
+        items: list[ChannelDataList] | None = []
         if layer_records:
-            for layer in layer_records:
-                items.append(ChannelDataList.read(fp, layer.channel_info))
+            items = _deferred_lists(fp, layer_records)
+            if items is None:
+                items = [
+                    ChannelDataList.read(fp, layer.channel_info)
+                    for layer in layer_records
+                ]
         logger.debug("  read channel image data, len=%d" % (fp.tell() - start_pos))
         return cls(items)  # type: ignore[arg-type]
 
@@ -1507,3 +1511,52 @@ class GlobalLayerMaskInfo(BaseElement):
             written += write_padding(fp, written, 4)
         logger.debug("writing global layer mask info, len=%d" % (written))
         return written
+
+
+# A lazy read's channels in one pass, built without __init__ as the records
+# are: charge() takes what ChannelDataList.read would.
+def _deferred_lists(
+    fp: IO[bytes], layer_records: "LayerRecords"
+) -> list[ChannelDataList] | None:
+    """Return every layer's channels as unread spans, as a lazy read leaves them.
+
+    None where ``ChannelDataList.read`` must run: not lazy, a length of 1, too
+    few bytes, or a parse limit hit (it raises then).
+    """
+    source = lazy_source(fp)
+    if source is None:
+        return None
+    rows = [[c.length for c in layer.channel_info] for layer in layer_records]
+    lengths = [n for row in rows for n in row]
+    total = sum(lengths)
+    if (
+        1 in lengths
+        or min(lengths, default=0) < 0
+        or total > _remaining_bytes(fp)
+        or (
+            current_budget() is not None
+            and not charge(total, len(lengths) + len(rows), max(lengths, default=0))
+        )
+    ):
+        return None
+    new, set_ = object.__new__, object.__setattr__
+    raw = Compression.RAW
+    offset = fp.tell()
+    items = []
+    for row in rows:
+        channels = []
+        for n in row:
+            data = new(ChannelData)
+            set_(data, "_compression", raw)
+            set_(data, "_data", b"")
+            if n:
+                set_(data, "_span", Span(source, offset, n))
+                offset += n
+            else:
+                set_(data, "_span", None)
+            channels.append(data)
+        item = new(ChannelDataList)
+        set_(item, "_items", channels)
+        items.append(item)
+    fp.seek(offset)
+    return items
