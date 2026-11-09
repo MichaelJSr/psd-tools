@@ -67,7 +67,7 @@ class RenderCache:
         default whether ``PSD_RCACHE_VERIFY`` is ``1``.
     """
 
-    def __init__(self, max_bytes: int = 512 << 20, verify: bool | None = None) -> None:
+    def __init__(self, max_bytes: int = 256 << 20, verify: bool | None = None) -> None:
         self.max_bytes = max_bytes
         self.verify = (
             os.environ.get("PSD_RCACHE_VERIFY") == "1" if verify is None else verify
@@ -75,6 +75,7 @@ class RenderCache:
         self.hits: Counter[str] = Counter()
         self.misses: Counter[str] = Counter()
         self._store: OrderedDict[Hashable, Entry] = OrderedDict()
+        self._held: dict[int, list[Any]] = {}  # id: [array, entries holding it]
         self._bytes = 0
         self._tokens: list[Token[RenderCache | None]] = []
 
@@ -102,26 +103,40 @@ class RenderCache:
         """Store the arrays, read-only, evicting the least recently used."""
         for array in value:
             array.flags.writeable = False
-        size = _nbytes(value)
-        if size > self.max_bytes:
+        if _nbytes(value) > self.max_bytes:
             return
         old = self._store.pop(key, None)
         if old is not None:
-            self._bytes -= _nbytes(old)
+            self._drop(old)
         self._store[key] = value
-        self._bytes += size
+        for array in value:
+            held = self._held.get(id(array))
+            if held is None:
+                self._held[id(array)] = [array, 1]
+                self._bytes += array.nbytes
+            else:
+                held[1] += 1
         while self._bytes > self.max_bytes:
             _, evicted = self._store.popitem(last=False)
-            self._bytes -= _nbytes(evicted)
+            self._drop(evicted)
+
+    def _drop(self, value: Entry) -> None:
+        for array in value:
+            held = self._held[id(array)]
+            held[1] -= 1
+            if not held[1]:
+                del self._held[id(array)]
+                self._bytes -= array.nbytes
 
     def clear(self) -> None:
         """Drop every entry."""
         self._store.clear()
+        self._held.clear()
         self._bytes = 0
 
     @property
     def nbytes(self) -> int:
-        """The bytes stored, an array shared by two entries counted twice."""
+        """The bytes stored, an array shared by entries counted once."""
         return self._bytes
 
 

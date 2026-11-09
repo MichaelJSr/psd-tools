@@ -1962,6 +1962,7 @@ def _apply_cached(
     # The arrays already stored, by the identity of the canvas they copy, so
     # a layer that leaves a canvas as it was stores no second copy.
     stored: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    prior: list[np.ndarray] = []
     start = 0
     for index in range(min(settled_below, len(layers)) - 1, -1, -1):
         if _settled(layers, index) and keys[index] in rc:
@@ -1971,6 +1972,7 @@ def _apply_cached(
                 canvas = array.copy()
                 setattr(compositor, name, canvas)
                 stored[name] = (canvas, array)
+            prior = list(state)
             start = index + 1
             break
     else:
@@ -1979,15 +1981,32 @@ def _apply_cached(
         compositor.apply(layers[index])
         if index >= settled_below or not _settled(layers, index):
             continue
-        copies = []
+        copies: list[np.ndarray] = []
         compositor._owned.clear()
-        for name in _CHECKPOINT:
+        for slot, name in enumerate(_CHECKPOINT):
             canvas = getattr(compositor, name)
             known = stored.get(name)
             if known is None or known[0] is not canvas:
-                known = stored[name] = (canvas, canvas.copy())
+                # A plane equal to one already held (the last entry's, or
+                # this entry's: alpha is alpha_g over a clear backdrop) is
+                # held once; entries are read-only and restored by copying.
+                held = prior[slot : slot + 1] + copies
+                same = next((a for a in held if _same_bits(a, canvas)), None)
+                known = stored[name] = (canvas, canvas.copy() if same is None else same)
             copies.append(known[1])
         rc.put(keys[index], tuple(copies))
+        prior = copies
+
+
+def _same_bits(a: np.ndarray, b: np.ndarray) -> bool:
+    """Whether two planes hold the same bits (a few rows first, then all)."""
+    if a.shape != b.shape or a.dtype != b.dtype or a.dtype.itemsize != 4:
+        return False
+    if not (a.flags.c_contiguous and b.flags.c_contiguous) or not a.size:
+        return False
+    x, y = a.view(np.uint32), b.view(np.uint32)
+    step = max(1, len(x) // 16)
+    return bool(np.array_equal(x[::step], y[::step]) and np.array_equal(x, y))
 
 
 def _settled(layers: list[Layer], index: int) -> bool:
