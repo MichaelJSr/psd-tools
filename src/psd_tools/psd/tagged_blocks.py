@@ -10,6 +10,7 @@ Tagged block data structure.
 import io
 import logging
 import struct
+from collections import OrderedDict
 from typing import IO, Any, ClassVar, Self
 
 from attrs import converters, define, field, validators
@@ -216,13 +217,22 @@ class TaggedBlocks(DictElement):
                 return cls.read(body, version=version, padding=padding, **kwargs)
         items: list[tuple[Any, TaggedBlock]] = []
         if version == 1 and type(fp) is io.BytesIO and not _hold(fp, items, padding):
-            return cls(items)  # type: ignore[arg-type]
+            return cls._of(items)
         while is_readable(fp, 8):  # len(signature) + len(key) = 8
             block = TaggedBlock.read(fp, version, padding)
             if block is None:
                 break
             items.append((block.key, block))
-        return cls(items)  # type: ignore[arg-type]
+        return cls._of(items)
+
+    @classmethod
+    def _of(cls, items: list[tuple[Any, "TaggedBlock"]]) -> Self:
+        """``cls(items)`` without attrs' ``__init__``; ``__new__`` charges."""
+        if cls is not TaggedBlocks:
+            return cls(items)  # type: ignore[arg-type]
+        self = cls.__new__(cls)
+        object.__setattr__(self, "_items", OrderedDict(items))
+        return self
 
     @classmethod
     def _key_converter(cls, key: Any) -> Any:
@@ -1170,9 +1180,13 @@ def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) ->
     False where that returns None.
     """
     data = fp.getbuffer()
+    new, set_ = object.__new__, object.__setattr__
     try:
         position, end = fp.tell(), len(data)
         budget = current_budget()
+        if budget is not None:
+            max_objects, max_read = budget._max_objects, budget._max_read
+            max_total = budget._max_total
         while position + 12 <= end:
             signature, key, length = _HEAD.unpack_from(data, position)
             start = position + 12
@@ -1186,14 +1200,32 @@ def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) ->
                 items.append((block.key, block))
                 position = fp.tell()
                 continue
-            if budget is not None:  # what TaggedBlock.read charges
-                budget.consume(3, 12)
-                budget.consume(0, length)
-                if gap:
-                    budget.consume(0, gap)
+            if budget is not None:
+                # What TaggedBlock.read and the element charge, at once when
+                # no limit is near; else call by call, to raise as they do.
+                objects = budget.objects + 4
+                total = budget.total_bytes + 12 + length + gap
+                if (
+                    budget.error is None
+                    and (max_objects is None or objects <= max_objects)
+                    and (max_read is None or (max_read >= 12 and length <= max_read))
+                    and (max_total is None or total <= max_total)
+                ):
+                    budget.objects, budget.total_bytes = objects, total
+                else:
+                    budget.consume(3, 12)
+                    budget.consume(0, length)
+                    if gap:
+                        budget.consume(0, gap)
+                    budget.consume(1, 0)
             tag = _TAGS[key]
-            raw = bytes(data[start:stop])
-            items.append((tag, TaggedBlock._unparsed(signature, tag, raw, padding)))
+            block = new(TaggedBlock)  # _unparsed, charged above
+            set_(block, "signature", signature)
+            set_(block, "key", tag)
+            set_(block, "_data", b"")
+            set_(block, "_span", None)
+            set_(block, "_held", (bytes(data[start:stop]), padding, budget))
+            items.append((tag, block))
             position = stop + gap
     finally:
         data.release()

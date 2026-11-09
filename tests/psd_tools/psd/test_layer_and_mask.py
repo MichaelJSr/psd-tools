@@ -1,9 +1,11 @@
 import io
 import logging
 import struct
+from collections import OrderedDict
 from typing import Any
 
 import pytest
+from attrs import fields
 
 from psd_tools.constants import ChannelID, Compression, Tag
 from psd_tools.psd import layer_and_mask
@@ -179,6 +181,30 @@ def test_layer_record_fast_read_matches_readers(
     monkeypatch.setattr(layer_and_mask, "_record_head", lambda fp: None)
     monkeypatch.setattr(layer_and_mask, "_record_extra", lambda data, encoding: None)
     assert fast == [outcome(*case) for case in cases]
+
+
+def test_plain_record_and_held_blocks_set_every_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Built without ``__init__``: every field set, equal to what ``cls()`` builds."""
+    real = LayerRecord.__init__
+    inits = []
+
+    def spy(self: LayerRecord, *args: Any, **kwargs: Any) -> None:
+        inits.append(self)
+        real(self, *args, **kwargs)
+
+    monkeypatch.setattr(LayerRecord, "__init__", spy)
+    record = LayerRecord.read(io.BytesIO(_record_bytes()))
+    assert not inits  # the plain path ran
+    values = {item.name: getattr(record, item.name) for item in fields(LayerRecord)}
+    assert LayerRecord(**values) == record
+    blocks = record.tagged_blocks
+    assert type(blocks._items) is OrderedDict
+    block = blocks[Tag.LAYER_ID]
+    assert block._held is not None
+    assert all(hasattr(block, item.name) for item in fields(TaggedBlock))
+    assert TaggedBlock(key=Tag.LAYER_ID, data=block.data) == block  # type: ignore[arg-type]
 
 
 def test_layer_record_channel_sizes() -> None:
