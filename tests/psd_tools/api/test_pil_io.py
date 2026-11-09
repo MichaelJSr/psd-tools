@@ -1,16 +1,17 @@
+import io
 import logging
 import os
 import zlib
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageCms
 
 import psd_tools.compression as codecs
 from psd_tools.api import pil_io, utils
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.compression import decompress_row_peak_bytes, rle
-from psd_tools.constants import ColorMode, Compression
+from psd_tools.constants import ColorMode, Compression, Resource
 from psd_tools.psd.patterns import Pattern
 
 from ..utils import TEST_ROOT, full_name
@@ -149,6 +150,37 @@ def test_apply_icc_profile() -> None:
     assert no_icc is not None
     assert with_icc is not None
     assert no_icc.getextrema() != with_icc.getextrema()
+
+
+def test_apply_icc_keeps_its_transform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """profileToProfile()'s pixels, and the second call builds no transform."""
+    psd = PSDImage.open(full_name("colorprofiles/north_america_newspaper.psd"))
+    profile = psd.image_resources.get_data(Resource.ICC_PROFILE)
+    image = psd.topil(apply_icc=False)
+    assert image is not None and profile
+    with io.BytesIO(profile) as f:
+        expected = ImageCms.profileToProfile(
+            image,
+            ImageCms.ImageCmsProfile(f),
+            ImageCms.createProfile("sRGB"),
+            outputMode="RGB",
+        )
+    assert expected is not None
+
+    built = []
+    build = ImageCms.ImageCmsTransform
+
+    def counted(*args, **kwargs):
+        built.append(args)
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(pil_io._icc_local, "transforms", {}, raising=False)
+    monkeypatch.setattr(ImageCms, "ImageCmsTransform", counted)
+    for _ in range(2):
+        result = pil_io._apply_icc(image, profile)
+        assert (result.mode, result.size) == (expected.mode, expected.size)
+        assert result.tobytes() == expected.tobytes()
+    assert len(built) == 1
 
 
 def test_a_pattern_is_charged_the_decode_depth_when_the_depths_disagree() -> None:
