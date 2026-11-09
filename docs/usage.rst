@@ -421,7 +421,7 @@ A render resumes after the bottom layers it has already composited, and reuses
 the group alphas and stroke effects of layers that did not change. Entries are
 keyed by what the layers hold, not by which objects they are, so an edit needs
 no invalidation and a reopened copy of the same file hits too. The cache keeps
-512 MB at most (``RenderCache(max_bytes=...)``) and serves only the default
+256 MB at most (``RenderCache(max_bytes=...)``) and serves only the default
 ``layer_filter``; a document that links an external file is not cached.
 A whole-document render that reads its preview for how type layers blend
 (``text_preview``, the default) resumes no higher than the first top-level

@@ -161,6 +161,29 @@ def test_the_cache_stays_within_its_size() -> None:
         assert cache.nbytes <= cache.max_bytes
 
 
+def test_an_array_shared_by_entries_is_counted_once() -> None:
+    cache = RenderCache(max_bytes=3000)
+    a, b = np.zeros(250, np.float32), np.ones(250, np.float32)
+    cache.put(("prefix", 1), (a, b))
+    cache.put(("prefix", 2), (a, a))
+    assert cache.nbytes == 2000
+    cache.put(("prefix", 3), (np.zeros(250, np.float32),))
+    cache.put(("prefix", 4), (np.zeros(250, np.float32),))  # evicts 1 only
+    assert ("prefix", 1) not in cache and ("prefix", 2) in cache
+    assert cache.nbytes == 3000
+
+
+def test_a_checkpoint_holds_equal_planes_once() -> None:
+    cache = RenderCache()
+    plain = _render("hidden-groups.psd", None)
+    assert np.array_equal(_render("hidden-groups.psd", cache), plain)
+    states = [v for k, v in cache._store.items() if cast(tuple, k)[0] == "prefix"]
+    assert len(states) > 1
+    assert all(state[1] is state[3] for state in states)  # alpha, alpha_g
+    assert len({id(a) for state in states for a in state}) < 2 * len(states)
+    assert np.array_equal(_render("hidden-groups.psd", cache), plain)
+
+
 def _story(psd: PSDImage) -> bytes:
     assert psd.tagged_blocks is not None
     buffer = io.BytesIO()
