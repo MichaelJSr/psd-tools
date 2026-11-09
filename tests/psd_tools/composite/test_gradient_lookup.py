@@ -6,7 +6,7 @@ import sys
 import numpy as np
 import pytest
 
-from psd_tools.composite.paint import _RAMP_SAMPLES, _Lookup
+from psd_tools.composite.paint import _LOOKUP_CHUNK, _RAMP_SAMPLES, _Lookup
 
 from ..utils import full_name
 
@@ -26,6 +26,8 @@ def test_the_lookup_is_interp1ds(samples: int, columns: int | None) -> None:
     )
     lookup = _Lookup(x, table)
     special = [0.0, -0.0, 1.0, np.nan, np.inf, -np.inf, x[1], x[-2], -0.2, 1.2]
+    big = np.random.default_rng(0).random((3, _LOOKUP_CHUNK // 2 + 7)) * 1.4 - 0.2
+    big.flat[_LOOKUP_CHUNK - 5 : _LOOKUP_CHUNK + 5] = special  # a piece's edge
     positions: list[object] = [
         rng.random((40, 30)) * 1.4 - 0.2,
         (rng.random((20, 10)) * 1.4 - 0.2).astype(np.float32),
@@ -33,6 +35,8 @@ def test_the_lookup_is_interp1ds(samples: int, columns: int | None) -> None:
         np.zeros((0,)),
         np.float64(0.37),
         rng.integers(0, 2, (5, 6)),
+        big,
+        big.astype(np.float32),
     ]
     for at in positions:
         want, got = expected(at), lookup(at)
