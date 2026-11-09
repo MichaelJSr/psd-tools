@@ -452,7 +452,7 @@ def composers(layer: TypeLayer) -> list[Any]:
     return [getattr(r["0"]["0"]["5"].get("29"), "value", None) for r in runs]
 
 
-@pytest.mark.parametrize("edit", ["text", "style", "sync"])
+@pytest.mark.parametrize("edit", ["text", "style", "sync", "redraw"])
 def test_story_paragraphs_get_the_tysh_composer(edit: str) -> None:
     # Photoshop re-lays a paragraph without the flag Every-line; most cards'
     # stories lack it, while TySh says single-line.
@@ -464,6 +464,9 @@ def test_story_paragraphs_get_the_tysh_composer(edit: str) -> None:
     stale = copy.deepcopy(story(layer))
     if edit == "style":
         layer.set_span_style(0, 4, fill=(1, 0, 0))
+    elif edit == "redraw":  # rasterize() drops the strikes
+        drop_strikes(layer, [])
+        assert "2" not in story(layer)["1"]
     else:
         layer.set_text(ABILITY + "!")
     if edit == "sync":
