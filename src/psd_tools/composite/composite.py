@@ -18,6 +18,7 @@ from psd_tools.api import numpy_io, pil_io
 from psd_tools.api._descriptor import get_blend_mode
 from psd_tools.api.effects import (
     BevelEmboss,
+    ColorOverlay,
     DropShadow,
     InnerGlow,
     InnerShadow,
@@ -1083,6 +1084,9 @@ class _PassCache:
     stroke_bands: dict = field(default_factory=dict)
     change_bboxes: _ContentBBoxes = field(default_factory=dict)
     box_safe: dict[int, bool] = field(default_factory=dict)
+    split_parts: dict[int, list[tuple[int, int, int, int]]] = field(
+        default_factory=dict
+    )
     mixes_isolated: dict[int, bool] = field(default_factory=dict)
     rc: rcache.RenderCache | None = None
     doc_key: bytes = b""
@@ -1187,6 +1191,103 @@ def _drawn_bbox(layer: Layer) -> tuple[int, int, int, int]:
     except (OverflowError, TypeError, ValueError):
         return (0, 0, layer._psd.width, layer._psd.height)
     return (0, 0, 0, 0) if box is None else box
+
+
+_SPLIT_BOXES = True
+# Pixels a part must save, for what each part costs to set up.
+_SPLIT_GAIN = 250_000
+
+
+def _margin(layer: Layer, cache: "_PassCache") -> int:
+    """How far past its own box ``layer``'s effects reach, on its widest side."""
+    bbox = layer.bbox
+    reach = _effect_reach(layer, cache.content_bboxes)
+    return max(
+        bbox[0] - reach[0],
+        bbox[1] - reach[1],
+        reach[2] - bbox[2],
+        reach[3] - bbox[3],
+        0,
+    )
+
+
+def _reads_near(layer: Layer) -> bool:
+    """Whether each effect ``layer`` draws reads only near its silhouette.
+
+    So a box around part of its contents draws, there, what the whole box
+    does: no spread matte, gradient or pattern stroke, overlay but a colour,
+    satin or bevel, all of which read their whole box.
+    """
+    if not _has_enabled_effects(layer):
+        return True
+    try:
+        effects = layer.effects
+        if not effects.enabled:
+            return True
+        for effect in effects:
+            if not effect.enabled:
+                continue
+            if isinstance(effect, ColorOverlay):
+                continue
+            if isinstance(effect, Stroke):
+                if stroke_reach(effect.descriptor) is None:
+                    return False
+            elif isinstance(effect, (DropShadow, InnerShadow)):
+                geometry = shadow_geometry(effect.descriptor, effect.angle)
+                if geometry.size > 0.0 and geometry.spread > 0.0:
+                    return False
+            elif isinstance(effect, (OuterGlow, InnerGlow)):
+                size, spread, _ = glow_geometry(effect.descriptor)
+                precise = effect.glow_type == GlowTechnique.PRECISE_MATTE
+                if glow_reach(size, spread, precise) is None:
+                    return False
+            else:
+                return False
+    except _UNREADABLE:
+        return False
+    return True
+
+
+def _split_parts(
+    group: Layer, pad: int, cache: "_PassCache", out: list[tuple[int, int, int, int]]
+) -> None:
+    """The change boxes of ``group``'s children, groups opened, grown by ``pad`` and the reach above."""
+    pad += _margin(group, cache)
+    for child in cast(GroupMixin, group):
+        if not child.is_visible() or child.clipping:
+            continue
+        if child.is_group() and not isinstance(child, Artboard) and _reads_near(child):
+            _split_parts(child, pad, cache, out)
+            continue
+        box = _change_bbox(child, cache)
+        if box[0] < box[2] and box[1] < box[3]:
+            out.append((box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad))
+
+
+def _merge_boxes(
+    boxes: list[tuple[int, int, int, int]],
+) -> list[tuple[int, int, int, int]]:
+    """``boxes`` joined until no two overlap."""
+    parts = list(boxes)
+    merged = True
+    while merged:
+        merged = False
+        out: list[tuple[int, int, int, int]] = []
+        for box in parts:
+            for i, other in enumerate(out):
+                if (
+                    box[0] < other[2]
+                    and other[0] < box[2]
+                    and box[1] < other[3]
+                    and other[1] < box[3]
+                ):
+                    out[i] = utils.union_bbox(box, other)
+                    merged = True
+                    break
+            else:
+                out.append(box)
+        parts = out
+    return parts
 
 
 def _change_bbox(layer: Layer, cache: "_PassCache") -> tuple[int, int, int, int]:
@@ -3406,6 +3507,11 @@ class Compositor:
             if box is not None:
                 self._apply_in_box(layer, box)
                 return
+            parts = self._split_boxes(layer) if _LOCAL_BOXES and _SPLIT_BOXES else None
+            if parts is not None:
+                for part in parts:
+                    self._apply_in_box(layer, part)
+                return
             self._owned.clear()
             self._apply_layer(layer)
             return
@@ -3432,6 +3538,41 @@ class Compositor:
         if area > _LOCAL_SHARE * self.width * self.height:
             return None
         return box
+
+    def _split_boxes(self, layer: Layer) -> list[tuple[int, int, int, int]] | None:
+        """Disjoint boxes a box-safe group changes the canvas in, when they are small.
+
+        Each child's change box grown by the reach of the effects above it, merged
+        where they meet: a pixel in one depends on nothing in another.
+        """
+        if (
+            not layer.is_group()
+            or isinstance(layer, Artboard)
+            or not _box_safe(layer, self._cache)
+        ):
+            return None
+        found = self._cache.split_parts.get(id(layer))
+        if found is None:
+            found = []
+            if _reads_near(layer):
+                _split_parts(layer, 0, self._cache, found)
+            self._cache.split_parts[id(layer)] = found
+        if not found:
+            return None
+        boxes = [
+            box
+            for box in (utils.intersect(self._viewport, b) for b in found)
+            if box != (0, 0, 0, 0)
+        ]
+        if not boxes:
+            # Whole, as before: it can still set colour under alpha 0.
+            return None
+        parts = _merge_boxes(boxes)
+        area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in parts)
+        whole = self.width * self.height
+        if area > _LOCAL_SHARE * whole or whole - area < _SPLIT_GAIN * len(parts):
+            return None
+        return parts
 
     def _apply_in_box(self, layer: Layer, box: tuple[int, int, int, int]) -> None:
         """:py:meth:`_apply_layer` on ``box``; the canvases outside it stay as they are."""
