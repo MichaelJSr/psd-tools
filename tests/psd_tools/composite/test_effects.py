@@ -2482,6 +2482,34 @@ def test_the_compiled_tent_blur_is_scipys(
         assert compiled.tobytes() == plain.tobytes()
 
 
+@pytest.mark.skipif(effects._cdistance is None, reason="compiled loops not built")
+@pytest.mark.parametrize("radius", [9.0, 40.0, 161.0])
+@pytest.mark.parametrize("odd", [None, -0.0, -0.01, math.inf])
+def test_the_tent_blurs_flat_windows_keep_the_plain_loops_bits(
+    monkeypatch: pytest.MonkeyPatch, radius: float, odd: float | None
+) -> None:
+    """Empty or full margins, lone lines, a -0 and odd weights: the skips change no bit."""
+    cdistance = effects._cdistance
+    assert cdistance is not None
+    taps = np.arange(1 - math.ceil(radius), math.ceil(radius), dtype=np.float64)
+    weights = 1.0 - np.abs(taps) / radius
+    weights = (weights / weights.sum()).astype(np.float32).astype(np.float64)
+    if odd is not None:
+        weights[[2, -3]] = odd
+    disc = np.pad(_antialiased_disc(40, 15.0), 120)
+    lines = np.zeros((260, 230), dtype=np.float32)
+    lines[30, 5:200] = 1.0
+    lines[90:250, 120] = 0.25
+    lines[259, 0] = 0.5
+    signed = disc.copy()
+    signed[0, 0] = signed[130, 4] = -0.0
+    cases = [(disc, 0.0), (1.0 - disc, 1.0), (lines, 0.0), (signed, 0.0)]
+    flat = [cdistance.tent_blur(alpha, weights, out) for alpha, out in cases]
+    monkeypatch.setattr(cdistance, "FLAT_MIN_REACH", 1 << 30)
+    for (alpha, out), got in zip(cases, flat, strict=True):
+        assert got.tobytes() == cdistance.tent_blur(alpha, weights, out).tobytes()
+
+
 def _weighted_field(seed: int) -> np.ndarray:
     """A float64 field of scattered starting values, the rest infinitely far."""
     rng = np.random.default_rng(seed)
