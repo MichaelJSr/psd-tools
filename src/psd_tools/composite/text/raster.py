@@ -15,7 +15,7 @@ import math
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Hashable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import freetype
@@ -34,6 +34,8 @@ from psd_tools.composite.text.constants import (
     GLYPH_CACHE_SIZE,
     MAX_CANVAS_PIXELS,
     NONE_THRESHOLD,
+    SMOOTH_GRID,
+    SMOOTH_SMALL_PX,
     STRONG_EMBOLDEN_26_6,
 )
 from psd_tools.composite.text.fonts import Face, TextRenderError, outline_points
@@ -110,6 +112,8 @@ class _Mode:
     origin: _Origin
     threshold: float | None  #: binarise the final coverage above this
     samples: int = 1  #: point samples a side per pixel; 1 is the exact area
+    #: both ems under this many px: no embolden, origins on 1/SMOOTH_GRID px
+    small_px: float = 0.0
 
     def snaps(self, general: bool) -> bool:
         return self.origin == "integer" or (self.origin == "crisp" and not general)
@@ -120,7 +124,7 @@ _MODES: dict[int, _Mode] = {
     0: _Mode(_UNHINTED, 0, "fractional", NONE_THRESHOLD),
     1: _Mode(_UNHINTED, 0, "crisp", None, COVERAGE_SAMPLES),
     2: _STRONG,
-    3: _STRONG,
+    3: replace(_STRONG, small_px=SMOOTH_SMALL_PX),
     4: _Mode(_LIGHT, 0, "integer", None),
 }
 
@@ -420,16 +424,20 @@ def _glyph_items(
         )
         x = xx * g.x + yx * g.y + tx
         y = xy * g.x + yy * g.y + ty
+        small = max(px_w, px_h) < mode.small_px
         if snap:
             steps = crisp_x_steps(size66[1] // (k * n)) if mode.origin == "crisp" else 1
             x, y = round(x * steps) / steps, float(round(y))
+        elif small:
+            x = round(x * SMOOTH_GRID) / SMOOTH_GRID
+            y = round(y * SMOOTH_GRID) / SMOOTH_GRID
         ix, iy = math.floor(x), math.floor(y)
         dx, dy = round((x - ix) * 64), round((y - iy) * 64)
         if dx == 64:
             ix, dx = ix + 1, 0
         if dy == 64:
             iy, dy = iy + 1, 0
-        ex = ey = mode.embolden
+        ex = ey = 0.0 if small else mode.embolden
         if g.faux_bold:
             ex += round(64 * px_w * FAUX_BOLD_EM)
             ey += round(64 * px_h * FAUX_BOLD_EM)

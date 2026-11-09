@@ -27,6 +27,7 @@ from psd_tools.composite.text.constants import (  # noqa: E402
     FAUX_BOLD_EM,
     FAUX_ITALIC_SHEAR,
     GENERAL_TRANSFORM_EPS,
+    SMOOTH_SMALL_PX,
     STRONG_EMBOLDEN_26_6,
 )
 from psd_tools.composite.text.fonts import Face, TextRenderError, load_face  # noqa: E402
@@ -196,9 +197,30 @@ def test_delta_sign(face: Face) -> None:
         assert rgba[100 - bbox[1], 1, 3] == pytest.approx(frac + DILATE, abs=TOL)
 
 
-def test_smooth_is_strong(face: Face) -> None:
-    g = [glyph(face, "I", 0.3, 50.7)]
+@pytest.mark.parametrize(
+    "em_w, em_h",
+    [
+        (SMOOTH_SMALL_PX, SMOOTH_SMALL_PX),
+        (SMOOTH_SMALL_PX, 50.0),
+        (50.0, SMOOTH_SMALL_PX),
+    ],
+)
+def test_smooth_is_strong_from_100_px(face: Face, em_w: float, em_h: float) -> None:
+    """Either em at 100 px or more draws as Strong."""
+    g = [dataclasses.replace(glyph(face, "I", 0.3, 150.7), em_w=em_w, em_h=em_h)]
     assert same(render(g, SMOOTH), render(g, STRONG))
+
+
+def test_small_smooth_is_plain_on_quarter_pixels(face: Face) -> None:
+    """Below 100 px per em: no embolden; the pen at 0.3 draws from 0.25."""
+    rgba, bbox = render([glyph(face, "I", 0.3, 100.1)], SMOOTH)
+    assert (bbox[0], bbox[3]) == (0, 100)
+    assert rgba[5, :, 3] == pytest.approx([0.75, 1, 1, 1, 0.296875], abs=TOL)
+    # Rotated too: a quarter turn puts the stem's columns down the rows.
+    rot: Transform = (0.0, 1.0, -1.0, 0.0, 0.0, 0.3)
+    rgba, bbox = render([glyph(face, "I", 0.0, 0.0)], SMOOTH, rot)
+    assert bbox[1] == 0
+    assert rgba[:5, 5, 3] == pytest.approx([0.75, 1, 1, 1, 0.296875], abs=TOL)
 
 
 def test_none_threshold(face: Face) -> None:

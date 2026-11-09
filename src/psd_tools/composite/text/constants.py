@@ -37,9 +37,15 @@ FAUX_BOLD_EM = 0.027
 # Faux italic shears the outline by tan 12 degrees.
 FAUX_ITALIC_SHEAR = 0.2126
 
-# AntA Strong and Smooth embolden the outline by this 26.6 amount in x and y,
-# fitted to Photoshop 2023's relayouts; scaled to the sample render, rounded.
+# AntA Strong, and Smooth from SMOOTH_SMALL_PX up, embolden the outline by
+# this 26.6 amount in x and y, fitted to Photoshop 2023's relayouts; scaled
+# to the sample render, rounded.
 STRONG_EMBOLDEN_26_6 = 17.5
+
+# Smooth with both ems (x and y) under this many px is not emboldened and puts
+# each glyph origin on 1/SMOOTH_GRID px, rotated too (Photoshop 2023).
+SMOOTH_SMALL_PX = 100.0
+SMOOTH_GRID = 4
 
 # AntA None keeps a pixel whose coverage exceeds 0.5 ** (1 / 1.25).
 NONE_THRESHOLD = 0.574
