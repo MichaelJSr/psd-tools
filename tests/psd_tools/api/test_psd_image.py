@@ -1,6 +1,8 @@
+import gc
 import io
 import logging
 import pprint
+import weakref
 from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
@@ -10,7 +12,7 @@ import pytest
 from PIL import Image, ImageChops
 
 from psd_tools.api import pil_io
-from psd_tools.api.layers import Group, PixelLayer
+from psd_tools.api.layers import Group, PixelLayer, SmartObjectLayer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import get_transparency_index, has_transparency
 from psd_tools.constants import BlendMode, ColorMode, Compression, Tag
@@ -91,6 +93,24 @@ def test_save_lazy_over_its_own_file(tmp_path: Path) -> None:
     with open(path, "rb") as f:
         PSDImage.open(f, lazy=True).save(path)
     assert path.read_bytes() == expected.getvalue()
+
+
+@pytest.mark.parametrize("filename", ["masks3.psd", "layers/smartobject-layer.psd"])
+def test_closed_document_is_freed_without_the_collector(filename: str) -> None:
+    gc.disable()
+    try:
+        with PSDImage.open(full_name(filename)) as psd:
+            refs: list[weakref.ref[Any]] = [weakref.ref(psd)]
+            for layer in psd.descendants():
+                layer.mask
+                if isinstance(layer, SmartObjectLayer):
+                    layer.smart_object
+                refs.append(weakref.ref(layer))
+        assert len(refs) > 1
+        del psd, layer
+        assert all(ref() is None for ref in refs)
+    finally:
+        gc.enable()
 
 
 def test_pilio(fixture: PSDImage) -> None:
