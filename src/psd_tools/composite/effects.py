@@ -1105,6 +1105,22 @@ def stroke_band(
         if not keep:
             del memo[key]
         return known[1]
+    # A band held on a box around this one, from the same shape: its crop is
+    # this band wherever the caller's viewport can show it (stroke_reach()).
+    x0, y0, x1, y1 = viewport
+    for held, (traced, bands) in list(memo.items()):
+        hx0, hy0, hx1, hy1 = held[1]
+        if (
+            held[0] != key[0]
+            or not (hx0 <= x0 and hy0 <= y0 and x1 <= hx1 and y1 <= hy1)
+            or traced.dtype != shape.dtype
+        ):
+            continue
+        cut = (slice(y0 - hy0, y1 - hy0), slice(x0 - hx0, x1 - hx0))
+        if traced[cut].shape == shape.shape and np.array_equal(traced[cut], shape):
+            if not keep:
+                del memo[held]
+            return bands[0][cut], bands[1][cut]
     band = _stroke_band(viewport, shape, desc)
     if keep:
         memo[key] = (shape.copy(), band)
