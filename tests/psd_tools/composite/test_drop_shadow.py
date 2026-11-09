@@ -1054,6 +1054,27 @@ def test_a_pass_through_group_covers_as_the_bevels_beside_its_children_do(
     assert _covers_beneath(group, None) is covers
 
 
+def test_an_adjustment_a_styled_group_keeps_to_itself_covers() -> None:
+    """A styled pass-through group keeps an adjustment to itself, so it covers.
+
+    Passed through, the adjustment rewrites what lies beneath. Photoshop
+    2023 leaves the shadow under such a group's edge uncut (Crystal_Spikes,
+    Sans). The rule reaches into a pass-through group nested inside.
+    """
+    psd = PSDImage.open(full_name("fill_adjustments.psd"))
+    rect = next(layer for layer in psd if layer.name == "Rectangle 1")
+    curves = next(layer for layer in psd if layer.name == "Curves 1")
+    inner = psd.create_group([rect, curves])
+    outer = psd.create_group([inner])
+    assert not _covers_beneath(outer, None)
+    block = rect.tagged_blocks.get_data(Tag.OBJECT_BASED_EFFECTS_LAYER_INFO)
+    for group in (outer, inner):
+        group.tagged_blocks.set_data(
+            Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, copy.deepcopy(block)
+        )
+        assert _covers_beneath(group, None)
+
+
 def test_a_drop_shadow_reaches_a_viewport_its_layer_misses() -> None:
     """The shadow is cast from the whole layer, wherever the viewport is.
 
