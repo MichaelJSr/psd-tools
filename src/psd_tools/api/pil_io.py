@@ -2,6 +2,7 @@
 
 import io
 import logging
+import threading
 from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
@@ -26,6 +27,8 @@ from psd_tools.psd.layer_and_mask import ChannelData
 from psd_tools.psd.patterns import Pattern
 
 if TYPE_CHECKING:
+    from PIL.ImageCms import ImageCmsTransform
+
     from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 
 logger = logging.getLogger(__name__)
@@ -808,6 +811,18 @@ def _check_channels(
     return channels
 
 
+_ICC_TRANSFORMS = 4
+_icc_local = threading.local()
+
+
+def _icc_transforms() -> "dict[tuple[bytes, str], ImageCmsTransform]":
+    """Return this thread's built profile-to-sRGB transforms, by (profile, mode)."""
+    transforms = getattr(_icc_local, "transforms", None)
+    if transforms is None:
+        transforms = _icc_local.transforms = {}
+    return transforms
+
+
 def _apply_icc(image: Image.Image, icc_profile: bytes) -> Image.Image:
     """Apply ICC Color profile."""
     try:
@@ -817,9 +832,13 @@ def _apply_icc(image: Image.Image, icc_profile: bytes) -> Image.Image:
         return image
 
     try:
-        with io.BytesIO(icc_profile) as f:
-            in_profile = ImageCms.ImageCmsProfile(f)
-        out_profile = ImageCms.createProfile("sRGB")
+        transforms = _icc_transforms()
+        key = (icc_profile, image.mode.replace("A", ""))
+        transform = transforms.get(key)
+        if transform is None:
+            with io.BytesIO(icc_profile) as f:
+                in_profile = ImageCms.ImageCmsProfile(f)
+            out_profile = ImageCms.createProfile("sRGB")
 
         alpha = None
         if image.mode in ("RGBA", "LA"):
@@ -831,9 +850,21 @@ def _apply_icc(image: Image.Image, icc_profile: bytes) -> Image.Image:
             else image.convert(image.mode.replace("A", ""))
         )
 
-        result = ImageCms.profileToProfile(
-            working_image, in_profile, out_profile, outputMode="RGB"
-        )
+        # profileToProfile(), its transform kept: a build costs 2-3 ms.
+        try:
+            if transform is None:
+                transform = ImageCms.ImageCmsTransform(
+                    in_profile,
+                    ImageCms.ImageCmsProfile(out_profile),
+                    working_image.mode,
+                    "RGB",
+                )
+                if len(transforms) >= _ICC_TRANSFORMS:
+                    transforms.clear()
+                transforms[key] = transform
+            result = transform.apply(working_image)
+        except (OSError, TypeError, ValueError) as v:
+            raise ImageCms.PyCMSError(v) from v
 
     except ImageCms.PyCMSError as e:
         logger.error(f"Failed to apply ICC profile: {e}")
