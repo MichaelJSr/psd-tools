@@ -308,12 +308,16 @@ def test_descriptor_mutations(monkeypatch: pytest.MonkeyPatch, data: bytes) -> N
 
 def test_descriptor_unknown_term_logged(monkeypatch: pytest.MonkeyPatch) -> None:
     key = descriptor._ZeroLengthKey(b"Gcls")
-    body = build(Descriptor, [(key, descriptor.Integer(1))]).tobytes()
+    text = "\ufeffa\ufffe"  # BOMs are kept as text
+    items = [(key, descriptor.Enumerated(key, key)), (b"t", descriptor.String(text))]
+    body = build(Descriptor, items).tobytes()
     compiled, python = both(monkeypatch, lambda: Descriptor.frombytes(body))
     assert compiled == python
-    assert ("psd_tools.psd.descriptor", logging.DEBUG, "Unknown term: b'Gcls'") in [
-        row[:3] for row in compiled[3]
-    ]
+    row = ("psd_tools.psd.descriptor", logging.DEBUG, "Unknown term: b'Gcls'")
+    assert [r[:3] for r in compiled[3]].count(row) == 3
+    first, second = Descriptor.frombytes(body), Descriptor.frombytes(body)
+    assert next(iter(first)) is next(iter(second))  # equal keys share one object
+    assert first[b"t"].value == text
 
 
 def test_descriptor_unit_from_enum(monkeypatch: pytest.MonkeyPatch) -> None:

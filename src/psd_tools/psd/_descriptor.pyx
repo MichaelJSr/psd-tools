@@ -12,14 +12,14 @@ to charge at once.
 from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.float cimport PyFloat_FromDouble
 from cpython.long cimport PyLong_FromLongLong
+from cpython.mem cimport PyMem_Free, PyMem_Malloc
 from cpython.object cimport PyObject_GenericSetAttr
-from cpython.unicode cimport PyUnicode_Decode
+from cpython.ref cimport PyObject, Py_INCREF, Py_XDECREF
+from cpython.unicode cimport PyUnicode_DecodeUTF16
 from libc.stdint cimport int32_t, int64_t, uint32_t, uint64_t
 from libc.string cimport memcpy
 
 cdef object _new = object.__new__
-cdef dict _kinds = {}
-cdef dict _units = {}
 cdef object _terms = frozenset()
 cdef object _ZeroLengthKey = None
 cdef object _OrderedDict = None
@@ -64,13 +64,6 @@ KINDS = {
 }
 
 
-def setup(kinds, units, terms, ZeroLengthKey, OrderedDict):
-    """Set the OSType table (``{bytes: (class, kind)}``), units and terms."""
-    global _kinds, _units, _terms, _ZeroLengthKey, _OrderedDict
-    _kinds, _units, _terms = dict(kinds), dict(units), terms
-    _ZeroLengthKey, _OrderedDict = ZeroLengthKey, OrderedDict
-
-
 class _GiveUp(Exception):
     pass
 
@@ -98,6 +91,61 @@ cdef inline int need(State *st, long long size) except -1:
 
 cdef inline uint32_t be32(const unsigned char *b) noexcept:
     return (<uint32_t>b[0] << 24) | (<uint32_t>b[1] << 16) | (<uint32_t>b[2] << 8) | b[3]
+
+
+cdef struct Entry:
+    uint32_t code  # the 4 bytes, big endian
+    int kind
+    PyObject *value  # kept alive by _held
+
+# OSTypes and units by code, filled by setup().
+cdef Entry *_kinds = NULL
+cdef Py_ssize_t _nkinds = 0
+cdef Entry *_units = NULL
+cdef Py_ssize_t _nunits = 0
+cdef list _held = []
+
+# The last zero-length key read per slot, so equal keys share one object.
+# Changed only under the GIL (the module does not claim free-threading).
+cdef enum:
+    KEY_SLOTS = 4096
+cdef uint32_t _key_codes[KEY_SLOTS]
+cdef bint _key_unknown[KEY_SLOTS]
+cdef PyObject *_key_objs[KEY_SLOTS]  # owned; NULL when free
+
+
+cdef Py_ssize_t fill(Entry **table, dict rows, bint pairs) except -1:
+    """Put ``rows``' 4-byte keys in a new ``*table``; return how many."""
+    cdef list items = [(k, v) for k, v in rows.items() if len(k) == 4]
+    cdef Entry *made = <Entry *>PyMem_Malloc((len(items) or 1) * sizeof(Entry))
+    cdef Py_ssize_t i
+    if made == NULL:
+        raise MemoryError
+    for i, (k, v) in enumerate(items):
+        made[i].code = be32(<const unsigned char *><bytes>k)
+        made[i].kind = v[1] if pairs else 0
+        value = v[0] if pairs else v
+        made[i].value = <PyObject *>value
+        _held.append(value)
+    PyMem_Free(table[0])
+    table[0] = made
+    return len(items)
+
+
+def setup(kinds, units, terms, ZeroLengthKey, OrderedDict):
+    """Set the OSType table (``{bytes: (class, kind)}``), units and terms."""
+    global _nkinds, _nunits, _terms, _ZeroLengthKey, _OrderedDict
+    cdef Py_ssize_t i
+    cdef PyObject *old
+    _nkinds = _nunits = 0
+    _held.clear()
+    _nkinds = fill(&_kinds, dict(kinds), True)
+    _nunits = fill(&_units, dict(units), False)
+    _terms, _ZeroLengthKey, _OrderedDict = terms, ZeroLengthKey, OrderedDict
+    for i in range(KEY_SLOTS):
+        old = _key_objs[i]
+        _key_objs[i] = NULL
+        Py_XDECREF(old)
 
 
 cdef inline uint64_t be64(const unsigned char *b) noexcept:
@@ -131,8 +179,9 @@ cdef object read_bytes(State *st, long long size):
 cdef object read_unicode(State *st):
     """``read_unicode_string(fp)`` with its padding of 1."""
     cdef long long size = read_u32(st) * 2
+    cdef int order = 1  # the "utf-16-be" codec: big endian, a BOM kept
     need(st, size)
-    value = PyUnicode_Decode(<const char *>(st.b + st.p), size, "utf-16-be", NULL)
+    value = PyUnicode_DecodeUTF16(<char *>(st.b + st.p), size, NULL, &order)
     st.p += size
     return value
 
@@ -140,11 +189,42 @@ cdef object read_unicode(State *st):
 cdef object read_key(State *st, list unknown):
     """``read_length_and_key(fp)``; an unknown term is logged by the caller."""
     cdef long long length = read_u32(st)
-    key = read_bytes(st, length if length else 4)
-    if length == 0 and key not in _terms:
-        key = _ZeroLengthKey(key)
+    cdef uint32_t code
+    cdef Py_ssize_t slot
+    cdef bint unknown_key
+    cdef PyObject *old
+    if length:
+        return read_bytes(st, length)
+    need(st, 4)
+    code = be32(st.b + st.p)
+    slot = ((code * <uint32_t>2654435761u) >> 20) & (KEY_SLOTS - 1)
+    if _key_objs[slot] != NULL and _key_codes[slot] == code:
+        key = <object>_key_objs[slot]
+        unknown_key = _key_unknown[slot]
+    else:
+        key = PyBytes_FromStringAndSize(<const char *>(st.b + st.p), 4)
+        unknown_key = key not in _terms
+        if unknown_key:
+            key = _ZeroLengthKey(key)
+        old = _key_objs[slot]
+        Py_INCREF(key)
+        _key_codes[slot] = code
+        _key_unknown[slot] = unknown_key
+        _key_objs[slot] = <PyObject *>key
+        Py_XDECREF(old)
+    st.p += 4
+    if unknown_key:
         unknown.append(key)
     return key
+
+
+cdef object unit_of(uint32_t code):
+    """``_unit(...)`` of a known unit, or give up."""
+    cdef Py_ssize_t j
+    for j in range(_nunits):
+        if _units[j].code == code:
+            return <object>_units[j].value
+    raise _GiveUp
 
 
 cdef inline int enter(State *st) except -1:
@@ -179,11 +259,18 @@ cdef object read_value(State *st, list unknown):
     cdef long long count, i
     cdef int kind
     cdef double number
-    entry = _kinds.get(read_bytes(st, 4))
-    if entry is None:
+    cdef uint32_t code
+    cdef Py_ssize_t j
+    need(st, 4)
+    code = be32(st.b + st.p)
+    st.p += 4
+    for j in range(_nkinds):
+        if _kinds[j].code == code:
+            break
+    else:
         raise _GiveUp
-    cls, kind = entry
-    obj = _new(cls)
+    kind = _kinds[j].kind
+    obj = _new(<object>_kinds[j].value)
     st.nobjects += 1
     if kind == K_DESCRIPTOR:
         name, classID, items = read_body(st, unknown)
@@ -212,9 +299,7 @@ cdef object read_value(State *st, list unknown):
     elif kind == K_UNIT_FLOAT:
         need(st, 12)
         st.nobjects += 2
-        unit = _units.get(PyBytes_FromStringAndSize(<const char *>(st.b + st.p), 4))
-        if unit is None:
-            raise _GiveUp
+        unit = unit_of(be32(st.b + st.p))
         number = be_double(st.b + st.p + 4)
         st.p += 12
         put(obj, "value", PyFloat_FromDouble(number))
@@ -222,9 +307,7 @@ cdef object read_value(State *st, list unknown):
     elif kind == K_UNIT_FLOATS:
         need(st, 8)
         st.nobjects += 2
-        unit = _units.get(PyBytes_FromStringAndSize(<const char *>(st.b + st.p), 4))
-        if unit is None:
-            raise _GiveUp
+        unit = unit_of(be32(st.b + st.p))
         count = be32(st.b + st.p + 4)
         st.p += 8
         need(st, count * 8)
