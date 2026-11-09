@@ -8,6 +8,7 @@ import pytest
 
 from psd_tools.psd.bin_utils import (
     FileReader,
+    PartsWriter,
     _remaining_bytes,
     be_array_to_bytes,
     bounded_reader,
@@ -283,3 +284,45 @@ def test_file_reader_moves_the_file_only_to_read(tmp_path: Path) -> None:
         assert reader.read(2) == bytes([10, 11])
         assert reader.read(2) == bytes([12, 13])
         assert calls == [(0, 2), (10, 0)]
+
+
+def test_parts_writer_writes_what_a_bytesio_does() -> None:
+    """Big payloads kept by reference; seeks back patch them and the buffer."""
+    rng = random.Random(7)
+    big = bytes(rng.randrange(256) for _ in range(PartsWriter.BIG + 5))
+    ops: list[Any] = []
+    for _ in range(400):
+        kind = rng.randrange(7)
+        if kind == 0:
+            ops.append(("write", big))
+        elif kind == 1:
+            ops.append(("write", memoryview(big)[3 : PartsWriter.BIG + 4]))
+        elif kind == 2:
+            ops.append(("write", bytes(rng.randrange(256) for _ in range(9))))
+        elif kind == 3:
+            ops.append(
+                ("patch", rng.random(), bytes(rng.randrange(256) for _ in range(6)))
+            )
+        elif kind == 4:
+            ops.append(("skip", rng.choice([-(10**9), -3, 1, 2, 4])))
+        elif kind == 5:
+            ops.append(("write", b""))
+        else:
+            ops.append(("write", array.array("H", range(rng.randrange(1, 4)))))
+    parts, plain = PartsWriter(), io.BytesIO()
+    for op in ops:
+        got = []
+        for fp in (parts, plain):
+            if op[0] == "write":
+                got.append(fp.write(op[1]))
+            elif op[0] == "skip":
+                fp.seek(op[1], 1)
+            else:
+                end = fp.seek(0, 2)
+                fp.seek(int(op[1] * max(end - 6, 0)))
+                fp.write(op[2])
+                fp.seek(0, 2)
+        assert got[:1] == got[1:] and parts.tell() == plain.tell()
+    kept = parts.parts()
+    assert any(part is big for part in kept)
+    assert b"".join(kept) == plain.getvalue()
