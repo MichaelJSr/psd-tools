@@ -1205,7 +1205,8 @@ def drop_strikes(layer: TypeLayer, fonts: Iterable[str]) -> None:
     raster (``tools/sweep_strikes.py``). Photoshop mixes a raster under stale
     strikes straight, and composes a story without strikes at open, in the
     text gamma. ``fonts`` are the faces the story is set in; a story in
-    :data:`_KEEP_STRIKES` keeps them.
+    :data:`_KEEP_STRIKES` keeps them. The story's paragraphs also get
+    TySh's composer where unset, so that layout keeps TySh's line breaks.
     """
     if _KEEP_STRIKES.intersection(fonts):
         return
@@ -1218,6 +1219,7 @@ def drop_strikes(layer: TypeLayer, fonts: Iterable[str]) -> None:
     view = story.story.get(story.k.view)
     if isinstance(view, engine_data.Dict) and story.k.strikes in view:
         del view[story.k.strikes]
+        _pin_composer(story, layer)
         _touch(layer)
 
 
