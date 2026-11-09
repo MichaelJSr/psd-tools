@@ -10,6 +10,7 @@ and serializing PSD file structures.
 """
 
 import array
+import bisect
 import functools
 import io
 import logging
@@ -99,6 +100,102 @@ class FileReader:
         data = self._fp.read(size)
         self._pos = self._at = self._pos + len(data)
         return data
+
+
+class PartsWriter:
+    """A save's target that keeps big immutable payloads by reference.
+
+    Writes go to a bytearray, but ``bytes`` (or a read-only view of ``bytes``)
+    of :py:attr:`BIG` bytes or more are kept as they are, so a save to a path
+    does not copy every payload into one buffer before the file is written.
+    A seek back and write patches in place, as a length marker needs.
+    """
+
+    BIG = 1 << 15
+    __slots__ = ("_starts", "_parts", "_buf", "_base", "_pos")
+
+    def __init__(self) -> None:
+        self._starts: list[int] = []
+        self._parts: list[Any] = []
+        self._buf = bytearray()
+        self._base = 0  # offset of _buf
+        self._pos = 0
+
+    def tell(self) -> int:
+        """Return the position."""
+        return self._pos
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        """Move the position, past the end too (a later write pads with NULs)."""
+        if whence == 0:
+            if offset < 0:
+                raise ValueError("negative seek value %d" % offset)
+        elif whence == 1:
+            offset = max(offset + self._pos, 0)  # as BytesIO
+        elif whence == 2:
+            offset = max(offset + self._base + len(self._buf), 0)
+        else:
+            raise ValueError("Invalid whence: %d" % whence)
+        self._pos = offset
+        return offset
+
+    def write(self, data: bytes | bytearray | memoryview) -> int:
+        """Write at the position; return the size."""
+        kind = type(data)
+        n = len(data) if kind is bytes or kind is bytearray else memoryview(data).nbytes
+        if not n:
+            return 0  # no padding, as BytesIO
+        buf = self._buf
+        pos = self._pos
+        end = self._base + len(buf)
+        if pos == end:
+            if n >= self.BIG and (
+                kind is bytes
+                or (
+                    type(data) is memoryview
+                    and data.readonly
+                    and type(data.obj) is bytes
+                    and data.c_contiguous
+                )
+            ):
+                if buf:
+                    self._starts.append(self._base)
+                    self._parts.append(buf)
+                    self._buf = bytearray()
+                self._starts.append(end)
+                self._parts.append(data)
+                self._base = end + n
+            else:
+                buf += data
+            self._pos = pos + n
+            return n
+        if pos > end:
+            buf += bytes(pos - end)
+            return self.write(data)
+        self._patch(pos, memoryview(data).cast("B"))
+        self._pos = pos + n
+        return n
+
+    def _patch(self, pos: int, view: memoryview) -> None:
+        """Overwrite what was written at ``pos``; a payload kept is copied first."""
+        while len(view):
+            if pos >= self._base:
+                i = pos - self._base
+                self._buf[i : i + len(view)] = view
+                return
+            k = bisect.bisect_right(self._starts, pos) - 1
+            part = self._parts[k]
+            if type(part) is not bytearray:
+                part = self._parts[k] = bytearray(part)
+            i = pos - self._starts[k]
+            take = min(len(view), len(part) - i)
+            part[i : i + take] = view[:take]
+            view = view[take:]
+            pos += take
+
+    def parts(self) -> list[Any]:
+        """Return the written bytes, in order."""
+        return [*self._parts, self._buf] if self._buf else list(self._parts)
 
 
 class _BoundedReader(io.IOBase):

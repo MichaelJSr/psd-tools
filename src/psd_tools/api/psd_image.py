@@ -84,7 +84,7 @@ from psd_tools.constants import (
     SectionDivider,
     Tag,
 )
-from psd_tools.psd.bin_utils import FileReader
+from psd_tools.psd.bin_utils import FileReader, PartsWriter
 from psd_tools.psd.color_mode_data import HDRT_DEFAULT, ColorModeData
 from psd_tools.psd.descriptor import String
 from psd_tools.psd.document import PSD
@@ -437,10 +437,11 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
 
         if isinstance(fp, (str, bytes, os.PathLike)):
             # In memory: a file's tell() and seek() are slow; a failed write keeps it.
-            with io.BytesIO() as buffer:
-                self._record.write(buffer, **kwargs)
-                with open(fp, mode) as f, buffer.getbuffer() as view:
-                    f.write(view)
+            # Payloads are kept by reference, not copied into one buffer.
+            parts = PartsWriter()
+            self._record.write(cast(IO[bytes], parts), **kwargs)
+            with open(fp, mode) as f:
+                f.writelines(parts.parts())
         else:
             self._record.write(fp, **kwargs)  # type: ignore[arg-type]
 
