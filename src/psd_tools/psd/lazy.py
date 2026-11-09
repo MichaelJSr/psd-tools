@@ -112,6 +112,17 @@ def lazy_reads(fp: IO[bytes]) -> Iterator[None]:
         _lazy.reset(token)
 
 
+def lazy_source(fp: IO[bytes]) -> _Source | None:
+    """Return the lazy read's source when ``fp`` reads the document's own file."""
+    source = _lazy.get()
+    if source is None:
+        return None
+    root = fp
+    while isinstance(root, _BoundedReader):
+        root = root._fp
+    return source if root is source.fp else None
+
+
 def defer(fp: IO[bytes], length: int) -> Span | None:
     """
     Skip ``length`` bytes of ``fp`` and return their span.
@@ -120,13 +131,8 @@ def defer(fp: IO[bytes], length: int) -> Span | None:
     a copy of a block); else None, and the caller reads the payload now. The
     bytes count against the parse budget as a read would.
     """
-    source = _lazy.get()
+    source = lazy_source(fp)
     if source is None:
-        return None
-    root = fp
-    while isinstance(root, _BoundedReader):
-        root = root._fp
-    if root is not source.fp:
         return None
     if length < 0 or length > _remaining_bytes(fp):
         raise OSError("Invalid data section size: %d" % length)

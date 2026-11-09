@@ -504,12 +504,28 @@ class TaggedBlock(BaseElement):
     ) -> int:
         """Write the structure to a file-like object and return the bytes written."""
         key = self.key if isinstance(self.key, bytes) else self.key.value
+        if version == 1:
+            # Bytes as read (held, or an unread span): no seek back for the length.
+            held = self._held
+            raw: bytes | memoryview | None = None
+            if held is not None and held[1] == padding:
+                raw = held[0]
+            elif self._span is not None and self._span[1] == 1:
+                raw = self._span[0].view()
+            if raw is not None:
+                size = len(raw)
+                gap = -(size + 4) % padding  # as write_length_block pads
+                head = _HEAD.pack(self.signature, key, size)
+                if (
+                    fp.write(head) != 12
+                    or fp.write(raw) != size
+                    or (gap and fp.write(bytes(gap)) != gap)
+                ):
+                    raise OSError("Failed to write tagged block %r" % key)
+                return 12 + size + gap
         written = write_fmt(fp, "4s4s", self.signature, key)
 
         def writer(f: IO[bytes]) -> int:
-            held = self._held
-            if held is not None and version == 1 and held[1] == padding:
-                return write_bytes(f, held[0])
             if self._span is not None and self._span[1] == version:
                 return write_bytes(f, self._span[0].view())  # unread: as read
             if hasattr(self.data, "write"):

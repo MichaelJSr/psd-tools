@@ -10,6 +10,7 @@ import pytest
 from psd_tools.constants import BlendMode, SectionDivider, Tag
 from psd_tools.psd import PSD
 from psd_tools.psd.base import IntegerElement
+from psd_tools.psd.bin_utils import write_bytes, write_length_block
 from psd_tools.psd.layer_and_mask import ChannelImageData, LayerInfoBlock, LayerRecords
 from psd_tools.psd.parse_limits import ParseLimitError
 from psd_tools.psd.tagged_blocks import (
@@ -227,6 +228,19 @@ def test_an_unread_layer_block_is_written_as_read() -> None:
     assert blocks.get_data(Tag.LAYER_ID) == 7
     blocks[Tag.LAYER_ID].data = IntegerElement(9)
     assert blocks.tobytes() == _raw_block(Tag.LAYER_ID.value, b"\0\0\0\x09").getvalue()
+
+
+@pytest.mark.parametrize("padding", [1, 2, 4])
+@pytest.mark.parametrize("size", [5, 6, 7, 8])
+def test_a_held_block_is_written_as_a_length_block(padding: int, size: int) -> None:
+    payload = bytes(range(size))
+    expected = io.BytesIO()
+    expected.write(b"8BIM" + Tag.LAYER_ID.value)
+    write_length_block(expected, lambda f: write_bytes(f, payload), padding=padding)
+    raw = expected.getvalue()
+    blocks = TaggedBlocks.frombytes(raw, padding=padding)
+    assert blocks[Tag.LAYER_ID]._held is not None
+    assert blocks.tobytes(padding=padding) == raw
 
 
 def test_nested_layer_info_blocks_raise_a_parse_limit_error() -> None:

@@ -13,9 +13,14 @@ from psd_tools import PSDImage
 from psd_tools.api._resources import _descriptors
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.constants import Tag
-from psd_tools.psd import PSD
+from psd_tools.psd import PSD, layer_and_mask
 from psd_tools.psd.lazy import Span, load
-from psd_tools.psd.parse_limits import ParseLimitError, ParseLimits
+from psd_tools.psd.parse_limits import (
+    ParseLimitError,
+    ParseLimits,
+    current_budget,
+    parse_context,
+)
 from psd_tools.range_reader import RangeReader
 
 from ..utils import all_files, full_name
@@ -148,6 +153,52 @@ def test_lazy_payloads_keep_the_parse_budget() -> None:
         PSD.read(io.BytesIO(data), parse_limits=limits)
     with pytest.raises(ParseLimitError):
         PSD.read(io.BytesIO(data), parse_limits=limits, lazy=True)
+
+
+@pytest.mark.parametrize(
+    "filename", ["layers/pixel-layer.psd", "layers/smartobject-layer.psd"]
+)
+def test_lazy_channels_in_one_pass_equal_their_reads(
+    filename: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spans and the parse budget's charge are ChannelDataList.read's, limits too."""
+    with open(full_name(filename), "rb") as f:
+        data = f.read()
+    real = layer_and_mask._deferred_lists
+    entry: list[tuple[int, bool]] = []
+
+    def spy(fp: IO[bytes], records: object) -> object:
+        budget = current_budget()
+        assert budget is not None
+        objects = budget.objects
+        items = real(fp, records)  # type: ignore[arg-type]
+        entry.append((objects, items is not None))
+        return items
+
+    def read(limits: ParseLimits) -> object:
+        try:
+            with parse_context(limits):
+                psd = PSD.read(io.BytesIO(data), lazy=True)
+                budget = current_budget()
+                assert budget is not None
+                spans = [
+                    (c._span.offset, c._span.length) if c._span else c._compression
+                    for _, channels in psd._iter_layers()
+                    for c in channels
+                ]
+                return spans, budget.objects, budget.total_bytes
+        except ParseLimitError as e:
+            return str(e)
+
+    monkeypatch.setattr(layer_and_mask, "_deferred_lists", spy)
+    fast = read(ParseLimits())
+    assert entry[0][1]  # the one pass ran
+    tight = ParseLimits(max_objects=entry[0][0] + 2)  # breached by the channels
+    fast_tight = read(tight)
+    monkeypatch.setattr(layer_and_mask, "_deferred_lists", lambda fp, records: None)
+    assert read(ParseLimits()) == fast
+    assert read(tight) == fast_tight
+    assert isinstance(fast_tight, str)
 
 
 def test_layer_blocks_read_later_keep_the_parse_budget() -> None:
