@@ -316,6 +316,10 @@ def divide(Cb: np.ndarray, Cs: np.ndarray) -> np.ndarray:
 _MODE_AWARE: set[Callable] = set()
 
 
+# Rows a non-separable blend works on at once.
+_BLEND_ROWS = 64
+
+
 # The one place the two fallbacks are applied, so that both decorators below
 # get them and cannot drift apart. What they are and why is documented on
 # :py:func:`non_separable`.
@@ -357,7 +361,17 @@ def _guarded(func, apply):
                 Cb.shape[2],
             )
             return normal(Cb, Cs)
-        return apply(Cb, Cs)
+        if Cb.shape != Cs.shape or Cb.shape[0] <= _BLEND_ROWS:
+            return apply(Cb, Cs)
+        # Pixel by pixel, so in bands of rows: the temporaries stay small.
+        first = apply(Cb[:_BLEND_ROWS], Cs[:_BLEND_ROWS])
+        out = np.empty((Cb.shape[0], *first.shape[1:]), dtype=first.dtype)
+        out[:_BLEND_ROWS] = first
+        for i in range(_BLEND_ROWS, Cb.shape[0], _BLEND_ROWS):
+            out[i : i + _BLEND_ROWS] = apply(
+                Cb[i : i + _BLEND_ROWS], Cs[i : i + _BLEND_ROWS]
+            )
+        return out
 
     _MODE_AWARE.add(_blend_fn)
     return _blend_fn

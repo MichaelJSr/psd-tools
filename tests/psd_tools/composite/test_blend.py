@@ -568,6 +568,25 @@ def test_non_separable_falls_back_when_the_operands_disagree_in_width(
     assert "4-channel source against a 3-channel backdrop" in caplog.text
 
 
+@pytest.mark.parametrize("func", NON_SEPARABLE, ids=lambda f: f.__name__)
+@pytest.mark.parametrize("mode", [ColorMode.RGB, ColorMode.CMYK], ids=lambda m: m.name)
+def test_non_separable_in_bands_is_the_whole_array(
+    func: Callable, mode: ColorMode, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tall canvases blend in bands of rows; the bits are the whole array's."""
+    rng = np.random.default_rng(7)
+    rows = 3 * blend_module._BLEND_ROWS + 19
+    width = 4 if mode == ColorMode.CMYK else 3
+    Cb, Cs = rng.random((2, rows, 37, width), dtype=np.float32)
+    Cs[60:70] = Cs[60:70, :, :1]  # grey across a band's edge
+    banded = func(Cb, Cs, mode)
+    monkeypatch.setattr(blend_module, "_BLEND_ROWS", rows)
+    whole = func(Cb, Cs, mode)
+    assert banded.dtype == whole.dtype
+    assert banded.shape == whole.shape
+    assert banded.tobytes() == whole.tobytes()
+
+
 def test_get_blend_func_binds_the_mode_only_to_the_non_separable_six() -> None:
     """Which functions take a colour mode is a correctness question (#746).
 

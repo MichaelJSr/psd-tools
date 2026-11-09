@@ -997,6 +997,10 @@ def _canvas_rows(color_mode: ColorMode, rgb: np.ndarray) -> np.ndarray:
     return np.array([_from_rgb(color_mode, tuple(row)) for row in rgb.tolist()])
 
 
+# Values a gradient lookup works out at once (each piece's arithmetic is the same).
+_LOOKUP_CHUNK = 1 << 16
+
+
 class _Lookup:
     """``interp1d(samples, table, axis=0, bounds_error=False, fill_value=(table[0], table[-1]))``.
 
@@ -1018,6 +1022,18 @@ class _Lookup:
             x = x.astype(np.float64)
         shape = x.shape
         x = x.ravel()
+        if len(x) <= _LOOKUP_CHUNK:
+            return self._at(x).reshape(shape + self._extra)
+        # A whole canvas in pieces: its temporaries are ~130 bytes a value.
+        first = self._at(x[:_LOOKUP_CHUNK])
+        y = np.empty((len(x), first.shape[1]), dtype=first.dtype)
+        y[:_LOOKUP_CHUNK] = first
+        for i in range(_LOOKUP_CHUNK, len(x), _LOOKUP_CHUNK):
+            y[i : i + _LOOKUP_CHUNK] = self._at(x[i : i + _LOOKUP_CHUNK])
+        return y.reshape(shape + self._extra)
+
+    def _at(self, x: np.ndarray) -> np.ndarray:
+        """The table at flat positions ``x``, one row a value."""
         hi = np.searchsorted(self._x, x).clip(1, len(self._x) - 1).astype(int)
         x_lo, x_hi = self._x[hi - 1], self._x[hi]
         y_lo, y_hi = self._y[hi - 1], self._y[hi]
@@ -1027,7 +1043,7 @@ class _Lookup:
         if len(y) > 0:
             y[x < self._x[0]] = self._below
             y[x > self._x[-1]] = self._above
-        return y.reshape(shape + self._extra)
+        return y
 
 
 def _make_linear_gradient_color(
