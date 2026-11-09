@@ -1,5 +1,7 @@
 import os
 import shutil
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 
 import pytest
@@ -212,11 +214,45 @@ def test_platform_index_waits_for_a_miss(
         return index(dirs)
 
     monkeypatch.setattr(fonts_module, "_Index", spy)
+    monkeypatch.setattr(fonts_module, "_INDEXES", OrderedDict())
     fm = FontMap(dirs=[fixture_fonts_dir], policy="skip")
     assert fm.resolve(PS_TT).how == "exact"
     assert built == [fm.dirs]
     fm.resolve("NoSuchFont")
     assert built == [fm.dirs, fm.platform_dirs]
+
+
+def test_index_shared_until_a_folder_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    ttf_font_path: str,
+    cff_font_path: str,
+    tmp_path: object,
+) -> None:
+    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
+    monkeypatch.setattr(fonts_module, "_INDEXES", OrderedDict())
+    root = os.path.join(str(tmp_path), "fonts")
+    sub = os.path.join(root, "sub")
+    os.makedirs(sub)
+    shutil.copy(ttf_font_path, sub)
+
+    def index() -> object:
+        return FontMap(dirs=[root], policy="skip")._indexes()[0]
+
+    # Written just now: maybe within one timestamp tick, so built again.
+    assert index() is not index()
+    monkeypatch.setattr(fonts_module, "_STAMP_SLACK_NS", 0)
+    old = time.time() - 60
+    os.utime(sub, (old, old))
+    first = index()
+    assert index() is first
+    shutil.copy(cff_font_path, sub)
+    fm = FontMap(dirs=[root], policy="skip")
+    assert fm.find(PS_CFF) == (
+        os.path.join(sub, os.path.basename(cff_font_path)),
+        0,
+        "exact",
+    )
+    assert fm._indexes()[0] is not first
 
 
 def test_env_dirs(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) -> None:
