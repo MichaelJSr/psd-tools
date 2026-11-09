@@ -11,8 +11,9 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from ctypes import POINTER, byref, c_ubyte, c_ulong, cast
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -26,6 +27,7 @@ from psd_tools.composite.text.constants import (
     ASCENT_GLYPHS,
     ASCENT_PPEM,
     FACE_CACHE_SIZE,
+    INDEX_CACHE_SIZE,
 )
 from psd_tools.composite.text.svg import SvgTable
 
@@ -427,35 +429,73 @@ def load_face(path: str, index: int = 0) -> Face:
     return Face(hb=font, ft=ft, metrics=metrics, key=(path, index))
 
 
+def _walk(directory: str) -> Iterator[tuple[str, list[str]]]:
+    """Each folder under ``directory`` in walk order, with its font files."""
+    for root, subdirs, files in os.walk(directory):
+        subdirs.sort()
+        yield (
+            root,
+            [
+                os.path.join(root, fn)
+                for fn in sorted(files)
+                if fn.lower().endswith(FONT_EXTENSIONS)
+            ],
+        )
+
+
 def font_files(directory: str) -> list[str]:
     """Font files under ``directory`` and its subdirectories, in walk order.
 
     Files sort before subdirectories at each level; symbolic links to
     directories are not followed.
     """
-    out: list[str] = []
-    for root, subdirs, files in os.walk(directory):
-        subdirs.sort()
-        out += [
-            os.path.join(root, fn)
-            for fn in sorted(files)
-            if fn.lower().endswith(FONT_EXTENSIONS)
-        ]
-    return out
+    return [path for _, files in _walk(directory) for path in files]
+
+
+#: A stamp this close to its index's build may miss a change in the same
+#: timestamp tick (FAT's is 2 s), so that index is not reused.
+_STAMP_SLACK_NS = 2_000_000_000
+
+
+def _stat_key(path: str) -> tuple[int, int, int] | None:
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_ctime_ns, st.st_size
 
 
 class _Index:
-    """Faces under a list of directories, by exact and by loose name."""
+    """Faces under a list of directories, by exact and by loose name.
+
+    It keeps the stat of every folder walked and font file read, for
+    :meth:`current`; it does not change once built.
+    """
 
     def __init__(self, dirs: Iterable[str]):
         self.exact: dict[str, tuple[str, int]] = {}
         self.loose: dict[str, tuple[str, int]] = {}
+        started = time.time_ns()
+        dirs = tuple(dirs)
+        paths = list(dirs)  # a missing folder too, should it appear
         for d in dirs:
-            for path in font_files(d):
-                try:
-                    self._add(path)
-                except freetype.FT_Exception:
-                    continue
+            for root, files in _walk(d):
+                if root != d:
+                    paths.append(root)
+                paths += files
+                for path in files:
+                    try:
+                        self._add(path)
+                    except freetype.FT_Exception:
+                        continue
+        self._paths = tuple(paths)
+        self._stamp = tuple(map(_stat_key, paths))
+        newest = max((max(k[:2]) for k in self._stamp if k), default=0)
+        self._racy = newest >= started - _STAMP_SLACK_NS
+
+    def current(self) -> bool:
+        """Whether no folder or font file has changed since the build."""
+        return not self._racy and tuple(map(_stat_key, self._paths)) == self._stamp
 
     def _add(self, path: str) -> None:
         first = freetype.Face(path)
@@ -471,6 +511,25 @@ class _Index:
                     self.loose.setdefault(norm(name), (path, i))
 
 
+#: Indexes every FontMap shares, by folder list, most recent last.
+_INDEXES: OrderedDict[tuple[str, ...], _Index] = OrderedDict()
+_INDEXES_LOCK = threading.Lock()
+
+
+def _index(dirs: tuple[str, ...]) -> _Index:
+    """The index of ``dirs``: the last one built while it is current."""
+    with _INDEXES_LOCK:
+        index = _INDEXES.get(dirs)
+    if index is None or not index.current():
+        index = _Index(dirs)
+    with _INDEXES_LOCK:
+        _INDEXES[dirs] = index
+        _INDEXES.move_to_end(dirs)
+        while len(_INDEXES) > INDEX_CACHE_SIZE:
+            _INDEXES.popitem(last=False)
+    return index
+
+
 class FontMap:
     """Resolves PostScript names to faces.
 
@@ -478,7 +537,9 @@ class FontMap:
     directories. An exact PostScript name is tried before a loose match in
     the user directories, then both again in the platform directories;
     the first face in directory order wins. ``aliases`` map a name to a font
-    file path or to another name and override everything.
+    file path or to another name and override everything. Each folder list
+    is indexed once per process and again when a folder or font file in it
+    changes; a map keeps the index it first read.
 
     ``policy`` decides a name no face matches: ``"raise"`` raises
     :class:`MissingFontError`, ``"skip"`` resolves to a faceless
@@ -510,14 +571,14 @@ class FontMap:
     def _user_index(self) -> _Index:
         with self._lock:
             if self._user is None:
-                self._user = _Index(self.dirs)
+                self._user = _index(self.dirs)
             return self._user
 
     def _platform_index(self) -> _Index:
         # Built on the first name the given folders miss.
         with self._lock:
             if self._platform is None:
-                self._platform = _Index(self.platform_dirs)
+                self._platform = _index(self.platform_dirs)
             return self._platform
 
     def _face(self, key: tuple[str, int]) -> Face:

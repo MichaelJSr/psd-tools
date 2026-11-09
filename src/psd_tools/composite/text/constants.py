@@ -63,10 +63,11 @@ GENERAL_TRANSFORM_EPS = 0.01
 MAX_CANVAS_PIXELS = 64_000_000
 
 # Bounded caches: rendered glyph bitmaps, by count and by their total bytes,
-# and open font faces.
+# open font faces, and the font indexes FontMaps share, by folder list.
 GLYPH_CACHE_SIZE = 8192
 GLYPH_CACHE_BYTES = 64 * 1024 * 1024
 FACE_CACHE_SIZE = 64
+INDEX_CACHE_SIZE = 8
 
 # A splice treats the pixels this far around a glyph's outline box as the
 # glyph's own: anti-aliasing, the Strong embolden and Photoshop's placement.

@@ -24,6 +24,7 @@ def test_values() -> None:
     assert c.GLYPH_CACHE_SIZE == 8192
     assert c.GLYPH_CACHE_BYTES == 64 * 1024 * 1024
     assert c.FACE_CACHE_SIZE == 64
+    assert c.INDEX_CACHE_SIZE == 8
     assert c.IOU_COVER == 0.5
     assert c.BAD_DIFF == 24 / 255
     assert c.ANY_ALPHA == 0.1
