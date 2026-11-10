@@ -4,6 +4,14 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] On glibc, the first composite fixes malloc's mmap threshold at
+  32 MiB and its trim threshold at 256 MiB, so freed canvases are reused
+  instead of handed back to the kernel: on Linux arm64, whole renders take
+  11-19% less CPU and boxes 4-10%, with a third of the page faults and the
+  same peak memory; up to about 150 MB more is held between renders.
+  ``PSD_TOOLS_MALLOC=0``, ``MALLOC_MMAP_THRESHOLD_``,
+  ``MALLOC_TRIM_THRESHOLD_``, ``MALLOC_MMAP_MAX_``, ``MALLOC_TOP_PAD_`` or
+  ``GLIBC_TUNABLES`` leave malloc alone
 - [fix] A pass-through group that any layer clips to, shown or hidden, renders
   as a styled pass-through group does, as Photoshop 2023 renders it.
   **Rendering change** for such groups over children or effects in blend
