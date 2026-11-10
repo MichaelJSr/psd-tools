@@ -51,9 +51,9 @@ Glyph = tuple[int, int, np.ndarray]
 # alive at once, for the allocation budget.
 #: A glyph: FreeType's bitmap and its copy, both uint8.
 _GLYPH_BYTES = 1 + 1
-#: A point-sampled glyph, per pixel of its large render: the uint16 hits
-#: and the inside mask.
-_SAMPLED_BYTES = 2 + 1
+#: A point-sampled glyph, per pixel of its large render: the uint8 hits,
+#: the inside mask and at most the row counts.
+_SAMPLED_BYTES = 1 + 1 + 1
 #: A rule: the float32 coverage, its scaling and the uint8 result.
 _RULE_BYTES = 4 + 4 + 1
 #: The canvas: uint32 coverage sum, float32 RGB, uint8 winning coverage,
@@ -274,7 +274,8 @@ def _bitmap(slot: freetype.GlyphSlot) -> np.ndarray:
     if rows == 0 or width == 0:
         return np.zeros((0, 0), np.uint8)
     n = rows * abs(pitch)
-    raw = ctypes.cast(bm._FT_Bitmap.buffer, ctypes.POINTER(ctypes.c_ubyte * n)).contents
+    # One copy out of FreeType's buffer, without a ctypes array type per glyph.
+    raw = ctypes.string_at(bm._FT_Bitmap.buffer, n)
     a = np.frombuffer(raw, dtype=np.uint8).reshape(rows, abs(pitch))
     if pitch < 0:
         a = a[::-1]
@@ -356,11 +357,11 @@ def _point_sampled(glyph: Glyph, n: int) -> Glyph:
     h, w = cov.shape
     x0, y0 = left // n, -top // n
     x1, y1 = -(-(left + w) // n), -(-(h - top) // n)
-    hits = np.zeros(((y1 - y0) * n, (x1 - x0) * n), np.uint16)
+    hits = np.zeros(((y1 - y0) * n, (x1 - x0) * n), np.uint8)
     hits[-top - y0 * n : -top - y0 * n + h, left - x0 * n : left - x0 * n + w] = (
         cov >= 128
     )
-    count = hits.reshape(y1 - y0, n, x1 - x0, n).sum(axis=(1, 3))
+    count = svg.sample_counts(hits, n).astype(np.uint64)
     return x0, -y0, ((count * 255 + n * n // 2) // (n * n)).astype(np.uint8)
 
 
