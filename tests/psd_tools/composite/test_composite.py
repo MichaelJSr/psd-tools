@@ -1,6 +1,8 @@
+import ctypes
 import dataclasses
 import io
 import logging
+import os
 import sys
 from typing import Any, cast
 
@@ -2917,3 +2919,47 @@ def test_mask_with_real_flags_present_is_applied() -> None:
     layer.mask._data.real_flags = MaskFlags()
     assert not layer.mask.has_real()
     assert not _blank_compositor(psd)._mask_repeats_shape(layer)
+
+
+@pytest.mark.parametrize(
+    "libc, env, refused, calls",
+    [
+        ("glibc 2.31", {}, False, [(-3, 32 << 20), (-1, 256 << 20)]),
+        ("glibc 2.31", {}, True, [(-3, 32 << 20)]),
+        ("glibc 2.31", {"PSD_TOOLS_MALLOC": "0"}, False, []),
+        ("glibc 2.31", {"MALLOC_MMAP_THRESHOLD_": "1"}, False, []),
+        ("glibc 2.31", {"GLIBC_TUNABLES": "x"}, False, []),
+        (None, {}, False, []),
+    ],
+)
+def test_keep_freed_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    libc: str | None,
+    env: dict[str, str],
+    refused: bool,
+    calls: list[tuple[int, int]],
+) -> None:
+    """``mallopt`` runs once a process, on glibc only, unless the env says not."""
+    module = sys.modules["psd_tools.composite.composite"]
+    made: list[tuple[int, int]] = []
+
+    class Libc:
+        def mallopt(self, param: int, value: int) -> int:
+            made.append((param, value))
+            return 0 if refused else 1
+
+    def confstr(name: str) -> str:
+        if libc is None:
+            raise ValueError(name)
+        return libc
+
+    for name in (*module._MALLOC_ENV, "PSD_TOOLS_MALLOC"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(os, "confstr", confstr, raising=False)
+    monkeypatch.setattr(ctypes, "CDLL", lambda name: Libc())
+    monkeypatch.setattr(module, "_MALLOC_SET", False)
+    module._keep_freed_memory()
+    module._keep_freed_memory()
+    assert made == calls
