@@ -1290,7 +1290,8 @@ def _vibrance_amount_weights(
     Returns the three weights and the index of the first amount.
     """
     position = np.asarray(amount, dtype=np.float32) * 4
-    first = np.clip(np.ceil(position) - 1, 0, 2).astype(np.intp)
+    # A NaN index is 0, as on arm64 and in _blend (x86 casts it to INT64_MIN).
+    first = np.nan_to_num(np.clip(np.ceil(position) - 1, 0, 2)).astype(np.intp)
     u = position - first
     return ((u - 1) * (u - 2) / 2, -u * (u - 2), u * (u - 1) / 2), first
 
