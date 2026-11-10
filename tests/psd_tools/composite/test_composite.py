@@ -2136,6 +2136,41 @@ def test_an_outer_effect_adds_its_coverage_beside_the_layer() -> None:
     assert np.allclose(color, 0.0)
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "passthrough_opacity.psd",
+        "transparency/knockout-deep-normal.psd",
+        "effects/styled-pass-through.psd",
+    ],
+)
+def test_full_fill_sources_are_only_read(
+    monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    """At 100% fill a source's own shape and alpha go on, not copies.
+
+    So whatever puts them on must only read them: frozen here, a write raises.
+    The fixtures reach the pass-through, knockout and text-space branches.
+    """
+    composite_source = Compositor._composite_source
+    full = []
+
+    def frozen(self: Compositor, source: Any, blend_mode: BlendMode) -> None:
+        arrays = [a for a in (source.shape, source.alpha) if a.flags.writeable]
+        for array in arrays:
+            array.flags.writeable = False
+        try:
+            composite_source(self, source, blend_mode)
+        finally:
+            for array in arrays:
+                array.flags.writeable = True
+        full.append(source.fill_opacity == 1.0)
+
+    monkeypatch.setattr(Compositor, "_composite_source", frozen)
+    composite(PSDImage.open(full_name(filename)), force=True)
+    assert any(full)
+
+
 def test_composite_stroke_effect_over_a_layer_without_a_mask() -> None:
     """A stroke effect must not require the layer to have a mask (#711).
 
