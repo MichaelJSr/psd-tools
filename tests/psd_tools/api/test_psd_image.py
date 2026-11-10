@@ -1060,9 +1060,13 @@ def test_save_marks_the_regenerated_composite_present() -> None:
     psd = PSDImage.open(full_name("layers-minimal/solid-color-fill.psd"))
     psd.mark_updated()
     kept = io.BytesIO()
-    psd.save(kept, update_preview=False)
+    psd.save(kept)  # Photoshop saved it without its merged image: kept so
     kept.seek(0)
-    assert not PSDImage.open(kept).has_preview()
+    assert PSDImage.open(kept).is_stripped()
+    # A stored red image Photoshop does not count as the composite.
+    psd.save(io.BytesIO(), preview=psd.composite(apply_icc=False))
+    version_info = psd.image_resources.get_data(1057)  # VersionInfo
+    version_info.has_composite = False
     regenerated = io.BytesIO()
     psd.save(regenerated)
     regenerated.seek(0)

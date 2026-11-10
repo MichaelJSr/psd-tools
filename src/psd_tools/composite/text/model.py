@@ -16,6 +16,8 @@ from psd_tools.composite.text.constants import (
     AUTO_LEADING,
     SUB_POSITION,
     SUB_SIZE,
+    SUPER_POSITION,
+    SUPER_SIZE,
     TAB_WIDTH,
 )
 
@@ -94,9 +96,19 @@ class TextModel:
     antialias: int  #: ``AntA``: 0 none, 1 crisp, 2 strong, 3 smooth, 4 sharp
     transform: Transform  #: text-space pt -> document px, whatever the document's ppi
     warnings: tuple[str, ...]
-    sub_size: float = SUB_SIZE  #: ``ResourceDict`` SubscriptSize/SuperscriptSize
-    sub_position: float = SUB_POSITION
+    sub_size: float = SUB_SIZE  #: ``ResourceDict`` SubscriptSize
+    sub_position: float = SUB_POSITION  #: ``ResourceDict`` SubscriptPosition
     auto_leading: float = AUTO_LEADING  #: ``ResourceDict`` auto-leading ratio
+    super_size: float = SUPER_SIZE  #: ``ResourceDict`` SuperscriptSize
+    super_position: float = SUPER_POSITION  #: ``ResourceDict`` SuperscriptPosition
+
+    def size_ratio(self, style: Style) -> float:
+        """The run's drawn size over its ``FontSize``: 1 unless super/subscript."""
+        return {1: self.super_size, 2: self.sub_size}.get(style.baseline, 1.0)
+
+    def position_ratio(self, style: Style) -> float:
+        """The super/subscript position ratio of the run's baseline; 0 for normal."""
+        return {1: self.super_position, 2: self.sub_position}.get(style.baseline, 0.0)
 
     @classmethod
     def from_layer(cls, layer: TypeLayer) -> TextModel:
@@ -154,6 +166,10 @@ class TextModel:
                 _value(_get(resources, "SubscriptPosition", SUB_POSITION))
             ),
             auto_leading=float(_value(_get(pnormal, "AutoLeading", AUTO_LEADING))),
+            super_size=float(_value(_get(resources, "SuperscriptSize", SUPER_SIZE))),
+            super_position=float(
+                _value(_get(resources, "SuperscriptPosition", SUPER_POSITION))
+            ),
         )
 
 

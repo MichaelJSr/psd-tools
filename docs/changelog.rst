@@ -31,6 +31,21 @@ Changelog
   layer (1024) with that layer; a new layer is unlinked, and lists that
   were already out of step are written unlinked. Other saves write them
   as read
+- [api] Linked smart objects are read and written as repository paths, never
+  through the file system: ``SmartObject.link_target()``, ``read(resolve=)``,
+  ``link()``, ``relink()``, ``content_id``, ``PSDImage.repo_path`` and
+  ``psd_tools.api.links``. **Backwards-incompatible**: ``.data`` on a linked
+  object raises, naming the file; use ``read()`` or ``open()``
+- [api] ``PSDImage.strip_merged()`` drops the merged image as Photoshop's
+  Maximize Compatibility off does, and ``is_stripped()`` tells such a file;
+  ``save()`` keeps it without one after an edit instead of regenerating it
+- [fix] A linked layer copied into another document has its ``relPath``
+  rebased on that document's folder; without both ``repo_path`` values the
+  copy raises. The render cache stays on for documents that link files, and
+  ``transform_box`` reads a link's corners when it has no ``PlLd``
+- [fix] Superscript runs take the document's ``SuperscriptSize`` and
+  ``SuperscriptPosition`` instead of the subscript ones. **Rendering change**
+  only where the two differ
 - [packaging] The sdist carries the Cython sources, so a wheel builds from
   it, and the wheel no longer ships the generated C
 - [fix] A shape's vector stroke follows its curves as Photoshop draws them

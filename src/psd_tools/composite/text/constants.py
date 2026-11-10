@@ -7,6 +7,8 @@ Tests assert these values; a change here is a behaviour change.
 # position ratios and the auto-leading ratio; a document's own values win.
 SUB_SIZE = 0.583
 SUB_POSITION = 0.333
+SUPER_SIZE = 0.583
+SUPER_POSITION = 0.333
 AUTO_LEADING = 1.2
 
 # Photoshop's default tab stops are this many pt apart, from the line's start
