@@ -273,3 +273,46 @@ def test_a_group_child_in_a_mode_of_its_own_passes_through(
 )
 def test_a_normal_group_child_mixes_as_a_layer_would(name: str) -> None:
     assert _nested_errors()[name] <= _BOUND
+
+
+# effects/clipped-pass-through.psd: over vertical stripes in eight colours, one
+# pass-through group per cell, named "<child>|<case>". The child is a blue
+# square and a blue bar at 50% in Multiply or Screen, or a Normal square and
+# bar with a Multiply drop shadow ("shadow"). The case is the group with
+# nothing clipped to it ("pt"), with a 0% outside stroke ("styled"), or with a
+# Curves layer clipped to it, hidden ("hadj") or shown ("vadj"), or a pixel
+# layer, hidden and filled ("hpx") or shown and empty ("vempty"). Photoshop
+# 2023's composite is the reference: every clipped case renders as "styled".
+_CLIPPED = "effects/clipped-pass-through.psd"
+_CLIPS = ("hadj", "vadj", "hpx", "vempty")
+# The styled shadow's own stray (the mix is not exact on a shadow's tail).
+_CLIPPED_BOUNDS = {"shadow": 6.0}
+
+
+def _clipped_errors() -> dict[str, float]:
+    """Per cell of the clipped fixture, its largest difference, in levels."""
+    psd = PSDImage.open(full_name(_CLIPPED))
+    color, _, _ = composite(psd)
+    diff = np.abs(color[..., :3] - psd.numpy()[..., :3]).max(axis=2) * 255.0
+    errors = {}
+    for layer in psd:
+        if layer.is_group():
+            left, top = layer.bbox[:2]
+            x, y = 10 + (left - 10) // 80 * 80, 10 + (top - 10) // 80 * 80
+            errors[layer.name] = float(diff[y : y + 80, x : x + 80].max())
+    return errors
+
+
+def test_a_clipped_pass_through_group_renders_as_a_styled_one() -> None:
+    """Any layer clipped to the group, hidden or empty, mixes it as a style does."""
+    errors = _clipped_errors()
+    assert len(errors) == 18
+    for name, error in errors.items():
+        assert error <= _CLIPPED_BOUNDS.get(name.split("|")[0], _BOUND), (name, error)
+
+
+@pytest.mark.parametrize("case", ("pt", *_CLIPS))
+def test_which_clipped_groups_mix(case: str) -> None:
+    psd = PSDImage.open(full_name(_CLIPPED))
+    group = next(layer for layer in psd if layer.name == f"multiply|{case}")
+    assert composite_module._mixes_isolated(group, None) is (case != "pt")
