@@ -77,6 +77,15 @@ TYPES, register = new_registry()
 # Tag(key) without the enum call, for a known key.
 _TAGS: dict[bytes, Tag] = {member.value: member for member in Tag}
 
+# Layer effects blocks: Photoshop writes them at version 0 (set_data).
+_EFFECT_BLOCKS = frozenset(
+    {
+        Tag.OBJECT_BASED_EFFECTS_LAYER_INFO,
+        Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V0,
+        Tag.OBJECT_BASED_EFFECTS_LAYER_INFO_V1,
+    }
+)
+
 TYPES.update(ADJUSTMENT_TYPES)
 TYPES.update(
     {
@@ -196,11 +205,24 @@ class TaggedBlocks(DictElement):
             kls = TYPES.get(key)
             self[key] = TaggedBlocks(key=key, data=kls(value))
 
+        A value that already is the key's type is stored as it is, not
+        copied (its version and name kept); a new effects block (``lfx2``, ``lmfx``,
+        ``lfxs``) takes Photoshop's version 0 and name, as Photoshop 2023
+        refuses to read a layer's effects at any other version.
         """
         key = self._key_converter(key)
         kls = TYPES.get(key)
-        if kls is not None:
-            self[key] = TaggedBlock(key=key, data=kls(*args, **kwargs))
+        if kls is None:
+            return
+        if len(args) == 1 and not kwargs and type(args[0]) is kls:
+            data = args[0]
+        else:
+            if key in _EFFECT_BLOCKS:
+                kwargs.setdefault("version", 0)
+                kwargs.setdefault("name", "\x00")
+            data = kls(*args, **kwargs)
+        signature = self[key].signature if key in self else b"8BIM"
+        self[key] = TaggedBlock(signature=signature, key=key, data=data)
 
     @classmethod
     def read(
