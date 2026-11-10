@@ -1063,7 +1063,11 @@ def draw_stroke_effect_split(
     elif paint_type == Enum.GradientFill:
         anchor = stroke_gradient_box(viewport, shape, desc, extent)
         color, _ = paint.draw_gradient_fill(
-            viewport, psd.color_mode, desc, paint.gradient_anchor(psd, desc, anchor)
+            viewport,
+            psd.color_mode,
+            desc,
+            paint.gradient_anchor(psd, desc, anchor),
+            psd.depth,
         )
         if color is None:
             color = np.ones((height, width, 1))
