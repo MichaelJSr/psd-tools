@@ -226,7 +226,24 @@ def _faded_at_8_bits(coverage: np.ndarray, percent: float, depth: int) -> np.nda
     return (np.floor(level * opacity / _LEVELS_8 + 0.5) / _LEVELS_8).astype(np.float32)
 
 
-def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
+def _isolates_adjustments(layer: Layer) -> bool:
+    """Whether a group keeps the adjustments inside it to its own content.
+
+    Photoshop does so for a group with clip layers, a fill under 100 or a
+    layer style on a pass-through group; the children's own blend modes
+    still reach the backdrop. A non-pass-through group is composited on its
+    own anyway.
+    """
+    return (
+        layer.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) < 255
+        or layer.has_clip_layers()
+        or (layer.blend_mode == BlendMode.PASS_THROUGH and _has_enabled_effects(layer))
+    )
+
+
+def _covers_beneath(
+    layer: Layer, shown: Callable[[Layer], bool] | None, confined: bool = False
+) -> bool:
     """Whether compositing the layer keeps ``1 - alpha`` of what lies beneath.
 
     A pass-through group puts each child on the backdrop in the child's own
@@ -234,17 +251,20 @@ def _covers_beneath(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     only when every child it shows, as ``shown`` (the compositor's layer
     filter) picks them, does, and every effect beside one does
     (:py:func:`_beside_covers`). A clipping child paints onto the layer it
-    clips to and never reaches the backdrop, and an adjustment layer paints
-    nothing.
+    clips to and never reaches the backdrop. An adjustment layer paints
+    nothing of its own: it covers only when ``confined``, inside a group that
+    keeps it to the group's content (:py:func:`_isolates_adjustments`), which
+    then goes on over ``1 - alpha`` of the backdrop as any content does.
     """
     if isinstance(layer, AdjustmentLayer):
-        return False
+        return confined
     if layer.blend_mode != BlendMode.PASS_THROUGH:
         return layer.blend_mode in _COVERS_BENEATH
     if not layer.is_group():
         return True  # blended as Normal (``blend.get_blend_func``)
+    confined = confined or _isolates_adjustments(layer)
     return all(
-        _covers_beneath(child, shown) and _beside_covers(child)
+        _covers_beneath(child, shown, confined) and _beside_covers(child)
         for child in cast(GroupMixin, layer)
         if (shown is None or shown(child)) and not child.clipping
     )
@@ -4948,16 +4968,7 @@ class Compositor:
             color_b = self._color
             alpha_b = self._alpha
 
-        # Photoshop keeps an adjustment inside a group that has clip layers, a
-        # fill under 100 or a layer style within the group's shape instead of
-        # passing it through; the children's own blend modes still reach the
-        # backdrop. A non-pass-through group is composited on its own anyway.
-        shape_const, _ = self._get_const(layer)
-        isolate_adjustments = (
-            shape_const < 1.0
-            or layer.has_clip_layers()
-            or (is_passthrough and _has_enabled_effects(layer))
-        )
+        isolate_adjustments = _isolates_adjustments(layer)
         mixes = isolate_adjustments and self._mixes_isolated(layer)
 
         # A pass-through group is not an isolation boundary, so deep knockout
