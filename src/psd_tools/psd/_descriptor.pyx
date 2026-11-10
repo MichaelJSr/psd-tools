@@ -389,3 +389,227 @@ def read(bytes data, Py_ssize_t position, long cap):
     except _GiveUp:
         return None
     return name, classID, items, st.p, st.nbytes, st.nobjects, st.maxread, unknown
+
+
+# ------------------------------ writer ------------------------------
+# ``descriptor._body_bytes`` for the exact classes and values it packs itself;
+# any other value is written by its own ``write`` after the buffer is flushed,
+# and odd numbers go through the same ``struct`` packers, as there.
+
+from cpython.bytes cimport PyBytes_AsString, PyBytes_Size
+from cpython.mem cimport PyMem_Realloc
+from libc.string cimport memcpy as _memcpy
+
+cdef dict _ostypes = {}  # exact class -> its OSType's 4 bytes
+cdef long _WRITE_DEPTH = 100  # nesting written here; deeper values write themselves
+cdef object W_UNIT_FLOAT = None, W_ENUMERATED = None, W_DOUBLE = None, W_DESCRIPTOR = None
+cdef object W_GLOBAL = None, W_BOOL = None, W_INTEGER = None, W_STRING = None, W_LIST = None
+cdef object W_LARGE = None, W_OBJECT_ARRAY = None, W_RAW = None
+cdef object P_U32 = None, P_I32 = None, P_I64 = None, P_F64 = None, P_UNIT_F64 = None, W_BYTES = None
+
+
+def setup_writer(ostypes, classes, packers, write_bytes):
+    """Set every class's OSType bytes, the classes written here, the packers and ``write_bytes``."""
+    global W_UNIT_FLOAT, W_ENUMERATED, W_DOUBLE, W_DESCRIPTOR, W_GLOBAL, W_BOOL, W_INTEGER, W_STRING, W_LIST
+    global W_LARGE, W_OBJECT_ARRAY, W_RAW, P_U32, P_I32, P_I64, P_F64, P_UNIT_F64, W_BYTES
+    _ostypes.clear()
+    _ostypes.update(ostypes)
+    (W_UNIT_FLOAT, W_ENUMERATED, W_DOUBLE, W_DESCRIPTOR, W_GLOBAL, W_BOOL, W_INTEGER, W_STRING, W_LIST,
+     W_LARGE, W_OBJECT_ARRAY, W_RAW) = classes
+    P_U32, P_I32, P_I64, P_F64, P_UNIT_F64 = packers
+    W_BYTES = write_bytes
+
+
+cdef class _WOut:
+    cdef char *buf
+    cdef Py_ssize_t n, cap
+    cdef object fp
+    cdef object written  # what went to fp
+    cdef bint bad  # a piece b"".join refuses: its TypeError at the flush, as there
+
+    def __cinit__(self):
+        self.cap = 1 << 14
+        self.n = 0
+        self.buf = <char *>PyMem_Malloc(self.cap)
+        if self.buf == NULL:
+            raise MemoryError()
+
+    def __dealloc__(self):
+        if self.buf != NULL:
+            PyMem_Free(self.buf)
+
+    cdef int grow(self, Py_ssize_t extra) except -1:
+        cdef Py_ssize_t cap = self.cap
+        cdef char *b
+        while self.n + extra > cap:
+            cap *= 2
+        b = <char *>PyMem_Realloc(self.buf, cap)
+        if b == NULL:
+            raise MemoryError()
+        self.buf, self.cap = b, cap
+        return 0
+
+    cdef inline int put(self, const char *s, Py_ssize_t k) except -1:
+        if self.n + k > self.cap:
+            self.grow(k)
+        _memcpy(self.buf + self.n, s, k)
+        self.n += k
+        return 0
+
+    cdef inline int u32(self, uint32_t v) except -1:
+        cdef char b[4]
+        b[0] = <char>(v >> 24)
+        b[1] = <char>(v >> 16)
+        b[2] = <char>(v >> 8)
+        b[3] = <char>v
+        return self.put(b, 4)
+
+    cdef inline int u64(self, uint64_t v) except -1:
+        cdef char b[8]
+        cdef int i
+        for i in range(8):
+            b[i] = <char>(v >> (56 - 8 * i))
+        return self.put(b, 8)
+
+    cdef inline int f64(self, double d) except -1:
+        cdef uint64_t u
+        _memcpy(&u, &d, 8)
+        return self.u64(u)
+
+    cdef int data(self, object data) except -1:
+        """A bytes object (or subclass) as it is; another bytes-like by its bytes."""
+        if not isinstance(data, bytes):
+            try:
+                data = bytes(memoryview(data))
+            except TypeError:
+                self.bad = True
+                return 0
+        self.put(PyBytes_AsString(data), PyBytes_Size(data))
+        return 0
+
+    cdef int flush(self) except -1:
+        if self.bad:
+            raise TypeError("expected a bytes-like object")
+        if self.n:
+            self.written += W_BYTES(self.fp, PyBytes_FromStringAndSize(self.buf, self.n))
+            self.n = 0
+        return 0
+
+    cdef int delegate(self, object v) except -1:
+        """``write_joined(fp, out) + v.write(fp)``."""
+        self.flush()
+        self.written += v.write(self.fp)
+        return 0
+
+
+cdef int _w_len(_WOut out, Py_ssize_t n) except -1:
+    """``_U32(n)``: the packer past 32 bits, for its error."""
+    if 0 <= n <= 0xFFFFFFFF:
+        out.u32(<uint32_t>n)
+    else:
+        out.data(P_U32(n))
+    return 0
+
+
+cdef int _w_key(_WOut out, object value) except -1:
+    """``_key_bytes``."""
+    if value in _terms or isinstance(value, _ZeroLengthKey):
+        out.u32(0)
+    else:
+        _w_len(out, len(value))
+    out.data(value)
+    return 0
+
+
+cdef int _w_ostype(_WOut out, object v) except -1:
+    code = _ostypes.get(type(v))
+    if code is None:
+        code = v.ostype.value
+    out.data(code)
+    return 0
+
+
+cdef int _w_body(_WOut out, object d, long depth) except -1:
+    cdef bytes name = d.name.encode("utf-16-be")
+    out.u32(<uint32_t>(PyBytes_Size(name) // 2))
+    out.data(name)
+    _w_key(out, d.classID)
+    items = d._items
+    _w_len(out, len(items))
+    for key, value in items.items():
+        _w_key(out, key)
+        _w_ostype(out, value)
+        _w_value(out, value, depth + 1)
+    return 0
+
+
+cdef int _w_value(_WOut out, object v, long depth) except -1:
+    cdef object t = type(v), x, unit
+    cdef long long n
+    cdef bytes data
+    if depth > _WRITE_DEPTH:  # deeper: its own write, with Python's recursion limit
+        t = None
+    if t is W_UNIT_FLOAT:
+        unit = v.unit.value
+        x = v.value
+        if type(unit) is bytes and PyBytes_Size(unit) == 4 and type(x) is float:
+            out.data(unit)
+            out.f64(x)
+        else:
+            out.data(P_UNIT_F64(unit, x))
+    elif t is W_ENUMERATED:
+        _w_key(out, v.typeID)
+        _w_key(out, v.enum)
+    elif t is W_DOUBLE:
+        x = v.value
+        if type(x) is float:
+            out.f64(x)
+        else:
+            out.data(P_F64(x))
+    elif t is W_DESCRIPTOR or t is W_GLOBAL:
+        _w_body(out, v, depth)
+    elif t is W_BOOL and type(v.value) is bool:
+        out.put(b"\x01" if v.value else b"\x00", 1)
+    elif t is W_INTEGER:
+        x = v.value
+        if type(x) is int and -2147483648 <= x <= 2147483647:
+            n = x
+            out.u32(<uint32_t>(<int32_t>n))
+        else:
+            out.data(P_I32(x))
+    elif t is W_STRING and type(v.value) is str:
+        data = v.value.encode("utf-16-be")
+        out.u32(<uint32_t>(PyBytes_Size(data) // 2))
+        out.data(data)
+    elif t is W_LIST:
+        items = v._items
+        _w_len(out, len(items))
+        for item in items:
+            _w_ostype(out, item)
+            _w_value(out, item, depth + 1)
+    elif t is W_LARGE:
+        x = v.value
+        if type(x) is int and -9223372036854775808 <= x <= 9223372036854775807:
+            n = x
+            out.u64(<uint64_t>n)
+        else:
+            out.data(P_I64(x))
+    elif t is W_OBJECT_ARRAY:
+        out.data(P_U32(v.items_count))
+        _w_body(out, v, depth)
+    elif t is W_RAW and type(v.value) is bytes:
+        _w_len(out, len(v.value))
+        out.data(v.value)
+    else:
+        out.delegate(v)
+    return 0
+
+
+def write_body(d, fp):
+    """``_body_bytes(d, out, fp) + write_joined(fp, out)``: the bytes written to ``fp``."""
+    cdef _WOut out = _WOut()
+    out.fp = fp
+    out.written = 0
+    _w_body(out, d, 0)
+    out.flush()
+    return out.written
