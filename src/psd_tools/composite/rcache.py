@@ -10,8 +10,10 @@ A pass stores the compositor state after each top-level layer below the
 first whose text blend it reads off the preview, and the group alphas and
 stroke bands it draws. Keys hash what a layer subtree *is* now
 (record bytes, channel bytes, children), never ``id()``, so an edit between
-passes changes the key and nothing needs invalidating. Stored arrays are
-read-only. With no cache active a pass pays one ContextVar read.
+passes changes the key and nothing needs invalidating. A payload that cannot
+change (channel bytes, a block as read, a linked file) is hashed once per
+cache; records are hashed on every pass. Stored arrays are read-only. With no
+cache active a pass pays one ContextVar read.
 
 ``PSD_RCACHE_VERIFY=1`` renders every cached pass a second time without the
 cache and raises :py:class:`CacheMismatch` unless the two are equal.
@@ -19,22 +21,32 @@ cache and raises :py:class:`CacheMismatch` unless the two are equal.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import io
 import os
+import weakref
 from collections import Counter, OrderedDict
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any
 
+import attrs
 import numpy as np
 
 from psd_tools.api.text_edit import stylistic_alternates
-from psd_tools.constants import Resource, Tag
+from psd_tools.constants import Compression, Resource, Tag
+from psd_tools.psd.filter_effects import (
+    FilterEffectChannel,
+    FilterEffectExtra,
+    FilterEffects,
+)
+from psd_tools.psd.linked_layer import LinkedLayers
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import Layer
     from psd_tools.api.psd_image import PSDImage
+    from psd_tools.psd.tagged_blocks import TaggedBlock
 
 _ACTIVE: ContextVar[RenderCache | None] = ContextVar(
     "psd_tools_render_cache", default=None
@@ -60,7 +72,9 @@ def suspended() -> Token[RenderCache | None]:
 class RenderCache:
     """LRU of compositor intermediates, bounded in bytes.
 
-    Not thread-safe: give each thread its own.
+    Not thread-safe: give each thread its own. It also keeps the digest of
+    each immutable payload a key hashed, and the payload, while the channel
+    or block that held it lives (up to 512 MB).
 
     :param max_bytes: The size the stored arrays are kept within.
     :param verify: Check every cached pass against an uncached one; by
@@ -78,6 +92,10 @@ class RenderCache:
         self._held: dict[int, list[Any]] = {}  # id: [array, entries holding it]
         self._bytes = 0
         self._tokens: list[Token[RenderCache | None]] = []
+        # Payload digests: mark -> (the objects hashed, kept so ids stay unique,
+        # digest, a weakref to their owner that drops the entry, size).
+        self._digests: dict[Hashable, tuple[Any, bytes, Any, int]] = {}
+        self._pinned = 0
 
     def __enter__(self) -> RenderCache:
         self._tokens.append(_ACTIVE.set(self))
@@ -133,6 +151,8 @@ class RenderCache:
         self._store.clear()
         self._held.clear()
         self._bytes = 0
+        self._digests.clear()
+        self._pinned = 0
 
     @property
     def nbytes(self) -> int:
@@ -157,8 +177,76 @@ def _record_bytes(record: Any, version: int) -> bytes:
     return buffer.getvalue()
 
 
+# Payload bytes the digests may keep alive; past it they start over.
+_PINNED_MAX = 512 << 20
+
+
+def _digest(
+    rc: RenderCache | None,
+    mark: Hashable,
+    pin: Any,
+    size: int,
+    payload: Callable[[], bytes | memoryview],
+    owner: Any,
+) -> bytes:
+    """sha256 of ``payload()``, kept under ``mark`` with ``pin`` while ``owner`` lives."""
+    if rc is None:
+        return hashlib.sha256(payload()).digest()
+    known = rc._digests.get(mark)
+    if known is not None:
+        return known[1]
+    digest = hashlib.sha256(payload()).digest()
+    try:
+        tie = weakref.ref(owner, functools.partial(_forget, weakref.ref(rc), mark))
+    except TypeError:
+        return digest
+    if rc._pinned + size > _PINNED_MAX:
+        rc._digests.clear()
+        rc._pinned = 0
+    rc._digests[mark] = (pin, digest, tie, size)
+    rc._pinned += size
+    return digest
+
+
+def _forget(cache: weakref.ref[RenderCache], mark: Hashable, _: object) -> None:
+    rc = cache()
+    entry = None if rc is None else rc._digests.pop(mark, None)
+    if rc is not None and entry is not None:
+        rc._pinned -= entry[3]
+
+
+def _bytes_digest(rc: RenderCache | None, data: Any, owner: Any) -> bytes:
+    if type(data) is bytes:
+        return _digest(rc, id(data), data, len(data), lambda: data, owner)
+    return hashlib.sha256(data).digest()  # mutable: whole every time
+
+
+def _channel_digest(channel: Any, rc: RenderCache | None) -> bytes:
+    """Digest of ``channel.data``; an unread one hashed in place."""
+    span = channel._span
+    if span is not None:
+        whole = span._source.data
+        end = span.offset + span.length
+        if whole is not None and end <= len(whole):
+
+            def unread() -> memoryview:
+                # A bad compression raises, as reading ``data`` does.
+                Compression(int.from_bytes(whole[span.offset : span.offset + 2]))
+                return memoryview(whole)[span.offset + 2 : end]
+
+            return _digest(rc, id(span), span, span.length, unread, channel)
+    return _bytes_digest(rc, channel.data, channel)
+
+
 def layer_key(layer: Layer, memo: dict[int, bytes]) -> bytes:
     """Hash of the layer's subtree as it is now: records, channels, children."""
+    known = memo.get(id(layer))
+    if known is not None:
+        return known
+    return _layer_key(layer, memo, _ACTIVE.get())
+
+
+def _layer_key(layer: Layer, memo: dict[int, bytes], rc: RenderCache | None) -> bytes:
     known = memo.get(id(layer))
     if known is not None:
         return known
@@ -167,7 +255,7 @@ def layer_key(layer: Layer, memo: dict[int, bytes]) -> bytes:
     digest = hashlib.sha256()
     digest.update(_record_bytes(layer._record, version))
     for channel in layer._channels:
-        digest.update(channel.data)
+        digest.update(_channel_digest(channel, rc))
     if layer.kind == "type":  # Stylistic Alternates live in Txt2 only
         digest.update(repr(stylistic_alternates(layer)).encode())  # type: ignore[arg-type]
     if layer.is_group():
@@ -175,7 +263,7 @@ def layer_key(layer: Layer, memo: dict[int, bytes]) -> bytes:
         if bounding is not None:
             digest.update(_record_bytes(bounding, version))
         for child in layer:  # type: ignore[attr-defined]
-            digest.update(layer_key(child, memo))
+            digest.update(_layer_key(child, memo, rc))
     key = memo[id(layer)] = digest.digest()[:16]
     return key
 
@@ -201,6 +289,81 @@ _DOCUMENT_RESOURCES = (
 )
 
 
+def _written(data: Any, version: int) -> bytes:
+    """A parsed block's bytes inside its length, as ``TaggedBlock.write`` writes them."""
+    buffer = io.BytesIO()
+    data.write(buffer, padding=4, version=version)
+    return buffer.getvalue()
+
+
+class _Unsplit(Exception):
+    pass
+
+
+def _emptied(item: Any, payloads: list[bytes]) -> Any:
+    body = item.data
+    if body is None:
+        return item
+    if type(body) is not bytes:
+        raise _Unsplit
+    payloads.append(body)
+    return attrs.evolve(item, data=b"")
+
+
+def _split(data: Any) -> tuple[Any, tuple[bytes, ...]] | None:
+    """``data`` with its linked files or smart filter pixels emptied, and those."""
+    payloads: list[bytes] = []
+    try:
+        if type(data) is LinkedLayers:
+            items = [_emptied(item, payloads) for item in data]
+        elif type(data) is FilterEffects:
+            items = []
+            for effect in data:
+                parts = {}
+                if effect.channels is not None:
+                    parts["channels"] = [
+                        _emptied(c, payloads) if type(c) is FilterEffectChannel else c
+                        for c in effect.channels
+                    ]
+                if type(effect.extra) is FilterEffectExtra:
+                    parts["extra"] = _emptied(effect.extra, payloads)
+                items.append(attrs.evolve(effect, **parts))
+        else:
+            return None
+        return attrs.evolve(data, items=items), tuple(payloads)
+    except (_Unsplit, AttributeError, TypeError, ValueError):
+        return None
+
+
+def _block_digest(block: TaggedBlock, version: int, rc: RenderCache | None) -> bytes:
+    """The block's signature and key, then a digest of its bytes inside its length.
+
+    The bytes as read (held, or unread) when it has them, else its data
+    written: a parsed block writes the bytes it was read from.
+    """
+    key = block.key if isinstance(block.key, bytes) else block.key.value
+    head = block.signature + key
+    held = block._held
+    if held is not None:
+        return head + _bytes_digest(rc, held[0], block)
+    if block._span is not None and block._span[1] == version:
+        span = block._span[0]
+        return head + _digest(rc, id(span), span, span.length, span.view, block)
+    data = block.data
+    if not hasattr(data, "write"):
+        return head + _bytes_digest(rc, data, block)
+    split = _split(data) if rc is not None else None
+    if split is None:
+        return head + hashlib.sha256(_written(data, version)).digest()
+    # Its records written again, its large payloads known by identity.
+    light, payloads = split
+    mark = (type(data), _written(light, version), *map(id, payloads))
+    size = sum(map(len, payloads))
+    return head + _digest(
+        rc, mark, payloads, size, lambda: _written(data, version), data
+    )
+
+
 def doc_key(psd: PSDImage) -> bytes | None:
     """What every layer's render may read from the document.
 
@@ -210,6 +373,7 @@ def doc_key(psd: PSDImage) -> bytes | None:
     blocks = psd.tagged_blocks
     record = psd._record
     version = record.header.version
+    rc = _ACTIVE.get()
     digest = hashlib.sha256()
     digest.update(_record_bytes(record.header, version))
     digest.update(_record_bytes(record.color_mode_data, version))
@@ -220,5 +384,5 @@ def doc_key(psd: PSDImage) -> bytes | None:
     if blocks is not None:
         for tag in _DOCUMENT_BLOCKS:
             if tag in blocks:
-                digest.update(_record_bytes(blocks[tag], version))
+                digest.update(_block_digest(blocks[tag], version, rc))
     return digest.digest()[:16]

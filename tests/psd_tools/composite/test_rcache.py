@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import io
 import random
+from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -13,9 +16,11 @@ from PIL import Image
 from psd_tools import PSDImage
 from psd_tools.api.layers import Layer, PixelLayer, TypeLayer
 from psd_tools.composite import composite
-from psd_tools.composite.rcache import CacheMismatch, RenderCache, doc_key
+from psd_tools.composite.rcache import CacheMismatch, RenderCache, doc_key, layer_key
 from psd_tools.constants import BlendMode, Tag
+from psd_tools.psd.lazy import load
 
+from ..smart_filters import feid_item, store_items
 from ..utils import full_name
 
 pytest.importorskip("scipy")
@@ -211,6 +216,73 @@ def test_an_external_link_is_part_of_the_document_key() -> None:
     cache = RenderCache()
     _render(psd, cache)
     assert cache._store
+
+
+def _keys(psd: PSDImage, cache: RenderCache | None) -> tuple[bytes | None, ...]:
+    with cache or contextlib.nullcontext():
+        return (doc_key(psd), *(layer_key(layer, {}) for layer in psd))
+
+
+def _with_smart_filter(tmp_path: Path) -> Path:
+    psd = PSDImage.open(full_name("layers/smartobject-layer.psd"))
+    plane = np.full((4, 4), 200, np.uint8)
+    store_items(psd, [feid_item((0, 0, 4, 4), plane[..., None], plane, plane)])
+    path = tmp_path / "fx.psd"
+    psd.save(path)
+    return path
+
+
+def test_keys_do_not_depend_on_how_a_payload_is_held(tmp_path: Path) -> None:
+    # Path open: links parsed, FEid held. BytesIO: both unread, channels too.
+    path = _with_smart_filter(tmp_path)
+    eager = PSDImage.open(path)
+    lazy = PSDImage.open(io.BytesIO(path.read_bytes()))
+    want = _keys(eager, None)
+    cache = RenderCache()
+    for psd in (eager, lazy, eager, lazy):
+        assert _keys(psd, cache) == want
+        assert _keys(psd, None) == want
+    for psd in (eager, lazy):
+        assert psd.tagged_blocks is not None
+        for block in psd.tagged_blocks.values():
+            load(block)
+        for layer in psd.descendants():
+            for channel in layer._channels:
+                load(channel)
+        assert _keys(psd, cache) == want
+        assert _keys(psd, RenderCache()) == want
+
+
+def test_a_payload_swapped_under_the_cache_changes_the_key(tmp_path: Path) -> None:
+    psd = PSDImage.open(io.BytesIO(_with_smart_filter(tmp_path).read_bytes()))
+    assert psd.tagged_blocks is not None
+    cache = RenderCache()
+    before = _keys(psd, cache)
+    item = psd.tagged_blocks.get_data(Tag.LINKED_LAYER2)[0]
+    effect = psd.tagged_blocks.get_data(Tag.FILTER_EFFECTS2)[0]
+    channel = psd[0]._channels[0]
+    file, pixels, plane = item.data, effect.channels[0].data, channel.data
+    for owner, name, value in (
+        (item, "data", file),
+        (effect.channels[0], "data", pixels),
+        (channel, "data", plane),
+    ):
+        setattr(owner, name, bytes(reversed(value)) + b"\0")
+        assert _keys(psd, cache) != before
+        setattr(owner, name, bytes(bytearray(value)))  # equal, another object
+        assert _keys(psd, cache) == before
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_the_digests_go_with_their_document(tmp_path: Path, lazy: bool) -> None:
+    path = _with_smart_filter(tmp_path)
+    psd = PSDImage.open(io.BytesIO(path.read_bytes()) if lazy else path)
+    cache = RenderCache()
+    _keys(psd, cache)
+    assert cache._digests
+    del psd
+    gc.collect()
+    assert not cache._digests and cache._pinned == 0
 
 
 _PROPERTY_FILES = [
