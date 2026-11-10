@@ -18,7 +18,7 @@ from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.utils import check_pixel_size, get_color_channels
 from psd_tools.compression import _decompress, decompress_row_peak_bytes
 from psd_tools.constants import Compression, LinkedLayerType, Tag
-from psd_tools.psd.descriptor import Descriptor, Double
+from psd_tools.psd.descriptor import Descriptor, Double, UnitFloat
 from psd_tools.psd.filter_effects import (
     FilterEffect,
     FilterEffectChannel,
@@ -30,6 +30,7 @@ from psd_tools.psd.tagged_blocks import (
     TaggedBlock,
     TaggedBlocks,
 )
+from psd_tools.terminology import Unit
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +307,7 @@ class SmartObject:
         blob: str,
         psd_path: str | None = None,
         pixels: tuple[float, float] | None = None,
+        resolution: float | None = None,
         corners: "Corners | None" = None,
         date: tuple = links.LINK_DATE,
         name: str | None = None,
@@ -328,6 +330,9 @@ class SmartObject:
             ``repo_path``.
         :param pixels: the file's (width, height) when it is not the embedded
             file's, written as each layer's ``Sz``.
+        :param resolution: the file's ppi, written as each layer's ``Rslt``;
+            default the embedded copy's, which Photoshop's Update Modified
+            Content resizes the layer by when it is not the file's.
         :param corners: the new placement (``Trnf``): 8 numbers, or a callable
             taking a layer's current 8 and returning its new ones, for an
             object several layers share.
@@ -341,6 +346,7 @@ class SmartObject:
             raise ValueError("Smart object data not found")
         if self.kind != "data":
             raise ValueError("Only an embedded smart object can be linked")
+        _check_resolution(resolution)
         psd_path = self._known_path(psd_path)
         item = self._data
         users = self._users()
@@ -369,7 +375,7 @@ class SmartObject:
         )
         _swap_item(self._layer._psd, item, external)
         for layer, new in zip(users, placed, strict=True):
-            _set_placement(layer, pixels, new, embedded=False)
+            _set_placement(layer, pixels, new, embedded=False, resolution=resolution)
         self._refresh(users, external)
 
     def relink(
@@ -380,6 +386,7 @@ class SmartObject:
         blob: str | None = None,
         psd_path: str | None = None,
         pixels: tuple[float, float] | None = None,
+        resolution: float | None = None,
         corners: "Corners | None" = None,
         date: tuple = links.LINK_DATE,
         name: str | None = None,
@@ -389,8 +396,8 @@ class SmartObject:
 
         The record's paths are rebuilt for *path* (default the file it links
         now) from the PSD's repository path, with *date*. *size*, *blob*
-        (a new ``contentID``), *pixels* and *corners* are written when given;
-        the raster is never changed.
+        (a new ``contentID``), *pixels*, *resolution* and *corners* are written
+        when given; the raster is never changed.
 
         :raises ValueError: if the object is not linked, the PSD path is
             unknown, or its link places nowhere and no *path* is given.
@@ -399,6 +406,7 @@ class SmartObject:
             raise ValueError("Smart object data not found")
         if self.kind != "external":
             raise ValueError("Only a linked smart object can be relinked")
+        _check_resolution(resolution)
         psd_path = self._known_path(psd_path)
         item = self._data
         if path is None:
@@ -424,7 +432,7 @@ class SmartObject:
                 links.link_content_id(blob, psd_path, item.uuid)
             )
         for layer, new in zip(users, placed, strict=True):
-            _set_placement(layer, pixels, new, embedded=False)
+            _set_placement(layer, pixels, new, embedded=False, resolution=resolution)
         self._refresh(users, item)
 
     def _psd_path(self, psd_path: str | None) -> str | None:
@@ -887,13 +895,19 @@ def _config(layer: LayerProtocol) -> SmartObjectLayerData:
     raise ValueError("Smart object config not found")
 
 
+def _check_resolution(resolution: float | None) -> None:
+    if resolution is not None and not float(resolution) > 0:
+        raise ValueError(f"A resolution must be over 0 ppi, not {resolution!r}")
+
+
 def _set_placement(
     layer: LayerProtocol,
     pixels: tuple[float, float] | None,
     corners: tuple[float, ...] | None,
     embedded: bool,
+    resolution: float | None = None,
 ) -> None:
-    """``SoLE`` without ``PlLd`` (unless *embedded*), with *pixels* and *corners*."""
+    """``SoLE`` without ``PlLd`` (unless *embedded*), with the values given."""
     blocks = layer.tagged_blocks
     if not embedded and Tag.SMART_OBJECT_LAYER_DATA1 in blocks:
         items = list(blocks.items())
@@ -913,6 +927,8 @@ def _set_placement(
             descriptor[b"Sz  "] = size
         size[b"Wdth"] = Double(float(pixels[0]))
         size[b"Hght"] = Double(float(pixels[1]))
+    if resolution is not None:
+        descriptor[b"Rslt"] = UnitFloat(unit=Unit.Density, value=float(resolution))
     if corners is not None:
         for key in (b"Trnf", b"nonAffineTransform"):
             values = descriptor.get(key)

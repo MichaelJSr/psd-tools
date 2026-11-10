@@ -130,6 +130,23 @@ def test_link_writes_photoshops_record_and_keeps_the_pixels() -> None:
     assert repeat.getvalue() == saved.getvalue()
 
 
+def test_link_and_relink_write_the_files_resolution() -> None:
+    psd = PSDImage.open(full_name("placedLayer.psd"))
+    psd.repo_path = CARD
+    so = _layer(psd, "embedded-png").smart_object
+    kept = so.resolution
+    with pytest.raises(ValueError, match="over 0"):
+        so.link("Types/Equip.png", 1, blob="b1", resolution=0)
+    so.link("Types/Equip.png", 1, blob="b1")
+    assert so.resolution == kept  # the embedded copy's, as before
+    so.relink(resolution=90)
+    saved = io.BytesIO()
+    psd.save(saved, update_preview=False)
+    back = PSDImage.open(io.BytesIO(saved.getvalue()))
+    rslt = _layer(back, "embedded-png").smart_object._config.data[b"Rslt"]  # type: ignore[union-attr]
+    assert (rslt.unit.value, rslt.value) == (b"#Rsl", 90.0)
+
+
 def test_relink_rewrites_the_paths_and_needs_the_psd_path() -> None:
     layer = _external(relPath="file:///C//Users/Zoey/TTSCardMaker/Types/x.png")
     so = layer.smart_object
