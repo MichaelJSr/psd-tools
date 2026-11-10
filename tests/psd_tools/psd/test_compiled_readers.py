@@ -220,6 +220,17 @@ def test_engine_data_is_read_compiled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(EngineData2.frombytes(data)) > 0
 
 
+def test_engine_keys_are_shared_up_to_63_chars() -> None:
+    name = b"L" * 63
+    data = b"<< /A 1 /B << /A 2 >> /" + name + b" 3 /" + name + b"L 4 >>"
+    with parse_context():
+        first, second = (_engine.parse(EngineData, data, 64)[0] for _ in range(2))
+    (a, _, short, long), (a2, _, short2, long2) = list(first), list(second)
+    assert a is a2 is next(iter(first["B"]))
+    assert short is short2
+    assert long == long2 and long is not long2
+
+
 def build(kind: type[Any], items: list[tuple[Any, Any]], **fields: Any) -> Any:
     """A descriptor of ``kind`` holding ``items``."""
     element = kind(**fields)

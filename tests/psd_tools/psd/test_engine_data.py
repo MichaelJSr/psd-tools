@@ -8,6 +8,7 @@ from psd_tools.psd.engine_data import (
     EngineData2,
     EngineToken,
     Float,
+    Property,
     String,
     Tokenizer,
 )
@@ -194,3 +195,17 @@ def test_the_first_byte_names_the_same_token_type_as_every_pattern() -> None:
             None,
         )
         assert dispatched == expected, token
+
+
+def test_str_keys_find_what_property_keys_find() -> None:
+    data = EngineData.frombytes(b"<< /A 1 /B << /C 2 >> >>")
+    for key in ("A", "B", "Z"):
+        assert data.get(key) == data.get(Property(key))
+        assert (key in data) == (Property(key) in data)
+    assert data["B"]["C"] == 2
+    assert data.get("Z", 7) == 7
+    with pytest.raises(KeyError) as by_str:
+        data["Z"]
+    with pytest.raises(KeyError) as by_property:
+        data[Property("Z")]
+    assert str(by_str.value) == str(by_property.value)
