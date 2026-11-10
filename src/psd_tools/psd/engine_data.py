@@ -309,7 +309,10 @@ class Dict(DictElement):
             return 0
         return write_bytes(fp, b"\n")
 
+    # A str key finds its Property directly: equal hash, and Property == str.
     def __getitem__(self, key: str | Property) -> Any:
+        if type(key) is str:
+            return self._items[key]
         key = key if isinstance(key, Property) else Property(key)
         return super().__getitem__(key)
 
@@ -322,11 +325,15 @@ class Dict(DictElement):
         super().__delitem__(key)
 
     def __contains__(self, key: str | Property) -> bool:  # type: ignore[override]
+        if type(key) is str:
+            return key in self._items
         key = key if isinstance(key, Property) else Property(key)
         return self._items.__contains__(key)
 
     def get(self, key: str | Property, *args: Any) -> Any:
         """Return the value of a key given as a string or a `Property`."""
+        if type(key) is str:
+            return self._items.get(key, *args)
         key = key if isinstance(key, Property) else Property(key)
         return super().get(key, *args)
 

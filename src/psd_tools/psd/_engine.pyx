@@ -27,6 +27,10 @@ cdef object _Integer = None
 cdef object _Float = None
 cdef object _Property = None
 cdef object _Tag = None
+# One Property per key name (frozen, so shared); long names and those past the cap get their own.
+cdef dict _KEYS = {}
+cdef Py_ssize_t _KEYS_CAP = 4096
+cdef Py_ssize_t _KEY_LEN = 64
 
 cdef enum:
     T_STOP
@@ -50,6 +54,7 @@ def setup(Dict, List, String, Bool, Integer, Float, Property, Tag, OrderedDict):
     _Dict, _List, _String, _Bool = Dict, List, String, Bool
     _Integer, _Float, _Property, _Tag = Integer, Float, Property, Tag
     _OrderedDict = OrderedDict
+    _KEYS.clear()  # no keys of an older Property class
 
 
 cdef inline bint _divider(unsigned char c) noexcept:
@@ -200,8 +205,17 @@ cdef class _Parser:
         cdef bint negative
         cdef object obj, raw, v, escaped, plain
         if kind == T_PROPERTY:
-            obj = _new(_Property)
             v = PyUnicode_DecodeASCII(<const char *>(self.b + s + 1), size - 1, NULL)
+            obj = _KEYS.get(v)
+            if obj is not None:
+                self.charge(size)
+                return obj
+            obj = _new(_Property)
+            PyObject_GenericSetAttr(obj, "value", v)
+            if size <= _KEY_LEN and len(_KEYS) < _KEYS_CAP:
+                _KEYS[v] = obj
+            self.charge(size)
+            return obj
         elif kind == T_STRING:
             raw = PyBytes_FromStringAndSize(<const char *>(self.b + s + 1), size - 2)
             if b"\\" in raw:  # String._ESCAPED_CHARS, undone in its order
