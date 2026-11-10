@@ -3456,6 +3456,18 @@ def _blend_unfiltered(
     return out, alpha
 
 
+def _is_one(factor: float | np.ndarray) -> bool:
+    """Whether ``factor`` is the scalar 1, which multiplies nothing."""
+    return type(factor) is float and factor == 1.0
+
+
+def _times(canvas: np.ndarray, factor: float) -> np.ndarray:
+    """``canvas * factor``, or ``canvas`` itself where that is the same bits."""
+    if _is_one(factor) and isinstance(canvas, np.ndarray) and canvas.dtype.kind == "f":
+        return canvas
+    return canvas * factor
+
+
 def _over(
     shape: np.ndarray,
     alpha: np.ndarray,
@@ -3832,7 +3844,8 @@ class Compositor:
         # outset-only stroke never reaches: it puts nothing inside the layer,
         # so the canvas is never started and hands its source back untouched,
         # fill opacity and all.
-        self._apply_outer_effects(outer, source.alpha * source.fill_opacity)
+        if outer:
+            self._apply_outer_effects(outer, source.alpha * source.fill_opacity)
         self._composite_source(source, layer.blend_mode)
 
     def _accepts(self, layer: Layer, clip_compositing: bool) -> bool:
@@ -3946,12 +3959,14 @@ class Compositor:
         fill_opacity, opacity = self._get_const(layer)
         mask = shape_mask * opacity
         # In place: both canvases were built for this layer by the calls above
-        # and are not shared with anything else.
-        shape *= shape_mask
+        # and are not shared with anything else. A factor of 1 leaves them be.
+        if not _is_one(shape_mask):
+            shape *= shape_mask
         region = None
         if is_group and _has_enabled_effects(layer):
             region = alpha * shape_mask
-        alpha *= mask
+        if not _is_one(mask):
+            alpha *= mask
         if stroke is not None:
             stroke_mask = self._get_mask(layer, clip_to_path=False)
             # The fill's share and the stroke's are disjoint, so they add.
@@ -4051,12 +4066,15 @@ class Compositor:
 
     def _composite_source(self, source: _Source, blend_mode: BlendMode) -> None:
         """Composite a resolved source into this compositor's canvases."""
+        # Both only read what they are handed, so at full fill they take the
+        # source's own canvases: times 1 is the same bits.
+        fill = source.fill_opacity
         if _composites_as_passthrough(source, blend_mode):
             self._apply_passthrough_source(
                 source.color,
-                source.shape * source.fill_opacity,
-                source.alpha * source.fill_opacity,
-                source.mask * source.fill_opacity,
+                _times(source.shape, fill),
+                _times(source.alpha, fill),
+                source.mask * fill,
             )
             return
 
@@ -4066,10 +4084,8 @@ class Compositor:
         # removes the whole backdrop.
         self._apply_source(
             source.color,
-            source.knockout_shape
-            if source.knockout
-            else source.shape * source.fill_opacity,
-            source.alpha * source.fill_opacity,
+            source.knockout_shape if source.knockout else _times(source.shape, fill),
+            _times(source.alpha, fill),
             blend_mode,
             source.knockout,
             text_gamma=source.text_gamma,
