@@ -168,6 +168,43 @@ def test_shape_read_is_sized_with_the_color_array_held(monkeypatch):
     assert seen[1] == layer.numpy("color").nbytes
 
 
+@pytest.mark.skipif(numpy_io._cnumpy_io is None, reason="compiled read not built")
+def test_the_joined_read_is_the_two_reads(monkeypatch):
+    """`_joined8`: the concatenate's bits, refused at the same budget."""
+    psd = PSDImage.open(full_name("semi-transparent-layers.psd"))
+    layer = next(
+        x
+        for x in psd.descendants()
+        if x.width * x.height > 0
+        and any(
+            i.id == ChannelID.TRANSPARENCY_MASK and len(c.data) > 0
+            for i, c in zip(x._record.channel_info, x._channels, strict=True)
+        )
+    )
+    color, shape = layer.numpy("color"), layer.numpy("shape")
+    joined = numpy_io._joined8(layer)
+    assert joined is not None and shape is not None
+    assert joined.tobytes() == np.concatenate([color, shape], axis=2).tobytes()
+
+    def least() -> tuple[int, str]:
+        low, high = 1, 1 << 32
+        while low < high:
+            psd.max_alloc_bytes = (low + high) // 2
+            try:
+                layer.numpy()
+                high = (low + high) // 2
+            except ValueError:
+                low = (low + high) // 2 + 1
+        psd.max_alloc_bytes = low - 1
+        with pytest.raises(ValueError) as refused:
+            layer.numpy()
+        return low, str(refused.value)
+
+    fast = least()
+    monkeypatch.setattr(numpy_io, "_joined8", lambda layer: None)
+    assert least() == fast
+
+
 def test_pil_decompress_phase_holds_earlier_planes():
     layer = _rgb_layer()
     _, _, planes, peak = _layer_peak_bytes(layer, None, False)
