@@ -53,6 +53,9 @@ _CALL_OVERHEAD_BYTES = 32768
 # planes outweigh the float32 colour it returns.
 GRADIENT_FILL_BYTES = 128
 
+# The levels of an 8-bit document's channels.
+_LEVELS_8 = 255.0
+
 
 # The modes whose color array is a single channel, so a descriptor color has to
 # be reduced to one component to be a legal source for them. Grayscale, bitmap
@@ -271,6 +274,7 @@ def create_fill_desc(
             layer._psd.color_mode,
             desc,
             gradient_anchor(layer._psd, desc, anchor),
+            layer._psd.depth,
         )
     return None, None
 
@@ -335,7 +339,11 @@ def create_fill(
         return draw_pattern_fill(viewport, layer._psd, desc)
     if (desc := blocks.get_data(Tag.GRADIENT_FILL_SETTING)) is not None:
         return draw_gradient_fill(
-            viewport, layer._psd.color_mode, desc, gradient_anchor(layer._psd, desc)
+            viewport,
+            layer._psd.color_mode,
+            desc,
+            gradient_anchor(layer._psd, desc),
+            layer._psd.depth,
         )
     if (desc := blocks.get_data(Tag.VECTOR_STROKE_CONTENT_DATA)) is not None:
         if Key.Color in desc:
@@ -344,7 +352,11 @@ def create_fill(
             return draw_pattern_fill(viewport, layer._psd, desc)
         elif Key.Gradient in desc:
             return draw_gradient_fill(
-                viewport, layer._psd.color_mode, desc, gradient_anchor(layer._psd, desc)
+                viewport,
+                layer._psd.color_mode,
+                desc,
+                gradient_anchor(layer._psd, desc),
+                layer._psd.depth,
             )
     return None, None
 
@@ -609,12 +621,17 @@ def draw_gradient_fill(
     color_mode: ColorMode,
     desc: Descriptor,
     anchor: tuple[float, float, float, float] | None = None,
+    depth: int | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """
     Create a gradient fill image.
 
     The ramp is laid out across ``anchor``, which defaults to ``viewport``; a
     viewport larger than the anchor continues the ramp past its ends.
+
+    In an 8-bit ``depth`` the colour and transparency come out in whole
+    levels, as Photoshop rasters a gradient before it blends; other depths,
+    and ``None``, leave them unrounded.
 
     Requires scipy for gradient color interpolation.
     """
@@ -665,12 +682,30 @@ def draw_gradient_fill(
     )
     color = G(Z) if G is not None else None
     shape = np.expand_dims(Ga(Z), 2) if Ga is not None else None
+    if depth == 8:
+        color, shape = _levels_8(color), _levels_8(shape)
     if Z.shape != (height, width):
         if color is not None:
             color = np.broadcast_to(color, (height, width, color.shape[2]))
         if shape is not None:
             shape = np.broadcast_to(shape, (height, width, 1))
     return color, shape
+
+
+def _levels_8(values: np.ndarray | None) -> np.ndarray | None:
+    """``values`` rounded to whole 8-bit levels, as ``composite._held`` rounds.
+
+    Worked in place, so ``values`` must be the caller's own fresh array.
+    """
+    if values is None:
+        return None
+    if values.dtype != np.float64:
+        values = values.astype(np.float64)
+    values *= _LEVELS_8
+    values += 0.5
+    np.floor(values, out=values)
+    values /= _LEVELS_8
+    return values.astype(np.float32)
 
 
 _METHODS = frozenset(method.value for method in GradientMethod)

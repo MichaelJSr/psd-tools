@@ -930,6 +930,11 @@ def _eased(opacity: np.ndarray) -> np.ndarray:
     return opacity**paint._PERCEPTUAL_ALPHA_GAMMA
 
 
+def _levels(values: np.ndarray) -> np.ndarray:
+    """``values`` in whole 8-bit levels, as an 8-bit document draws a ramp."""
+    return np.floor(values * 255.0 + 0.5) / 255.0
+
+
 # Photoshop 2023's alpha levels at 1/4, 1/2 and 3/4 of a 2048 px black fill
 # fading 100% to 0% at full smoothness, perceptual method.
 PS_PERCEPTUAL_FADE = [172, 77, 16]
@@ -956,12 +961,13 @@ def test_a_perceptual_fill_fades_along_the_fitted_ease() -> None:
     function of that blend, whatever shape it has.
     """
     layer, desc = _fill_layer(None)
-    _, classic = paint.create_fill(layer, layer.bbox)
+    mode = layer._psd.color_mode
+    _, classic = paint.draw_gradient_fill(layer.bbox, mode, desc)
     desc[FILL_METHOD_KEY] = Enumerated(
         typeID=b"gradientInterpolationMethodType",
         enum=GradientMethod.PERCEPTUAL.value,
     )
-    _, perceptual = paint.create_fill(layer, layer.bbox)
+    _, perceptual = paint.draw_gradient_fill(layer.bbox, mode, desc)
     assert classic is not None and perceptual is not None
     blend = classic[:, 0, 0]
     assert blend[0] == pytest.approx(0.0), "the top row is on the clear stop"
@@ -969,6 +975,23 @@ def test_a_perceptual_fill_fades_along_the_fitted_ease() -> None:
     assert (np.diff(blend) > 0).all()
     assert np.allclose(perceptual[:, 0, 0], _eased(blend), atol=1e-5)
     assert np.allclose(perceptual, perceptual[:, :1, :])
+
+
+def test_an_8_bit_documents_gradient_is_drawn_in_whole_levels() -> None:
+    """Photoshop rasters a gradient at 8 bits before it blends; 16 bits are left."""
+    layer, desc = _fill_layer(None)
+    psd = layer._psd
+    assert psd.depth == 8
+    color, shape = paint.create_fill(layer, layer.bbox)
+    free_color, free_shape = paint.draw_gradient_fill(layer.bbox, psd.color_mode, desc)
+    _, deep_shape = paint.draw_gradient_fill(layer.bbox, psd.color_mode, desc, None, 16)
+    assert color is not None and shape is not None and free_color is not None
+    assert free_shape is not None and deep_shape is not None
+    assert not np.array_equal(free_shape, _levels(free_shape))
+    assert color.dtype == shape.dtype == np.float32
+    assert np.array_equal(color, _levels(free_color).astype(np.float32))
+    assert np.array_equal(shape, _levels(free_shape).astype(np.float32))
+    assert np.array_equal(deep_shape, free_shape)
 
 
 @pytest.mark.parametrize(
@@ -1088,7 +1111,7 @@ def test_an_overlay_not_aligned_with_its_layer_is_laid_out_on_the_document() -> 
     assert paint.gradient_anchor(psd, desc) == psd.viewbox
     unaligned, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
     on_document, _ = paint.draw_gradient_fill(
-        layer.bbox, psd.color_mode, desc, psd.viewbox
+        layer.bbox, psd.color_mode, desc, psd.viewbox, psd.depth
     )
     assert aligned is not None and unaligned is not None and on_document is not None
     assert np.array_equal(unaligned, on_document)
@@ -1125,11 +1148,13 @@ def test_a_pixel_layers_overlay_is_laid_out_on_its_over_half_opaque_pixels() -> 
     assert _opaque_bounds(layer, layer.bbox) == opaque
     desc = _gradient(angle=90.0)
     color, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
-    expected, _ = paint.draw_gradient_fill(layer.bbox, psd.color_mode, desc, opaque)
+    expected, _ = paint.draw_gradient_fill(
+        layer.bbox, psd.color_mode, desc, opaque, psd.depth
+    )
     assert color is not None and expected is not None
     assert np.array_equal(color, expected)
     rows = np.clip(1.0 - (np.arange(10) - 1) / 7, 0.0, 1.0)
-    assert np.allclose(color[..., 0], rows[:, None], atol=1e-6)
+    assert np.allclose(color[..., 0], _levels(rows)[:, None], atol=1e-6)
 
 
 def test_a_scaled_overlay_ends_on_whole_pixels_cut_toward_zero() -> None:
@@ -1143,7 +1168,9 @@ def test_a_scaled_overlay_ends_on_whole_pixels_cut_toward_zero() -> None:
     box = _scaled_layout(_opaque_bounds(layer, layer.bbox), desc)
     assert np.allclose(box, (5, 7 - 10 / 3, 15, 7 + 10 / 3))
     color, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
-    expected, _ = paint.draw_gradient_fill(layer.bbox, psd.color_mode, desc, box)
+    expected, _ = paint.draw_gradient_fill(
+        layer.bbox, psd.color_mode, desc, box, psd.depth
+    )
     assert color is not None and expected is not None
     assert np.array_equal(color, expected)
     # Above the document the start rounds up: -4.5 to -4.
@@ -1185,7 +1212,9 @@ def test_a_type_layers_overlay_is_laid_out_on_its_over_half_opaque_pixels(
     assert _opaque_bounds(text, text.bbox) == opaque
     desc = _gradient(angle=90.0)
     color, _ = _draw_gradient_overlay(text, desc, 3, text.bbox, text.bbox)
-    expected, _ = paint.draw_gradient_fill(text.bbox, psd.color_mode, desc, opaque)
+    expected, _ = paint.draw_gradient_fill(
+        text.bbox, psd.color_mode, desc, opaque, psd.depth
+    )
     assert color is not None and expected is not None
     assert np.array_equal(color, expected)
 
@@ -1209,7 +1238,7 @@ def test_an_overlay_not_aligned_with_its_layer_leaves_its_pixels_unread(
     desc = _gradient(angle=90.0)
     desc[Key.Alignment] = Bool(False)
     expected, _ = paint.draw_gradient_fill(
-        layer.bbox, psd.color_mode, desc, psd.viewbox
+        layer.bbox, psd.color_mode, desc, psd.viewbox, psd.depth
     )
 
     def unread(*args: object, **kwargs: object) -> None:
@@ -1232,8 +1261,10 @@ def test_a_gradient_stroke_effect_not_aligned_with_its_layer_is_laid_out_on_the_
     bbox = effects.stroke_bbox(layer.bbox, desc, None)
     shape = np.ones((bbox[3] - bbox[1], bbox[2] - bbox[0], 1), dtype=np.float32)
     color, _ = effects.draw_stroke_effect(bbox, shape, desc, psd)
-    on_document, _ = paint.draw_gradient_fill(bbox, psd.color_mode, desc, psd.viewbox)
-    on_box, _ = paint.draw_gradient_fill(bbox, psd.color_mode, desc)
+    on_document, _ = paint.draw_gradient_fill(
+        bbox, psd.color_mode, desc, psd.viewbox, psd.depth
+    )
+    on_box, _ = paint.draw_gradient_fill(bbox, psd.color_mode, desc, None, psd.depth)
     assert on_document is not None and on_box is not None
     assert np.array_equal(color, on_document)
     assert not np.array_equal(color, on_box)
@@ -1251,7 +1282,7 @@ def test_a_vector_stroke_gradient_not_aligned_with_its_layer_is_laid_out_on_the_
     desc[Key.Alignment] = Bool(False)
     color, on_document = paint.create_fill(layer, layer.bbox)
     expected_color, expected = paint.draw_gradient_fill(
-        layer.bbox, psd.color_mode, desc, psd.viewbox
+        layer.bbox, psd.color_mode, desc, psd.viewbox, psd.depth
     )
     assert on_layer is not None and on_document is not None and expected is not None
     assert color is not None and expected_color is not None
@@ -1274,11 +1305,14 @@ def test_a_shape_layers_overlay_is_laid_out_on_its_path_with_whole_pixel_ends() 
     )
     assert color is not None
     rows = np.clip((206 - np.arange(144, 208)) / 60, 0.0, 1.0)
-    assert np.allclose(color[:, 0, 0], rows, atol=1e-6)
+    # Every fourth row is a tie between two levels.
+    assert np.allclose(color[:, 0, 0], rows, atol=0.5 / 255 + 1e-6)
 
     desc = _gradient(angle=45.0)
     color, _ = _draw_gradient_overlay(layer, desc, 3, layer.bbox, layer.bbox)
-    expected, _ = paint.draw_gradient_fill(layer.bbox, psd.color_mode, desc, layer.bbox)
+    expected, _ = paint.draw_gradient_fill(
+        layer.bbox, psd.color_mode, desc, layer.bbox, psd.depth
+    )
     assert color is not None and expected is not None
     assert np.array_equal(color, expected)
 
@@ -1299,7 +1333,8 @@ def test_a_shape_layers_path_end_a_fixed_point_step_off_a_pixel_sits_on_it(
     color, _ = _draw_gradient_overlay(layer, _gradient(angle=90.0), 3, record, record)
     assert color is not None
     rows = np.clip((82 - np.arange(43, 83)) / 38, 0.0, 1.0)
-    assert np.allclose(color[:, 0, 0], rows, atol=1e-4)
+    # Row 63 is 127.5 levels: either whole level next to it.
+    assert np.allclose(color[:, 0, 0], rows, atol=0.5 / 255 + 1e-4)
 
 
 def test_a_shape_stroke_gradient_not_aligned_with_its_layer_is_laid_out_on_the_document() -> (
@@ -1314,7 +1349,9 @@ def test_a_shape_stroke_gradient_not_aligned_with_its_layer_is_laid_out_on_the_d
     on_path, _ = paint.create_fill_desc(layer, desc, psd.viewbox, anchor)
     desc[Key.Alignment] = Bool(False)
     on_document, _ = paint.create_fill_desc(layer, desc, psd.viewbox, anchor)
-    expected, _ = paint.draw_gradient_fill(psd.viewbox, psd.color_mode, desc)
+    expected, _ = paint.draw_gradient_fill(
+        psd.viewbox, psd.color_mode, desc, None, psd.depth
+    )
     assert on_path is not None and on_document is not None and expected is not None
     assert np.array_equal(on_document, expected)
     assert not np.array_equal(on_document, on_path)

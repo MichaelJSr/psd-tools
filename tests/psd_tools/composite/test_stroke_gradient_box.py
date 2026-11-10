@@ -54,8 +54,11 @@ def test_a_soft_tail_does_not_stretch_a_gradient_strokes_ramp(size: float) -> No
     shape = _soft_tailed()
     box = stroke_gradient_box(_VIEWPORT, shape, desc)
     assert box == _grown(_OPAQUE, int(size))
-    color, _, _ = draw_stroke_effect_split(_VIEWPORT, shape, desc, _psd())
-    expected, _ = paint.draw_gradient_fill(_VIEWPORT, ColorMode.RGB, desc, box)
+    psd = _psd()
+    color, _, _ = draw_stroke_effect_split(_VIEWPORT, shape, desc, psd)
+    expected, _ = paint.draw_gradient_fill(
+        _VIEWPORT, ColorMode.RGB, desc, box, psd.depth
+    )
     assert expected is not None
     assert np.array_equal(color, expected)
 
