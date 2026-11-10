@@ -55,6 +55,21 @@ def _bits(a: np.ndarray) -> bytes:
     return np.where(np.isnan(a), np.nan, a).tobytes()
 
 
+def _close32(compiled: np.ndarray, plain: np.ndarray) -> None:
+    """Float32 maths within 2 float32 ULPs (or one ULP at 1.0 near zero), NaNs where numpy's.
+
+    numpy's own float32 paths differ in the last bit by CPU (AVX-512's vector maths on
+    the Linux runner), and so do the signs of a NaN and a zero.
+    """
+    a, b = np.asarray(compiled, np.float64), np.asarray(plain, np.float64)
+    assert a.shape == b.shape
+    assert np.array_equal(np.isnan(a), np.isnan(b))
+    keep = ~np.isnan(a)
+    np.testing.assert_allclose(
+        a[keep], b[keep], rtol=2.4e-7, atol=1.2e-7
+    )  # 1 ULP at 1.0
+
+
 def _same(compiled: np.ndarray, plain: np.ndarray) -> None:
     assert compiled.dtype == plain.dtype == np.float32
     assert compiled.shape == plain.shape
@@ -449,8 +464,10 @@ def test_vibrance_step_is_numpys(
             patch.setattr(adjustments, "_cblend", None)
             plain = adjustments._vibrance_step(view, amount)
         assert compiled.dtype == plain.dtype == np.float64
-        # + 0.0: on x86 numpy's max and min give a zero either sign.
-        assert _bits(compiled + 0.0) == _bits(plain + 0.0)
+        if dtype == np.float32:
+            _close32(compiled, plain)
+        else:  # + 0.0: on x86 numpy's max and min give a zero either sign.
+            assert _bits(compiled + 0.0) == _bits(plain + 0.0)
     assert len(calls) == 1, "a strided view stays with numpy"
 
 
@@ -476,7 +493,7 @@ def test_mix_toward_is_numpys(monkeypatch: pytest.MonkeyPatch, channels: int) ->
         got = composite._mix_toward(c, b, strength)
         expected = utils.clip(c + strength * (b - c))
         assert got.dtype == expected.dtype
-        assert got.tobytes() == expected.tobytes()
+        _close32(got, expected)
     assert len(calls) == 5
 
 
