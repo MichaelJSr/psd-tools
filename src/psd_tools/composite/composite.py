@@ -5851,34 +5851,27 @@ class Compositor:
         if inner == (0, 0, 0, 0):
             return np.zeros((height, width, 1), dtype=np.float32)
 
-        # Shared across passes, the alpha is composited on the whole content
-        # box, so another viewport crops it from there. Not a pass-through
-        # artboard's: it paints outside its frame.
-        rkey = None
-        if self._cache.rc is not None and not (
-            passthrough and isinstance(layer, Artboard)
+        inner, alpha = self._held_group_alpha(layer, inner)
+        # Shared across passes on the box it was composited on: a later
+        # viewport inside that box crops it. Not a pass-through artboard's: it
+        # paints outside its frame.
+        rc, rkey = self._cache.rc, None
+        if (
+            alpha is None
+            and rc is not None
+            and not (passthrough and isinstance(layer, Artboard))
         ):
-            inner = utils.intersect(
-                _content_bbox(layer, self._cache.content_bboxes),
-                utils.union_bbox(layer._psd.viewbox, viewport),
-            )
             # Whether it mixes hangs on its clip layers too, outside its key.
             rkey = self._rkey(
-                "group_alpha", layer, inner, self._mixing or self._mixes_isolated(layer)
+                "group_alpha", layer, self._mixing or self._mixes_isolated(layer)
             )
-        key = (id(layer), inner)
-        alpha = self._cache.group_alphas.get(key)
-        if alpha is None and rkey is not None:
-            assert self._cache.rc is not None
-            hit = self._cache.rc.get(rkey)
+            assert rkey is not None
+            hit = rc.get_around(rkey, inner)
             if hit is not None:
-                alpha = self._cache.group_alphas[key] = hit[0]
-        if alpha is None and rkey is None:
-            inner, alpha = self._held_group_alpha(layer, inner)
+                inner, (alpha,) = hit
+                self._cache.group_alphas[(id(layer), inner)] = alpha
         if alpha is None:
-            if rkey is None:
-                inner = self._group_alpha_box(layer, viewport, inner, passthrough)
-                key = (id(layer), inner)
+            inner = self._group_alpha_box(layer, viewport, inner, passthrough)
             inner_h, inner_w = inner[3] - inner[1], inner[2] - inner[0]
             group_compositor = Compositor(
                 inner,
@@ -5899,10 +5892,12 @@ class Compositor:
             )
             for sublayer in cast(GroupMixin, layer):
                 group_compositor.apply(sublayer)
-            alpha = self._cache.group_alphas[key] = group_compositor.alpha
+            alpha = self._cache.group_alphas[(id(layer), inner)] = (
+                group_compositor.alpha
+            )
             if rkey is not None:
-                assert self._cache.rc is not None
-                self._cache.rc.put(rkey, (alpha,))
+                assert rc is not None
+                rc.put_boxed(rkey, inner, (alpha,))
         return paste(viewport, inner, alpha)
 
     def _held_group_alpha(

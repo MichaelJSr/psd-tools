@@ -53,6 +53,7 @@ _ACTIVE: ContextVar[RenderCache | None] = ContextVar(
 )
 
 Entry = tuple[np.ndarray, ...]
+Box = tuple[int, int, int, int]
 
 
 class CacheMismatch(AssertionError):
@@ -90,6 +91,7 @@ class RenderCache:
         self.misses: Counter[str] = Counter()
         self._store: OrderedDict[Hashable, Entry] = OrderedDict()
         self._held: dict[int, list[Any]] = {}  # id: [array, entries holding it]
+        self._boxes: dict[Hashable, list[Box]] = {}  # key: boxes put_boxed() stored
         self._bytes = 0
         self._tokens: list[Token[RenderCache | None]] = []
         # Payload digests: mark -> (the objects hashed, kept so ids stay unique,
@@ -138,6 +140,33 @@ class RenderCache:
             _, evicted = self._store.popitem(last=False)
             self._drop(evicted)
 
+    def get_around(self, key: tuple, box: Box) -> tuple[Box, Entry] | None:
+        """A :py:meth:`put_boxed` entry on a box around ``box``, and that box.
+
+        Counted as one hit or miss of its kind ``key[0]``.
+        """
+        x0, y0, x1, y1 = box
+        boxes = self._boxes.get(key)
+        if boxes:
+            for held in boxes:
+                if held[0] <= x0 and held[1] <= y0 and x1 <= held[2] and y1 <= held[3]:
+                    value = self._store.get((*key, held))
+                    if value is not None:
+                        self._store.move_to_end((*key, held))
+                        self.hits[key[0]] += 1
+                        return held, value
+            boxes[:] = [held for held in boxes if (*key, held) in self._store]
+        self.misses[key[0]] += 1
+        return None
+
+    def put_boxed(self, key: tuple, box: Box, value: Entry) -> None:
+        """:py:meth:`put` under ``key`` and ``box``, found by :py:meth:`get_around`."""
+        self.put((*key, box), value)
+        if (*key, box) in self._store:
+            boxes = self._boxes.setdefault(key, [])
+            if box not in boxes:
+                boxes.append(box)
+
     def _drop(self, value: Entry) -> None:
         for array in value:
             held = self._held[id(array)]
@@ -150,6 +179,7 @@ class RenderCache:
         """Drop every entry."""
         self._store.clear()
         self._held.clear()
+        self._boxes.clear()
         self._bytes = 0
         self._digests.clear()
         self._pinned = 0
