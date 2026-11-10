@@ -1470,6 +1470,26 @@ def _sampled_alpha(
     return 1 - keep.reshape(h, n, w, n).mean(axis=(1, 3))
 
 
+def sample_counts(hits: np.ndarray, n: int) -> np.ndarray:
+    """How many of each pixel's ``n`` x ``n`` samples ``hits`` (0 or 1) holds.
+
+    Strided adds, rows then columns: whole numbers, so exact in any order,
+    in the smallest unsigned type that holds ``n * n``.
+    """
+    rows = hits[0::n].astype(np.min_scalar_type(n * n))
+    for k in range(1, n):
+        rows += hits[k::n]
+    count = rows[:, 0::n].copy()
+    for k in range(1, n):
+        count += rows[:, k::n]
+    return count
+
+
+def _sample_share(ink: np.ndarray, n: int) -> np.ndarray:
+    """``ink.reshape(h, n, w, n).mean(axis=(1, 3), dtype=np.float32)``."""
+    return sample_counts(ink.view(np.uint8), n).astype(np.float32) / np.float32(n * n)
+
+
 def _clear(keep: np.ndarray, inside: np.ndarray, alpha: np.ndarray, n: int) -> None:
     """Take ``alpha`` (per pixel) off ``keep`` at the samples ``inside``, in place."""
     if alpha.min() == alpha.max():
@@ -1569,7 +1589,7 @@ def rasterize(
                 continue
             rgba = _paint_rgba(item.paint, item, m, x0, y0, w, h)
             _clear(keep, inside, rgba[..., 3] * item.opacity, n)
-            cov = ink.reshape(h, n, w, n).mean(axis=(1, 3), dtype=np.float32)
+            cov = _sample_share(ink, n)
             color = rgba[..., :3]
         alpha = (cov * item.opacity)[..., None] * rgba[..., 3:]
         out *= 1 - alpha

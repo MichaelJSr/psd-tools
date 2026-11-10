@@ -484,6 +484,19 @@ def test_alpha_grid_samples_points() -> None:
     assert sampled[1, 0, :3] / sampled[1, 0, 3] == pytest.approx([0, 1, 0], abs=1e-6)
 
 
+@pytest.mark.parametrize("n", [2, 3, 4, 16])
+def test_sample_counts_match_the_reshaped_sum(n: int) -> None:
+    """Strided counts are the reshaped sum and mean, bit for bit; 16 x 16 fits."""
+    ink = np.random.default_rng(n).random((3 * n, 5 * n)) < 0.5
+    ink[:n, :n] = True
+    cells = ink.reshape(3, n, 5, n)
+    count = svg.sample_counts(ink.view(np.uint8), n)
+    assert np.array_equal(count, cells.sum(axis=(1, 3)))
+    share = svg._sample_share(ink, n)
+    mean = cells.mean(axis=(1, 3), dtype=np.float32)
+    assert share.dtype == mean.dtype and share.tobytes() == mean.tobytes()
+
+
 def test_strong_colours_mix_grown_samples_in_srgb() -> None:
     """Photoshop 2023's Strong badge edges are quarter mixes in sRGB.
 
