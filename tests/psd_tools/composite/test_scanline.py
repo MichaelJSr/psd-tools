@@ -230,6 +230,31 @@ def test_the_bands_the_canvas_is_summed_in_do_not_show() -> None:
             banded["_BAND_CELLS"], banded["_BAND_PIECES"] = saved
 
 
+@pytest.mark.skipif(
+    not hasattr(scanline._compiled, "coverage_rows"), reason="compiled loops not built"
+)
+@pytest.mark.parametrize("nonzero", [False, True])
+def test_the_compiled_row_pass_matches_numpy(
+    monkeypatch: pytest.MonkeyPatch, nonzero: bool
+) -> None:
+    """Windings past 2, both signs, half pixels, bands: the same bits."""
+    rng = np.random.default_rng(5)
+    square = np.array(_rectangle(3.3, 2.7, 40.6, 41.2))
+    paths = [
+        [square, square + 0.4, square + 0.9, square[::-1] + 1.3],
+        [np.array(_rectangle(0.5, 0.5, 30, 20.5))] * 5,
+        [rng.uniform(-8, 56, (40, 2)) for _ in range(3)],
+    ]
+    compiled = [scanline.fill_coverage(p, 48, 48, nonzero=nonzero) for p in paths]
+    monkeypatch.setattr(scanline, "_BAND_CELLS", 51 * 7)
+    compiled.append(scanline.fill_coverage(paths[2], 48, 48, nonzero=nonzero))
+    monkeypatch.setattr(scanline, "_compiled", None)
+    plain = [scanline.fill_coverage(p, 48, 48, nonzero=nonzero) for p in paths]
+    plain.append(scanline.fill_coverage(paths[2], 48, 48, nonzero=nonzero))
+    for a, b in zip(compiled, plain, strict=True):
+        assert a.tobytes() == b.tobytes()
+
+
 def test_a_straight_edge_is_not_subdivided() -> None:
     """PSD stores a straight edge as a cubic with both handles on the anchors.
 
