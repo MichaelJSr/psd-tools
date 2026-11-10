@@ -3298,8 +3298,36 @@ def _adjust(
                 return None
             if out is picked:
                 return content
-            return out[0][index].reshape(h, w, out.shape[2])
+            return _gather(out[0], index).reshape(h, w, out.shape[2])
     return fn(content, colormode, layer)
+
+
+def _gather(table: np.ndarray, index: np.ndarray) -> np.ndarray:
+    """``table[index]``: each pixel's row of the distinct answers."""
+    if (
+        hasattr(_cblend, "gather_rows")
+        and table.dtype == np.float32
+        and table.ndim == 2
+        and table.flags.c_contiguous
+        and index.dtype == np.int32
+    ):
+        rows = _cblend.gather_rows(table, index)
+        if rows is not None:
+            return rows
+    return np.take(table, index, axis=0)
+
+
+def _mix_toward(
+    content: np.ndarray, blended: np.ndarray, strength: float | np.ndarray
+) -> np.ndarray:
+    """``utils.clip(content + strength * (blended - content))``, in one pass where compiled."""
+    if hasattr(_cblend, "mix_toward"):
+        if type(strength) is float:
+            if utils.in_rows((), (content, blended)):
+                return _cblend.mix_toward(content, blended, None, strength)
+        elif _compiled_fits((strength,), (content, blended)):
+            return _cblend.mix_toward(content, blended, strength, 0.0)
+    return utils.clip(content + strength * (blended - content))
 
 
 def _unmix(
@@ -4659,7 +4687,7 @@ class Compositor:
         # that describes it.
         blend_fn = get_blend_func(layer.blend_mode, self._color_mode)
         blended = blend_fn(content, transformed_color)
-        content = utils.clip(content + strength * (blended - content))
+        content = _mix_toward(content, blended, strength)
 
         if self._adjustment_isolated:
             self._color = _remix(

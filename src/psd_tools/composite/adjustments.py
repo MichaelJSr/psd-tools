@@ -195,8 +195,15 @@ def _apply_luts(
 ) -> NDArray[np.float32]:
     if img.ndim != 3:
         raise ValueError(f"Expected 3D array (H, W, C), got ndim={img.ndim}.")
-    out = img.astype(np.float32, copy=True)
     n_channels = ColorMode.channels(colormode)
+    if (
+        colormode != ColorMode.GRAYSCALE
+        and list(luts) == [0]
+        and img.dtype == np.float32
+    ):
+        # The master alone: read it off the image, no copy first.
+        return _apply_lut(img, luts[0])
+    out = img.astype(np.float32, copy=True)
     channels = range(1, n_channels + 1)
 
     # individual adjustments get applied independently of each other, then the master lut its applied if exists

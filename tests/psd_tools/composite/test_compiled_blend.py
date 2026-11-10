@@ -335,6 +335,8 @@ _NEWEST = (
     "vibrance_step",
     "text_mix",
     "distinct_pixels",
+    "mix_toward",
+    "gather_rows",
 )
 
 
@@ -447,17 +449,47 @@ def test_vibrance_step_is_numpys(
 
 
 @pytest.mark.parametrize("channels", [1, 3, 4])
+def test_mix_toward_is_numpys(monkeypatch: pytest.MonkeyPatch, channels: int) -> None:
+    """An adjustment's strength, per pixel or one, over the specials and a box view."""
+    kernel, calls = composite._cblend.mix_toward, []
+
+    def spy(*args: object) -> np.ndarray:
+        calls.append(args)
+        return kernel(*args)
+
+    monkeypatch.setattr(composite._cblend, "mix_toward", spy)
+    rng = np.random.default_rng(channels + 7)
+    content = rng.choice(_SPECIAL, size=(60, 70, channels)).astype(np.float32)
+    blended = rng.choice(_SPECIAL, size=(60, 70, channels)).astype(np.float32)
+    mask = rng.choice(_SPECIAL, size=(60, 70, 1)).astype(np.float32)
+    for strength in (mask, mask[3:-2, 1:-4], 1.0, 0.3137254901960784, 0.0):
+        box = (slice(None), slice(None))
+        if isinstance(strength, np.ndarray) and strength.shape != mask.shape:
+            box = (slice(3, -2), slice(1, -4))
+        c, b = content[box], blended[box]
+        got = composite._mix_toward(c, b, strength)
+        expected = utils.clip(c + strength * (b - c))
+        assert got.dtype == expected.dtype
+        assert got.tobytes() == expected.tobytes()
+    assert len(calls) == 5
+
+
+@pytest.mark.parametrize("channels", [1, 3, 4])
 def test_distinct_pixels_number_equal_bits(channels: int) -> None:
     """First seen first, -0.0 apart from 0.0, None past the limit."""
     rng = np.random.default_rng(channels)
     palette = rng.choice(_SPECIAL, size=(40, channels))
     pixels = palette[rng.integers(0, 40, 5000)]
-    bits = pixels.view(np.uint32)
-    first = np.unique(bits, axis=0, return_index=True)[1]
-    index, found = composite._cblend.distinct_pixels(pixels, len(first))
-    assert np.array_equal(found, np.sort(first))
-    assert np.array_equal(bits[found][index], bits)
-    assert composite._cblend.distinct_pixels(pixels, len(first) - 1) is None
+    for rows in (pixels, np.repeat(pixels, rng.integers(1, 9, len(pixels)), axis=0)):
+        bits = rows.view(np.uint32)
+        first = np.unique(bits, axis=0, return_index=True)[1]
+        index, found = composite._cblend.distinct_pixels(rows, len(first))
+        assert np.array_equal(found, np.sort(first))
+        assert np.array_equal(bits[found][index], bits)
+        assert np.array_equal(
+            composite._gather(rows[found], index).view(np.uint32), bits
+        )
+        assert composite._cblend.distinct_pixels(rows, len(first) - 1) is None
 
 
 def test_a_pointwise_adjustment_runs_once_per_colour() -> None:
