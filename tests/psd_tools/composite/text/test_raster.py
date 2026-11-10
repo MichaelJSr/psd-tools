@@ -404,6 +404,72 @@ def test_two_colour_overlap(face: Face) -> None:
     )
 
 
+def _strided_compose(items: list[Any], threshold: float | None) -> np.ndarray:
+    """The canvas as one strided RGB and a concatenate, for the bit check."""
+    x0, y0 = min(i[0] for i in items), min(i[1] for i in items)
+    w = max(x + c.shape[1] for x, _, c, _ in items) - x0
+    h = max(y + c.shape[0] for _, y, c, _ in items) - y0
+    acc = np.zeros((h, w), np.uint32)
+    rgb = np.zeros((h, w, 3), np.float32)
+    fills = {f for *_, f in items if f is not None}
+    best = np.zeros((h, w), np.uint8) if len(fills) > 1 else None
+    for x, y, cov, fill in items:
+        if fill is None:
+            continue
+        ys, xs = (
+            slice(y - y0, y - y0 + cov.shape[0]),
+            slice(x - x0, x - x0 + cov.shape[1]),
+        )
+        acc[ys, xs] += cov
+        if best is not None:
+            rgb[ys, xs][cov > best[ys, xs]] = fill
+            np.maximum(best[ys, xs], cov, out=best[ys, xs])
+    if best is None and fills:
+        rgb[acc > 0] = fills.pop()
+    if threshold is not None:
+        alpha = (acc > threshold * 255).astype(np.float32)
+    else:
+        alpha = np.minimum(acc, 255).astype(np.float32)
+        alpha /= 255
+    rgba = np.concatenate([rgb, alpha[..., None]], axis=-1)
+    colors = [(x, y, c) for x, y, c, f in items if f is None]
+    if colors:
+        rgba[..., :3] *= rgba[..., 3:]
+        for x, y, c in colors:
+            ys, xs = (
+                slice(y - y0, y - y0 + c.shape[0]),
+                slice(x - x0, x - x0 + c.shape[1]),
+            )
+            rgba[ys, xs] *= 1 - c[..., 3:]
+            rgba[ys, xs] += c
+        a = rgba[..., 3:]
+        np.clip(a, 0, 1, out=a)
+        ink = a[..., 0] > 0
+        rgba[..., :3][ink] = np.clip(rgba[..., :3][ink] / a[ink], 0, 1)
+    return rgba
+
+
+@pytest.mark.parametrize("antialias", [NONE, STRONG])
+@pytest.mark.parametrize("fills", [(RED,), (RED, BLUE)])
+def test_compose_planes_match_strided(antialias: int, fills: tuple[RGB, ...]) -> None:
+    rng = np.random.default_rng(antialias + len(fills))
+    items: list[Any] = []
+    for i in range(12):
+        x, y = (int(v) for v in rng.integers(-20, 40, 2))
+        h, w = (int(v) for v in rng.integers(1, 30, 2))
+        if i % 3:
+            cov = rng.integers(0, 256, (h, w)).astype(np.uint8)
+            items.append((x, y, cov, fills[i % len(fills)]))
+        else:
+            a = rng.random((h, w, 1), np.float32)
+            color = np.concatenate([rng.random((h, w, 3), np.float32) * a, a], -1)
+            items.append((x, y, color, None))
+    mode = raster_module._MODES[antialias]
+    got, _ = raster_module._compose(items, IDENTITY, mode, AREA, None)
+    want = _strided_compose(items, mode.threshold)
+    assert np.array_equal(got.view(np.uint32), want.view(np.uint32))
+
+
 def test_rules(face: Face) -> None:
     rgba, bbox = render(rules=[Rule(0.0, 10.0, 5.0, 2.0, GREEN)])
     assert bbox == (0, 4, 10, 6)
