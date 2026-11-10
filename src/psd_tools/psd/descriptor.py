@@ -135,6 +135,8 @@ class _DescriptorMixin(DictElement):
 
     def _write_body(self, fp: IO[bytes]) -> int:
         if type(self) in _FAST_BODIES:
+            if _WRITER:
+                return _descriptor.write_body(self, fp)  # type: ignore[no-any-return]
             out: list[bytes] = []
             written = _body_bytes(self, out, fp)
             return written + write_joined(fp, out)
@@ -1081,3 +1083,31 @@ def _setup_compiled() -> frozenset[bytes]:
 
 # The OSTypes ``_descriptor`` reads.
 _COMPILED_OSTYPES = _setup_compiled() if _descriptor is not None else frozenset()
+
+
+def _setup_writer() -> bool:
+    """Give ``_descriptor`` the writer's classes; False when it has none."""
+    if _descriptor is None or not hasattr(_descriptor, "write_body"):
+        return False
+    ostypes = {kls: kls.ostype.value for kls in set(TYPES.values())}
+    classes = (
+        UnitFloat,
+        Enumerated,
+        Double,
+        Descriptor,
+        GlobalObject,
+        Bool,
+        Integer,
+        String,
+        List,
+        LargeInteger,
+        ObjectArray,
+        RawData,
+    )
+    _descriptor.setup_writer(
+        ostypes, classes, (_U32, _I32, _I64, _F64, _UNIT_F64), write_bytes
+    )
+    return True
+
+
+_WRITER = _setup_writer()

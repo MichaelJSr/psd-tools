@@ -334,3 +334,352 @@ def parse(cls, bytes data, long depth_cap):
     if parser.bail:
         return None
     return obj, parser.nbytes, parser.nobjects, parser.maxread
+
+
+# ------------------------------ writer ------------------------------
+# Builds the bytes ``Dict.write``/``List.write`` build for the exact element
+# classes, or gives up (None) on anything else, leaving Python to write.
+
+from cpython.bytes cimport PyBytes_AsString, PyBytes_Size
+from cpython.mem cimport PyMem_Free, PyMem_Malloc, PyMem_Realloc
+from cpython.unicode cimport PyUnicode_AsUTF8AndSize
+from libc.math cimport fabs, signbit
+from cpython.long cimport PyLong_AsLongLongAndOverflow
+from cpython.dict cimport PyDict_Next
+from cpython.object cimport PyObject
+from libc.string cimport memcpy
+
+cdef extern from "Python.h":
+    char *PyOS_double_to_string(double val, char format_code, int precision, int flags, int *type) except NULL
+    Py_ssize_t PyUnicode_GetLength(object o) except -1
+
+cdef object _EngineData = None
+cdef object _EngineData2 = None
+cdef long _WRITE_DEPTH = 100  # nesting the writer takes; deeper goes to Python
+
+
+def setup_writer(EngineData, EngineData2):
+    """Set the root classes the writer takes besides ``Dict``."""
+    global _EngineData, _EngineData2
+    _EngineData, _EngineData2 = EngineData, EngineData2
+
+
+cdef class _Out:
+    cdef char *buf
+    cdef Py_ssize_t n, cap
+
+    def __cinit__(self):
+        self.cap = 1 << 16
+        self.n = 0
+        self.buf = <char *>PyMem_Malloc(self.cap)
+        if self.buf == NULL:
+            raise MemoryError()
+
+    def __dealloc__(self):
+        if self.buf != NULL:
+            PyMem_Free(self.buf)
+
+    cdef int grow(self, Py_ssize_t extra) except -1:
+        cdef Py_ssize_t cap = self.cap
+        cdef char *b
+        while self.n + extra > cap:
+            cap *= 2
+        b = <char *>PyMem_Realloc(self.buf, cap)
+        if b == NULL:
+            raise MemoryError()
+        self.buf, self.cap = b, cap
+        return 0
+
+    cdef inline int put(self, const char *s, Py_ssize_t k) except -1:
+        if self.n + k > self.cap:
+            self.grow(k)
+        memcpy(self.buf + self.n, s, k)
+        self.n += k
+        return 0
+
+    cdef inline int putc(self, char c) except -1:
+        if self.n + 1 > self.cap:
+            self.grow(1)
+        self.buf[self.n] = c
+        self.n += 1
+        return 0
+
+    cdef int tabs(self, long k) except -1:
+        if self.n + k > self.cap:
+            self.grow(k)
+        cdef long i
+        for i in range(k):
+            self.buf[self.n + i] = 9
+        self.n += k
+        return 0
+
+
+class _Bail(Exception):
+    pass
+
+
+cdef int _w_name(_Out out, object value) except -1:
+    """``b"/" + value.encode("macroman")`` for a str value."""
+    cdef Py_ssize_t k
+    cdef const char *s
+    cdef bytes data
+    out.putc(47)
+    s = PyUnicode_AsUTF8AndSize(value, &k)
+    if k == PyUnicode_GetLength(value):  # ASCII: macroman's bytes too
+        out.put(s, k)
+    else:
+        data = value.encode("macroman")
+        out.put(PyBytes_AsString(data), PyBytes_Size(data))
+    return 0
+
+
+cdef int _w_int(_Out out, long long n) except -1:
+    """``b"%d" % n``."""
+    cdef char tmp[24]
+    cdef int k = 24
+    cdef unsigned long long u = <unsigned long long>(-(n + 1)) + 1 if n < 0 else <unsigned long long>n
+    while True:
+        k -= 1
+        tmp[k] = 48 + <char>(u % 10)
+        u //= 10
+        if u == 0:
+            break
+    if n < 0:
+        k -= 1
+        tmp[k] = 45
+    out.put(tmp + k, 24 - k)
+    return 0
+
+
+cdef int _w_scalar(_Out out, object v) except -1:
+    cdef object t = type(v)
+    cdef long long n
+    cdef int overflow = 0
+    cdef object x
+    cdef bytes data
+    cdef const unsigned char *s
+    cdef Py_ssize_t k, i, end
+    cdef char *f
+    cdef double d
+    if t is _Integer:
+        x = v.value
+        if type(x) is not int:
+            raise _Bail()
+        n = PyLong_AsLongLongAndOverflow(x, &overflow)
+        if overflow:
+            data = b"%d" % x
+            out.put(PyBytes_AsString(data), PyBytes_Size(data))
+        else:
+            _w_int(out, n)
+    elif t is _Float:
+        x = v.value
+        if type(x) is not float:
+            raise _Bail()
+        d = x
+        if d == d and fabs(d) < 1e15 and d == <double>(<long long>d):
+            # whole: b"%.8f" stripped is the integer and ".0"
+            if d == 0.0:
+                if signbit(d):
+                    out.put(b"-0.0", 4)
+                else:
+                    out.put(b"0.0", 3)
+            else:
+                _w_int(out, <long long>d)
+                out.put(b".0", 2)
+            return 0
+        f = PyOS_double_to_string(d, 102, 8, 0, NULL)  # b"%.8f"
+        try:
+            k = 0
+            while f[k] != 0:
+                k += 1
+            end = k
+            while end > 0 and f[end - 1] == 48:  # rstrip(b"0")
+                end -= 1
+            i = 0
+            if fabs(d) > 0.0 and fabs(d) < 1.0:  # replace(b"0.", b".")
+                if f[0] == 48 and end > 1 and f[1] == 46:
+                    i = 1
+                elif f[0] == 45 and end > 2 and f[1] == 48 and f[2] == 46:
+                    out.putc(45)
+                    i = 2
+            out.put(f + i, end - i)
+            if end > 0 and f[end - 1] == 46:  # b"." -> b".0"
+                out.putc(48)
+        finally:
+            PyMem_Free(f)
+    elif t is _Bool:
+        x = v.value
+        if x is True:
+            out.put(b"true", 4)
+        elif x is False:
+            out.put(b"false", 5)
+        else:
+            raise _Bail()
+    elif t is _String:
+        x = v.value
+        if type(x) is not str:
+            raise _Bail()
+        data = x.encode("utf-16-be")
+        s = <const unsigned char *>PyBytes_AsString(data)
+        k = PyBytes_Size(data)
+        out.put(b"(\xfe\xff", 3)
+        if out.n + 2 * k + 1 > out.cap:
+            out.grow(2 * k + 1)
+        for i in range(k):
+            if s[i] == 92 or s[i] == 40 or s[i] == 41:
+                out.buf[out.n] = 92
+                out.n += 1
+            out.buf[out.n] = s[i]
+            out.n += 1
+        out.putc(41)
+    elif t is _Property:
+        x = v.value
+        if type(x) is not str:
+            raise _Bail()
+        _w_name(out, x)
+    elif t is _Tag:
+        x = v.value
+        if type(x) is not bytes:
+            raise _Bail()
+        out.put(PyBytes_AsString(x), PyBytes_Size(x))
+    else:
+        raise _Bail()
+    return 0
+
+
+cdef int _w_value(_Out out, object value, long inner, bint has_indent, long depth) except -1:
+    """A dict entry's value, after its key."""
+    cdef object t = type(value), first, ft
+    if t is _Dict or t is _EngineData:
+        _w_dict(out, value, inner, has_indent, True, depth)
+        return 0
+    out.putc(32)
+    if t is _List:
+        items = value._items
+        nested = False
+        if len(items) > 0:
+            first = items[0]
+            ft = type(first)
+            if ft is _Dict or ft is _EngineData:
+                nested = True
+            elif not (ft is _List or ft is _Integer or ft is _Float or ft is _Bool
+                      or ft is _String or ft is _Property or ft is _Tag):
+                raise _Bail()  # isinstance(first, Dict) is Python's to decide
+        if nested:
+            _w_list(out, value, inner, has_indent, depth)
+        else:
+            _w_list(out, value, 0, False, depth)
+    else:
+        _w_scalar(out, value)
+    return 0
+
+
+cdef int _w_key(_Out out, object key) except -1:
+    if type(key) is _Property:
+        v = key.value
+        if type(v) is str:
+            _w_name(out, v)
+            return 0
+    raise _Bail()
+
+
+cdef int _w_dict(_Out out, object d, long indent, bint has_indent, bint container, long depth) except -1:
+    cdef long inner = indent + 1
+    cdef object key, value, items
+    cdef Py_ssize_t pos = 0
+    cdef PyObject *k
+    cdef PyObject *v
+    cdef bint lockstep = True
+    if depth > _WRITE_DEPTH:
+        raise _Bail()  # deeper: Python's, with its recursion limit
+    if container:
+        if not has_indent:
+            out.put(b" <<", 3)
+        else:
+            if indent == 0:
+                out.putc(10)
+            out.putc(10)
+            out.tabs(indent)
+            out.put(b"<<\n", 3)
+    items = d._items
+    if type(items) is not _OrderedDict:
+        raise _Bail()
+    for key in items:  # the OrderedDict's order; values from the dict while it agrees, unhashed
+        if lockstep and PyDict_Next(items, &pos, &k, &v) and <object>k is key:
+            value = <object>v
+        else:
+            lockstep = False
+            value = items[key]
+        if has_indent:
+            out.tabs(inner)
+        else:
+            out.putc(32)
+        _w_key(out, key)
+        _w_value(out, value, inner, has_indent, depth + 1)
+        if has_indent:
+            out.putc(10)
+    if container:
+        if not has_indent:
+            out.put(b" >>", 3)
+        else:
+            out.tabs(indent)
+            out.put(b">>", 2)
+    return 0
+
+
+cdef int _w_list(_Out out, object lst, long indent, bint has_indent, long depth) except -1:
+    cdef object item, t
+    if depth > _WRITE_DEPTH:
+        raise _Bail()
+    depth += 1
+    out.putc(91)
+    if not has_indent:
+        for item in lst._items:
+            t = type(item)
+            if t is _Dict or t is _EngineData:
+                _w_dict(out, item, 0, False, True, depth)
+            else:
+                out.putc(32)
+                if t is _List:
+                    _w_list(out, item, 0, False, depth)
+                else:
+                    _w_scalar(out, item)
+        out.putc(32)
+    else:
+        for item in lst._items:
+            t = type(item)
+            if t is _Dict or t is _EngineData:
+                _w_dict(out, item, indent, True, True, depth)
+            elif t is _List:
+                _w_list(out, item, indent, True, depth)
+            else:
+                raise _Bail()
+        out.putc(10)
+        out.tabs(indent)
+    out.putc(93)
+    return 0
+
+
+def dumps(obj, indent, bint container):
+    """``Dict.write``'s (or ``List.write``'s) bytes for exact classes; None to leave it to Python."""
+    cdef _Out out
+    cdef object t = type(obj)
+    cdef bint has_indent = indent is not None
+    cdef long level = 0
+    if _Dict is None or _EngineData is None:
+        return None
+    if has_indent:
+        if type(indent) is not int or not 0 <= indent <= 1 << 20:
+            return None
+        level = indent
+    out = _Out()
+    try:
+        if t is _Dict or t is _EngineData or t is _EngineData2:
+            _w_dict(out, obj, level, has_indent, container, 0)
+        elif t is _List:
+            _w_list(out, obj, level, has_indent, 0)
+        else:
+            return None
+    except Exception:  # _Bail, or what Python raises the same way
+        return None
+    return PyBytes_FromStringAndSize(out.buf, out.n)

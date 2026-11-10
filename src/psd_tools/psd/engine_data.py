@@ -264,6 +264,10 @@ class Dict(DictElement):
     ) -> int:
         """Write the structure to a file-like object and return the bytes written."""
         if type(self) in _FAST_WRITERS:
+            if _WRITER:
+                data = _engine.dumps(self, indent, write_container)
+                if data is not None:
+                    return write_bytes(fp, data)
             out: list[bytes] = []
             written = _dict_bytes(self, indent, write_container, out, fp)
             return written + write_joined(fp, out)
@@ -409,6 +413,10 @@ class List(ListElement):
     def write(self, fp: Any, indent: int | None = None, **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""
         if type(self) in _FAST_WRITERS:
+            if _WRITER:
+                data = _engine.dumps(self, indent, True)
+                if data is not None:
+                    return write_bytes(fp, data)
             out: list[bytes] = []
             written = _list_bytes(self, indent, out, fp)
             return written + write_joined(fp, out)
@@ -765,3 +773,7 @@ def _compiled_roots() -> frozenset[type]:
 
 
 _COMPILED_ROOTS = _compiled_roots()
+# The compiled writer takes the classes the reader was set up with.
+_WRITER = bool(_COMPILED_ROOTS) and hasattr(_engine, "dumps")
+if _WRITER:
+    _engine.setup_writer(EngineData, EngineData2)
