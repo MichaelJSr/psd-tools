@@ -56,8 +56,8 @@ _GLYPH_BYTES = 1 + 1
 _SAMPLED_BYTES = 2 + 1
 #: A rule: the float32 coverage, its scaling and the uint8 result.
 _RULE_BYTES = 4 + 4 + 1
-#: The canvas: uint32 coverage sum, float32 RGB, uint8 winning coverage,
-#: float32 alpha and the float32 RGBA.
+#: The canvas: uint32 coverage sum, the ink's int64 indices and float32
+#: alpha, uint8 winning coverage, float32 alpha and the float32 RGBA.
 _COMPOSE_BYTES = 4 + 12 + 1 + 4 + 16
 #: A resampled canvas: the warped premultiplied float32 RGBA, its alpha,
 #: the ink mask, the float32 RGB and the float32 RGBA; the axis-aligned
@@ -564,7 +564,8 @@ def _compose(
     _guard("canvas", w, h, w * h * _COMPOSE_BYTES, options, budget)
     # Coverage is summed in 8-bit units and clipped once at the end.
     acc = np.zeros((h, w), np.uint32)
-    rgb = np.zeros((h, w, 3), np.float32)
+    rgba = np.zeros((h, w, 4), np.float32)
+    rgb = rgba[..., :3]
     fills = {f for _, _, _, f in items if f is not None}
     best = np.zeros((h, w), np.uint8) if len(fills) > 1 else None
     for x, y, cov, fill in items:
@@ -582,13 +583,18 @@ def _compose(
         rgb[ys, xs][win] = fill
         np.maximum(best[ys, xs], cov, out=best[ys, xs])
     if best is None and fills:
-        rgb[acc > 0] = fills.pop()
+        # One plane at a time: a strided mask over three channels is slow.
+        only = np.asarray(fills.pop(), np.float32)
+        inked = np.flatnonzero(acc)
+        flat = rgba.reshape(-1, 4)
+        for c in range(3):
+            flat[inked, c] = only[c]
     if mode.threshold is not None:
-        alpha = (acc > mode.threshold * 255).astype(np.float32)
+        rgba[..., 3] = acc > mode.threshold * 255
     else:
         alpha = np.minimum(acc, 255).astype(np.float32)
         alpha /= 255
-    rgba = np.concatenate([rgb, alpha[..., None]], axis=-1)
+        rgba[..., 3] = alpha
     colors = [(x, y, c) for x, y, c, f in items if f is None]
     if colors:
         _lay_colors(rgba, colors, x0, y0)
@@ -598,17 +604,26 @@ def _compose(
 def _lay_colors(
     rgba: np.ndarray, colors: list[tuple[int, int, np.ndarray]], x0: int, y0: int
 ) -> None:
-    """Lay premultiplied colour glyphs over straight ``rgba``, in order, in place."""
-    rgba[..., :3] *= rgba[..., 3:]
+    """Lay premultiplied colour glyphs over straight ``rgba``, in order, in place.
+
+    ``rgba`` is C-contiguous. Each step runs a plane at a time: the same
+    float32 operations as one strided pass, several times faster.
+    """
+    assert rgba.flags.c_contiguous
+    alpha = rgba[..., 3]
+    for c in range(3):
+        np.multiply(rgba[..., c], alpha, out=rgba[..., c])
     for x, y, color in colors:
         ys = slice(y - y0, y - y0 + color.shape[0])
         xs = slice(x - x0, x - x0 + color.shape[1])
         rgba[ys, xs] *= 1 - color[..., 3:]
         rgba[ys, xs] += color
-    alpha = rgba[..., 3:]
     np.clip(alpha, 0, 1, out=alpha)
-    ink = alpha[..., 0] > 0
-    rgba[..., :3][ink] = np.clip(rgba[..., :3][ink] / alpha[ink], 0, 1)
+    flat = rgba.reshape(-1, 4)
+    ink = np.flatnonzero(alpha > 0)
+    shown = flat[ink, 3]
+    for c in range(3):
+        flat[ink, c] = np.clip(flat[ink, c] / shown, 0, 1)
 
 
 def _rasterize_matrix(
