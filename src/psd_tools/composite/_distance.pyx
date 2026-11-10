@@ -1,12 +1,12 @@
 # cython: boundscheck=False, wraparound=False, cdivision=True, language_level=3
-"""C loops behind effects._signed_distance, _nearest_boundary, _chamfer_transform, _chamfer_relax and _tent_blur.
+"""C loops behind effects._signed_distance, _nearest_boundary, _chamfer_transform, _chamfer_relax and _tent_blur, and scanline.fill_coverage's row sums.
 
 The numpy code's float32 (pruned minimum) and float64 (chamfer) operations in
 the same order, so the results are bit-identical. Memoryviews only, so the
 module builds against the Limited API without numpy headers.
 """
 import numpy as np
-from libc.math cimport INFINITY, signbit, sqrt
+from libc.math cimport INFINITY, fabs, fmod, signbit, sqrt
 from libc.stdlib cimport calloc, free, malloc
 from libc.string cimport memcpy
 
@@ -1265,3 +1265,36 @@ cdef void _disk_runs(const unsigned char[:, ::1] stating, Py_ssize_t oy, Py_ssiz
                     xb = w
                 runs[yy, xa] += 1
                 runs[yy, xb] -= 1
+
+
+def coverage_rows(double[:, ::1] rows, float[:, ::1] coverage, Py_ssize_t top, Py_ssize_t width,
+                  bint nonzero, double residue):
+    """``scanline.fill_coverage``'s row pass, numpy's float64 steps in its order.
+
+    Each row's prefix sum (numpy's cumsum: the first cell, then one add a cell),
+    its absolute value folded into [0, 1] (``np.mod`` by 2, then ``1 - |r - 1|``)
+    or held to 1, under ``residue`` 0, then cast; columns 1 to ``width`` go to
+    ``coverage`` from row ``top``. ``rows`` is left as it was.
+    """
+    cdef Py_ssize_t h = rows.shape[0], y, x
+    cdef double run, r
+    if rows.shape[1] < width + 1 or top < 0 or top + h > coverage.shape[0] or coverage.shape[1] < width:
+        raise ValueError("rows do not fit the coverage")
+    with nogil:
+        for y in range(h):
+            run = rows[y, 0]
+            for x in range(1, width + 1):
+                run = run + rows[y, x]
+                r = fabs(run)
+                if nonzero:
+                    # np.minimum(r, 1.0): NaN passes.
+                    if r > 1.0:
+                        r = 1.0
+                else:
+                    # np.mod(r, 2.0) for r >= +0 is fmod's exact answer (+0 for 0).
+                    if r >= 2.0:
+                        r = fmod(r, 2.0)
+                    r = 1.0 - fabs(r - 1.0)
+                if r < residue:
+                    r = 0.0
+                coverage[top + y, x - 1] = <float>r

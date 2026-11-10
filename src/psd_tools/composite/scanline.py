@@ -36,6 +36,11 @@ aggdraw for a union instead is wrong over whole regions of the same shapes
 
 import numpy as np
 
+try:
+    from . import _distance as _compiled  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - the extension is optional
+    _compiled = None
+
 # Accumulator cells, and segment pieces, held at once. Rows are split and
 # summed a band at a time, and the pieces of a band are cut into columns a
 # span at a time, so these bound peak working memory whatever the canvas is
@@ -204,6 +209,10 @@ def fill_coverage(
             acc += np.bincount(cell + 1, weights=rise * share, minlength=cells)
 
         rows = acc[:cells].reshape(bottom - top, stride)
+        if _compiled is not None and hasattr(_compiled, "coverage_rows"):
+            # The steps below in one pass a row, the same float64 operations.
+            _compiled.coverage_rows(rows, coverage, top, width, nonzero, _RESIDUE)
+            continue
         np.cumsum(rows, axis=1, out=rows)
         np.abs(rows, out=rows)
         # Even-odd: a pixel wound twice is outside again, so the winding is
