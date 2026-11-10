@@ -133,6 +133,37 @@ def test_regions_share_group_alphas() -> None:
     assert cache.hits["group_alpha"] > 0
 
 
+def test_a_group_alpha_is_composited_on_the_box_asked_for() -> None:
+    # The box an uncached pass composites, not the group's whole box.
+    psd = PSDImage.open(full_name("effects/group-stroke-off-canvas.psd"))
+    cache = RenderCache()
+    for box in ((36, 8, 40, 12), (37, 9, 39, 11), (56, 8, 60, 24)):
+        plain = _render(psd, None, viewport=box)
+        assert np.array_equal(_render(psd, cache, viewport=box), plain)
+    keys = [cast(tuple, key) for key in cache._store]
+    boxes = [key[-1] for key in keys if key[0] == "group_alpha"]
+    assert boxes == [(36, 8, 52, 24), (44, 8, 60, 24)]  # "Inside" is (36, 8, 60, 24)
+    assert (cache.hits["group_alpha"], cache.misses["group_alpha"]) == (1, 2)
+
+
+def test_a_boxed_entry_serves_boxes_inside_it_until_evicted() -> None:
+    cache = RenderCache(max_bytes=2000)
+    key, alpha = ("group_alpha", b"k"), np.zeros(250, np.float32)
+    cache.put_boxed(key, (0, 0, 10, 10), (alpha,))
+    hit = cache.get_around(key, (2, 2, 10, 5))
+    assert hit is not None and hit[0] == (0, 0, 10, 10) and hit[1][0] is alpha
+    assert cache.get_around(key, (2, 2, 11, 5)) is None
+    cache.put(("prefix", 1), (np.zeros(400, np.float32),))  # evicts it
+    assert cache.get_around(key, (2, 2, 3, 3)) is None
+    assert not cache._boxes[key]
+    cache.put_boxed(key, (0, 0, 1, 1), (alpha,))
+    cache.clear()
+    assert not cache._boxes
+    nothing = RenderCache(max_bytes=0)
+    nothing.put_boxed(key, (0, 0, 10, 10), (alpha,))
+    assert nothing.get_around(key, (0, 0, 1, 1)) is None and not nothing._boxes
+
+
 def test_verify_catches_a_wrong_entry() -> None:
     path = "effects/double-stroke-effects.psd"
     cache = RenderCache(verify=True)
