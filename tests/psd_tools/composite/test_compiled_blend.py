@@ -50,10 +50,15 @@ def _numpy(
         return fn(*args)
 
 
+def _bits(a: np.ndarray) -> bytes:
+    """The bytes, every NaN one NaN: a NaN's sign is the CPU's (x86 sets it)."""
+    return np.where(np.isnan(a), np.nan, a).tobytes()
+
+
 def _same(compiled: np.ndarray, plain: np.ndarray) -> None:
     assert compiled.dtype == plain.dtype == np.float32
     assert compiled.shape == plain.shape
-    assert compiled.tobytes() == plain.tobytes()
+    assert _bits(compiled) == _bits(plain)
 
 
 @pytest.mark.parametrize("seed", range(6))
@@ -444,7 +449,8 @@ def test_vibrance_step_is_numpys(
             patch.setattr(adjustments, "_cblend", None)
             plain = adjustments._vibrance_step(view, amount)
         assert compiled.dtype == plain.dtype == np.float64
-        assert compiled.tobytes() == plain.tobytes()
+        # + 0.0: on x86 numpy's max and min give a zero either sign.
+        assert _bits(compiled + 0.0) == _bits(plain + 0.0)
     assert len(calls) == 1, "a strided view stays with numpy"
 
 
