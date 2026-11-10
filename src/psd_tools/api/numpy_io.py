@@ -433,6 +433,9 @@ def get_layer_data(
             layer, layer.mask.width, layer.mask.height, lambda x: x.id == channel_id
         )
 
+    joined = _joined8(layer)
+    if joined is not None:
+        return joined
     color = _find_channel(layer, layer.width, layer.height, lambda x: x.id >= 0)
     shape = _find_channel(
         layer,
@@ -458,6 +461,59 @@ def get_layer_data(
             warn=False,
         )
     return np.concatenate([color, shape], axis=2)
+
+
+def _joined8(layer: "LayerProtocol") -> np.ndarray | None:
+    """:func:`get_layer_data`'s colour and shape, levelled into one array at once.
+
+    The same planes, guards and levels as its two reads and their
+    ``np.concatenate``, which costs more than the reads. None, before
+    anything is decoded, unless the layer is 8-bit with colour planes and one
+    shape plane and the compiled module is there; None too for a plane short
+    of its pixels, which the general path stacks its own way.
+    """
+    if layer._psd.depth != 8 or _cnumpy_io is None:
+        return None
+    width, height, version = layer.width, layer.height, layer._psd.version
+    pairs = list(zip(layer._record.channel_info, layer._channels, strict=False))
+    colors = [d for i, d in pairs if i.id >= 0 and d._data_length > 0]
+    shapes = [
+        d
+        for i, d in pairs
+        if i.id == ChannelID.TRANSPARENCY_MASK and d._data_length > 0
+    ]
+    size = width * height
+    if not colors or len(shapes) != 1 or not size:
+        return None
+    _guard_channel_read(layer, width, height, lambda x: x.id >= 0)
+    planes = [d.get_data(width, height, 8, version) for d in colors]
+    if any(len(plane) != size for plane in planes):
+        return None
+    # The colour read's array holds every colour plane, kept ones or not.
+    held = size * len(planes) * 4
+    _guard_channel_read(
+        layer,
+        width,
+        height,
+        lambda x: x.id == ChannelID.TRANSPARENCY_MASK,
+        held,
+    )
+    shape = shapes[0].get_data(width, height, 8, version)
+    if len(shape) != size:
+        return None
+    expected = EXPECTED_CHANNELS.get(layer._psd.color_mode)
+    if expected is not None and len(planes) > expected:
+        logger.debug("Extra channel found")
+        planes = planes[:expected]
+    check_pixel_size(
+        width,
+        height,
+        len(planes) + 1,
+        max_alloc_bytes=layer._psd._max_alloc_bytes,
+        estimated_bytes=held + size * 4 + size * (len(planes) + 1) * 4,
+        warn=False,
+    )
+    return cast(np.ndarray, _cnumpy_io.planes8([*planes, shape], height, width))
 
 
 def get_layer_rows(

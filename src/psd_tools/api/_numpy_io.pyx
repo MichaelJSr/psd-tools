@@ -21,6 +21,7 @@ def planes8(list planes, Py_ssize_t h, Py_ssize_t w):
     cdef const unsigned char[::1] a
     cdef const unsigned char[::1] b
     cdef const unsigned char[::1] c
+    cdef const unsigned char[::1] d
     for k in range(n):
         a = planes[k]
         if a.shape[0] != size:
@@ -33,6 +34,7 @@ def planes8(list planes, Py_ssize_t h, Py_ssize_t w):
     cdef const unsigned char *p
     cdef const unsigned char *q
     cdef const unsigned char *r
+    cdef const unsigned char *t
     if n == 1:
         a = planes[0]
         p = &a[0]
@@ -47,6 +49,16 @@ def planes8(list planes, Py_ssize_t h, Py_ssize_t w):
                 o[3 * i] = _LEVEL[p[i]]
                 o[3 * i + 1] = _LEVEL[q[i]]
                 o[3 * i + 2] = _LEVEL[r[i]]
+    elif n == 4:
+        # Colour and shape together (numpy_io._joined8), in one pass.
+        a, b, c, d = planes[0], planes[1], planes[2], planes[3]
+        p, q, r, t = &a[0], &b[0], &c[0], &d[0]
+        with nogil:
+            for i in range(size):
+                o[4 * i] = _LEVEL[p[i]]
+                o[4 * i + 1] = _LEVEL[q[i]]
+                o[4 * i + 2] = _LEVEL[r[i]]
+                o[4 * i + 3] = _LEVEL[t[i]]
     else:
         for k in range(n):
             a = planes[k]
