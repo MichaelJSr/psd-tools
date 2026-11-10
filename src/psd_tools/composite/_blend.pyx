@@ -362,6 +362,70 @@ def lut_levels(const float[:, :, :] values, const float[::1] lut):
     return result
 
 
+def mix_toward(const float[:, :, :] content, const float[:, :, :] blended, strength, float scalar):
+    """``utils.clip(content + strength * (blended - content))``, ``strength`` a canvas of one
+    channel, or None for ``scalar``."""
+    cdef Py_ssize_t h = content.shape[0], w = content.shape[1], n = content.shape[2]
+    cdef Py_ssize_t y, x, c, i
+    cdef float k
+    cdef const float[:, :, :] s
+    cdef const float* p_s
+    cdef const float* p_c
+    cdef const float* p_b
+    cdef float* o
+    _rows(content, h, w, n)
+    _rows(blended, h, w, n)
+    if strength is not None:
+        s = strength
+        _rows(s, h, w, 1)
+    result = np.empty((h, w, n), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return result
+    cdef float[:, :, ::1] out = result
+    with nogil:
+        for y in range(h):
+            p_c, p_b, o = &content[y, 0, 0], &blended[y, 0, 0], &out[y, 0, 0]
+            if strength is None:
+                for i in range(w * n):
+                    o[i] = _clip(p_c[i] + scalar * (p_b[i] - p_c[i]))
+                continue
+            p_s = &s[y, 0, 0]
+            if n == 3:
+                for x in range(w):
+                    k = p_s[x]
+                    i = 3 * x
+                    o[i] = _clip(p_c[i] + k * (p_b[i] - p_c[i]))
+                    o[i + 1] = _clip(p_c[i + 1] + k * (p_b[i + 1] - p_c[i + 1]))
+                    o[i + 2] = _clip(p_c[i + 2] + k * (p_b[i + 2] - p_c[i + 2]))
+                continue
+            for x in range(w):
+                k = p_s[x]
+                for c in range(n):
+                    i = x * n + c
+                    o[i] = _clip(p_c[i] + k * (p_b[i] - p_c[i]))
+    return result
+
+
+def gather_rows(const float[:, ::1] table, const int[::1] index):
+    """``table[index]``; None if an index is out of range."""
+    cdef Py_ssize_t n = index.shape[0], m = table.shape[0], c = table.shape[1], p, k
+    cdef int d
+    cdef bint bad = False
+    result = np.empty((n, c), dtype=np.float32)
+    if n == 0 or c == 0:
+        return result
+    cdef float[:, ::1] out = result
+    with nogil:
+        for p in range(n):
+            d = index[p]
+            if d < 0 or d >= m:
+                bad = True
+                break
+            for k in range(c):
+                out[p, k] = table[d, k]
+    return None if bad else result
+
+
 cdef inline unsigned char _byte(float v) noexcept nogil:
     # 255 * v, np.clip to [0, 255], np.rint, astype(uint8). fmaxf takes NaN
     # to 0, which is what the cast makes of it.
