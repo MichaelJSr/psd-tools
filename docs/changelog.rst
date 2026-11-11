@@ -35,6 +35,24 @@ Changelog
   ``PSD_TOOLS_MALLOC=0``, ``MALLOC_MMAP_THRESHOLD_``,
   ``MALLOC_TRIM_THRESHOLD_``, ``MALLOC_MMAP_MAX_``, ``MALLOC_TOP_PAD_`` or
   ``GLIBC_TUNABLES`` leave malloc alone
+- [fix] Text composer: a word stays on a box line that runs past the box by
+  up to 1.4e-5 of its width, as Photoshop 2023 lays it. **Rendering change**
+  for re-laid box text
+- [fix] Channel mixer and exposure: the same pixels on every CPU (the mixer
+  summed per channel in a fixed order, exposure powers in float64 rounded
+  once). **Rendering change** of at most 2 levels on a few pixels
+- [refactor] Open keeps typed image resources as read and parses each on
+  first use (``ImageResource.data`` is a property; one never read is written
+  back as read), and reads the link lists only when records move
+- [refactor] The compiled descriptor and engine readers allocate their
+  elements directly and keep atomic values out of the cyclic garbage collector
+- [fix] 8-bit documents: gradient colour and transparency in whole levels, as
+  Photoshop 2023 rasters them. **Rendering change** for gradient fills,
+  overlays and gradient strokes
+- [refactor] ``RenderCache``: a payload that cannot change (channel bytes, a
+  block as read, linked files and smart-filter pixels) is hashed once per
+  cache; group alpha is composited on the box asked for, and a stored box
+  around it is reused (``RenderCache.get_around``, ``put_boxed``)
 - [fix] A pass-through group that any layer clips to, shown or hidden, renders
   as a styled pass-through group does, as Photoshop 2023 renders it.
   **Rendering change** for such groups over children or effects in blend
