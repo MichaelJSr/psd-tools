@@ -4,6 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A user mask's Properties feather is drawn: the whole mask is blurred
+  by a gaussian of the feather in pixels, as Photoshop 2023 draws it, before
+  its density. A real mask and a vector mask's feather are drawn as before.
+  **Rendering change** for layers with a feathered mask
 - [fix] 8-bit documents: adjustment layers give whole levels, as Photoshop
   2023's 8-bit composite: each adjustment's result and the canvas where it
   applies are rounded to the nearest level, the channel mixer's exact halves
