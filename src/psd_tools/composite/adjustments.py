@@ -37,6 +37,7 @@ from psd_tools.composite.blend import (
     hsv2hsl,
     rgb2hsl,
 )
+from psd_tools.composite.paint import _dot3, _power, _powf
 from psd_tools.constants import ColorMode, Resource
 from psd_tools.psd.adjustments import LevelRecord
 from psd_tools.psd.adjustments import Levels as LevelsData
@@ -479,7 +480,7 @@ def _levels_gamma(
     on the LUT's levels. ``power``: that power, if worked out already.
     """
     if power is None:
-        power = np.power(values, np.float32(1.0 / gamma), dtype=np.float32)
+        power = _powf(values, np.float32(1.0 / gamma))
     if gamma <= 1.0:
         return power
     steps = lut_size - 1
@@ -641,16 +642,6 @@ def apply_exposure(
     channel_id = 1 if colormode == ColorMode.GRAYSCALE else 0
 
     return _apply_luts({channel_id: lut}, img, colormode)
-
-
-def _powf(
-    x: np.ndarray | np.float32, y: np.ndarray | np.float32
-) -> NDArray[np.float32]:
-    """``x ** y`` in float32, correctly rounded: worked in float64, rounded once.
-
-    float32 powers differ in the last bits between CPUs (SVML, libm).
-    """
-    return np.power(np.asarray(x, np.float64), np.float64(y)).astype(np.float32)
 
 
 @require_scipy
@@ -939,11 +930,10 @@ def _get_colorrange_hsl_values(
         saturation_contribution = saturation * (
             (
                 _1
-                - np.power(
+                - _powf(
                     _1 - range_mask,
                     np.float32(1.5)
-                    / (_1 - saturation ** np.float32(4.0) + np.float32(5e-2)),
-                    dtype=np.float32,
+                    / (_1 - _powf(saturation, np.float32(4.0)) + np.float32(5e-2)),
                 )
             )
             if saturation > 0
@@ -1265,7 +1255,7 @@ def _rows_from_rgb(
         key = ink.min(axis=1, keepdims=True)
         cmy = (ink - key) / np.maximum(_1 - key, _FLOAT_EPSILON)
         return (_1 - np.concatenate([cmy, key], axis=1)).astype(np.float32, copy=False)
-    return (rgb @ _BT601_LUMINANCE)[:, None].astype(np.float32, copy=False)
+    return _dot3(rgb, _BT601_LUMINANCE)[:, None].astype(np.float32, copy=False)
 
 
 _BT601_LUMINANCE = np.array([0.299, 0.587, 0.114], dtype=np.float32)
@@ -1406,7 +1396,7 @@ def _colorbalance_shadows(level: np.ndarray) -> np.ndarray:
 def _colorbalance_midtones(level: np.ndarray, amount: float) -> np.ndarray:
     """``level ** 2 ** -amount``; a brightening one starts from black on a parabola."""
     exponent = 2.0**-amount
-    out = level**exponent
+    out = _power(level, exponent)
     if exponent >= 1:
         return out
     slope = _COLORBALANCE_TOE_SLOPE
@@ -1541,18 +1531,6 @@ def _vibrance(linear: np.ndarray, vibrance: float, saturation: float) -> np.ndar
     return np.clip(out, _0, _1)
 
 
-def _dot3(rgb: np.ndarray, weights: np.ndarray) -> np.ndarray:
-    """``rgb @ weights`` (3, or 3 by n), each pixel's sum in channel order.
-
-    BLAS may fuse or block those sums by the array's shape; the compositor
-    runs each distinct colour alone (``composite._adjust``).
-    """
-    out = rgb[..., 0:1] * weights[0]
-    out += rgb[..., 1:2] * weights[1]
-    out += rgb[..., 2:3] * weights[2]
-    return out[..., 0] if weights.ndim == 1 else out
-
-
 @functools.cache
 def _vibrance_tables() -> dict[str, np.ndarray]:
     """The vibrance tables by name; see ``_vibrance_step``."""
@@ -1632,8 +1610,8 @@ def _vibrance_step(linear: np.ndarray, amount: float) -> np.ndarray:
     # extrapolate.
     value = SRGB_SLOPE * high
     bright = high > SRGB_CUTOFF
-    value[bright] = (1.0 + SRGB_OFFSET) * high[bright] ** (
-        1.0 / SRGB_GAMMA
+    value[bright] = (1.0 + SRGB_OFFSET) * _power(
+        high[bright], 1.0 / SRGB_GAMMA
     ) - SRGB_OFFSET
     node = _vibrance_node(value * _255, sat)
     scale = _1 + _bilinear(at_amount, node)

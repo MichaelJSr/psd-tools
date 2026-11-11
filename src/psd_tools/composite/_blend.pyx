@@ -18,7 +18,7 @@ Every canvas but ``lut_levels``', ``to_bytes``', ``vibrance_step``'s and
 adjacent and its neighbour the next pixel along (``_rows``), as they are in a
 box cut from a canvas; ``utils.in_rows`` checks that first.
 """
-from libc.math cimport NAN, ceilf, fabs, floorf, fmaxf, fminf, pow, powf, rintf, signbit
+from libc.math cimport NAN, ceilf, fabs, floorf, fmaxf, fminf, pow, rintf, signbit
 
 import numpy as np
 
@@ -985,7 +985,8 @@ def vibrance_step(
             sat = span / high if high > 0 else <real>0.0
             if high > rcut:
                 if real is float:
-                    value = rgain * powf(high, rinv) - roff
+                    # in double, rounded once: powf differs between CPUs
+                    value = rgain * <float>pow(<double>high, <double>rinv) - roff
                 else:
                     value = rgain * pow(high, rinv) - roff
             else:

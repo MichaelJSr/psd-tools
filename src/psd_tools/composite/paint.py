@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from psd_tools.api import numpy_io
 from psd_tools.api._descriptor import get_descriptor, get_scalar
@@ -937,7 +938,9 @@ def _make_radial_gradient(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
 
 def _make_angle_gradient(X: np.ndarray, Y: np.ndarray, angle: float) -> np.ndarray:
     """Generate index map for angle gradients."""
-    Z = (((180 * np.arctan2(Y, X) / np.pi) + angle) % 360) / 360
+    # float64, rounded once: float32 atan2 differs between CPUs
+    theta = np.arctan2(Y, X, dtype=np.float64).astype(np.result_type(X, Y))
+    Z = (((180 * theta / np.pi) + angle) % 360) / 360
     return Z
 
 
@@ -1111,13 +1114,42 @@ def _stop_tangents(values: np.ndarray) -> np.ndarray:
     return 0.5 * (after - before)
 
 
+def _powf(
+    x: np.ndarray | np.float32, y: np.ndarray | np.float32
+) -> NDArray[np.float32]:
+    """``x ** y`` in float32, correctly rounded: worked in float64, rounded once.
+
+    float32 powers differ in the last bits between CPUs (SVML, libm).
+    """
+    return np.power(np.asarray(x, np.float64), np.float64(y)).astype(np.float32)
+
+
+def _power(x: Any, y: float) -> Any:
+    """``x ** y``, a float32 ``x`` through :py:func:`_powf` (``y`` as float32)."""
+    if getattr(x, "dtype", None) == np.float32:
+        return _powf(x, np.float32(y))
+    return x**y
+
+
+def _dot3(rgb: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """``rgb @ weights`` (3, or 3 by n), each pixel's sum in channel order.
+
+    BLAS may fuse or block those sums by the array's shape and the CPU; the
+    compositor runs each distinct colour alone (``composite._adjust``).
+    """
+    out = rgb[..., 0:1] * weights[0]
+    out += rgb[..., 1:2] * weights[1]
+    out += rgb[..., 2:3] * weights[2]
+    return out[..., 0] if weights.ndim == 1 else out
+
+
 # ``color_convert``'s sRGB transfer functions over an array. That module is
 # scalar by design, so it is the pieces that are shared, not the functions.
 def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
     return np.where(
         rgb <= SRGB_SLOPE * SRGB_CUTOFF,
         rgb / SRGB_SLOPE,
-        ((rgb + SRGB_OFFSET) / (1.0 + SRGB_OFFSET)) ** SRGB_GAMMA,
+        _power((rgb + SRGB_OFFSET) / (1.0 + SRGB_OFFSET), SRGB_GAMMA),
     )
 
 
@@ -1126,7 +1158,7 @@ def _linear_to_srgb(rgb: np.ndarray) -> np.ndarray:
     return np.where(
         rgb <= SRGB_CUTOFF,
         rgb * SRGB_SLOPE,
-        (1.0 + SRGB_OFFSET) * rgb ** (1.0 / SRGB_GAMMA) - SRGB_OFFSET,
+        (1.0 + SRGB_OFFSET) * _power(rgb, 1.0 / SRGB_GAMMA) - SRGB_OFFSET,
     )
 
 
@@ -1151,11 +1183,11 @@ _OKLAB_LAB_INV = np.linalg.inv(_OKLAB_LAB)
 
 
 def _srgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
-    return np.cbrt(_srgb_to_linear(rgb) @ _OKLAB_LMS.T) @ _OKLAB_LAB.T
+    return _dot3(np.cbrt(_dot3(_srgb_to_linear(rgb), _OKLAB_LMS.T)), _OKLAB_LAB.T)
 
 
 def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
-    return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ _OKLAB_LMS_INV.T)
+    return _linear_to_srgb(_dot3(_dot3(lab, _OKLAB_LAB_INV.T) ** 3, _OKLAB_LMS_INV.T))
 
 
 # An ICC profile's connection space white (D50), sRGB's colorants as a
@@ -1246,12 +1278,12 @@ _PERCEPTUAL_ALPHA_GAMMA = 1.728
 
 def _ease_alpha(alpha: np.ndarray) -> np.ndarray:
     """Perceptual opacity from a blended one."""
-    return np.power(np.clip(alpha, 0.0, 1.0), _PERCEPTUAL_ALPHA_GAMMA)
+    return _power(np.clip(alpha, 0.0, 1.0), _PERCEPTUAL_ALPHA_GAMMA)
 
 
 def _unease_alpha(alpha: np.ndarray) -> np.ndarray:
     """Inverse of :py:func:`_ease_alpha`."""
-    return np.power(np.clip(alpha, 0.0, 1.0), 1.0 / _PERCEPTUAL_ALPHA_GAMMA)
+    return _power(np.clip(alpha, 0.0, 1.0), 1.0 / _PERCEPTUAL_ALPHA_GAMMA)
 
 
 _BlendSpace = tuple[

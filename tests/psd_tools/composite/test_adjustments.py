@@ -244,9 +244,13 @@ def test_levels_gamma_leaves_black_at_two_to_the_gamma(gamma: float) -> None:
 
 @pytest.mark.parametrize(("gamma", "lut_size"), [(0.5, 256), (1.0, 256), (1.1, 256)])
 def test_levels_gamma_without_a_toe_is_a_power(gamma: float, lut_size: int) -> None:
-    """At or below gamma 1, and where the toe ends inside the first level."""
+    """At or below gamma 1, and where the toe ends inside the first level.
+
+    The power worked in float64 and rounded once: the same on every CPU.
+    """
     values = _lut_domain(lut_size)
-    expected = np.power(values, np.float32(1.0 / gamma))
+    exponent = float(np.float32(1.0 / gamma))
+    expected = np.power(values.astype(np.float64), exponent).astype(np.float32)
     assert np.array_equal(_levels_gamma(values, gamma, lut_size), expected)
 
 

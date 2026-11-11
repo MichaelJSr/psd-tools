@@ -30,6 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from psd_tools.composite.paint import _power
 from psd_tools.composite.scanline import fill_coverage, flatten_cubics
 from psd_tools.composite.text.constants import GENERAL_TRANSFORM_EPS
 
@@ -1378,13 +1379,13 @@ def device_bbox(
 
 def to_linear(c: np.ndarray) -> np.ndarray:
     """sRGB-encoded values to linear light."""
-    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+    return np.where(c <= 0.04045, c / 12.92, _power((c + 0.055) / 1.055, 2.4))
 
 
 def to_srgb(c: np.ndarray) -> np.ndarray:
     """Linear-light values to sRGB encoding."""
     return np.where(
-        c <= 0.0031308, c * 12.92, 1.055 * np.maximum(c, 0.0) ** (1 / 2.4) - 0.055
+        c <= 0.0031308, c * 12.92, 1.055 * _power(np.maximum(c, 0.0), 1 / 2.4) - 0.055
     )
 
 
