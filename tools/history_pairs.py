@@ -21,7 +21,7 @@ mean RGB difference. It scores each live card's newest pair unless told
 otherwise. Blobs come from ``--cache`` (files hashed in place), then ``--clone``
 (read only), then GitHub: ``--batch`` pairs per throwaway repo, one batched
 fetch each, deleted after. One process per pair; rows are appended, so a rerun
-resumes. ``tools/history_pairs.tsv`` is the pinned list: score it as it is.
+resumes. A pinned list is a pairs file whose rows all have ``newest`` 1.
 """
 
 from __future__ import annotations
