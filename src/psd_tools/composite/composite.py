@@ -41,6 +41,7 @@ from psd_tools.api.layers import (
     SmartObjectLayer,
     TypeLayer,
 )
+from psd_tools.api.mask import Mask
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import (
@@ -154,6 +155,9 @@ def _styled(effects: Iterator[Any]) -> Iterator[_StyledEffect]:
 # fill, or a layer effect's canvas, may grow to, past the floor check_growth()
 # allows.
 _CANVAS_GROWTH = 4
+
+# How far a mask feather's gaussian reaches, in sigmas (scipy's default).
+_FEATHER_TRUNCATE = 4.0
 
 
 # The layer modes whose compositing keeps ``1 - alpha`` of the backdrop, which
@@ -875,16 +879,40 @@ def _vector_stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     return (bbox[0] - width, bbox[1] - width, bbox[2] + width, bbox[3] + width)
 
 
+def _mask_feather(mask: Mask) -> float:
+    """The user mask's Properties feather: its gaussian's sigma in pixels, or 0.0.
+
+    A real mask is read as stored: no card has one under a feather.
+    """
+    parameters = mask.parameters
+    feather = parameters.user_mask_feather if parameters is not None else None
+    if feather is None or mask.has_real() or not 0.0 < feather < math.inf:
+        return 0.0
+    return float(feather)
+
+
+def _feather_box(mask: Mask, sigma: float) -> tuple[int, int, int, int]:
+    """The mask's box grown by as far as a feather of ``sigma`` spreads it.
+
+    An empty box stays empty: the blur of the background is the background.
+    """
+    left, top, right, bottom = mask.bbox
+    if left >= right or top >= bottom:
+        return mask.bbox
+    reach = math.ceil(_FEATHER_TRUNCATE * sigma)
+    return left - reach, top - reach, right + reach, bottom + reach
+
+
 def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
     """The box a layer's style is laid out on and its silhouette read from.
 
     ``layer.bbox``, except for an adjustment layer, which has no pixels of its
     own: its mask is its shape, so the mask's box stands in -- empty when the
-    mask hides everything -- and the whole canvas where there is no mask or
-    the mask reveals what lies outside its box. A vector mask narrows it as
-    it narrows the shape. A mask under full density reveals the layer
-    everywhere, as :py:meth:`Compositor._get_mask` folds it in, and narrows
-    nothing.
+    mask hides everything, grown by a feather's reach -- and the whole canvas
+    where there is no mask or the mask reveals what lies outside its box. A
+    vector mask narrows it as it narrows the shape. A mask under full density
+    reveals the layer everywhere, as :py:meth:`Compositor._get_mask` folds it
+    in, and narrows nothing.
     """
     if not isinstance(layer, AdjustmentLayer):
         return layer.bbox
@@ -902,7 +930,8 @@ def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
         and mask.background_color == 0
         and user_density in (None, 255)
     ):
-        bbox = mask.bbox
+        sigma = _mask_feather(mask)
+        bbox = _feather_box(mask, sigma) if sigma else mask.bbox
     vector = layer.vector_mask if layer.has_vector_mask() else None
     if (
         vector is not None
@@ -5579,6 +5608,8 @@ class Compositor:
             )
         ):
             return False
+        if _mask_feather(mask):
+            return False
         stored = layer.numpy("mask", real_mask=True)
         if stored is None:
             return False
@@ -5598,7 +5629,7 @@ class Compositor:
         viewport: tuple[int, int, int, int] | None = None,
         clip_to_path: bool = True,
     ) -> float | np.ndarray:
-        """The layer's mask coverage, with any mask density already folded in.
+        """The layer's mask coverage, with any mask feather and density folded in.
 
         ``viewport`` defaults to this compositor's; a stroke effect passes the
         box it draws on, which may reach outside it (#804). ``clip_to_path=False``
@@ -5619,12 +5650,12 @@ class Compositor:
             # TODO: When force, ignore real mask.
             mask = layer.numpy("mask", real_mask=not self._force)
             if mask is not None:
-                shape = paste(
-                    viewport,
-                    layer.mask.bbox,
-                    mask,
-                    layer.mask.background_color / 255.0,
-                )
+                bbox = layer.mask.bbox
+                background = layer.mask.background_color / 255.0
+                sigma = _mask_feather(layer.mask)
+                if sigma:
+                    bbox, mask = self._feather_mask(layer, mask, sigma, background)
+                shape = paste(viewport, bbox, mask, background)
             if layer.mask.parameters:
                 density = layer.mask.parameters.user_mask_density
                 if density is None:
@@ -5661,6 +5692,42 @@ class Compositor:
                 shape = d * shape + (1.0 - d)
 
         return shape
+
+    def _feather_mask(
+        self, layer: Layer, mask: np.ndarray, sigma: float, background: float
+    ) -> tuple[tuple[int, int, int, int], np.ndarray]:
+        """The whole mask blurred by its feather, on its box grown by the reach.
+
+        A gaussian of ``sigma`` pixels, as Photoshop 2023 draws a Properties
+        feather; past the box the mask is its background. Blurred whole, not
+        on the viewport, so every box of a render reads the same values.
+        Without scipy, or on a canvas out of proportion (a forged feather), the
+        mask stays as stored.
+        """
+        stored = cast(Mask, layer.mask).bbox
+        box = _feather_box(cast(Mask, layer.mask), sigma)
+        try:
+            check_growth(
+                _pixels(box),
+                max(_pixels(layer._psd.viewbox), _pixels(stored)),
+                _CANVAS_GROWTH,
+            )
+        except ValueError as error:
+            logger.warning("Mask feather of %s left out: %s", layer, error)
+            return stored, mask
+        if not self._has_scipy("Mask feathers"):
+            return stored, mask
+        from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+        canvas = paste(box, stored, mask, background)[..., 0].astype(np.float64)
+        blurred = ndimage.gaussian_filter(
+            canvas,
+            sigma,
+            mode="constant",
+            cval=background,
+            truncate=_FEATHER_TRUNCATE,
+        )
+        return box, blurred.astype(np.float32)[..., None]
 
     def _get_const(self, layer: Layer) -> tuple[float, float]:
         """Get constant attributes."""
