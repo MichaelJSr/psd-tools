@@ -4,6 +4,8 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Gradient maps in 8-bit documents read Photoshop's 4096-step table;
+  **Rendering change** on steep ramps
 - [fix] 8-bit documents: adjustment layers give whole levels, as Photoshop
   2023's 8-bit composite: each adjustment's result and the canvas where it
   applies are rounded to the nearest level, the channel mixer's exact halves
