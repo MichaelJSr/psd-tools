@@ -1,5 +1,6 @@
 import io
 import os
+import struct
 from typing import Any
 
 import pytest
@@ -53,6 +54,15 @@ def test_image_resource_from_to(fixture: ImageResource) -> None:
 def test_image_resource_exception() -> None:
     with pytest.raises(IOError):
         ImageResource.frombytes(b"\x00\x00\x00\x01")
+
+
+def test_a_typed_resource_is_parsed_when_read() -> None:
+    body = b"8BIM" + struct.pack(">HxxI", Resource.GLOBAL_ANGLE, 2) + b"\x00\x01"
+    section = struct.pack(">I", len(body)) + body
+    resources = ImageResources.frombytes(section)  # too short for an Integer
+    assert resources.tobytes() == section  # unread: as read
+    with pytest.raises(IOError):
+        resources.get_data(Resource.GLOBAL_ANGLE)
 
 
 @pytest.mark.parametrize(
