@@ -4,6 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] 8-bit documents: adjustment layers give whole levels, as Photoshop
+  2023's 8-bit composite: each adjustment's result and the canvas where it
+  applies are rounded to the nearest level, the channel mixer's exact halves
+  up. **Rendering change**
 - [fix] Modern Brightness/Contrast in 8-bit documents reads Photoshop 2023's
   own levels: every brightness alone, every contrast alone and 79 pairs; any
   other pair takes the contrast of the brightness's level, at most a level

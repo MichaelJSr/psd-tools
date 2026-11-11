@@ -3340,7 +3340,11 @@ def _adjust(
     content: np.ndarray,
     colormode: ColorMode,
 ) -> np.ndarray | None:
-    """``fn(content, colormode, layer)``; a pointwise one runs once per colour."""
+    """``fn(content, colormode, layer)``; a pointwise one runs once per colour.
+
+    In an 8-bit document the answer is in whole levels (:py:func:`_held_levels`).
+    """
+    levels = layer._psd.depth == 8
     if (
         layer.kind in _POINTWISE
         and _cblend is not None
@@ -3361,9 +3365,56 @@ def _adjust(
             if out is None:
                 return None
             if out is picked:
-                return content
+                return _held_levels(layer, content) if levels else content
+            if levels:
+                out = _held_levels(layer, out)
             return _gather(out[0], index).reshape(h, w, out.shape[2])
-    return fn(content, colormode, layer)
+    out = fn(content, colormode, layer)
+    if out is None or not levels:
+        return out
+    return _held_levels(layer, out)
+
+
+# The levels of an 8-bit document's colour.
+_LEVEL = np.float32(255.0)
+# A channel mixer's exact half, past float32 noise.
+_HALF_UP = np.float32(0.5 + 1e-4)
+
+
+def _whole_levels(values: np.ndarray, strength: float | np.ndarray = 1.0) -> np.ndarray:
+    """``values`` clipped and rounded to whole 8-bit levels, halves to even.
+
+    Only where ``strength`` is above 0: a pixel an adjustment leaves alone
+    keeps its value, so a box or a crop rounds as the whole canvas does.
+    """
+    if type(strength) is float:
+        if strength <= 0:
+            return values
+        if hasattr(_cblend, "whole_levels") and _compiled_fits((), (values,)):
+            return _cblend.whole_levels(values)
+    elif hasattr(_cblend, "whole_levels") and _compiled_fits((strength,), (values,)):
+        return _cblend.whole_levels(values, strength)
+    rounded = (np.rint(np.clip(values, 0.0, 1.0) * _LEVEL) / _LEVEL).astype(
+        np.float32, copy=False
+    )
+    if type(strength) is float:
+        return rounded
+    return np.where(np.asarray(strength) > 0, rounded, values)
+
+
+def _held_levels(layer: AdjustmentLayer, values: np.ndarray) -> np.ndarray:
+    """An adjustment's answer as Photoshop's 8-bit composite holds it: whole levels.
+
+    Photoshop 2023 rounds each adjustment's result in an 8-bit document
+    before the next layer reads it, so an exposure under a vibrance hands it
+    whole levels; its integer channel mixer rounds exact halves up. Normal
+    pixel layers stay in float, nearer what Photoshop draws there.
+    """
+    if layer.kind == "channelmixer":
+        return (
+            np.floor(np.clip(values, 0.0, 1.0) * _LEVEL + _HALF_UP) / _LEVEL
+        ).astype(np.float32, copy=False)
+    return _whole_levels(values)
 
 
 def _gather(table: np.ndarray, index: np.ndarray) -> np.ndarray:
@@ -3382,16 +3433,24 @@ def _gather(table: np.ndarray, index: np.ndarray) -> np.ndarray:
 
 
 def _mix_toward(
-    content: np.ndarray, blended: np.ndarray, strength: float | np.ndarray
+    content: np.ndarray,
+    blended: np.ndarray,
+    strength: float | np.ndarray,
+    levels: bool = False,
 ) -> np.ndarray:
-    """``utils.clip(content + strength * (blended - content))``, in one pass where compiled."""
+    """``utils.clip(content + strength * (blended - content))``, in one pass where compiled.
+
+    With ``levels``, in whole 8-bit levels where ``strength`` is above 0
+    (:py:func:`_whole_levels`).
+    """
     if hasattr(_cblend, "mix_toward"):
         if type(strength) is float:
             if utils.in_rows((), (content, blended)):
-                return _cblend.mix_toward(content, blended, None, strength)
+                return _cblend.mix_toward(content, blended, None, strength, levels)
         elif _compiled_fits((strength,), (content, blended)):
-            return _cblend.mix_toward(content, blended, strength, 0.0)
-    return utils.clip(content + strength * (blended - content))
+            return _cblend.mix_toward(content, blended, strength, 0.0, levels)
+    mixed = utils.clip(content + strength * (blended - content))
+    return _whole_levels(mixed, strength) if levels else mixed
 
 
 def _unmix(
@@ -4767,14 +4826,18 @@ class Compositor:
         # that describes it.
         blend_fn = get_blend_func(layer.blend_mode, self._color_mode)
         blended = blend_fn(content, transformed_color)
-        content = _mix_toward(content, blended, strength)
+        # An 8-bit canvas holds whole levels where an adjustment applies.
+        levels = layer._psd.depth == 8
+        isolated = self._adjustment_isolated
+        content = _mix_toward(content, blended, strength, levels and not isolated)
 
-        if self._adjustment_isolated:
-            self._color = _remix(
+        if isolated:
+            content = _remix(
                 content, backdrop_color, backdrop_alpha, content_alpha, self._alpha
             )
-        else:
-            self._color = content
+            if levels:
+                content = _whole_levels(content, strength)
+        self._color = content
 
     def _apply_styled_adjustment(self, layer: AdjustmentLayer) -> None:
         """Composite an adjustment layer that carries a style.

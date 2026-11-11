@@ -7,6 +7,8 @@ Each is the numpy expression it replaces in ``composite.py`` (``lut_levels``:
 ``text_mix``: ``Compositor._mix_in_text_space``), its
 operations in the same dtypes and order, so the results are bit-identical.
 ``distinct_pixels`` numbers a canvas' distinct colours for ``composite._adjust``.
+``whole_levels``, and ``mix_toward`` and ``remix`` with ``levels`` set, round to
+whole 8-bit levels (``composite._whole_levels``).
 Memoryviews only, so the module builds against the Limited API without numpy
 headers.
 
@@ -38,6 +40,27 @@ cdef inline int _rows(
 cdef inline float _clip(float q) noexcept nogil:
     # np.clip's answer: NaN and -0.0 pass through.
     return <float>0.0 if q < 0 else (<float>1.0 if q > 1 else q)
+
+
+cdef inline float _level(float q) noexcept nogil:
+    # np.rint(q * 255) / 255 in float32.
+    return rintf(q * <float>255.0) / <float>255.0
+
+
+cdef inline void _levels_row(
+    float* o, const float* k, Py_ssize_t w, Py_ssize_t n
+) noexcept nogil:
+    # o's pixels in whole levels where k > 0, every one with k NULL.
+    cdef Py_ssize_t x, c, i
+    if k == NULL:
+        for i in range(w * n):
+            o[i] = _level(o[i])
+        return
+    for x in range(w):
+        if k[x] > 0:
+            for c in range(n):
+                i = x * n + c
+                o[i] = _level(o[i])
 
 
 def unions(
@@ -362,9 +385,12 @@ def lut_levels(const float[:, :, :] values, const float[::1] lut):
     return result
 
 
-def mix_toward(const float[:, :, :] content, const float[:, :, :] blended, strength, float scalar):
+def mix_toward(
+    const float[:, :, :] content, const float[:, :, :] blended, strength, float scalar, bint levels=False
+):
     """``utils.clip(content + strength * (blended - content))``, ``strength`` a canvas of one
-    channel, or None for ``scalar``."""
+    channel, or None for ``scalar``; with ``levels``, in whole 8-bit levels where the strength
+    is above 0."""
     cdef Py_ssize_t h = content.shape[0], w = content.shape[1], n = content.shape[2]
     cdef Py_ssize_t y, x, c, i
     cdef float k
@@ -388,6 +414,8 @@ def mix_toward(const float[:, :, :] content, const float[:, :, :] blended, stren
             if strength is None:
                 for i in range(w * n):
                     o[i] = _clip(p_c[i] + scalar * (p_b[i] - p_c[i]))
+                if levels and scalar > 0:
+                    _levels_row(o, NULL, w, n)
                 continue
             p_s = &s[y, 0, 0]
             if n == 3:
@@ -397,12 +425,46 @@ def mix_toward(const float[:, :, :] content, const float[:, :, :] blended, stren
                     o[i] = _clip(p_c[i] + k * (p_b[i] - p_c[i]))
                     o[i + 1] = _clip(p_c[i + 1] + k * (p_b[i + 1] - p_c[i + 1]))
                     o[i + 2] = _clip(p_c[i + 2] + k * (p_b[i + 2] - p_c[i + 2]))
+            else:
+                for x in range(w):
+                    k = p_s[x]
+                    for c in range(n):
+                        i = x * n + c
+                        o[i] = _clip(p_c[i] + k * (p_b[i] - p_c[i]))
+            if levels:
+                _levels_row(o, p_s, w, n)
+    return result
+
+
+def whole_levels(const float[:, :, :] values, strength=None):
+    """``composite._whole_levels``: ``np.rint(np.clip(values, 0.0, 1.0) * 255) / 255``, only
+    where ``strength``, a canvas of one channel, is above 0 if given."""
+    cdef Py_ssize_t h = values.shape[0], w = values.shape[1], n = values.shape[2]
+    cdef Py_ssize_t y, x, c, i
+    cdef const float[:, :, :] s
+    cdef const float *p
+    cdef const float *p_s
+    cdef float *o
+    _rows(values, h, w, n)
+    if strength is not None:
+        s = strength
+        _rows(s, h, w, 1)
+    result = np.empty((h, w, n), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return result
+    cdef float[:, :, ::1] out = result
+    with nogil:
+        for y in range(h):
+            p, o = &values[y, 0, 0], &out[y, 0, 0]
+            if strength is None:
+                for i in range(w * n):
+                    o[i] = _level(_clip(p[i]))
                 continue
+            p_s = &s[y, 0, 0]
             for x in range(w):
-                k = p_s[x]
                 for c in range(n):
                     i = x * n + c
-                    o[i] = _clip(p_c[i] + k * (p_b[i] - p_c[i]))
+                    o[i] = _level(_clip(p[i])) if p_s[x] > 0 else p[i]
     return result
 
 

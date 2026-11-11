@@ -546,5 +546,7 @@ def test_a_pointwise_adjustment_runs_once_per_colour() -> None:
         plain = fn(image, ColorMode.RGB, layer)
         assert sizes == [(1, 50, 3)], layer.name
         assert out is not None and plain is not None
+        # 8-bit documents: whole levels.
+        plain = composite._held_levels(layer, plain)
         assert out.dtype == plain.dtype
         assert out.tobytes() == plain.tobytes(), layer.name

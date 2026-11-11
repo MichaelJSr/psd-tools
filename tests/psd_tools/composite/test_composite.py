@@ -1111,8 +1111,11 @@ def test_composite_pil_rounds_to_the_nearest_byte() -> None:
 
 
 def test_composite_pil_rounds_the_delayed_alpha_to_the_nearest_byte() -> None:
-    """CMYK hands its alpha to ``post_process()`` as a plane, rounded too."""
-    psd = PSDImage.open(full_name("adjustments/levels_cmyk.psd"))
+    """CMYK hands its alpha to ``post_process()`` as a plane, rounded too.
+
+    Its Brightness/Contrast masks leave some colour off whole levels.
+    """
+    psd = PSDImage.open(full_name("adjustments/brightnesscontrast_cmyk.psd"))
     color, _, alpha = composite(psd, force=True)
 
     plain = psd.composite(ignore_preview=True, force=True, apply_icc=False)
