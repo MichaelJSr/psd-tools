@@ -3,6 +3,8 @@ import importlib
 import logging
 import math
 import struct
+import subprocess
+import sys
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -22,6 +24,7 @@ from psd_tools.composite.adjustments import (
     _legacy_brightnesscontrast_lut,
     _levels_gamma,
     _lut_domain,
+    _natural_spline,
     _rows_from_rgb,
     _vibrance_space,
     apply_blackandwhite,
@@ -316,6 +319,46 @@ def test_curves_without_extra_records_leaves_the_image_alone(
     monkeypatch.setattr(layer, "_data", CurvesData(version=4))
     image = np.zeros((2, 2, 3), dtype=np.float32)
     assert apply_curves(image, ColorMode.RGB, layer) is image
+
+
+@pytest.mark.parametrize(
+    "points",
+    [
+        [(0, 0), (255, 255)],
+        [(0, 0), (40, 10), (255, 255)],  # pivots: the second row's lead is larger
+        [(9, 0), (160, 255)],
+        [(255, 0), (30, 70), (200, 150), (0, 255)],
+        [(int(v), 16 * i + 15) for i, v in enumerate(np.linspace(0, 255, 16))],
+    ],
+)
+def test_curves_spline_is_scipys(points: list[tuple[int, int]]) -> None:
+    from scipy.interpolate import CubicSpline  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    x = np.array([p[1] for p in points], dtype=np.float32) / np.float32(255)
+    y = np.array([p[0] for p in points], dtype=np.float32) / np.float32(255)
+    for size in (256, 65536):
+        t = np.clip(_lut_domain(size), x[0], x[-1])
+        ours = _natural_spline(x, y, t).astype(np.float32)
+        theirs = CubicSpline(x, y, bc_type="natural")(t).astype(np.float32)
+        np.testing.assert_array_max_ulp(ours, theirs, maxulp=1)
+    with pytest.raises(ValueError, match="strictly increasing"):
+        _natural_spline(x[::-1].copy(), y, t)
+
+
+def test_curves_and_plain_adjustments_leave_scipy_interpolate_unloaded() -> None:
+    script = """
+import sys
+import numpy as np
+from psd_tools import PSDImage
+from psd_tools.composite.adjustments import _huesaturation
+for name in ("curves_rgb", "brightnesscontrast_rgb"):
+    PSDImage.open(sys.argv[1] + "/" + name + ".psd").composite(force=True)
+img = np.full((2, 2, 3), 0.5, dtype=np.float32)
+_huesaturation(img, [], (np.float32(0.1), np.float32(0.2), np.float32(0)))
+assert "scipy.interpolate" not in sys.modules
+"""
+    folder = full_name("adjustments")
+    subprocess.run([sys.executable, "-c", script, folder], check=True)
 
 
 @pytest.mark.parametrize(

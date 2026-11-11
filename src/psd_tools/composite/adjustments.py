@@ -289,8 +289,6 @@ def apply_brightnesscontrast(
     for every channel: Photoshop's own in 8-bit documents, else a fit.
     Requires scipy for cubic spline interpolation.
     """
-    from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
-
     t = _lut_domain(_get_lut_size(layer))
 
     if layer.use_legacy:
@@ -302,6 +300,8 @@ def apply_brightnesscontrast(
         levels = _brightnesscontrast_levels(layer.brightness, layer.contrast)
         if levels is not None:
             return _apply_lut(img, levels.astype(np.float32) / _255)
+
+    from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
 
     c = np.float32(layer.contrast) / _100
 
@@ -493,20 +493,13 @@ def _levels_gamma(
     return np.where(values < end, toe, power).astype(np.float32)
 
 
-@require_scipy
 @_preserve_alpha
 def apply_curves(
     img: np.ndarray,
     colormode: Literal[ColorMode.CMYK, ColorMode.GRAYSCALE, ColorMode.RGB],
     layer: Curves,
 ) -> np.ndarray:
-    """
-    Apply a curves adjustment to an image.
-
-    Requires scipy for cubic spline interpolation.
-    """
-    from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
-
+    """Apply a curves adjustment to an image: a natural cubic spline per channel."""
     if layer.extra is None:
         return img
     info_dict = {data.channel_id: data.points for data in layer.extra}
@@ -523,15 +516,79 @@ def apply_curves(
         x = np.array([p[1] for p in points], dtype=np.float32) / _255
         y = np.array([p[0] for p in points], dtype=np.float32) / _255
 
-        cs = interpolate.CubicSpline(x, y, bc_type="natural")
-
-        x_min, x_max = x[0], x[-1]
-        t_clamped = np.clip(t, x_min, x_max)
-
-        lut = cs(t_clamped).astype(np.float32, copy=False).clip(_0, _1)
-        luts[channel_id] = lut
+        t_clamped = np.clip(t, x[0], x[-1])
+        lut = _natural_spline(x, y, t_clamped).astype(np.float32, copy=False)
+        luts[channel_id] = lut.clip(_0, _1)
 
     return _apply_luts(luts, img, colormode)
+
+
+def _natural_spline(
+    x: NDArray[np.float32], y: NDArray[np.float32], t: NDArray[np.float32]
+) -> NDArray[np.float64]:
+    """
+    ``scipy.interpolate.CubicSpline(x, y, bc_type="natural")(t)``.
+
+    scipy's float64 steps (1.18): its banded system for the slopes, solved as
+    LAPACK's reference gtsv does, CubicHermiteSpline's coefficients, PPoly's
+    intervals and Horner order. Plain float64, so the same on every CPU
+    (scipy's LAPACK differs by platform in the last bits).
+    """
+    xs, ys = x.astype(np.float64), y.astype(np.float64)
+    dx = np.diff(xs)
+    if np.any(dx <= 0):
+        raise ValueError("`x` must be strictly increasing sequence.")
+    slope = np.diff(ys) / dx
+    n = len(xs)
+
+    # CubicSpline's banded system; its end rows hold the zero second derivatives.
+    A = np.zeros((3, n))
+    A[1, 1:-1] = 2 * (dx[:-1] + dx[1:])
+    A[0, 2:] = dx[:-1]
+    A[-1, :-2] = dx[1:]
+    A[1, 0], A[0, 1] = 2 * dx[0], dx[0]
+    A[1, -1], A[-1, -2] = 2 * dx[-1], dx[-1]
+    b = np.empty(n)
+    b[1:-1] = 3 * (dx[1:] * slope[:-1] + dx[:-1] * slope[1:])
+    b[0], b[-1] = 3 * (ys[1] - ys[0]), 3 * (ys[-1] - ys[-2])
+    s = np.array(
+        _gtsv(A[2, :-1].tolist(), A[1].tolist(), A[0, 1:].tolist(), b.tolist())
+    )
+
+    w = (s[:-1] + s[1:] - 2 * slope) / dx
+    c0, c1, c2, c3 = w / dx, (slope - s[:-1]) / dx - w, s[:-1], ys[:-1]
+
+    tt = t.astype(np.float64)
+    i = np.clip(np.searchsorted(xs, tt, side="right") - 1, 0, n - 2)
+    h = tt - xs[i]
+    return 0.0 + c3[i] + c2[i] * h + c1[i] * (h * h) + c0[i] * (h * h * h)
+
+
+def _gtsv(
+    dl: list[float], d: list[float], du: list[float], b: list[float]
+) -> list[float]:
+    """LAPACK's reference dgtsv, one right-hand side: partial pivoting."""
+    n = len(d)
+    for i in range(n - 1):
+        if abs(d[i]) >= abs(dl[i]):
+            fact = dl[i] / d[i]
+            d[i + 1] = d[i + 1] - fact * du[i]
+            b[i + 1] = b[i + 1] - fact * b[i]
+            dl[i] = 0.0
+        else:
+            fact = d[i] / dl[i]
+            d[i], temp = dl[i], d[i + 1]
+            d[i + 1] = du[i] - fact * temp
+            if i < n - 2:
+                dl[i] = du[i + 1]
+                du[i + 1] = -fact * dl[i]
+            du[i] = temp
+            b[i], b[i + 1] = b[i + 1], b[i] - fact * b[i + 1]
+    b[-1] = b[-1] / d[-1]
+    b[-2] = (b[-2] - du[-1] * b[-1]) / d[-2]
+    for i in range(n - 3, -1, -1):
+        b[i] = (b[i] - du[i] * b[i + 1] - dl[i] * b[i + 2]) / d[i]
+    return b
 
 
 @_preserve_alpha
@@ -757,6 +814,8 @@ def _get_colorrange_hsl_values(
     colorrange_hue = np.zeros_like(base_hue)
     colorrange_saturation = np.zeros_like(base_hue)
     colorrange_lightness = np.zeros_like(base_hue)
+    if not color_ranges:  # master only: no scipy
+        return colorrange_hue, colorrange_saturation, colorrange_lightness
 
     interpolator = _get_huesaturation_interpolator()
     points = np.empty((*colorrange_saturation.shape, 2), dtype=np.float32)
