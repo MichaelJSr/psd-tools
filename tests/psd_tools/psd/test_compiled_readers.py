@@ -5,6 +5,7 @@ and the two must agree on the elements (their exact classes and fields), the
 parse budget left behind, the log records and any exception.
 """
 
+import gc
 import io
 import logging
 import os
@@ -231,6 +232,16 @@ def test_engine_keys_are_shared_up_to_63_chars() -> None:
     assert long == long2 and long is not long2
 
 
+def test_engine_values_are_untracked() -> None:
+    data = b"<< /A 1 /B (\xfe\xff\x00x) /C .5 /D true /E [ 2 ] /F << >> >>"
+    with parse_context():
+        root = _engine.parse(EngineData, data, 64)[0]
+    for key, value in root.items():
+        assert not gc.is_tracked(key)
+        assert gc.is_tracked(value) == (key in ("E", "F")), key
+    assert not gc.is_tracked(root["E"][0])
+
+
 def build(kind: type[Any], items: list[tuple[Any, Any]], **fields: Any) -> Any:
     """A descriptor of ``kind`` holding ``items``."""
     element = kind(**fields)
@@ -362,6 +373,20 @@ def test_descriptor_is_read_compiled(monkeypatch: pytest.MonkeyPatch) -> None:
         assert _descriptor.read(data, 0, 64) is not None
     monkeypatch.setattr(descriptor, "read_length_and_key", None)
     assert len(Descriptor.frombytes(data)) == len(EVERY)
+
+
+def test_descriptor_values_are_untracked() -> None:
+    mixin = descriptor._DescriptorMixin
+    containers = (mixin, descriptor.List, descriptor.UnitFloats)
+
+    def check(element: Any) -> None:
+        assert gc.is_tracked(element) == isinstance(element, containers), element
+        if isinstance(element, (mixin, descriptor.List)):
+            for value in element.values() if isinstance(element, mixin) else element:
+                check(value)
+
+    with parse_context():
+        check(Descriptor.frombytes(DESCRIPTORS[-1]))
 
 
 @pytest.mark.parametrize(

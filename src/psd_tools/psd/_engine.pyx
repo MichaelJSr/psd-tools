@@ -12,10 +12,19 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.float cimport PyFloat_FromString
 from cpython.list cimport PyList_Append
 from cpython.long cimport PyLong_FromLongLong
-from cpython.object cimport PyObject_GenericSetAttr, PyObject_SetItem
+from cpython.object cimport PyObject_GenericSetAttr, PyObject_SetItem, PyTypeObject
 from cpython.unicode cimport PyUnicode_DecodeASCII
 
-cdef object _new = object.__new__
+cdef extern from "Python.h":
+    object PyType_GenericAlloc(PyTypeObject *cls, Py_ssize_t nitems)
+    void PyObject_GC_UnTrack(void *op)
+
+
+cdef inline object _new(object cls):
+    """``object.__new__(cls)`` without the call (what it allocates for these classes)."""
+    return PyType_GenericAlloc(<PyTypeObject *>cls, 0)
+
+
 cdef tuple _ESCAPES = ((b"\\\\", b"\\"), (b"\\(", b"("), (b"\\)", b")"))
 cdef object _int = int
 cdef object _OrderedDict = None
@@ -212,6 +221,7 @@ cdef class _Parser:
                 return obj
             obj = _new(_Property)
             PyObject_GenericSetAttr(obj, "value", v)
+            PyObject_GC_UnTrack(<void *>obj)
             if size <= _KEY_LEN and len(_KEYS) < _KEYS_CAP:
                 _KEYS[v] = obj
             self.charge(size)
@@ -245,6 +255,7 @@ cdef class _Parser:
             obj = _new(_Tag)
             self.nbytes += size
         PyObject_GenericSetAttr(obj, "value", v)
+        PyObject_GC_UnTrack(<void *>obj)  # atomic: in no cycle, as CPython untracks such tuples
         self.charge(size)
         return obj
 

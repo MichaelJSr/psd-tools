@@ -13,13 +13,22 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 from cpython.float cimport PyFloat_FromDouble
 from cpython.long cimport PyLong_FromLongLong
 from cpython.mem cimport PyMem_Free, PyMem_Malloc
-from cpython.object cimport PyObject_GenericSetAttr
+from cpython.object cimport PyObject_GenericSetAttr, PyObject_SetItem, PyTypeObject
 from cpython.ref cimport PyObject, Py_INCREF, Py_XDECREF
 from cpython.unicode cimport PyUnicode_DecodeUTF16
 from libc.stdint cimport int32_t, int64_t, uint32_t, uint64_t
 from libc.string cimport memcpy
 
-cdef object _new = object.__new__
+cdef extern from "Python.h":
+    object PyType_GenericAlloc(PyTypeObject *cls, Py_ssize_t nitems)
+    void PyObject_GC_UnTrack(void *op)
+
+
+cdef inline object _new(object cls):
+    """``object.__new__(cls)`` without the call (what it allocates for these classes)."""
+    return PyType_GenericAlloc(<PyTypeObject *>cls, 0)
+
+
 cdef object _terms = frozenset()
 cdef object _ZeroLengthKey = None
 cdef object _OrderedDict = None
@@ -250,6 +259,21 @@ cdef tuple read_body(State *st, list unknown):
     return name, classID, items
 
 
+cdef tuple read_body_dict(State *st, list unknown):
+    """``read_body`` into an ``OrderedDict``, as ``OrderedDict(items)`` fills it."""
+    cdef long long count, i
+    enter(st)
+    name = read_unicode(st)
+    classID = read_key(st, unknown)
+    count = read_u32(st)
+    items = _OrderedDict()
+    for i in range(count):
+        key = read_key(st, unknown)
+        PyObject_SetItem(items, key, read_value(st, unknown))
+    st.depth -= 1
+    return name, classID, items
+
+
 cdef inline void put(object obj, str name, object value) except *:
     PyObject_GenericSetAttr(obj, name, value)
 
@@ -273,14 +297,14 @@ cdef object read_value(State *st, list unknown):
     obj = _new(<object>_kinds[j].value)
     st.nobjects += 1
     if kind == K_DESCRIPTOR:
-        name, classID, items = read_body(st, unknown)
-        put(obj, "_items", _OrderedDict(items))
+        name, classID, items = read_body_dict(st, unknown)
+        put(obj, "_items", items)
         put(obj, "name", name)
         put(obj, "classID", classID)
     elif kind == K_OBJECT_ARRAY:
         items_count = read_u32(st)
-        name, classID, items = read_body(st, unknown)
-        put(obj, "_items", _OrderedDict(items))
+        name, classID, items = read_body_dict(st, unknown)
+        put(obj, "_items", items)
         put(obj, "items_count", items_count)
         put(obj, "name", name)
         put(obj, "classID", classID)
@@ -364,6 +388,9 @@ cdef object read_value(State *st, list unknown):
         put(obj, "value", read_unicode(st))
     else:
         raise _GiveUp
+    # Atomic fields only: in no cycle, as CPython untracks such tuples.
+    if kind != K_DESCRIPTOR and kind != K_OBJECT_ARRAY and kind != K_LIST and kind != K_UNIT_FLOATS:
+        PyObject_GC_UnTrack(<void *>obj)
     return obj
 
 
