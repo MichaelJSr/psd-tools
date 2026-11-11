@@ -1064,8 +1064,13 @@ def apply_gradientmap(
     luminance = np.clip(_gradientmap_luminance(img, colormode), 0, 1)
     if layer.reversed:
         luminance = _1 - luminance
-    index = np.rint(luminance[..., 0] * (lut.shape[0] - 1)).astype(np.intp)
-    return lut[index]
+    size = lut.shape[0]
+    if size == _GRADIENTMAP_STEPS:
+        # Read at rint(luminance * 4096), as Photoshop's table is.
+        index = np.minimum(np.rint(luminance[..., 0] * np.float32(size)), size - 1)
+    else:
+        index = np.rint(luminance[..., 0] * np.float32(size - 1))
+    return lut[index.astype(np.intp)]
 
 
 def _gradientmap_luminance(
@@ -1088,6 +1093,15 @@ _STOP_GRAY_MAX = np.float32(10000.0)
 _STOP_LOCATION_MAX = 4096.0
 # The block's smoothness at 100%, as a gradient descriptor's ``Intr`` is.
 _SMOOTHNESS_MAX = 4096.0
+# Photoshop's table for an 8-bit document: 4096 steps, k / 4096.
+_GRADIENTMAP_STEPS = 4096
+
+
+@functools.lru_cache(maxsize=1)
+def _gradientmap_steps() -> NDArray[np.float32]:
+    return np.arange(_GRADIENTMAP_STEPS, dtype=np.float32) / np.float32(
+        _GRADIENTMAP_STEPS
+    )
 
 
 def _gradientmap_lut(
@@ -1121,7 +1135,7 @@ def _gradientmap_lut(
     size = _get_lut_size(layer)
     smoothness = min(max(float(block.interpolation) / _SMOOTHNESS_MAX, 0.0), 1.0)
     ramp = _gradient_ramp(
-        _lut_domain(size),
+        _gradientmap_steps() if size == 256 else _lut_domain(size),
         np.array(locations),
         np.array(midpoints),
         np.clip(np.array(colors, dtype=np.float32), _0, _1),

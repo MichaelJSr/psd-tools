@@ -1161,7 +1161,7 @@ def test_gradient_map_keeps_a_hard_edge_between_co_located_stops() -> None:
             ]
         )
     )
-    below, at = 0.5 - 2 / 255, 0.5
+    below, at = 0.5 - 1 / 255, 0.5
     image = np.array([[[below] * 3, [at] * 3, [0.75] * 3]], dtype=np.float32)
     out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out[0, 0], red, atol=3 / 255)
@@ -1315,6 +1315,33 @@ def test_gradient_map_converts_its_table_as_a_fill_would(
     )
     expected = [_from_rgb(colormode, tuple(float(v) for v in row)) for row in rgb]
     assert np.allclose(_rows_from_rgb(colormode, rgb), expected, atol=1e-6)
+
+
+@pytest.mark.parametrize("lut_size", [256, 65536])
+def test_gradient_map_reads_photoshops_4096_step_table_in_8_bits(
+    lut_size: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """8 bits read entry rint(luminance x 4096) of k / 4096, finer than a level.
+
+    Deeper documents keep a table of their own size.
+    """
+    monkeypatch.setattr(
+        importlib.import_module("psd_tools.composite.adjustments"),
+        "_get_lut_size",
+        lambda layer: lut_size,
+    )
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)])
+    )
+    gray = np.array([0.5, 0.5 + 0.3 / 255, 0.9, 1.0], dtype=np.float32)
+    image = np.repeat(gray[None, :, None], 3, axis=2)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))[0, :, 0]
+    luminance = image[0] @ _LUM
+    if lut_size == 256:
+        expected = np.minimum(np.rint(luminance * 4096), 4095) / 4096
+    else:
+        expected = np.rint(luminance * 65535) / 65535
+    assert np.allclose(out, expected, atol=1e-6)
 
 
 def test_gradient_map_with_a_noise_gradient_is_not_rendered() -> None:
