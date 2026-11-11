@@ -233,6 +233,18 @@ def _faded_at_8_bits(coverage: np.ndarray, percent: float, depth: int) -> np.nda
     return (np.floor(level * opacity / _LEVELS_8 + 0.5) / _LEVELS_8).astype(np.float32)
 
 
+def _opacity_at_8_bits(percent: float, depth: int) -> float:
+    """An effect's opacity ``percent`` as a fraction, a whole level at 8 bits.
+
+    Rounded as :py:func:`_faded_at_8_bits` does, halves up: 50% is 128/255.
+    Other depths, and a value that is not finite, read as is.
+    """
+    level = percent * _LEVELS_8 / 100.0
+    if depth != 8 or not math.isfinite(level):
+        return percent / 100.0
+    return math.floor(level + 0.5) / _LEVELS_8
+
+
 def _isolates_adjustments(layer: Layer) -> bool:
     """Whether a group keeps the adjustments inside it to its own content.
 
@@ -483,7 +495,7 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     return mixes
 
 
-def _stroke_paint(effect: _StyledEffect) -> float:
+def _stroke_paint(effect: _StyledEffect, depth: int) -> float:
     """How much of its band a stroke effect paints over what lies beneath.
 
     Its opacity in Normal or Dissolve; nothing in another mode, which lets
@@ -492,7 +504,7 @@ def _stroke_paint(effect: _StyledEffect) -> float:
     try:
         if effect.blend_mode not in _COVERS_BENEATH:
             return 0.0
-        share = effect.opacity / 100.0
+        share = _opacity_at_8_bits(effect.opacity, depth)
     except _UNREADABLE:
         return 0.0
     return min(max(share, 0.0), 1.0) if math.isfinite(share) else 0.0
@@ -5857,7 +5869,7 @@ class Compositor:
                     # Read, so it fails as the draw would; no shape of its own.
                     paint._get_color(layer._psd.color_mode, effect.descriptor)
                     fill, shape_e = _UNREAD, None
-                opacity = effect.opacity / 100.0
+                opacity = _opacity_at_8_bits(effect.opacity, layer._psd.depth)
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:
                 logger.debug(
@@ -6235,7 +6247,7 @@ class Compositor:
             band = paste(viewport, bbox, band - inside)
             outside = band if outside is None else np.maximum(outside, band)
             if covers:
-                share = band * _stroke_paint(effect)
+                share = band * _stroke_paint(effect, layer._psd.depth)
                 painted = share if painted is None else np.maximum(painted, share)
         shape = silhouette if outside is None else np.minimum(silhouette + outside, 1.0)
         if not covers:
@@ -6510,7 +6522,7 @@ class Compositor:
                 )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
-                faded = coverage * effect_opacity
+                faded = _faded_at_8_bits(coverage, glow.opacity, layer._psd.depth)
                 self._apply_source(
                     color if self._alpha_only else paste(self._viewport, bbox, color),
                     coverage,
@@ -6558,8 +6570,12 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an inner effect of %s: %s", layer, error)
                 continue
-            coverage = paste(self._viewport, bbox, coverage)
-            canvas.over(canvas.within(coverage), color, blend_mode, opacity)
+            coverage = canvas.within(paste(self._viewport, bbox, coverage))
+            if layer._psd.depth == 8:
+                # Matte and opacity held at 8 bits, as a drop shadow's.
+                coverage = _faded_at_8_bits(coverage, effect.opacity, 8)
+                opacity = 1.0
+            canvas.over(coverage, color, blend_mode, opacity)
 
     def _inner_box(self, layer: Layer, reach: float) -> tuple[int, int, int, int]:
         """The box an inner effect reaching ``reach`` past an edge is drawn on.
@@ -6960,7 +6976,7 @@ class Compositor:
                     if rkey is not None:
                         assert self._cache.rc is not None
                         self._cache.rc.put(rkey, (color, mask_in_bbox, inside_in_bbox))
-                opacity = effect.opacity / 100.0
+                opacity = _opacity_at_8_bits(effect.opacity, layer._psd.depth)
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a stroke effect of %s: %s", layer, error)
