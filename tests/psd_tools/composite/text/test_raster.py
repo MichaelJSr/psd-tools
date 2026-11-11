@@ -29,6 +29,7 @@ from psd_tools.composite.text.constants import (  # noqa: E402
     GENERAL_TRANSFORM_EPS,
     SMOOTH_SMALL_PX,
     STRONG_EMBOLDEN_26_6,
+    TOUCH_TIE,
 )
 from psd_tools.composite.text.fonts import Face, TextRenderError, load_face  # noqa: E402
 from psd_tools.composite.text.layout import Layout, PlacedGlyph, Rule  # noqa: E402
@@ -56,7 +57,7 @@ GREEN: RGB = (0.0, 1.0, 0.0)
 EM = 40.5
 STEM_W = 259 / 64
 STEM_H = 1814 / 64
-#: Strong moves each edge outward by half the 26.6 strength, floored.
+#: Strong's exact area moves each edge outward by half the 26.6 strength, floored.
 DILATE = (round(STRONG_EMBOLDEN_26_6) // 2) / 64
 #: 8-bit coverage plus the 26.6 placement of an edge.
 TOL = 1 / 255 + 1 / 64
@@ -145,29 +146,66 @@ def test_phase_columns_strong(face: Face) -> None:
 
 
 def test_strong_coverage_is_point_sampled(face: Face) -> None:
-    """Four samples a column: the dilated stem spans 0.11 to 4.44 px."""
+    """Four samples a column, each where the 0.25 to 4.30 px stem touches its cell."""
     rgba, bbox = render([glyph(face, "I", 0.25, 100.0)], options=SAMPLES)
     assert bbox[0] == 0 and bbox[2] == 5
     assert rgba[5, :, 3] == pytest.approx([1, 1, 1, 1, 0.5], abs=1 / 255)
     assert (rgba[..., :3][rgba[..., 3] > 0] == RED).all()
 
 
-@pytest.mark.parametrize(("options", "strength"), [(SAMPLES, 70), (AREA, 18)])
+@pytest.mark.parametrize(
+    ("options", "strength", "touch"),
+    [(SAMPLES, 0, (-1, -1)), (AREA, 18, None)],
+)
 def test_strong_embolden_strength(
-    face: Face, monkeypatch: pytest.MonkeyPatch, options: Options, strength: int
+    face: Face,
+    monkeypatch: pytest.MonkeyPatch,
+    options: Options,
+    strength: int,
+    touch: tuple[int, int] | None,
 ) -> None:
-    """17.5 scales to the 4x sample render, then rounds to whole 26.6."""
-    seen: list[tuple[int, int]] = []
+    """The exact area rounds 17.5 to whole 26.6; point samples touch instead."""
+    seen: list[tuple[Any, ...]] = []
     real = raster_module._render_glyph
 
     def spy(*args: Any) -> Any:
-        seen.append(args[-1])
+        seen.append(args[6:])
         return real(*args)
 
     monkeypatch.setattr(raster_module, "_render_glyph", spy)
     render([glyph(face, "I", 0.25, 100.0)], options=options)
-    assert seen == [(strength, strength)]
-    assert all(type(v) is int for v in seen[0])
+    assert seen == [((strength, strength), touch)]
+    assert all(type(v) is int for v in seen[0][0])
+
+
+def test_touch_edges_grow_an_eighth(face: Face) -> None:
+    """At any origin a 4 px stem inks 4.25 px; each edge grows 1/8 px on average."""
+    grown = []
+    for i in range(16):
+        x = 10 + (i + 0.5) / 64
+        rgba, bbox = render([glyph(face, "I", x, 100.0, em=40)], options=SAMPLES)
+        cols = np.round(rgba[5, :, 3] * 16) / 16
+        assert cols.sum() == 4.25
+        grown.append(x - (bbox[0] + 1 - cols[0]))
+    assert np.mean(grown) == pytest.approx(0.125)
+
+
+def test_touch_tie_counts_left_and_top(face: Face) -> None:
+    """Edges on sample cell borders gain a sample on the left and top only."""
+    rgba, bbox = render([glyph(face, "I", 10.0, 100.0, em=40)], options=SAMPLES)
+    a = rgba[..., 3]
+    assert bbox == (9, 71, 14, 100)
+    assert a[1:, 0] == pytest.approx(0.25, abs=1 / 255)
+    assert a[0, 1:] == pytest.approx(0.25, abs=1 / 255)
+    assert (a[1:, 1:] == 1).all()
+    # Past TOUCH_TIE the origin's own side wins: right and bottom instead.
+    past = 10 + 1.2 * TOUCH_TIE / 256
+    rgba, bbox = render([glyph(face, "I", past, past + 90, em=40)], options=SAMPLES)
+    a = rgba[..., 3]
+    assert bbox == (10, 72, 15, 101)
+    assert a[:-1, -1] == pytest.approx(0.25, abs=1 / 255)
+    assert a[-1, :-1] == pytest.approx(0.25, abs=1 / 255)
+    assert (a[:-1, :-1] == 1).all()
 
 
 @pytest.mark.parametrize("antialias", [CRISP, STRONG, SMOOTH])

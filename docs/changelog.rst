@@ -4,6 +4,15 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Text: AntA Strong, and Smooth from 100 px, count a point sample
+  where the outline touches any of its cell, as Photoshop 2023 (a straight
+  edge grows 1/8 px), instead of the fitted 17.5/64 embolden. Glyph origins
+  go on the sample render's own 26.6 grid, and a second render one unit
+  towards the exact origin (left and up on a tie, ``TOUCH_TIE``) joins the
+  first, so an edge on a sample cell's border counts on the left and top
+  only. Colour glyphs and ``coverage="area"`` keep the embolden. About half
+  the bad pixels against Photoshop 2023's relayouts; a redraw takes about
+  10% more CPU. **Rendering change** for text the fork draws
 - [fix] 8-bit documents: adjustment layers give whole levels, as Photoshop
   2023's 8-bit composite: each adjustment's result and the canvas where it
   applies are rounded to the nearest level, the channel mixer's exact halves
