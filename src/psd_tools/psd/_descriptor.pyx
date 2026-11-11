@@ -301,6 +301,9 @@ cdef object read_value(State *st, list unknown):
         put(obj, "_items", items)
         put(obj, "name", name)
         put(obj, "classID", classID)
+        PyObject_GC_UnTrack(<void *>items)
+        PyObject_GC_UnTrack(<void *>obj)
+        return obj
     elif kind == K_OBJECT_ARRAY:
         items_count = read_u32(st)
         name, classID, items = read_body_dict(st, unknown)
@@ -308,6 +311,9 @@ cdef object read_value(State *st, list unknown):
         put(obj, "items_count", items_count)
         put(obj, "name", name)
         put(obj, "classID", classID)
+        PyObject_GC_UnTrack(<void *>items)
+        PyObject_GC_UnTrack(<void *>obj)
+        return obj
     elif kind == K_LIST:
         enter(st)
         count = read_u32(st)
@@ -316,6 +322,9 @@ cdef object read_value(State *st, list unknown):
             values.append(read_value(st, unknown))
         st.depth -= 1
         put(obj, "_items", values)
+        PyObject_GC_UnTrack(<void *>values)
+        PyObject_GC_UnTrack(<void *>obj)
+        return obj
     elif kind == K_PROPERTY:
         put(obj, "name", read_unicode(st))
         put(obj, "classID", read_key(st, unknown))
@@ -342,6 +351,9 @@ cdef object read_value(State *st, list unknown):
             st.p += 8
         put(obj, "unit", unit)
         put(obj, "values", values)
+        PyObject_GC_UnTrack(<void *>values)
+        PyObject_GC_UnTrack(<void *>obj)
+        return obj
     elif kind == K_DOUBLE:
         need(st, 8)
         st.nobjects += 1
@@ -389,8 +401,7 @@ cdef object read_value(State *st, list unknown):
     else:
         raise _GiveUp
     # Atomic fields only: in no cycle, as CPython untracks such tuples.
-    if kind != K_DESCRIPTOR and kind != K_OBJECT_ARRAY and kind != K_LIST and kind != K_UNIT_FLOATS:
-        PyObject_GC_UnTrack(<void *>obj)
+    PyObject_GC_UnTrack(<void *>obj)
     return obj
 
 
