@@ -1,6 +1,7 @@
 import copy
 import importlib
 import logging
+import math
 import struct
 from collections.abc import Callable
 from typing import Any, Literal
@@ -502,6 +503,42 @@ def test_exposure_darks_match_photoshops_levels(
     assert np.rint(out[0, :, 0] * 255).astype(int).tolist() == PS_EXPOSURE_DARKS
 
 
+@pytest.mark.parametrize(
+    "colormode, settings",
+    [
+        (ColorMode.RGB, (-3.91, 0.0, 1.0)),
+        (ColorMode.RGB, (0.73, -0.0125, 1.37)),
+        (ColorMode.GRAYSCALE, (1.68, 0.02, 0.61)),
+    ],
+    ids=["rgb-darks", "rgb-offset-gamma", "grayscale"],
+)
+def test_exposure_lut_rounds_each_float32_power_once(
+    monkeypatch: pytest.MonkeyPatch,
+    colormode: Literal[ColorMode.GRAYSCALE, ColorMode.RGB],
+    settings: tuple[float, float, float],
+) -> None:
+    """float32 steps, the powers correctly rounded: no CPU's own powf."""
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[7]
+    assert isinstance(layer, adjustments.Exposure)
+    monkeypatch.setattr(layer, "_data", ExposureData(0, *settings))
+    f32 = np.float32
+    exposure, offset, gamma = (float(f32(value)) for value in settings)
+    rgb = colormode == ColorMode.RGB
+    color_gamma = float(f32(2.2 if rgb else 1.75))
+    expected = []
+    for value in _lut_domain(256).tolist():
+        # float64 holds a float32 product or sum exactly enough to round once
+        linear = float(f32(math.pow(value, color_gamma)))
+        linear = float(f32(linear * float(f32(math.pow(2.0, exposure)))))
+        linear = min(max(float(f32(linear + offset)), 0.0), 1.0)
+        linear = float(f32(math.pow(linear, float(f32(1.0 / gamma)))))
+        level = f32(math.pow(linear, float(f32(1.0 / color_gamma))))
+        expected.append(min(level, f32(linear * 94.5)) if rgb else level)
+    ramp = np.repeat(_lut_domain(256)[None, :, None], 3 if rgb else 1, axis=2)
+    out = _applied(apply_exposure(ramp, colormode, layer))
+    assert np.array_equal(out[0, :, 0], np.array(expected, dtype=np.float32))
+
+
 # Hue/Saturation
 huesaturation_tests = {
     "huesaturation": LOOSE,  # lower accuracy is due to how _apply_saturation works
@@ -931,6 +968,25 @@ def test_channel_mixer_monochrome_writes_one_mix_to_every_channel(
     out = _applied(apply_channelmixer(image, ColorMode.RGB, layer))
     gray = image @ np.array([0.3, 0.59, 0.11], dtype=np.float32)
     assert np.allclose(out, gray[..., None], atol=1e-6)
+
+
+def test_channel_mixer_sums_each_pixel_in_channel_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each pixel's sum in channel order, the same bits in any shape, on any CPU."""
+    layer = _channel_mixer_layer()
+    records = [[71, 37, -9, 0, 0], [13, 55, 41, 0, 3], [-23, 66, 59, 0, -2]]
+    monkeypatch.setattr(layer, "_data", _mixer_data(records))
+    mix = np.array(records, dtype=np.float32) / np.float32(100)
+    image = np.random.default_rng(7).random((37, 53, 3), dtype=np.float32)
+    out = _applied(apply_channelmixer(image, ColorMode.RGB, layer))
+    r, g, b = image[..., 0:1], image[..., 1:2], image[..., 2:3]
+    expected = r * mix[:, 0] + g * mix[:, 1] + b * mix[:, 2] + mix[:, 4]
+    assert np.array_equal(out, expected.clip(0, 1))
+    pixel = _applied(apply_channelmixer(image[5:6, 9:10], ColorMode.RGB, layer))
+    assert np.array_equal(pixel, out[5:6, 9:10])
+    flat = _applied(apply_channelmixer(image.reshape(1, -1, 3), ColorMode.RGB, layer))
+    assert np.array_equal(flat, out.reshape(1, -1, 3))
 
 
 def test_channel_mixer_with_a_short_block_is_not_rendered(

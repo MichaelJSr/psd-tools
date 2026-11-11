@@ -523,24 +523,32 @@ def apply_exposure(
         _GRAY_COLOR_GAMMA if colormode == ColorMode.GRAYSCALE else _SRGB_COLOR_GAMMA
     )
 
-    lut = cast(
-        NDArray[np.float32], np.power(values, color_gamma, dtype=np.float32)
-    )  # image is converted to linear color space first
+    lut = _powf(values, color_gamma)  # image is converted to linear color space first
 
     # exposure operates in linear space
-    lut *= np.float32(np.exp2(exposure))
+    lut *= _powf(np.float32(2.0), exposure)
     lut = (lut + offset).clip(_0, _1)
-    lut **= _1 / gamma
+    lut = _powf(lut, _1 / gamma)
     toe = lut * _EXPOSURE_TOE_SLOPE
 
     # convert back to original space using inverse TRC approximation
-    lut **= (_1 / color_gamma).clip(_0, _1)
+    lut = _powf(lut, (_1 / color_gamma).clip(_0, _1))
     if colormode != ColorMode.GRAYSCALE:
         lut = np.minimum(lut, toe)
 
     channel_id = 1 if colormode == ColorMode.GRAYSCALE else 0
 
     return _apply_luts({channel_id: lut}, img, colormode)
+
+
+def _powf(
+    x: np.ndarray | np.float32, y: np.ndarray | np.float32
+) -> NDArray[np.float32]:
+    """``x ** y`` in float32, correctly rounded: worked in float64, rounded once.
+
+    float32 powers differ in the last bits between CPUs (SVML, libm).
+    """
+    return np.power(np.asarray(x, np.float64), np.float64(y)).astype(np.float32)
 
 
 @require_scipy
@@ -882,7 +890,7 @@ def apply_channelmixer(
 
     weights = records[:3, :3]
     constant = records[:3, _MIXER_FIELDS - 1]
-    out = img @ weights.T + constant
+    out = _dot3(img, weights.T) + constant
     return out.clip(_0, _1).astype(np.float32, copy=False)
 
 
