@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] Curves, Hue/Saturation without colour ranges and 8-bit
+  Brightness/Contrast no longer import ``scipy.interpolate`` (0.2-0.5 s of a
+  process's first render). Curves' natural spline runs scipy's own float64
+  steps in plain Python and numpy (LAPACK's reference ``gtsv``), so its LUTs
+  are the same on every CPU and need no scipy. Renders are unchanged; on
+  arm64, where scipy's LAPACK rounds differently, a rare curve's LUT entry
+  can move by one float32 step
 - [fix] Modern Brightness/Contrast in 8-bit documents reads Photoshop 2023's
   own levels: every brightness alone, every contrast alone and 79 pairs; any
   other pair takes the contrast of the brightness's level, at most a level
