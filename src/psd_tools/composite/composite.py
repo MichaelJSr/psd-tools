@@ -860,6 +860,23 @@ def _path_bbox(layer: Layer) -> tuple[int, int, int, int]:
         return layer.bbox
 
 
+def _vector_stroke_box(
+    layer: Layer, width: int, viewport: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """The box a vector stroke's fill is drawn on: ``width`` past the layer and the path.
+
+    ``layer.bbox`` can stop short of the path (an origination box is
+    truncated), so the path's box joins it on ``viewport``, a pixel wider for
+    its rounding.
+    """
+    left, top, right, bottom = layer.bbox
+    own = (left - width, top - width, right + width, bottom + width)
+    left, top, right, bottom = _path_bbox(layer)
+    reach = width + 1
+    path = (left - reach, top - reach, right + reach, bottom + reach)
+    return utils.union_bbox(own, utils.intersect(path, viewport))
+
+
 def _vector_stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     """``layer.bbox`` grown by the width of a centred or outer vector stroke.
 
@@ -4334,13 +4351,13 @@ class Compositor:
     def _traces_mask(self, layer: Layer) -> bool:
         """Whether the layer's strokes follow its mask rather than its coverage.
 
-        A layer drawn from a fill, or force-redrawn from its vector mask, has
-        no source shape worth tracing; an adjustment layer has no shape but
-        its mask.
+        A layer drawn from a fill, or redrawn from its vector mask
+        (:py:meth:`_redraws`), has no source shape worth tracing; an
+        adjustment layer has no shape but its mask.
         """
         return (
             isinstance(layer, AdjustmentLayer)
-            or (self._force and layer.has_vector_mask())
+            or (self._redraws(layer) and layer.has_vector_mask())
             or (not layer.has_pixels() and utils.has_fill(layer))
         )
 
@@ -5291,7 +5308,7 @@ class Compositor:
         if color is not None:
             numpy_io.check_shape_read(layer, numpy_io._backing_bytes(color))
         shape = layer.numpy("shape")
-        if (self._force or not layer.has_pixels()) and utils.has_fill(layer):
+        if (self._redraws(layer) or not layer.has_pixels()) and utils.has_fill(layer):
             color, shape = paint.create_fill(layer, layer.bbox)
             if shape is None:
                 shape = np.ones((layer.height, layer.width, 1), dtype=np.float32)
@@ -5327,7 +5344,7 @@ class Compositor:
             x0, x1 = 0, right - left
         if start == 0 and stop == bottom - top and x0 == 0 and x1 == right - left:
             return None
-        if not layer.has_pixels() or (self._force and utils.has_fill(layer)):
+        if not layer.has_pixels() or (self._redraws(layer) and utils.has_fill(layer)):
             return None
         if isinstance(layer, SmartObjectLayer) and _may_unfilter(layer):
             return None
@@ -5345,7 +5362,7 @@ class Compositor:
 
         Not for a redrawn fill or a smart filter mask, which make both at once.
         """
-        if (self._force or not layer.has_pixels()) and utils.has_fill(layer):
+        if (self._redraws(layer) or not layer.has_pixels()) and utils.has_fill(layer):
             return False
         return not (isinstance(layer, SmartObjectLayer) and _may_unfilter(layer))
 
@@ -5424,13 +5441,44 @@ class Compositor:
             own = np.minimum(own + stroke[1 if alpha else 0] * stroke_mask, 1.0)
         return own
 
+    def _redraws(self, layer: Layer) -> bool:
+        """Whether a layer with stored pixels is drawn from its fill and path instead.
+
+        Every one is under ``force``. Otherwise one whose clip layers would
+        paint over the vector stroke in its pixels: Photoshop draws the stroke
+        over them. A stroke of no width (the templates' 'Clip ... to this'
+        shapes) has nothing to cover.
+        """
+        if self._force:
+            return True
+        stroke = layer.stroke
+        if stroke is None or not stroke.enabled:
+            return False
+        try:
+            width = float(stroke._data.get("strokeStyleLineWidth", 1.0))
+        except (TypeError, ValueError):
+            return False
+        vector_mask = layer.vector_mask
+        if not (
+            0.0 < width < math.inf
+            and vector_mask is not None
+            and not vector_mask.disabled
+            and layer.has_pixels()
+            and utils.has_fill(layer)
+            and not utils.is_fill_disabled(layer)
+        ):
+            return False
+        shown = self._layer_filter
+        return any(shown is None or shown(clip) for clip in layer.clip_layers)
+
     def _has_redrawn_stroke(self, layer: Layer) -> bool:
         """Whether this layer's vector stroke is drawn from the path.
 
-        A layer read from stored pixels has its stroke in them already.
+        A layer read from stored pixels has its stroke in them already, unless
+        it is redrawn (:py:meth:`_redraws`).
         """
         return bool(
-            (self._force or not layer.has_pixels())
+            (self._redraws(layer) or not layer.has_pixels())
             and layer.has_vector_mask()
             and layer.stroke is not None
             and layer.stroke.enabled
@@ -5543,7 +5591,7 @@ class Compositor:
                 shape_s = bounded
             return color, shape, alpha, (shape_s * uncovered, alpha_s * uncovered)
 
-        if fill_off and (self._force or not layer.has_pixels()):
+        if fill_off and (self._redraws(layer) or not layer.has_pixels()):
             shape, alpha = shape * 0.0, alpha * 0.0
         if clip is not None:
             color = self._apply_clip_layers(clip, color)
@@ -5597,7 +5645,7 @@ class Compositor:
         if (
             mask is None
             or not isinstance(layer, (ShapeLayer, FillLayer))
-            or self._force
+            or self._redraws(layer)
             or not layer.has_pixels()
             or mask.real_flags is not None
             or mask.bbox != layer.bbox
@@ -5674,7 +5722,7 @@ class Compositor:
             and layer.vector_mask is not None
             and not layer.vector_mask.disabled
             and (
-                self._force
+                self._redraws(layer)
                 or not layer.has_pixels()
                 or (
                     not utils.has_fill(layer)
@@ -5759,8 +5807,8 @@ class Compositor:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Get stroke source, on ``viewport`` or this compositor's.
 
-        The fill is drawn on the layer's box grown by the stroke width and
-        pasted onto the viewport, but laid out across the path's own box:
+        The fill is drawn on :py:func:`_vector_stroke_box` and pasted onto
+        the viewport, but laid out across the path's own box:
         Photoshop maps a pattern's phase and a gradient's ramp across the
         path whatever the width. The coverage is rasterized straight onto
         that viewport: a path is placed in document coordinates,
@@ -5777,13 +5825,7 @@ class Compositor:
             width = math.ceil(desc.get("strokeStyleLineWidth", 1.0))
         except OverflowError as error:
             raise ValueError("Stroke width is not finite.") from error
-        fill_bbox = cast(
-            tuple[int, int, int, int],
-            tuple(
-                x + d
-                for x, d in zip(layer.bbox, (-width, -width, width, width), strict=True)
-            ),
-        )
+        fill_bbox = _vector_stroke_box(layer, width, viewport)
         # The width is the file's, and it grows the box the fill is drawn on.
         if fill_bbox[0] < fill_bbox[2] and fill_bbox[1] < fill_bbox[3]:
             check_growth(
