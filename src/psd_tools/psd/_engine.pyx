@@ -289,6 +289,8 @@ cdef class _Parser:
                 PyObject_SetItem(items, key, value)
             elif kind == T_DICT_END or kind == T_STOP:
                 self.depth -= 1
+                PyObject_GC_UnTrack(<void *>items)
+                PyObject_GC_UnTrack(<void *>obj)
                 return obj
             elif kind == T_BAIL:
                 self.bail = True
@@ -310,6 +312,8 @@ cdef class _Parser:
             kind = self.next_token()
             if kind == T_ARRAY_END or kind == T_STOP:
                 self.depth -= 1
+                PyObject_GC_UnTrack(<void *>items)
+                PyObject_GC_UnTrack(<void *>obj)
                 return obj
             if kind == T_DICT_START:
                 value = self.parse_dict(_Dict)

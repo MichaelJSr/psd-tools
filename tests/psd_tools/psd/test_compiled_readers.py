@@ -236,9 +236,10 @@ def test_engine_values_are_untracked() -> None:
     data = b"<< /A 1 /B (\xfe\xff\x00x) /C .5 /D true /E [ 2 ] /F << >> >>"
     with parse_context():
         root = _engine.parse(EngineData, data, 64)[0]
+    for container in (root, root["E"], root["F"]):
+        assert not gc.is_tracked(container) and not gc.is_tracked(container._items)
     for key, value in root.items():
-        assert not gc.is_tracked(key)
-        assert gc.is_tracked(value) == (key in ("E", "F")), key
+        assert not gc.is_tracked(key) and not gc.is_tracked(value), key
     assert not gc.is_tracked(root["E"][0])
 
 
@@ -377,16 +378,49 @@ def test_descriptor_is_read_compiled(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_descriptor_values_are_untracked() -> None:
     mixin = descriptor._DescriptorMixin
-    containers = (mixin, descriptor.List, descriptor.UnitFloats)
 
     def check(element: Any) -> None:
-        assert gc.is_tracked(element) == isinstance(element, containers), element
-        if isinstance(element, (mixin, descriptor.List)):
+        assert not gc.is_tracked(element), element
+        if isinstance(element, descriptor.UnitFloats):
+            assert not gc.is_tracked(element.values)
+        elif isinstance(element, (mixin, descriptor.List)):
+            assert not gc.is_tracked(element._items), element
             for value in element.values() if isinstance(element, mixin) else element:
                 check(value)
 
     with parse_context():
-        check(Descriptor.frombytes(DESCRIPTORS[-1]))
+        root = Descriptor.frombytes(DESCRIPTORS[-1])
+    for value in root.values():  # the root itself is built in Python
+        check(value)
+
+
+def test_untracked_trees_edit_and_save(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Edited untracked trees save as Python's tracked ones."""
+    engine = b"<< /A [ 1 << /B 2 >> ] /C << /D [ ] >> >>"
+
+    def read() -> tuple[Any, Any]:
+        with parse_context():
+            return Descriptor.frombytes(DESCRIPTORS[-1]), EngineData.frombytes(engine)
+
+    def edit(desc: Any, data: Any) -> tuple[bytes, ...]:
+        saved = desc.tobytes(), data.tobytes()
+        desc[b"list"].append(Descriptor(name="new"))
+        desc[b"GlbO"][b"b"] = listing(descriptor.List, [descriptor.Integer(4)])
+        desc[b"ObAr"][b"x"].values.append(3.0)
+        data["A"][1]["E"] = listing(engine_data.List, [engine_data.Integer(5)])
+        data["C"]["D"].append(engine_data.Dict())
+        gc.collect()
+        return (*saved, desc.tobytes(), data.tobytes())
+
+    compiled = read()
+    with monkeypatch.context() as m:
+        m.setattr(engine_data, "_engine", None)
+        m.setattr(descriptor, "_descriptor", None)
+        python = read()
+    assert not gc.is_tracked(compiled[1]) and gc.is_tracked(python[1])
+    saved = edit(*compiled)
+    assert saved == edit(*python)
+    assert saved[0] == DESCRIPTORS[-1]
 
 
 @pytest.mark.parametrize(
