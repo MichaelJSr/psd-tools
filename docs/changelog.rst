@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] The compiled descriptor and engine data readers keep the
+  containers they build (descriptors, object arrays, lists, unit float lists,
+  engine dicts and lists, and their items) out of the cyclic garbage
+  collector, as they already did for plain values: reading every block of a
+  card takes about 18% less CPU, and about 28% less in a process holding a
+  large heap. Parsed values and saved bytes are unchanged; a reference cycle
+  later built through a parsed container is not collected
 - [fix] Modern Brightness/Contrast in 8-bit documents reads Photoshop 2023's
   own levels: every brightness alone, every contrast alone and 79 pairs; any
   other pair takes the contrast of the brightness's level, at most a level
