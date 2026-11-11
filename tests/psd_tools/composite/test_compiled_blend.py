@@ -320,6 +320,8 @@ def test_numpy_keeps_what_the_loops_do_not_take(
         "gray1.psd",
         "blend-modes/cmyk-blend-modes.psd",
         "adjustments/adjustment_nested_composition_3.psd",
+        "adjustments/curves_rgb.psd",
+        "fill_adjustments.psd",
         "effects/styled-pass-through.psd",
         "effects/styled-pass-through-nested.psd",
         "effects/fading-mode-effects.psd",
@@ -357,6 +359,7 @@ _NEWEST = (
     "distinct_pixels",
     "mix_toward",
     "gather_rows",
+    "whole_levels",
 )
 
 
@@ -494,7 +497,11 @@ def test_mix_toward_is_numpys(monkeypatch: pytest.MonkeyPatch, channels: int) ->
         expected = utils.clip(c + strength * (b - c))
         assert got.dtype == expected.dtype
         _close32(got, expected)
-    assert len(calls) == 5
+        # Whole levels where the strength is above 0.
+        levels = np.rint(np.clip(expected, 0.0, 1.0) * np.float32(255)) / 255
+        expected = np.where(np.asarray(strength) > 0, levels, expected)
+        _close32(composite._mix_toward(c, b, strength, True), expected)
+    assert len(calls) == 10
 
 
 @pytest.mark.parametrize("channels", [1, 3, 4])

@@ -3443,12 +3443,16 @@ def _mix_toward(
     With ``levels``, in whole 8-bit levels where ``strength`` is above 0
     (:py:func:`_whole_levels`).
     """
-    if hasattr(_cblend, "mix_toward"):
+    # A build without whole_levels() predates the levels argument.
+    if hasattr(_cblend, "mix_toward") and (
+        not levels or hasattr(_cblend, "whole_levels")
+    ):
+        more = (True,) if levels else ()
         if type(strength) is float:
             if utils.in_rows((), (content, blended)):
-                return _cblend.mix_toward(content, blended, None, strength, levels)
+                return _cblend.mix_toward(content, blended, None, strength, *more)
         elif _compiled_fits((strength,), (content, blended)):
-            return _cblend.mix_toward(content, blended, strength, 0.0, levels)
+            return _cblend.mix_toward(content, blended, strength, 0.0, *more)
     mixed = utils.clip(content + strength * (blended - content))
     return _whole_levels(mixed, strength) if levels else mixed
 
