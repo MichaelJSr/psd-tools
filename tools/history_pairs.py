@@ -2,7 +2,7 @@
 
     python tools/history_pairs.py list <clone> <pairs.tsv> [--rev REV]
     PYTHONPATH=src python tools/history_pairs.py score <pairs.tsv> <out.jsonl>
-        [--clone C] [--cache DIR] [--all | --only LIST] [--batch 100] [--workers 2]
+        [--clone C] [--cache DIR] [--all] [--only LIST] [--batch 100] [--workers 2]
     python tools/history_pairs.py sum <out.jsonl> [<base.jsonl>] [--feature NAME]
 
 A history pair is a PSD and its PNG changed in the same commit by a person, so
@@ -331,14 +331,14 @@ def fetch(work: str, shas: list[str], url: str) -> str:
 def pick(a: argparse.Namespace) -> list[Row]:
     """The pairs to score, one per blob pair, less those already in the output."""
     rows = read_tsv(a.pairs)
+    if not a.all:
+        rows = [r for r in rows if r.get("newest") == "1"]
     if a.only:
         with open(a.only, encoding="utf-8") as f:
             want = {line.strip() for line in f if line.strip()}
         rows = [
             r for r in rows if r["path"] in want or f"{r['psd']}:{r['png']}" in want
         ]
-    elif not a.all:
-        rows = [r for r in rows if r.get("newest") == "1"]
     seen = set()
     if os.path.exists(a.out):
         with open(a.out, encoding="utf-8") as f:
@@ -487,7 +487,7 @@ def main() -> int:
     p.add_argument(
         "--all", action="store_true", help="every pair, not each live card's newest"
     )
-    p.add_argument("--only", help="file of card paths or psd:png blob pairs")
+    p.add_argument("--only", help="file of card paths or psd:png blob pairs to keep")
     p.add_argument("--batch", type=int, default=100)
     p.add_argument("--workers", type=int, default=2)
     p.add_argument("--url", default=URL)
