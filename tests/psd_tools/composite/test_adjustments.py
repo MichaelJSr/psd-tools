@@ -1651,3 +1651,22 @@ def test_a_lut_is_read_at_each_level(dtype: type, lut_size: int) -> None:
     assert np.isnan(got[1, 1])
     got[1, 1] = expected[1, 1]
     assert np.array_equal(got, expected)
+
+
+# 8-bit documents
+def test_an_8_bit_canvas_holds_whole_levels_where_an_adjustment_applies() -> None:
+    """Under a half-opaque adjustment too; the channel mixer rounds halves up."""
+    psd = PSDImage.open(full_name("fill_adjustments.psd"))
+    for layer in list(psd)[4:]:
+        layer.visible = layer.name == "Exposure 1"
+    psd[1].opacity = 100
+    psd[7].opacity = 128
+    color = composite_module.composite(psd)[0] * 255
+    assert np.abs(color - np.rint(color)).max() < 1e-4
+    psd[7].visible = False
+    color = composite_module.composite(psd)[0] * 255
+    assert np.abs(color - np.rint(color)).max() > 0.4
+
+    half = np.full((1, 1, 3), 126.5 / 255, dtype=np.float32)
+    assert composite_module._held_levels(psd[13], half)[0, 0, 0] * 255 == 127
+    assert composite_module._held_levels(psd[7], half)[0, 0, 0] * 255 == 126
