@@ -69,7 +69,8 @@ _CONTRAST_INNER_DELTA = np.float32(25.0 / 255.0)
 # Only mean 127 with lab False is verified; neither property is read here.
 _LEGACY_PIVOT = np.float32(127.0) / _255
 
-# Modern brightness curve, fitted to Photoshop exports. Positive brightness
+# Modern brightness curve, fitted to Photoshop exports (16 and 32 bits; 8-bit
+# documents read Photoshop's tables). Positive brightness
 # scales the shadows by a gain of exp(brightness / _BRIGHTNESS_GAIN_SCALE) up
 # to a knee, then rolls off into white; negative brightness is its inverse.
 # With s = 1 - 1 / gain, the knee's output level is k0 + k1 * s and the
@@ -285,7 +286,8 @@ def apply_brightnesscontrast(
     Apply a brightness & contrast adjustment to an image.
 
     Brightness is applied first and contrast to its result, through one curve
-    for every channel. Requires scipy for cubic spline interpolation.
+    for every channel: Photoshop's own in 8-bit documents, else a fit.
+    Requires scipy for cubic spline interpolation.
     """
     from scipy import interpolate  # type: ignore[import-untyped]  # noqa: PLC0415
 
@@ -295,6 +297,11 @@ def apply_brightnesscontrast(
         lut = _legacy_brightnesscontrast_lut(layer.brightness, layer.contrast, t)
         channel_id = 1 if colormode == ColorMode.GRAYSCALE else 0
         return _apply_luts({channel_id: lut}, img, colormode)
+
+    if _get_lut_size(layer) == 256 and (layer.brightness, layer.contrast) != (0, 0):
+        levels = _brightnesscontrast_levels(layer.brightness, layer.contrast)
+        if levels is not None:
+            return _apply_lut(img, levels.astype(np.float32) / _255)
 
     c = np.float32(layer.contrast) / _100
 
@@ -310,6 +317,40 @@ def apply_brightnesscontrast(
     # does: the curve is steep near white, and an identity adjustment must
     # leave the pixels as they are.
     return np.interp(img, t, lut).astype(np.float32, copy=False)
+
+
+@functools.cache
+def _brightnesscontrast_tables() -> tuple[
+    NDArray[np.uint8], NDArray[np.uint8], dict[tuple[int, int], NDArray[np.uint8]]
+]:
+    """Photoshop's 8-bit tables: by brightness, by contrast, and by pair."""
+    source = resources.files(__package__).joinpath("brightnesscontrast_tables.npz")
+    with source.open("rb") as stream, np.load(stream) as data:
+        pairs = {
+            (int(b), int(c)): table
+            for (b, c), table in zip(data["pairs"], data["pair_tables"], strict=True)
+        }
+        return data["brightness"], data["contrast"], pairs
+
+
+def _brightnesscontrast_levels(
+    brightness: int, contrast: int
+) -> NDArray[np.uint8] | None:
+    """
+    Photoshop 2023's modern brightness and contrast on 8-bit levels.
+
+    Read off ramps (tools/brightnesscontrast_tables.py): every brightness
+    alone, every contrast alone and the pairs measured. Another pair takes
+    the contrast of the brightness's level, at most a level off. None out
+    of range.
+    """
+    if not (-150 <= brightness <= 150 and -50 <= contrast <= 100):
+        return None
+    bright, contrasts, pairs = _brightnesscontrast_tables()
+    table = pairs.get((brightness, contrast))
+    if table is None:
+        table = contrasts[contrast + 50][bright[brightness + 150]]
+    return table
 
 
 def _brightness_curve(brightness: int, t: NDArray[np.float32]) -> NDArray[np.float64]:

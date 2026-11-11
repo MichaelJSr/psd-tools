@@ -76,7 +76,11 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 psd_tools = ["*.pyx", "py.typed"]
-"psd_tools.composite" = ["noise_field.npz", "vibrance_tables.npz"]
+"psd_tools.composite" = [
+    "brightnesscontrast_tables.npz",
+    "noise_field.npz",
+    "vibrance_tables.npz",
+]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.c", "*.cpp"]
