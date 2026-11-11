@@ -1014,10 +1014,12 @@ _BlendSpace = tuple[
 ]
 
 # Methods that blend somewhere other than the document's own arrays:
-# perceptual in Oklab, linear in linear-light sRGB. Classic and smooth, and a
-# missing or unknown key, blend the canvas values directly.
+# perceptual and smooth in Oklab (smooth as Photoshop draws the cards' maps),
+# linear in linear-light sRGB. Classic, and a missing or unknown key, blend
+# the canvas values directly.
 _BLEND_SPACES: dict[bytes, _BlendSpace] = {
     GradientMethod.PERCEPTUAL.value: (_srgb_to_oklab, _oklab_to_srgb),
+    GradientMethod.SMOOTH.value: (_srgb_to_oklab, _oklab_to_srgb),
     GradientMethod.LINEAR.value: (_srgb_to_linear, _linear_to_srgb),
 }
 

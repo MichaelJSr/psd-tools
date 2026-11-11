@@ -1175,10 +1175,10 @@ def _gradient_ramp(
 
     Stops are taken in location order. Each segment blends as a gradient
     fill's does (``paint._smooth_segments``), in the space the method names:
-    perceptual in Oklab, linear in linear light, classic and the rest on the
-    sRGB values. Two stops at one location make a hard edge: the segment into
-    it ends in the first stop's colour and the segment out of it starts in
-    the second's.
+    perceptual and smooth in Oklab, linear in linear light, classic and the
+    rest on the sRGB values. Two stops at one location make a hard edge: the
+    segment into it ends in the first stop's colour and the segment out of it
+    starts in the second's.
     """
     if len(locations) == 1:
         return np.repeat(colors[:1], len(t), axis=0)

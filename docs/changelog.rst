@@ -4,6 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Gradients with Photoshop's Smooth method (``Smoo``) blend their
+  colours in Oklab, as perceptual, instead of as classic, as Photoshop draws
+  the cards' Smooth gradient maps; fills, overlays and strokes follow, and
+  opacity stops still blend as classic. **Rendering change**
 - [fix] A user mask's Properties feather is drawn: the whole mask is blurred
   by a gaussian of the feather in pixels, as Photoshop 2023 draws it, before
   its density. A real mask and a vector mask's feather are drawn as before.
