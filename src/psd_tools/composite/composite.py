@@ -158,6 +158,8 @@ _CANVAS_GROWTH = 4
 
 # How far a mask feather's gaussian reaches, in sigmas (scipy's default).
 _FEATHER_TRUNCATE = 4.0
+# The Properties panel's largest feather, in pixels: past it a file is forged.
+_FEATHER_MAX = 1000.0
 
 
 # The layer modes whose compositing keeps ``1 - alpha`` of the backdrop, which
@@ -882,11 +884,12 @@ def _vector_stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
 def _mask_feather(mask: Mask) -> float:
     """The user mask's Properties feather: its gaussian's sigma in pixels, or 0.0.
 
-    A real mask is read as stored: no card has one under a feather.
+    A real mask is read as stored: no card has one under a feather. So is a
+    feather past :data:`_FEATHER_MAX`.
     """
     parameters = mask.parameters
     feather = parameters.user_mask_feather if parameters is not None else None
-    if feather is None or mask.has_real() or not 0.0 < feather < math.inf:
+    if feather is None or mask.has_real() or not 0.0 < feather <= _FEATHER_MAX:
         return 0.0
     return float(feather)
 

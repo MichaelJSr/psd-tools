@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from psd_tools.api.mask import Mask
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite
 from psd_tools.composite.composite import _style_bbox
@@ -27,15 +28,20 @@ def _edge(t: np.ndarray, lo: int, hi: int) -> np.ndarray:
     return phi(t + 0.5 - lo) - phi(t + 0.5 - hi)
 
 
+def _square() -> tuple[PSDImage, Mask]:
+    """An opaque layer under a solid 20 px mask at (22, 22)."""
+    psd = PSDImage.new("RGB", (64, 64))
+    layer = psd.create_pixel_layer(Image.new("RGB", (64, 64), (255, 0, 0)))
+    return psd, layer.create_mask(Image.new("L", (20, 20), 255), top=22, left=22)
+
+
 def test_a_feathered_mask_is_its_box_blurred_whole() -> None:
-    """An opaque layer under a solid 20 px mask: its alpha is the box blurred.
+    """The layer's alpha is the mask's box blurred.
 
     The blur reaches past the mask's box, and a box render reads the whole
     render's values. Density goes on after the feather.
     """
-    psd = PSDImage.new("RGB", (64, 64))
-    layer = psd.create_pixel_layer(Image.new("RGB", (64, 64), (255, 0, 0)))
-    mask = layer.create_mask(Image.new("L", (20, 20), 255), top=22, left=22)
+    psd, mask = _square()
     mask._data.parameters = MaskParameters(user_mask_feather=_SIGMA)
 
     _, _, alpha = composite(psd, force=True)
@@ -54,6 +60,15 @@ def test_a_feathered_mask_is_its_box_blurred_whole() -> None:
     _, _, dense = composite(psd, force=True)
     share = 128 / 255
     assert np.allclose(dense, share * alpha + (1.0 - share), atol=1e-6)
+
+
+@pytest.mark.parametrize("feather", [1e308, 900.0])
+def test_a_forged_or_too_wide_feather_leaves_the_mask_as_stored(feather: float) -> None:
+    psd, mask = _square()
+    _, _, hard = composite(psd, force=True)
+    mask._data.parameters = MaskParameters(user_mask_feather=feather)
+    _, _, alpha = composite(psd, force=True)
+    assert np.array_equal(alpha, hard)
 
 
 def test_a_feathered_adjustment_mask_grows_its_style_box() -> None:
