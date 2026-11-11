@@ -7,7 +7,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from psd_tools.composite.text.constants import WORD_SPACING_MIN
+from psd_tools.composite.text.constants import FIT_SLACK, WORD_SPACING_MIN
 
 Decision = Literal["fit", "compress", "break", "forced", "paragraph"]
 
@@ -137,7 +137,7 @@ def _greedy(
     ops = _break_ops(text, a, b, space_set)
 
     def fits(p: int, q: int) -> bool:
-        return measure(p, q) <= width + _FIT_EPS
+        return measure(p, q) <= width * (1 + FIT_SLACK) + _FIT_EPS
 
     def factor(p: int, q: int) -> float | None:
         """Word-spacing factor that sets ``text[p:q]`` to ``width``; None without spaces."""

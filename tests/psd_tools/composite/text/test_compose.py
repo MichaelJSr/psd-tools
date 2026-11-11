@@ -50,6 +50,16 @@ def test_exact_fit_boundary() -> None:
     assert lines == [Line(0, 4, 0.0, "fit"), Line(5, 9, 0.0, "paragraph")]
 
 
+def test_photoshop_slack_past_the_box() -> None:
+    # Photoshop 2023 keeps a line up to 1.4e-5 of the box width past the box.
+    text = "aaaa bbbb"
+    measure, sp = widths(text, space=5.0)
+    over = break_lines(text, 0, 9, measure, sp, 85.0 / (1 + 1e-5), 0)
+    assert spans(over) == [(0, 9)]
+    over = break_lines(text, 0, 9, measure, sp, 85.0 / (1 + 2e-5), 0)
+    assert spans(over) == [(0, 4), (5, 9)]
+
+
 def test_trailing_spaces_hang() -> None:
     # The whole run of spaces hangs on the first line; the next starts after it.
     text = "aaaa   bbbb  "

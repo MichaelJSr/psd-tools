@@ -27,6 +27,10 @@ ASCENT_PPEM = 1000
 # frame; its top is then taken as zero.
 BOX_ABSOLUTE_FRAME_L = 1.5
 
+# Photoshop 2023 keeps a word on a box line that runs past the box by up to
+# this fraction of the box width (fixtures at 128-483 pt: 1.43e-5..1.48e-5).
+FIT_SLACK = 1.4e-5
+
 # Justified text pulls a word onto the line only while the compressed
 # word-space factor stays at or above this.
 WORD_SPACING_MIN = 0.8
