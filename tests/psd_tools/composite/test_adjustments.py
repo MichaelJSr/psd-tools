@@ -17,6 +17,7 @@ from psd_tools.composite import composite, paint
 from psd_tools.composite.adjustments import (
     _apply_lut,
     _brightness_curve,
+    _brightnesscontrast_tables,
     _huesaturation,
     _legacy_brightnesscontrast_lut,
     _levels_gamma,
@@ -110,50 +111,22 @@ def _brightness_contrast_layer(
     return layer
 
 
-# Levels Photoshop exports through one non-legacy layer:
-# (brightness, contrast, input level, output level).
-_PHOTOSHOP_BRIGHTNESS_CONTRAST = [
-    (-150, 0, 32, 12),
-    (-150, 0, 128, 50),
-    (-150, 0, 192, 79),
-    (-33, 0, 64, 52),
-    (-33, 0, 128, 104),
-    (-33, 0, 192, 161),
-    (-120, 70, 64, 18),
-    (-120, 70, 128, 43),
-    (-120, 70, 192, 82),
-    (-51, -50, 64, 58),
-    (-51, -50, 128, 103),
-    (-51, -50, 192, 141),
-    (-95, -50, 64, 45),
-    (-95, -50, 128, 82),
-    (0, -50, 64, 76),
-    (0, -50, 192, 180),
-    (4, 100, 64, 41),
-    (4, 100, 128, 134),
-    (-31, 47, 64, 42),
-    (-31, 47, 192, 171),
-    (23, 70, 64, 57),
-    (23, 70, 192, 229),
-    (150, -21, 32, 87),
-    (150, -21, 96, 210),
-]
-# The curve is fitted, not exact: inputs up to 192 may be off by this many levels.
-_BRIGHTNESS_CONTRAST_LEVELS = 2
+# Photoshop 2023 document: an 8-bit ramp, two rows (gray; k, 7k, 101k + 50)
+# to each modern Brightness/Contrast layer clipped to them, at the settings
+# the cards use and brightnesscontrast_rgb's.
+def test_brightnesscontrast_matches_photoshop_ramps() -> None:
+    psd = PSDImage.open(full_name("adjustments/brightnesscontrast_ramps_rgb.psd"))
+    reference = np.rint(psd.numpy()[..., :3] * 255)
+    result = np.asarray(psd.composite(force=True, apply_icc=False), np.float64)
+    assert np.array_equal(result[..., :3], reference)
 
 
-@pytest.mark.parametrize(
-    ("brightness", "contrast", "level", "expected"), _PHOTOSHOP_BRIGHTNESS_CONTRAST
-)
-def test_brightnesscontrast_matches_photoshop_levels(
-    brightness: int, contrast: int, level: int, expected: int
-) -> None:
-    layer = _brightness_contrast_layer(brightness, contrast)
-    image = np.full((1, 1, 3), level / 255, dtype=np.float32)
-    out = _applied(apply_brightnesscontrast(image, ColorMode.RGB, layer))
-    assert out * 255 == pytest.approx(
-        np.full((1, 1, 3), expected), abs=_BRIGHTNESS_CONTRAST_LEVELS
-    )
+def test_an_unmeasured_pair_is_at_most_a_level_off() -> None:
+    """Contrast after the brightness's level, against each measured pair."""
+    bright, contrast, pairs = _brightnesscontrast_tables()
+    for (b, c), table in pairs.items():
+        composed = contrast[c + 50][bright[b + 150]].astype(int)
+        assert np.abs(composed - table).max() <= 1, (b, c)
 
 
 def test_brightnesscontrast_at_zero_leaves_the_image_unchanged() -> None:
@@ -172,11 +145,18 @@ def test_brightness_and_its_negative_are_inverse_curves(brightness: int) -> None
     assert _brightness_curve(-brightness, there) == pytest.approx(t, abs=1e-4)
 
 
+@pytest.mark.parametrize("lut_size", [256, 65536])
 @pytest.mark.parametrize("brightness", range(-150, 151, 25))
 @pytest.mark.parametrize("contrast", [-50, 0, 50, 100])
 def test_brightnesscontrast_keeps_black_white_and_order(
-    brightness: int, contrast: int
+    brightness: int, contrast: int, lut_size: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Photoshop's tables in 8 bits, the fit deeper."""
+    monkeypatch.setattr(
+        importlib.import_module("psd_tools.composite.adjustments"),
+        "_get_lut_size",
+        lambda layer: lut_size,
+    )
     layer = _brightness_contrast_layer(brightness, contrast)
     ramp = np.repeat(_lut_domain(256).reshape(1, -1, 1), 3, axis=2)
     out = _applied(apply_brightnesscontrast(ramp, ColorMode.RGB, layer))[0, :, 0]

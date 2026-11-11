@@ -4,6 +4,11 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Modern Brightness/Contrast in 8-bit documents reads Photoshop 2023's
+  own levels: every brightness alone, every contrast alone and 79 pairs; any
+  other pair takes the contrast of the brightness's level, at most a level
+  off. The fit missed by up to 11 levels and stays for 16 and 32 bits.
+  **Rendering change** for brightness/contrast in 8-bit documents
 - [refactor] On glibc, the first composite fixes malloc's mmap threshold at
   32 MiB and its trim threshold at 256 MiB, so freed canvases are reused
   instead of handed back to the kernel: on Linux arm64, whole renders take
