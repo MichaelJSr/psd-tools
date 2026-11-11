@@ -142,6 +142,50 @@ def test_divide_and_clip_are_numpys(
     _same(utils.clip(a), _numpy(monkeypatch, utils.clip, a))
 
 
+@pytest.mark.parametrize(
+    "place",
+    [
+        (0, 0, 17, 26),
+        (-3, 4, 17, 26),
+        (6, -9, 17, 26),
+        (20, 28, 17, 26),
+        (-40, 0, 17, 26),
+        (-3, -4, 30, 40),
+    ],
+)
+@pytest.mark.parametrize("src_alpha", [True, False])
+@pytest.mark.parametrize("has_shape", [True, False])
+def test_unfilter_is_numpys(
+    monkeypatch: pytest.MonkeyPatch,
+    place: tuple[int, int, int, int],
+    src_alpha: bool,
+    has_shape: bool,
+) -> None:
+    """A source over part of the box, all of it, or none; NaN alpha keeps the blend."""
+    oy, ox, sh, sw = place
+    rng = np.random.default_rng(abs(oy) * 50 + abs(ox))
+    color, weight = _canvas(rng, 3), _canvas(rng, 1)
+    shape = _canvas(rng, 1) if has_shape else None
+    h, w = color.shape[:2]
+    box = (10, 20, 10 + w, 20 + h)
+    sbox = (box[0] + ox, box[1] + oy, box[0] + ox + sw, box[1] + oy + sh)
+    planes = rng.integers(0, 256, (sh, sw, 4), dtype=np.uint8)
+    source = (
+        sbox,
+        planes[..., :3].copy(),
+        planes[..., 3].copy() if src_alpha else None,
+    )
+    layer = SimpleNamespace(
+        bbox=box, name="unfilter", _psd=SimpleNamespace(_max_alloc_bytes=None)
+    )
+    assert composite._unfilter_fits(box, sbox, color, shape, weight, *source[1:])
+    blend_ = composite._blend_unfiltered
+    compiled = blend_(layer, color, shape, weight.copy(), source)
+    plain = _numpy(monkeypatch, blend_, layer, color, shape, weight.copy(), source)
+    for c, p in zip(compiled, plain, strict=True):
+        _same(c, p)
+
+
 @pytest.mark.parametrize("seed", range(4))
 @pytest.mark.parametrize("gamma", [1.45, 1.0, 3.0, 0.5])
 @pytest.mark.parametrize("isolated", [False, True])
@@ -360,6 +404,7 @@ _NEWEST = (
     "mix_toward",
     "gather_rows",
     "whole_levels",
+    "unfilter",
 )
 
 
