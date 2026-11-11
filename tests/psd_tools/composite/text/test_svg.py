@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import io
 import os
+from typing import Any
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ pytest.importorskip("uharfbuzz")
 from psd_tools.composite import effects
 from psd_tools.composite.scanline import fill_coverage
 from psd_tools.composite.text import svg
+from psd_tools.composite.text.constants import STRONG_EMBOLDEN_26_6
 from psd_tools.composite.text.fonts import Face, load_face
 from psd_tools.composite.text.layout import Layout, PlacedGlyph
 from psd_tools.composite.text.model import RGB, Transform
@@ -1034,6 +1036,22 @@ def test_smooth_colour_glyphs_are_strong_from_100_px(color_face: Face) -> None:
         a, box_a = _render(glyphs, STRONG)
         b, box_b = _render(glyphs, smooth)
         assert (box_a == box_b and np.array_equal(a, b)) is same
+
+
+def test_strong_colour_glyphs_keep_the_embolden(
+    color_face: Face, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outlines are touch-sampled; a colour glyph keeps the 17.5 embolden."""
+    seen: list[float] = []
+    real = svg.rasterize
+
+    def spy(*args: Any) -> Any:
+        seen.append(args[-1])
+        return real(*args)
+
+    monkeypatch.setattr(svg, "rasterize", spy)
+    _render([_glyph(color_face, "A", 0.3, 100.0, 50.0)], STRONG)
+    assert seen == [STRONG_EMBOLDEN_26_6 / 64]
 
 
 def test_the_glyph_budget_counts_the_alpha_grid(color_face: Face) -> None:
