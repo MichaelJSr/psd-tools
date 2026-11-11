@@ -85,12 +85,16 @@ from psd_tools.constants import (
     SectionDivider,
     Tag,
 )
+from psd_tools.psd.base import ValueElement
 from psd_tools.psd.bin_utils import FileReader, PartsWriter
 from psd_tools.psd.color_mode_data import HDRT_DEFAULT, ColorModeData
 from psd_tools.psd.descriptor import String
 from psd_tools.psd.document import PSD
 from psd_tools.psd.header import FileHeader
 from psd_tools.psd.image_data import ImageData
+from psd_tools.psd.image_resources import (
+    TYPES as RESOURCE_TYPES,
+)
 from psd_tools.psd.image_resources import (
     ImageResource,
     ImageResources,
@@ -106,7 +110,7 @@ from psd_tools.psd.layer_and_mask import (
     LayerRecord,
     LayerRecords,
 )
-from psd_tools.psd.parse_limits import ParseLimits
+from psd_tools.psd.parse_limits import ParseLimits, resume_budget
 from psd_tools.psd.tagged_blocks import (
     SectionDividerSetting,
     SmartObjectLayerData,
@@ -163,6 +167,8 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         self._opened_order: list[int] = []
         self._opened_target: LayerRecord | None = None
         self._links_rewritten = False
+        # The records and those three resources as read, until _sync_links reads them.
+        self._opened_held: tuple[list[LayerRecord], list[Any]] | None = None
         #: The document's path in its repository, ``/``-separated, or ``None``.
         #: Links are placed and written from it (see
         #: :py:meth:`~psd_tools.api.smart_object.SmartObject.link_target`).
@@ -510,12 +516,44 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         return list(info.layer_records or ()) if info is not None else []
 
     def _stash_links(self) -> None:
-        """Record the link resources as opened. See :py:meth:`_sync_links`."""
+        """Record the link resources as opened. See :py:meth:`_sync_links`.
+
+        Resources still as read are kept as bytes, read once the records move.
+        """
         records = self._layer_records()
-        count = len(records)
+        self._opened_order = [id(record) for record in records]
         resources = self.image_resources
-        groups = resources.get_data(Resource.LAYER_GROUP_INFO)
-        flags = resources.get_data(Resource.LAYER_GROUPS_ENABLED_ID)
+        held = []
+        for key in _LINK_RESOURCES:
+            item = resources.get(key)
+            if item is not None and item._held is None:  # read already: now
+                values = [resources.get_data(k) for k in _LINK_RESOURCES]
+                self._stash_entries(records, *values)
+                return
+            held.append(None if item is None else item._held)
+        self._opened_held = (records, held)
+
+    def _read_opened_links(self) -> None:
+        """Read the link resources :py:meth:`_stash_links` kept as bytes."""
+        if self._opened_held is None:
+            return
+        records, held = self._opened_held
+        values = []
+        for key, item in zip(_LINK_RESOURCES, held, strict=True):
+            value = None
+            if item is not None:
+                with resume_budget(item[1]):
+                    value = RESOURCE_TYPES[key].frombytes(item[0])
+                if isinstance(value, ValueElement):
+                    value = value.value  # as get_data()
+            values.append(value)
+        self._stash_entries(records, *values)
+        self._opened_held = None
+
+    def _stash_entries(
+        self, records: list[LayerRecord], groups: Any, flags: Any, target: Any
+    ) -> None:
+        count = len(records)
         # Photoshop writes one entry per record; another length is stale.
         if not isinstance(groups, LayerGroupInfo) or len(groups) != count:
             groups = [0] * count
@@ -525,8 +563,6 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             id(record): (record, group, flag)
             for record, group, flag in zip(records, groups, flags, strict=True)
         }
-        self._opened_order = [id(record) for record in records]
-        target = resources.get_data(Resource.LAYER_STATE_INFO)
         if isinstance(target, int) and 0 <= target < count:
             self._opened_target = records[target]
 
@@ -545,6 +581,7 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         order = [id(record) for record in records]
         if order == self._opened_order and not self._links_rewritten:
             return
+        self._read_opened_links()
         self._links_rewritten = True  # an undone move must undo its rewrite
         new = (None, 0, 1)
         entries = [self._opened_links.get(id(record), new) for record in records]
@@ -1223,13 +1260,12 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         divider = blocks.get_data(Tag.SECTION_DIVIDER_SETTING, None)
         return blocks.get_data(Tag.NESTED_SECTION_DIVIDER_SETTING, divider)
 
-    @classmethod
-    def _unmatched_dividers(cls, records: list[tuple[Any, Any]]) -> set[int]:
+    @staticmethod
+    def _unmatched_dividers(dividers: list[Any]) -> set[int]:
         """Return the indices of group dividers that do not pair up, as ``_init`` reads them."""
         opened: list[int] = []
         unmatched: set[int] = set()
-        for index, (record, _) in enumerate(records):
-            divider = cls._divider(record)
+        for index, divider in enumerate(dividers):
             if divider is None:
                 continue
             if divider.kind == SectionDivider.BOUNDING_SECTION_DIVIDER:
@@ -1248,16 +1284,18 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         """Initialize layer structure."""
         group_stack: list[layers.Group | PSDImage] = [self]
         records = list(self._record._iter_layers())
-        unmatched = self._unmatched_dividers(records)
+        dividers = [self._divider(record) for record, _ in records]
+        unmatched = self._unmatched_dividers(dividers)
         filtered = 0
 
         for index, (record, channels) in enumerate(records):
             current_group = group_stack[-1]
 
             blocks = record.tagged_blocks
+            keys = blocks._items.keys()
             end_of_group = False
             layer: layers.Layer | PSDImage | None = None
-            divider = self._divider(record)
+            divider = dividers[index]
             if index in unmatched:
                 logger.warning("Ignoring an unbalanced section divider.")
                 divider = None
@@ -1302,14 +1340,9 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
                     end_of_group = True
                 else:
                     logger.warning(f"Divider {divider.kind} found.")
-            elif Tag.TYPE_TOOL_OBJECT_SETTING in blocks or Tag.TYPE_TOOL_INFO in blocks:
+            elif not keys.isdisjoint(_TYPE_TAGS):
                 layer = layers.TypeLayer(current_group, record, channels)
-            elif (
-                Tag.SMART_OBJECT_LAYER_DATA1 in blocks
-                or Tag.SMART_OBJECT_LAYER_DATA2 in blocks
-                or Tag.PLACED_LAYER1 in blocks
-                or Tag.PLACED_LAYER2 in blocks
-            ):
+            elif not keys.isdisjoint(_SMART_TAGS):
                 layer = layers.SmartObjectLayer(current_group, record, channels)
                 position = None
                 if _has_filters(blocks):
@@ -1326,14 +1359,11 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
                     layer = kind(current_group, record, channels)
 
             # If nothing applies, this is either a shape or pixel layer.
-            shape_condition = record.flags.pixel_data_irrelevant and (
-                Tag.VECTOR_ORIGINATION_DATA in blocks
-                or Tag.VECTOR_MASK_SETTING1 in blocks
-                or Tag.VECTOR_MASK_SETTING2 in blocks
-                or Tag.VECTOR_STROKE_DATA in blocks
-                or Tag.VECTOR_STROKE_CONTENT_DATA in blocks
+            shape_condition = (
+                record.flags.pixel_data_irrelevant and not keys.isdisjoint(_VECTOR_TAGS)
             )
-            if isinstance(layer, (type(None), layers.FillLayer)) and shape_condition:
+            # The protocol isinstance is slow: only when the shape tags are there.
+            if shape_condition and isinstance(layer, (type(None), layers.FillLayer)):
                 layer = layers.ShapeLayer(current_group, record, channels)
 
             if layer is None:
@@ -1422,8 +1452,35 @@ def _build_record_tree(
     return (layer_records, channel_image_data)
 
 
+_LINK_RESOURCES = (
+    Resource.LAYER_GROUP_INFO,
+    Resource.LAYER_GROUPS_ENABLED_ID,
+    Resource.LAYER_STATE_INFO,
+)
+_TYPE_TAGS = frozenset((Tag.TYPE_TOOL_OBJECT_SETTING, Tag.TYPE_TOOL_INFO))
+_SMART_TAGS = frozenset(
+    (
+        Tag.SMART_OBJECT_LAYER_DATA1,
+        Tag.SMART_OBJECT_LAYER_DATA2,
+        Tag.PLACED_LAYER1,
+        Tag.PLACED_LAYER2,
+    )
+)
+_VECTOR_TAGS = frozenset(
+    (
+        Tag.VECTOR_ORIGINATION_DATA,
+        Tag.VECTOR_MASK_SETTING1,
+        Tag.VECTOR_MASK_SETTING2,
+        Tag.VECTOR_STROKE_DATA,
+        Tag.VECTOR_STROKE_CONTENT_DATA,
+    )
+)
+
+
 def _adjustment_kind(blocks: TaggedBlocks) -> type[layers.Layer] | None:
     """Return the adjustment or fill layer class the blocks select, or `None`."""
+    if blocks._items.keys().isdisjoint(adjustments.TYPES.keys()):
+        return None  # a pixel layer, mostly
     keys = [key for key in adjustments.TYPES if key in blocks]
     # Other adjustments carry CgEd too (a Curves preset's name), so it and brit
     # select Brightness/Contrast only when no other adjustment block is present.

@@ -290,6 +290,17 @@ def test_stale_links_stay_until_the_records_change() -> None:
     assert _links(_reopen(kept)) == ({}, {1}, 15)
 
 
+def test_links_are_the_ones_opened_after_an_edit_of_the_resources() -> None:
+    psd = _linked()
+    resources = psd.image_resources
+    assert resources[Resource.LAYER_GROUP_INFO]._held is not None  # unread at open
+    resources.get_data(Resource.LAYER_GROUP_INFO)[:] = [9] * len(_ids(psd))
+    _remove(psd)
+    again = _reopen(psd)
+    present = {layer.layer_id for layer in again.descendants()}
+    assert _links(again) == ({i: g for i, g in LINKS.items() if i in present}, {1}, 7)
+
+
 def test_links_follow_a_move_undone_after_a_save() -> None:
     psd = _linked()
     hp = _find(psd, "Stats Bars/Bars/hp")

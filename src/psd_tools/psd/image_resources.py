@@ -96,7 +96,7 @@ from psd_tools.psd.bin_utils import (
 )
 from psd_tools.psd.color import Color
 from psd_tools.psd.descriptor import DescriptorBlock
-from psd_tools.psd.parse_limits import ParseLimitError
+from psd_tools.psd.parse_limits import ParseLimitError, current_budget, resume_budget
 from psd_tools.registry import new_registry
 from psd_tools.validators import in_
 from psd_tools.version import __version__
@@ -228,7 +228,7 @@ class ImageResources(DictElement):
             p.breakable("")
 
 
-@define(repr=False)
+@define(repr=False, eq=False)
 class ImageResource(BaseElement):
     """
     Image resource block.
@@ -248,7 +248,8 @@ class ImageResource(BaseElement):
     .. py:attribute:: name
     .. py:attribute:: data
 
-        The resource data.
+        The resource data. A typed resource is kept as read and parsed on
+        first access; one never read is written back as it was read.
     """
 
     signature: bytes = field(
@@ -258,7 +259,41 @@ class ImageResource(BaseElement):
     )
     key: int = 1000
     name: str = ""
-    data: bytes = field(default=b"", repr=False)
+    _data: Any = field(default=b"", repr=False)
+    # A typed resource not parsed yet: (bytes as read, the open's budget).
+    _held: "tuple[bytes, Any] | None" = field(default=None, init=False, repr=False)
+
+    def _load(self) -> None:
+        held = self._held
+        if held is not None:
+            raw, budget = held
+            with resume_budget(budget):
+                self._data = TYPES[self.key].frombytes(raw)
+            self._held = None
+
+    @property
+    def data(self) -> Any:
+        """The resource data; a typed one is parsed on first access."""
+        if self._held is not None:
+            self._load()
+        return self._data
+
+    @data.setter
+    def data(self, value: Any) -> None:
+        self._data, self._held = value, None
+
+    def __eq__(self, other: object) -> bool:
+        if other.__class__ is not self.__class__:
+            return NotImplemented
+        assert isinstance(other, ImageResource)
+        return (self.signature, self.key, self.name, self.data) == (
+            other.signature,
+            other.key,
+            other.name,
+            other.data,
+        )
+
+    __hash__ = None  # type: ignore[assignment]
 
     @classmethod
     def read(
@@ -280,19 +315,11 @@ class ImageResource(BaseElement):
                 logger.debug("Unknown image resource %d" % (key))
         name = read_pascal_string(fp, encoding, padding=2)
         raw_data = read_length_block(fp, padding=2)
-        if key in TYPES:
-            data = TYPES[key].frombytes(raw_data)
-            # try:
-            #     _raw_data = data.tobytes(padding=1)
-            #     assert _raw_data == raw_data, '%r vs %r' % (
-            #         _raw_data, raw_data
-            #     )
-            # except AssertionError as e:
-            #     logger.error(e)
-            #     raise
-        else:
-            data = raw_data
-        return cls(signature, key, name, data)
+        if key in TYPES:  # parsed on first access, on the open's budget
+            self = cls(signature, key, name)
+            self._held = (raw_data, current_budget())
+            return self
+        return cls(signature, key, name, raw_data)
 
     def write(self, fp: IO[bytes], encoding: str = "macroman", **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""
@@ -300,8 +327,11 @@ class ImageResource(BaseElement):
             fp, "4sH", self.signature, getattr(self.key, "value", self.key)
         )
         written += write_pascal_string(fp, self.name, encoding, 2)
+        held = self._held
 
         def writer(f: IO[bytes]) -> int:
+            if held is not None:  # never read: as read
+                return write_bytes(f, held[0])
             if hasattr(self.data, "write"):
                 return self.data.write(f, padding=1)
             return write_bytes(f, self.data)
