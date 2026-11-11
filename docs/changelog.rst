@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Vector strokes: the stroke's colour is drawn up to the path's own
+  box, a pixel wider, so a stroke past a stored box that stops short of the
+  path (a truncated origination box) is no longer white there. A shape with
+  stored pixels, a stroke wider than 0 and a shown clip layer is redrawn
+  from its fill and path without ``force`` too, so the stroke goes over the
+  clip layers as in Photoshop. **Rendering change** for those layers
 - [fix] A user mask's Properties feather is drawn: the whole mask is blurred
   by a gaussian of the feather in pixels, as Photoshop 2023 draws it, before
   its density. A real mask and a vector mask's feather are drawn as before.
