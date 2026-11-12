@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
+  as drop shadows do (matte and opacity held at 8 bits, their product
+  rounded), and colour, gradient and pattern overlays and stroke effects
+  apply their opacity as a whole level, halves up (61% is 156/255, as
+  Photoshop 2023 draws it). Other depths keep the float opacity.
+  **Rendering change**
 - [fix] A user mask's Properties feather is drawn: the whole mask is blurred
   by a gaussian of the feather in pixels, as Photoshop 2023 draws it, before
   its density. A real mask and a vector mask's feather are drawn as before.
