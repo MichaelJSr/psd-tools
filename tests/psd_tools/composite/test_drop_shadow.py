@@ -199,9 +199,11 @@ def test_spread_grows_the_silhouette_and_takes_the_blur_it_replaces() -> None:
         (0, 0, 81, 81), shape, distance=0.0, angle=0.0, size=6.0, spread=0.0
     )
     row = hard[40, 40:, 0]
-    # Covered out to the disc's radius plus the size, and not a pixel beyond.
+    # Covered out to the disc's radius plus the size, and the sliver of the
+    # next pixel Photoshop's 8-bit steps leave (``effects/hard-spread.psd``).
     assert np.all(row[: 12 + 6 + 1] == 1.0), row
-    assert np.all(row[12 + 6 + 1 :] == 0.0), row
+    assert float(row[12 + 6 + 1]) == pytest.approx(22.0 / 255.0), row
+    assert np.all(row[12 + 6 + 2 :] == 0.0), row
     # The soft shadow ramps across the same reach instead.
     ramp = soft[40, 40 + 12 - 3 : 40 + 12 + 6, 0]
     assert np.all(np.diff(ramp) < 0), ramp
@@ -421,19 +423,17 @@ def test_the_spread_edge_follows_the_rim_pixels_own_coverage(
     """A grown edge lies the spread past where the outermost rim pixel ends.
 
     A fully covered rim pixel ends half a pixel past its centre; one a
-    fifth covered ends a fifth of the way across it. Unblurred, the pixel
-    the grown edge crosses carries just that share, and the pixels between
-    are opaque whatever the feather behind the rim held: grown level by
-    level, a two-pixel feather would leave them part covered.
+    fifth covered ends a fifth of the way across it. Before the blur, the
+    pixel the grown edge crosses carries just that share, and the pixels
+    between are opaque whatever the feather behind the rim held: grown level
+    by level, a two-pixel feather would leave them part covered.
     """
-    square = np.zeros((41, 41, 1), dtype=np.float32)
+    square = np.zeros((41, 41), dtype=np.float32)
     square[10:31, 10:31] = 1.0
     shape = square.copy()
-    shape[10:31, 31 - len(rim) : 31, 0] = rim
-    grown = effects.draw_drop_shadow(
-        (0, 0, 41, 41), shape, distance=0.0, angle=0.0, size=3.0, spread=100.0
-    )
-    row = grown[20, 30:36, 0]
+    shape[10:31, 31 - len(rim) : 31] = rim
+    grown = effects._spread(shape, 3)
+    row = grown[20, 30:36]
     assert np.allclose(row, [1.0, 1.0, 1.0, rim[-1], 0.0, 0.0], atol=1e-6), row
 
 
@@ -446,14 +446,12 @@ def test_spread_grows_from_whichever_covered_pixel_reaches_furthest() -> None:
     one's ``alpha - 1``, so a 1 px spread covers it ``2 - sqrt(2)``. Beside
     the faint pixel, at ``(11, 13)``, the faint one reaches furthest.
     """
-    shape = np.zeros((21, 21, 1), dtype=np.float32)
+    shape = np.zeros((21, 21), dtype=np.float32)
     shape[11, 11] = 1.0
     shape[11, 12] = 0.05
-    grown = effects.draw_drop_shadow(
-        (0, 0, 21, 21), shape, distance=0.0, angle=0.0, size=1.0, spread=100.0
-    )
-    assert float(grown[12, 12, 0]) == pytest.approx(2.0 - math.sqrt(2.0), abs=1e-5)
-    assert float(grown[11, 13, 0]) == pytest.approx(0.05, abs=1e-5)
+    grown = effects._spread(shape, 1)
+    assert float(grown[12, 12]) == pytest.approx(2.0 - math.sqrt(2.0), abs=1e-5)
+    assert float(grown[11, 13]) == pytest.approx(0.05, abs=1e-5)
 
 
 @pytest.mark.parametrize("pixels", [1, 3, 9])
@@ -507,6 +505,82 @@ def test_spread_reaches_round_antialiased_edges_as_photoshop_grows_them(
 
     monkeypatch.setattr(effects, "_spread", _nearest_rim)
     assert float(_premultiplied_error(psd).max()) > 8.0 / 255.0
+
+
+def test_a_hard_spread_matches_photoshop_2023(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every pixel of ``hard-spread.psd`` is Photoshop 2023's PNG of it.
+
+    Five fill-0 layers, each a spread or choke of its whole size, so no blur
+    is left: a drop shadow of 6 px with 70% noise, one of 7 px, a softer
+    outer glow of 12 px at a 50% range, an inner shadow of 3 px and a softer
+    inner glow of 6 px, around squares with 64, 128 and 192 rims, dots and
+    a disc. Grown as a blurred spread is, the edges fall short of
+    Photoshop's by up to a pixel.
+    """
+    psd = PSDImage.open(full_name("effects/hard-spread.psd"))
+    theirs = np.asarray(Image.open(full_name("effects/hard-spread.png")), dtype=int)
+
+    def error() -> int:
+        ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
+        alpha = theirs[..., 3:] / 255.0
+        color = np.abs(ours[..., :3] * ours[..., 3:] / 255.0 - theirs[..., :3] * alpha)
+        return int(max(np.abs(ours[..., 3] - theirs[..., 3]).max(), color.max()))
+
+    assert error() <= 1
+    monkeypatch.setattr(
+        effects,
+        "_hard_spread",
+        lambda alpha, pixels, outside: effects._spread(alpha, pixels),
+    )
+    assert error() > 24
+
+
+@pytest.mark.parametrize(
+    ("pixels", "steps", "reach"),
+    [
+        (6, (36, 51, 81), 7),
+        (7, (31, 45, 71), 8),
+        (15, (15, 22, 35), 16),
+        (16, (15, 21, 33), 16),
+        (127, (1, 2, 4), 254),
+    ],
+)
+def test_a_hard_spread_steps_as_photoshop_does(
+    pixels: int, steps: tuple[int, int, int], reach: int
+) -> None:
+    """Read off single pixels Photoshop 2023 grew by 1 to 250 px at 100%.
+
+    Its field holds ``pixels + 1`` pixels in 255 levels, every step rounded
+    down, so the edge overshoots ``pixels``: a pixel at 15, 254 from 127 on.
+    """
+    assert effects._hard_steps(pixels) == steps
+    assert effects._hard_reach(pixels) == reach
+    dot = np.zeros((2 * reach + 5, 2 * reach + 5), dtype=np.float32)
+    dot[reach + 2, reach + 2] = 1.0
+    row = effects._hard_spread(dot, pixels, 0.0)[reach + 2, reach + 2 :]
+    assert row[reach] > 0.0 and not row[reach + 1 :].any()
+
+
+def test_a_hard_spread_starts_each_level_as_photoshop_sums_it() -> None:
+    """A level's start is a running sum rounded down, not its quotient.
+
+    At 2 px, 192 leaves ``63 / 3 = 21`` of a step open, but the sum lands a
+    hair under it and starts at 20; at 6 px, ``63 / 7 = 9`` holds. Read off
+    straight edges of every level at 1 to 40 px.
+    """
+    assert effects._hard_starts(2)[192] == 20.0
+    assert effects._hard_starts(2)[27] == 76.0
+    assert effects._hard_starts(6)[192] == 9.0
+    assert effects._hard_starts(6)[255] == 0.0
+
+
+def test_the_canvas_of_a_hard_spread_holds_its_reach() -> None:
+    """A 200 px shadow at 100% covers 254 px out, so its canvas grows that far."""
+    box = (50, 50, 51, 51)
+    soft = effects.drop_shadow_bbox(box, 0.0, 0.0, 200.0)
+    hard = effects.drop_shadow_bbox(box, 0.0, 0.0, 200.0, spread=100.0)
+    assert soft == (50 - 202, 50 - 202, 51 + 202, 51 + 202)
+    assert hard == (50 - 256, 50 - 256, 51 + 256, 51 + 256)
 
 
 def test_spread_grows_the_coverage_not_its_level() -> None:

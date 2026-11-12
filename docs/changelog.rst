@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A drop shadow, softer outer glow, inner shadow or softer inner glow
+  whose spread or choke takes its whole size grows as Photoshop 2023 does:
+  in whole steps of an 8-bit field holding the size and a pixel, so its edge
+  reaches up to a pixel past the size (254 px from 127 on), and its noise
+  is held under that edge. Omori's name shadow (noise 70, spread 100%,
+  6 px) was up to 183 levels off at its edge, now within a level; spreads
+  that leave a blur are unchanged. **Rendering change**
 - [fix] Outer glows with a gradient cover what Photoshop 2023 covers: a
   gradient fading from opaque to clear in two stops covers the glow's falloff
   as a solid colour does (wherever its stops sit), with its noise, which

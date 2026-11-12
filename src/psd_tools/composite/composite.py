@@ -1062,6 +1062,7 @@ def _beneath_reach(
                     geometry.angle,
                     geometry.size,
                     budget,
+                    geometry.spread,
                 ),
             )
         except _UNREADABLE as error:
@@ -6416,6 +6417,7 @@ class Compositor:
                     geometry.angle,
                     geometry.size,
                     layer._psd._max_alloc_bytes,
+                    geometry.spread,
                 )
                 self._check_effect_growth(bbox, cast_from)
                 bbox = _within_reach(

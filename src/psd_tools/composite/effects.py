@@ -502,20 +502,23 @@ def _chamfer_transform(mask: np.ndarray) -> np.ndarray:
     return _chamfer_relax(np.where(mask, np.inf, 0.0)).astype(np.float32)
 
 
-def _chamfer_relax(field: np.ndarray) -> np.ndarray:
+def _chamfer_relax(
+    field: np.ndarray, diagonal: float = _DIAGONAL, knight: float = _KNIGHT
+) -> np.ndarray:
     """``field`` lowered in place to ``min(field[q] + length(x - q))`` over every ``q``.
 
     The passes :py:func:`_chamfer_transform` runs, from a float64 ``field``
     holding each pixel's own starting value rather than a zero. Unlike
     :py:func:`_nearest_boundary`'s minimum, the cost does not grow with how
-    far a value travels.
+    far a value travels. ``diagonal`` and ``knight`` are those moves' lengths
+    against an axis move's 1.
     """
     if _cdistance is not None and hasattr(_cdistance, "chamfer_relax"):
-        _cdistance.chamfer_relax(field, _DIAGONAL, _KNIGHT)
+        _cdistance.chamfer_relax(field, diagonal, knight)
         return field
     height, width = field.shape
     cols = np.arange(width, dtype=np.float64)
-    moves = ((1, 0, 1.0), (1, 1, _DIAGONAL), (1, 2, _KNIGHT), (2, 1, _KNIGHT))
+    moves = ((1, 0, 1.0), (1, 1, diagonal), (1, 2, knight), (2, 1, knight))
     for order in (range(height), range(height - 1, -1, -1)):
         step = 1 if order.start == 0 else -1
         for row in order:
@@ -1274,13 +1277,16 @@ def drop_shadow_bbox(
     angle: float,
     size: float,
     max_alloc_bytes: AllocBudget | None = None,
+    spread: float = 0.0,
 ) -> tuple[int, int, int, int]:
     """The canvas :py:func:`draw_drop_shadow` needs to draw a shadow on.
 
     ``bbox`` grown by the shadow's size on every side and by its offset on
     the side it is cast to. It is the box the silhouette is read on, before
     it is moved, so it has to hold that too. The two pixels added on top are
-    the antialiased fringe spread leaves and a pixel to spare.
+    the antialiased fringe spread leaves and a pixel to spare. A ``spread``
+    that leaves nothing to blur grows it by that matte's reach
+    (:py:func:`_matte_reach`) if that is further.
 
     An empty ``bbox`` is returned untouched, as :py:func:`stroke_bbox` does:
     there is no silhouette to cast.
@@ -1291,7 +1297,8 @@ def drop_shadow_bbox(
     ``max_alloc_bytes``, which the callers read as an unreadable shadow.
     """
     dx, dy = _shadow_offset(distance, angle)
-    return _cast_canvas(bbox, dx, dy, size, max_alloc_bytes, _SHADOW_BYTES)
+    reach = _matte_reach(size, spread) if math.isfinite(spread) else size
+    return _cast_canvas(bbox, dx, dy, reach, max_alloc_bytes, _SHADOW_BYTES)
 
 
 def outer_glow_bbox(
@@ -1303,11 +1310,14 @@ def outer_glow_bbox(
 
     A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the
     glow's size on every side, with the same fringe, and raising the same
-    way. A gradient glow is checked against what painting its gradient peaks
+    way, and as far as a softer glow's spread reaches (:py:func:`_matte_reach`).
+    A gradient glow is checked against what painting its gradient peaks
     at, which is more than the falloff it is laid along. Raises as
     :py:func:`glow_geometry` does for a size it cannot read.
     """
-    size, _, _ = glow_geometry(desc)
+    size, spread, _ = glow_geometry(desc)
+    if _enum(desc, Key.GlowTechnique) != Enum.PreciseMatte:
+        size = _matte_reach(size, spread)
     per_pixel = _GLOW_GRADIENT_BYTES if Key.Gradient in desc else _SHADOW_BYTES
     return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, per_pixel)
 
@@ -1516,6 +1526,85 @@ def _spread(alpha: np.ndarray, pixels: int) -> np.ndarray:
     return np.where(inside, np.float32(1.0), grown).astype(np.float32)
 
 
+def _hard_steps(pixels: int) -> tuple[int, int, int]:
+    """The axis, diagonal and knight steps of a spread that leaves no blur.
+
+    Photoshop grows such a matte in an 8-bit field that holds ``pixels + 1``
+    pixels: an axis step costs ``255 / (pixels + 1)`` of it and the other
+    two that times their length, each rounded down. Past 254 pixels the step
+    would round to nothing; Photoshop's sizes stop at 250.
+    """
+    unit = 255.0 / (min(pixels, 254) + 1)
+    return math.floor(unit), math.floor(unit * _DIAGONAL), math.floor(unit * _KNIGHT)
+
+
+@functools.cache
+def _hard_starts(pixels: int) -> np.ndarray:
+    """What each 8-bit coverage level starts a hard spread's field at.
+
+    The share of an axis step a pixel's coverage leaves open: Photoshop adds
+    a 255th of the step per level under 255, summing in doubles, and rounds
+    each sum down.
+    """
+    step = 255.0 / (min(pixels, 254) + 1) / 255.0
+    starts = np.empty(256, dtype=np.float64)
+    total = 0.0
+    for level in range(255, -1, -1):
+        starts[level] = math.floor(total)
+        total += step
+    return starts
+
+
+def _hard_reach(pixels: int) -> int:
+    """How far past the silhouette a hard spread of ``pixels`` covers anything."""
+    return 254 // _hard_steps(pixels)[0]
+
+
+def _hard_spread(alpha: np.ndarray, pixels: int, outside: float) -> np.ndarray:
+    """``alpha`` grown by ``pixels`` when nothing of the size is left to blur.
+
+    Photoshop does not grow such a matte as :py:func:`_spread` does but in
+    whole steps of an 8-bit field (:py:func:`_hard_steps`): each pixel
+    :py:func:`_spread` counts as covered starts it at
+    :py:func:`_hard_starts`, every other pixel at the least start plus
+    chamfer path, and the matte is ``255 - field`` stretched by 255 over an
+    axis step, rounded up. The rounded step makes the grown edge reach up to
+    a pixel further than ``pixels``, more for a larger spread, and 254
+    pixels from 127 on. What lies past the canvas is ``outside``.
+    """
+    axis, diagonal, knight = _hard_steps(pixels)
+    alpha = np.clip(alpha, 0.0, 1.0)
+    pad = 1 if outside > 0.0 else 0
+    if pad:
+        alpha = np.pad(alpha, 1, constant_values=outside)
+    inside = alpha >= _SPREAD_FLOOR * (1.0 - 1e-6)
+    grown = np.zeros(alpha.shape, dtype=np.float32)
+    if inside.any():
+        height, width = alpha.shape
+        rows, cols = np.nonzero(inside)
+        span = _hard_reach(pixels) + 1
+        crop = (
+            slice(max(rows.min() - span, 0), min(rows.max() + span + 1, height)),
+            slice(max(cols.min() - span, 0), min(cols.max() + span + 1, width)),
+        )
+        levels = np.rint(alpha[crop] * 255.0).astype(np.intp)
+        field = np.where(inside[crop], _hard_starts(pixels)[levels] / axis, np.inf)
+        field = _chamfer_relax(field, diagonal / axis, knight / axis)
+        # The field holds whole steps; rint undoes the division's rounding.
+        stretched = np.ceil((255.0 - np.rint(field * axis)) * 255.0 / axis)
+        grown[crop] = np.clip(stretched, 0.0, 255.0) / 255.0
+    return grown[1:-1, 1:-1] if pad else grown
+
+
+def _matte_reach(size: float, spread: float) -> float:
+    """How far a shadow's or softer glow's matte reaches past its silhouette."""
+    size = max(float(size), 0.0)
+    pixels = _spread_pixels(size, spread)
+    if pixels > 0 and size <= pixels:
+        return max(size, float(_hard_reach(pixels)))
+    return size
+
+
 def draw_drop_shadow(
     viewport: tuple[int, int, int, int],
     shape: np.ndarray,
@@ -1654,7 +1743,7 @@ def draw_inner_shadow(
 
 
 def _spread_matte(
-    alpha: np.ndarray, size: float, spread: float
+    alpha: np.ndarray, size: float, spread: float, outside: float = 0.0
 ) -> tuple[np.ndarray, float]:
     """``alpha`` grown by the spread, and what is left of the size to blur it by.
 
@@ -1663,14 +1752,19 @@ def _spread_matte(
     whole pixels (:py:func:`_spread_pixels`) *grow* the silhouette's coverage
     before the blur (:py:func:`_spread`), and the blur takes what is left
     of ``size``, so the matte turns hard-edged at 100%, and a feathered
-    edge is hardened by a spread of a pixel.
+    edge is hardened by a spread of a pixel. A spread that leaves nothing
+    to blur grows as :py:func:`_hard_spread` says, ``outside`` past the canvas.
     """
     alpha = alpha.astype(np.float32)
     size = max(float(size), 0.0)
     pixels = _spread_pixels(size, spread)
+    radius = max(size - pixels, 0.0)
     if pixels > 0:
-        alpha = _spread(alpha, pixels)
-    return alpha, max(size - pixels, 0.0)
+        if radius > 0.0:
+            alpha = _spread(alpha, pixels)
+        else:
+            alpha = _hard_spread(alpha, pixels, outside)
+    return alpha, radius
 
 
 def _shadow_matte(
@@ -1684,7 +1778,7 @@ def _shadow_matte(
     (:py:func:`_signed_distance`), so a tail that holds half a level of the
     document's alpha moves the stroke out by up to a pixel.
     """
-    alpha, radius = _spread_matte(alpha, size, spread)
+    alpha, radius = _spread_matte(alpha, size, spread, outside)
     return _tent_blur(alpha, radius, outside)
 
 

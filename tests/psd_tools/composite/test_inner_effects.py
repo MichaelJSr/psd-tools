@@ -416,7 +416,11 @@ def test_an_inner_shadow_follows_the_global_light() -> None:
 
 
 def test_a_full_choke_glows_a_hard_ring_inside_the_edge() -> None:
-    """A white glow at full choke whitens the 3 px inside the edge, and no more."""
+    """A white glow at full choke whitens the 3 px inside the edge and a sliver.
+
+    The sliver is the 13 levels Photoshop's 8-bit steps leave of the next
+    pixel (``effects/hard-spread.psd``), doubled by the 50% range.
+    """
     psd, layer = _square()
     _forge(layer, Klass.InnerGlow, ChokeMatte=100.0, Blur=3.0)
     color, _ = _render(psd)
@@ -424,7 +428,9 @@ def test_a_full_choke_glows_a_hard_ring_inside_the_edge() -> None:
     middle = (top + bottom) // 2
     row = color[middle, left:right]
     assert np.allclose(row[:3], 1.0) and np.allclose(row[-3:], 1.0)
-    assert np.allclose(row[3:-3], (0.0, 0.0, 1.0))
+    sliver = (26.0 / 255.0, 26.0 / 255.0, 1.0)
+    assert np.allclose(row[3], sliver) and np.allclose(row[-4], sliver)
+    assert np.allclose(row[4:-4], (0.0, 0.0, 1.0))
 
 
 @pytest.mark.parametrize(
