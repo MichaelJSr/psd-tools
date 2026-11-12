@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Outer glows with a gradient cover what Photoshop 2023 covers: a
+  gradient fading from opaque to clear in two stops covers the glow's falloff
+  as a solid colour does (wherever its stops sit), with its noise, which
+  moves the coverage and never the colour; any other gradient is full where
+  its matte reaches 12% (25/3 times the matte, was 8), held under its
+  transparency. **Rendering change**
 - [fix] A type layer drawn from its stored raster (font substituted, text
   data without ``bounds``, or mixed straight: pinned so by
   ``layer_text_gamma``, ``text_gamma=None`` or the preview) is a pixel layer
