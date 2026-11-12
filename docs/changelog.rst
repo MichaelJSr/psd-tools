@@ -14,13 +14,6 @@ Changelog
   one the cache hashed under another mark (the same card opened again, its
   saved copy reopened) is compared with it and takes its digest instead of
   being hashed again. Keys and renders are unchanged
-- [fix] 8-bit documents: Hue/Saturation with the master alone at hue 0
-  and saturation 0 or -100 works in whole levels, as Photoshop 2023 does:
-  lightness scales each channel's level by a whole-level ``K / 255``
-  (toward black below 0, toward white above), rounded, and desaturation
-  then sets every channel to the floored midrange of the three. Exact on
-  every colour for desaturation; other settings, colour ranges, colorize
-  and other depths keep the old model. **Rendering change**
 - [fix] Colour (SVG) glyphs: gradients are sampled at each pixel's
   top-left corner from a 256-entry table (``rint(t x 255)``), and Strong
   text's fills take their colour from touch samples (a sample counts where
