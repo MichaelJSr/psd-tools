@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] An 8-bit pattern scaled in an 8-bit document is drawn in whole levels,
+  as Photoshop 2023 draws it: each halving of a reduction rounds
+  ``(a + b + c + d + 2) >> 2``, three halvings at most (below 12.5% the third
+  is sampled further apart), and the bilinear blend weighs in 256ths and
+  rounds once. Igor's 7% Headtowski overlay was 0.2 levels dark, which Darker
+  Color turned into 27 whole-pixel flips (up to 183 levels); it now matches.
+  Patterns at 100% are unchanged. **Rendering change**
 - [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
   of the document's own profile, its colorants adapted to D65 by Bradford,
   as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp
