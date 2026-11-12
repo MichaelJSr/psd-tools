@@ -4,6 +4,11 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A shape with no stored pixels is filled wherever its path covers,
+  not only inside its box, which truncates the origination box and can
+  stop a row short of an Align Edges path (Old_Chica, Uumuu, Green_Mage,
+  Bobberlington: a missing or transparent row now matches Photoshop 2023),
+  in box renders too. **Rendering change**
 - [fix] A drop shadow, softer outer glow, inner shadow or softer inner glow
   whose spread or choke takes its whole size grows as Photoshop 2023 does:
   in whole steps of an 8-bit field holding the size and a pixel, so its edge

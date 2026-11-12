@@ -974,8 +974,8 @@ def test_a_centered_stroke_shows_through_a_transparent_fill(
     """The stroke is its own coverage wherever the fill leaves none (#937)."""
     real = paint_module.create_fill
 
-    def transparent(layer: Layer, bbox: tuple[int, int, int, int]):  # type: ignore[no-untyped-def]
-        color, _ = real(layer, bbox)
+    def transparent(layer: Layer, bbox: tuple[int, int, int, int], *anchor):  # type: ignore[no-untyped-def]
+        color, _ = real(layer, bbox, *anchor)
         return color, np.zeros((bbox[3] - bbox[1], bbox[2] - bbox[0], 1), np.float32)
 
     monkeypatch.setattr(paint_module, "create_fill", transparent)
@@ -998,8 +998,8 @@ def test_a_half_covered_fill_under_a_half_opaque_stroke_composites_once(
     """
     real = paint_module.create_fill
 
-    def half(layer: Layer, bbox: tuple[int, int, int, int]):  # type: ignore[no-untyped-def]
-        color, _ = real(layer, bbox)
+    def half(layer: Layer, bbox: tuple[int, int, int, int], *anchor):  # type: ignore[no-untyped-def]
+        color, _ = real(layer, bbox, *anchor)
         return color, np.full(
             (bbox[3] - bbox[1], bbox[2] - bbox[0], 1), 0.5, np.float32
         )

@@ -4050,7 +4050,8 @@ class Compositor:
         a stroke reaches outside the layer: a layer whose own box has cleared
         the viewport can still paint the part of its stroke that falls back
         inside, and rejecting it here would lose the stroke along with the
-        layer (#815). A drop shadow reaches out the same way. ``_effect_reach()``
+        layer (#815). A drop shadow reaches out the same way, and so does a
+        fill drawn from its path past its box (:py:meth:`_fill_box`). ``_effect_reach()``
         rather than ``_paint_bbox()`` because the group half of that
         measurement is unreachable from here: a group is exempt from the cull,
         so the box is only ever measured for a layer that has no contents to
@@ -4070,9 +4071,12 @@ class Compositor:
         if self._layer_filter is not None and not self._layer_filter(layer):
             logger.debug("Ignore %s", layer)
             return False
-        if not (
-            isinstance(layer, AdjustmentLayer) or layer.is_group()
-        ) and utils.intersect(self._viewport, _effect_reach(layer)) == (0, 0, 0, 0):
+        if (
+            not (isinstance(layer, AdjustmentLayer) or layer.is_group())
+            and utils.intersect(self._viewport, _effect_reach(layer)) == (0, 0, 0, 0)
+            and utils.intersect(self._viewport, self._fill_box(layer, self._viewport))
+            == (0, 0, 0, 0)
+        ):
             logger.debug("Out of viewport %s", layer)
             return False
         # A clipping layer is composited by its base, through _apply_clip_layers().
@@ -5364,13 +5368,18 @@ class Compositor:
         share = (1.0 - a) / (2.0 - a)
         return color + share * (isolated.result_isolated() - color)
 
-    def _read_object(self, layer: Layer) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def _read_object(
+        self, layer: Layer, box: tuple[int, int, int, int] | None = None
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
         """The layer's own color and coverage, on ``layer.bbox`` and unpasted.
 
         Split out of :py:meth:`_get_object` so a stroke effect can re-read the
         coverage on the box it draws on rather than on this compositor's
         viewport (#804), without restating which of the two sources -- stored
         pixels or a redrawn fill -- this layer's arrays come from.
+
+        A redrawn fill is drawn on ``box`` (:py:meth:`_fill_box`), laid out on
+        ``layer.bbox``.
         """
         color = layer.numpy("color")
         # The colour array stays live through the shape read, so it is charged
@@ -5379,9 +5388,10 @@ class Compositor:
             numpy_io.check_shape_read(layer, numpy_io._backing_bytes(color))
         shape = layer.numpy("shape")
         if (self._force or not layer.has_pixels()) and utils.has_fill(layer):
-            color, shape = paint.create_fill(layer, layer.bbox)
+            box = layer.bbox if box is None else box
+            color, shape = paint.create_fill(layer, box, layer.bbox)
             if shape is None:
-                shape = np.ones((layer.height, layer.width, 1), dtype=np.float32)
+                shape = np.ones((box[3] - box[1], box[2] - box[0], 1), dtype=np.float32)
         elif color is not None and isinstance(layer, SmartObjectLayer):
             memo = self._cache.unfiltered
             if memo is not None and memo[0] is layer:
@@ -5391,6 +5401,31 @@ class Compositor:
             if color is not stored:
                 self._cache.unfiltered = (layer, color, shape)
         return color, shape
+
+    @staticmethod
+    def _fill_box(
+        layer: Layer, viewport: tuple[int, int, int, int]
+    ) -> tuple[int, int, int, int]:
+        """The box :py:meth:`_read_object` draws a layer's fill on.
+
+        ``layer.bbox``, joined on ``viewport`` by the path's drawn box for a
+        filled layer with a path and no stored pixels: its box is the
+        origination box truncated to whole pixels, which can stop a row short
+        of what the path covers (Align Edges snaps the path outward).
+        """
+        box = layer.bbox
+        if (
+            box[0] >= box[2]
+            or box[1] >= box[3]
+            or layer.has_pixels()
+            or not utils.has_fill(layer)
+            or not layer.has_vector_mask()
+        ):
+            return box
+        mask = layer.vector_mask
+        if mask is None or mask.disabled:
+            return box
+        return utils.union_bbox(box, utils.intersect(_drawn_bbox(layer), viewport))
 
     def _read_rows(
         self, layer: Layer, viewport: tuple[int, int, int, int], color: bool = True
@@ -5559,9 +5594,10 @@ class Compositor:
         if rows is None:
             if alone:
                 color, own_shape = self._read_shape(layer)
+                box = layer.bbox
             else:
-                color, own_shape = self._read_object(layer)
-            box = layer.bbox
+                box = self._fill_box(layer, viewport)
+                color, own_shape = self._read_object(layer, box)
         else:
             color, own_shape, box = rows
             del rows
