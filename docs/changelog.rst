@@ -4,6 +4,11 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] A feathered mask is blurred once per content (its bytes, box,
+  feather and background) and kept read-only in a process-wide memo of up
+  to 64 MiB: later passes, box renders and other copies of the document
+  reuse it, and a thread asking for one being blurred waits for it. Renders
+  are unchanged
 - [refactor] PSB documents opened from bytes keep their layers' tagged
   blocks as bytes until read, as PSD documents do (8-byte lengths
   included), and read their layer records in a few struct reads. An
