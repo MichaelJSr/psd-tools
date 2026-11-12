@@ -13,6 +13,10 @@ Changelog
   smart object with a filter mask: an all-white mask reads as a plain layer,
   and any other mask blends the unfiltered source on that part alone, as the
   whole box decides. Renders are unchanged
+- [fix] 8-bit documents: a layer's alpha times its opacity and mask is
+  rounded to whole levels before it blends, as Photoshop 2023 does (50% over
+  a soft edge blends at round(a x 128 / 255)). Groups, layers with effects,
+  fill opacity and other depths keep the float product. **Rendering change**
 - [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
   as drop shadows do (matte and opacity held at 8 bits, their product
   rounded), and colour, gradient and pattern overlays and stroke effects

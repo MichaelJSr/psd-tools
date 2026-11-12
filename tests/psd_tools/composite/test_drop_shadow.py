@@ -1821,7 +1821,9 @@ def test_a_redrawn_shape_casts_what_it_is_resolved_to(
     )
     source = compositor._resolve_source(layer)
     silhouette = compositor._cast_shape(layer, viewport)
-    assert np.allclose(silhouette, source.alpha / source.opacity, atol=1e-6)
+    # Its shadow off, the 8-bit layer has no style: its alpha is held.
+    held = _held(silhouette * source.opacity, layer._psd.depth)
+    assert np.allclose(held, source.alpha, atol=1e-6)
     assert float(silhouette[height // 2, width // 2, 0]) == float(fill_enabled)
     assert silhouette.max() > 0.0, "the stroke casts"
 

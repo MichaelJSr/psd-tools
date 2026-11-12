@@ -218,6 +218,23 @@ def _held(alpha: np.ndarray, depth: int) -> np.ndarray:
     return (np.floor(alpha * _LEVELS_8 + 0.5) / _LEVELS_8).astype(np.float32)
 
 
+def _holds_alpha(
+    layer: Layer, is_group: bool, mask: float | np.ndarray, opacity: float
+) -> bool:
+    """Whether the layer's alpha times its opacity and mask goes on at whole levels.
+
+    In an 8-bit document Photoshop 2023 rounds that product before it blends
+    (the canvas itself stays float here). Groups and styled layers keep the
+    float product; :py:func:`_held` leaves other depths be.
+    """
+    return (
+        not is_group
+        and layer._psd.depth == 8
+        and (opacity < 1.0 or not isinstance(mask, float))
+        and not _has_enabled_effects(layer)
+    )
+
+
 def _faded_at_8_bits(coverage: np.ndarray, percent: float, depth: int) -> np.ndarray:
     """A shadow's ``coverage`` faded by its opacity ``percent``, in 8-bit steps.
 
@@ -4329,6 +4346,8 @@ class Compositor:
             # The fill's share and the stroke's are disjoint, so they add.
             shape = np.minimum(shape + stroke[0] * stroke_mask, 1.0)
             alpha = np.minimum(alpha + stroke[1] * stroke_mask * opacity, 1.0)
+        if _holds_alpha(layer, is_group, mask, opacity):
+            alpha = _held(alpha, layer._psd.depth)
         if region is None:
             # An object's effects cover its shape, the redrawn stroke included.
             # A group with no style to draw never has its region read.
