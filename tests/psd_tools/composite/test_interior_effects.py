@@ -286,7 +286,8 @@ def test_a_normal_stroke_knocks_the_layer_out_under_it(style: bytes) -> None:
         )
         renders.append(composite(psd)[0])
 
-    band = 0.5 * _rgb((255, 255, 255)) + 0.5 * _rgb(_BACKDROP)
+    t = 128 / 255.0  # 50% at 8 bits
+    band = t * _rgb((255, 255, 255)) + (1.0 - t) * _rgb(_BACKDROP)
     expected = _faded(band, opacity / 255.0)[0, 0]
     for render in renders:
         assert np.allclose(render[20, 11], expected, atol=1e-5)

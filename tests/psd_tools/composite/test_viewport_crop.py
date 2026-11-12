@@ -147,6 +147,51 @@ def test_a_viewport_render_is_the_full_render_cropped(
             assert np.array_equal(full[top:bottom, left:right], cut), (name, box)
 
 
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "effects/effect-noise-cone.psd",
+        "effects/group-stroke-shadow-tail.psd",
+        "effects/outer-glow-faint.psd",
+        "effects/outer-glow-laws.psd",
+        "effects/spread-cone.psd",
+        "layer_comps.psb",
+        "layer_params.psb",
+    ],
+)
+def test_a_spread_matte_on_a_box_is_the_whole_one_cropped(filename: str) -> None:
+    """Small boxes across each spread layer's edges, where the spread grows."""
+    psd = PSDImage.open(full_name(filename))
+    whole = composite(psd)
+    boxes: list[_Box] = []
+    for layer in _styled(psd):
+        if not any(
+            float(effect.descriptor.get(Key.ChokeMatte, 0.0)) > 0.0
+            and float(effect.descriptor.get(Key.Blur, 0.0)) > 0.0
+            for effect in layer.effects
+            if effect.enabled
+        ):
+            continue
+        left, top, right, bottom = layer.bbox
+        middle_x, middle_y = (left + right) // 2, (top + bottom) // 2
+        for box in (
+            (left - 6, middle_y - 5, left + 9, middle_y + 5),
+            (middle_x - 4, top - 7, middle_x + 4, top + 6),
+            (right - 8, bottom - 8, right + 8, bottom + 8),
+        ):
+            clamped = _clamp(box, psd.viewbox)
+            if clamped is not None:
+                boxes.append(clamped)
+    assert boxes
+    for box in boxes:
+        left, top, right, bottom = box
+        part = composite(psd, viewport=box)
+        for name, full, cut in zip(
+            ("color", "shape", "alpha"), whole, part, strict=True
+        ):
+            assert np.array_equal(full[top:bottom, left:right], cut), (name, box)
+
+
 def test_within_reach_cuts_a_box_to_the_viewport_grown_by_the_reach() -> None:
     assert _within_reach((0, 0, 100, 100), (40, 40, 60, 60), 5) == (35, 35, 65, 65)
     # A box already within reach is left alone.
@@ -190,10 +235,10 @@ def test_a_cast_mattes_reach_is_its_blur_and_its_offset() -> None:
     assert effects.cast_reach(3.0, 45.0, 0.5, 0.0) == 6
 
 
-def test_a_spread_matte_reads_its_whole_box() -> None:
-    """A spread matte is drawn on its whole box."""
-    assert effects.cast_reach(0.0, 0.0, 2.0, 10.0) is None
-    assert effects.glow_reach(2.0, 10.0, precise=False) is None
+def test_a_spread_matte_reads_a_pixel_further() -> None:
+    assert effects.cast_reach(0.0, 0.0, 2.0, 10.0) == 6
+    assert effects.cast_reach(4.0, 90.0, 2.0, 100.0) == 10
+    assert effects.glow_reach(2.0, 10.0, precise=False) == 6
     # A size of zero is not spread at all.
     assert effects.cast_reach(3.0, 90.0, 0.0, 69.0) == 6
 
@@ -243,26 +288,43 @@ def _record_boxes(
 
 
 @pytest.mark.parametrize(
-    "layer_name, kind, drawn_by",
+    "filename, layer_name, kind, drawn_by",
     [
-        ("Drop Shadow", "dropshadow", "draw_drop_shadow"),
-        ("Stroke", "stroke", "draw_stroke_effect_split"),
-        ("Outer Glow", "outerglow", "glow_paint"),
-        ("Inner Shadow", "innershadow", "draw_inner_shadow"),
-        ("Inner Glow", "innerglow", "draw_inner_glow"),
+        ("layer_effects.psd", "Drop Shadow", "dropshadow", "draw_drop_shadow"),
+        ("layer_effects.psd", "Stroke", "stroke", "draw_stroke_effect_split"),
+        ("layer_effects.psd", "Outer Glow", "outerglow", "glow_paint"),
+        ("layer_effects.psd", "Inner Shadow", "innershadow", "draw_inner_shadow"),
+        ("layer_effects.psd", "Inner Glow", "innerglow", "draw_inner_glow"),
+        ("effects/spread-cone.psd", "DrSh 8 50%", "dropshadow", "draw_drop_shadow"),
+        ("effects/spread-cone.psd", "IrSh 4 28%", "innershadow", "draw_inner_shadow"),
+        ("effects/spread-cone.psd", "OrGl 4 28%", "outerglow", "glow_paint"),
     ],
-    ids=["drop shadow", "stroke", "outer glow", "inner shadow", "inner glow"],
+    ids=[
+        "drop shadow",
+        "stroke",
+        "outer glow",
+        "inner shadow",
+        "inner glow",
+        "spread drop shadow",
+        "choked inner shadow",
+        "spread outer glow",
+    ],
 )
 def test_a_small_viewport_draws_an_effect_on_a_box_near_it(
-    layer_name: str, kind: str, drawn_by: str, monkeypatch: pytest.MonkeyPatch
+    filename: str,
+    layer_name: str,
+    kind: str,
+    drawn_by: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The cost of a viewport render follows the viewport, not the layer.
 
-    Each styled row of ``layer_effects.psd`` is far wider than the window
-    asked for inside it; its effect is drawn on a box no further from that
-    window than the effect's reach, and so narrower than the layer.
+    Each styled row of ``layer_effects.psd`` and ``spread-cone.psd`` is far
+    wider than the window asked for inside it; its effect is drawn on a box
+    no further from that window than the effect's reach, and so narrower
+    than the layer.
     """
-    psd = PSDImage.open(full_name("layer_effects.psd"))
+    psd = PSDImage.open(full_name(filename))
     layer = next(sub for sub in psd.descendants() if sub.name == layer_name)
     effect = cast(_Cut, next(iter(layer.effects.find(kind))))
     reach = _reach(effect)

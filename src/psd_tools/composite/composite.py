@@ -41,6 +41,7 @@ from psd_tools.api.layers import (
     SmartObjectLayer,
     TypeLayer,
 )
+from psd_tools.api.mask import Mask
 from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import (
@@ -155,6 +156,11 @@ def _styled(effects: Iterator[Any]) -> Iterator[_StyledEffect]:
 # allows.
 _CANVAS_GROWTH = 4
 
+# How far a mask feather's gaussian reaches, in sigmas (scipy's default).
+_FEATHER_TRUNCATE = 4.0
+# The Properties panel's largest feather, in pixels: past it a file is forged.
+_FEATHER_MAX = 1000.0
+
 
 # The layer modes whose compositing keeps ``1 - alpha`` of the backdrop, which
 # an outer glow's cut under a partial pixel relies on. Dissolve is drawn as
@@ -212,6 +218,23 @@ def _held(alpha: np.ndarray, depth: int) -> np.ndarray:
     return (np.floor(alpha * _LEVELS_8 + 0.5) / _LEVELS_8).astype(np.float32)
 
 
+def _holds_alpha(
+    layer: Layer, is_group: bool, mask: float | np.ndarray, opacity: float
+) -> bool:
+    """Whether the layer's alpha times its opacity and mask goes on at whole levels.
+
+    In an 8-bit document Photoshop 2023 rounds that product before it blends
+    (the canvas itself stays float here). Groups and styled layers keep the
+    float product; :py:func:`_held` leaves other depths be.
+    """
+    return (
+        not is_group
+        and layer._psd.depth == 8
+        and (opacity < 1.0 or not isinstance(mask, float))
+        and not _has_enabled_effects(layer)
+    )
+
+
 def _faded_at_8_bits(coverage: np.ndarray, percent: float, depth: int) -> np.ndarray:
     """A shadow's ``coverage`` faded by its opacity ``percent``, in 8-bit steps.
 
@@ -225,6 +248,18 @@ def _faded_at_8_bits(coverage: np.ndarray, percent: float, depth: int) -> np.nda
     level = np.floor(coverage * _LEVELS_8 + 0.5)
     opacity = math.floor(percent * _LEVELS_8 / 100.0 + 0.5)
     return (np.floor(level * opacity / _LEVELS_8 + 0.5) / _LEVELS_8).astype(np.float32)
+
+
+def _opacity_at_8_bits(percent: float, depth: int) -> float:
+    """An effect's opacity ``percent`` as a fraction, a whole level at 8 bits.
+
+    Rounded as :py:func:`_faded_at_8_bits` does, halves up: 50% is 128/255.
+    Other depths, and a value that is not finite, read as is.
+    """
+    level = percent * _LEVELS_8 / 100.0
+    if depth != 8 or not math.isfinite(level):
+        return percent / 100.0
+    return math.floor(level + 0.5) / _LEVELS_8
 
 
 def _isolates_adjustments(layer: Layer) -> bool:
@@ -477,7 +512,7 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     return mixes
 
 
-def _stroke_paint(effect: _StyledEffect) -> float:
+def _stroke_paint(effect: _StyledEffect, depth: int) -> float:
     """How much of its band a stroke effect paints over what lies beneath.
 
     Its opacity in Normal or Dissolve; nothing in another mode, which lets
@@ -486,7 +521,7 @@ def _stroke_paint(effect: _StyledEffect) -> float:
     try:
         if effect.blend_mode not in _COVERS_BENEATH:
             return 0.0
-        share = effect.opacity / 100.0
+        share = _opacity_at_8_bits(effect.opacity, depth)
     except _UNREADABLE:
         return 0.0
     return min(max(share, 0.0), 1.0) if math.isfinite(share) else 0.0
@@ -854,6 +889,23 @@ def _path_bbox(layer: Layer) -> tuple[int, int, int, int]:
         return layer.bbox
 
 
+def _vector_stroke_box(
+    layer: Layer, width: int, viewport: tuple[int, int, int, int]
+) -> tuple[int, int, int, int]:
+    """The box a vector stroke's fill is drawn on: ``width`` past the layer and the path.
+
+    ``layer.bbox`` can stop short of the path (an origination box is
+    truncated), so the path's box joins it on ``viewport``, a pixel wider for
+    its rounding.
+    """
+    left, top, right, bottom = layer.bbox
+    own = (left - width, top - width, right + width, bottom + width)
+    left, top, right, bottom = _path_bbox(layer)
+    reach = width + 1
+    path = (left - reach, top - reach, right + reach, bottom + reach)
+    return utils.union_bbox(own, utils.intersect(path, viewport))
+
+
 def _vector_stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     """``layer.bbox`` grown by the width of a centred or outer vector stroke.
 
@@ -875,16 +927,41 @@ def _vector_stroke_reach(layer: Layer) -> tuple[int, int, int, int]:
     return (bbox[0] - width, bbox[1] - width, bbox[2] + width, bbox[3] + width)
 
 
+def _mask_feather(mask: Mask) -> float:
+    """The user mask's Properties feather: its gaussian's sigma in pixels, or 0.0.
+
+    A real mask is read as stored: no card has one under a feather. So is a
+    feather past :data:`_FEATHER_MAX`.
+    """
+    parameters = mask.parameters
+    feather = parameters.user_mask_feather if parameters is not None else None
+    if feather is None or mask.has_real() or not 0.0 < feather <= _FEATHER_MAX:
+        return 0.0
+    return float(feather)
+
+
+def _feather_box(mask: Mask, sigma: float) -> tuple[int, int, int, int]:
+    """The mask's box grown by as far as a feather of ``sigma`` spreads it.
+
+    An empty box stays empty: the blur of the background is the background.
+    """
+    left, top, right, bottom = mask.bbox
+    if left >= right or top >= bottom:
+        return mask.bbox
+    reach = math.ceil(_FEATHER_TRUNCATE * sigma)
+    return left - reach, top - reach, right + reach, bottom + reach
+
+
 def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
     """The box a layer's style is laid out on and its silhouette read from.
 
     ``layer.bbox``, except for an adjustment layer, which has no pixels of its
     own: its mask is its shape, so the mask's box stands in -- empty when the
-    mask hides everything -- and the whole canvas where there is no mask or
-    the mask reveals what lies outside its box. A vector mask narrows it as
-    it narrows the shape. A mask under full density reveals the layer
-    everywhere, as :py:meth:`Compositor._get_mask` folds it in, and narrows
-    nothing.
+    mask hides everything, grown by a feather's reach -- and the whole canvas
+    where there is no mask or the mask reveals what lies outside its box. A
+    vector mask narrows it as it narrows the shape. A mask under full density
+    reveals the layer everywhere, as :py:meth:`Compositor._get_mask` folds it
+    in, and narrows nothing.
     """
     if not isinstance(layer, AdjustmentLayer):
         return layer.bbox
@@ -902,7 +979,8 @@ def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
         and mask.background_color == 0
         and user_density in (None, 255)
     ):
-        bbox = mask.bbox
+        sigma = _mask_feather(mask)
+        bbox = _feather_box(mask, sigma) if sigma else mask.bbox
     vector = layer.vector_mask if layer.has_vector_mask() else None
     if (
         vector is not None
@@ -1137,6 +1215,10 @@ _ContentBBoxes = dict[int, tuple[int, int, int, int]]
 _GroupAlphas = dict[tuple[int, tuple[int, int, int, int]], np.ndarray]
 # A compositor's colour, alpha and group alpha, as they stood at some point.
 _Canvas = tuple[np.ndarray, np.ndarray, np.ndarray]
+# A smart filter mask's box and plane, the value past it, and the source.
+_UnfilterPlan = tuple[
+    tuple[_Box, np.ndarray], float, tuple[_Box, np.ndarray, np.ndarray | None]
+]
 
 
 @dataclass
@@ -1210,6 +1292,8 @@ class _PassCache:
     :py:func:`_unfilter_under_mask` blended, with the result: each effect cast
     from the layer reads it again, and the blend decodes the document's
     ``FEid`` planes. It holds the layer itself, and one layer's pixels.
+    ``unfilter_plans`` holds, per smart object a part of the box reads,
+    :py:func:`_whole_unfilter_plan`: the mask and source, uint8.
 
     ``stroke_bands`` carries a stroke's band from the drop shadow's knockout to
     the stroke drawn after it (:py:func:`effects.stroke_band`).
@@ -1226,6 +1310,7 @@ class _PassCache:
     group_alphas: _GroupAlphas = field(default_factory=dict)
     scipy_warned: bool = False
     unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
+    unfilter_plans: dict[int, _UnfilterPlan | None] = field(default_factory=dict)
     text: _TextBlend = field(default_factory=_TextBlend)
     stroke_bands: dict = field(default_factory=dict)
     change_bboxes: _ContentBBoxes = field(default_factory=dict)
@@ -1361,8 +1446,8 @@ def _reads_near(layer: Layer) -> bool:
     """Whether each effect ``layer`` draws reads only near its silhouette.
 
     So a box around part of its contents draws, there, what the whole box
-    does: no spread matte, gradient or pattern stroke, overlay but a colour,
-    satin or bevel, all of which read their whole box.
+    does: no gradient or pattern stroke, overlay but a colour, satin or
+    bevel, all of which read their whole box, and no effect it cannot read.
     """
     if not _has_enabled_effects(layer):
         return True
@@ -1379,14 +1464,10 @@ def _reads_near(layer: Layer) -> bool:
                 if stroke_reach(effect.descriptor) is None:
                     return False
             elif isinstance(effect, (DropShadow, InnerShadow)):
-                geometry = shadow_geometry(effect.descriptor, effect.angle)
-                if geometry.size > 0.0 and geometry.spread > 0.0:
-                    return False
+                # Read for what it raises.
+                shadow_geometry(effect.descriptor, effect.angle)
             elif isinstance(effect, (OuterGlow, InnerGlow)):
-                size, spread, _ = glow_geometry(effect.descriptor)
-                precise = effect.glow_type == GlowTechnique.PRECISE_MATTE
-                if glow_reach(size, spread, precise) is None:
-                    return False
+                glow_geometry(effect.descriptor)
             else:
                 return False
     except _UNREADABLE:
@@ -3522,8 +3603,9 @@ def _remix(
 # one plane holds palette indices, not grey levels.
 _TEXTURE_PLANES = {ColorMode.RGB: 3, ColorMode.GRAYSCALE: 1}
 
-# Float32 planes of ``layer.bbox`` that _blend_unfiltered() allocates at its
-# peak, beside the arrays it is given.
+# Float32 planes of ``layer.bbox`` that _blend_unfiltered()'s numpy steps
+# allocate at their peak, beside the arrays it is given. The compiled loop
+# takes 4, but the budget check counts these either way.
 _UNFILTER_PLANES = 8
 
 
@@ -3539,31 +3621,125 @@ def _unfilter_under_mask(
     block leaves the stored pixels as they are.
     """
     try:
-        so = layer.smart_object
-        if (
-            layer._psd.color_mode != ColorMode.RGB
-            or color.shape[-1] != 3
-            or not (so.has_enabled_filters and so.filter_mask_enabled)
-        ):
-            return color, shape
         held = sum(numpy_io._backing_bytes(a) for a in (color, shape) if a is not None)
-        mask = so._filter_mask(held)
-        if mask is None:
+        found = _unfilter_plan(layer, color.shape[-1], held)
+        if found is None:
             return color, shape
-        box = layer.bbox
-        fill = 255.0 if so.filter_mask_extends_white else 0.0
-        weight = paste(box, mask[0], mask[1][..., None], background=fill)
-        del mask
-        if weight.min() == 255:
-            return color, shape
-        source = so._filter_source(held + numpy_io._backing_bytes(weight))
-        if source is None:
-            return color, shape
+        (_, _, source), weight = found
+        del found
+        assert weight is not None
         weight /= 255
         return _blend_unfiltered(layer, color, shape, weight, source)
     except Exception as exc:  # the stored pixels are the safe fallback
         logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
         return color, shape
+
+
+def _unfilter_plan(
+    layer: SmartObjectLayer, channels: int, held: int, weigh: bool = True
+) -> tuple[_UnfilterPlan, np.ndarray | None] | None:
+    """What :py:func:`_unfilter_under_mask` blends with, and the mask on ``layer.bbox``.
+
+    *channels* is the stored colour's, *held* the bytes its colour and shape
+    keep live. Without *weigh* the mask is tested on its plane and not laid
+    on the box. None keeps the stored pixels. Raises as the decodes do.
+    """
+    so = layer.smart_object
+    if (
+        layer._psd.color_mode != ColorMode.RGB
+        or channels != 3
+        or not (so.has_enabled_filters and so.filter_mask_enabled)
+    ):
+        return None
+    mask = so._filter_mask(held)
+    if mask is None:
+        return None
+    fill = 255.0 if so.filter_mask_extends_white else 0.0
+    weight = None
+    if weigh:
+        weight = paste(layer.bbox, mask[0], mask[1][..., None], background=fill)
+        if weight.min() == 255:
+            return None
+    elif _white_on(layer.bbox, *mask, fill):
+        return None
+    # The mask on the box, float32, stays live across the decode.
+    source = so._filter_source(held + layer.width * layer.height * 4)
+    if source is None:
+        return None
+    return (mask, fill, source), weight
+
+
+def _white_on(box: _Box, mask_box: _Box, plane: np.ndarray, fill: float) -> bool:
+    """Whether ``paste(box, mask_box, plane[..., None], fill)`` is 255 throughout."""
+    inter = utils.intersect(box, mask_box)
+    if inter != box and fill != 255:
+        return False
+    if inter == (0, 0, 0, 0):
+        return True
+    x0, y0 = mask_box[0], mask_box[1]
+    return bool(
+        plane[inter[1] - y0 : inter[3] - y0, inter[0] - x0 : inter[2] - x0].min() == 255
+    )
+
+
+def _whole_unfilter_plan(layer: SmartObjectLayer) -> _UnfilterPlan | None:
+    """:py:func:`_unfilter_plan` for the whole read, the layer's pixels undecoded.
+
+    The whole box decides, budget included, so a part blends exactly where
+    the whole would: an all-white test on a part could pass where the whole
+    blends, and ``(s * c) / s`` is not always ``c`` in float32.
+    """
+    try:
+        channels, held = numpy_io.layer_read_size(layer)
+        found = _unfilter_plan(layer, channels, held, weigh=False)
+        if found is None:
+            return None
+        plan = found[0]
+        _, src_color, src_alpha = plan[2]
+        held += layer.width * layer.height * 4  # the mask on the box
+        held += sum(
+            numpy_io._backing_bytes(a) for a in (src_color, src_alpha) if a is not None
+        )
+        _check_unfilter(layer, layer.width, layer.height, held)
+        return plan
+    except Exception as exc:  # the stored pixels are the safe fallback
+        logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
+        return None
+
+
+def _unfilter_part(
+    layer: SmartObjectLayer,
+    color: np.ndarray,
+    shape: np.ndarray | None,
+    plan: _UnfilterPlan,
+    box: _Box,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """:py:func:`_unfilter_under_mask` on ``box``, a part of ``layer.bbox``, by the whole box's *plan*.
+
+    Every step is per pixel, so these are the whole blend's pixels on ``box``.
+    """
+    (mask_box, plane), fill, source = plan
+    try:
+        weight = paste(box, mask_box, plane[..., None], background=fill)
+        weight /= 255
+        return _blend_unfiltered(layer, color, shape, weight, source, box)
+    except Exception as exc:  # the stored pixels are the safe fallback
+        logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
+        return color, shape
+
+
+def _check_unfilter(
+    layer: SmartObjectLayer, width: int, height: int, held: int
+) -> None:
+    """Refuse :py:func:`_blend_unfiltered` on a box over the budget; *held* is its inputs' bytes."""
+    check_pixel_size(
+        width,
+        height,
+        3,
+        max_alloc_bytes=layer._psd._max_alloc_bytes,
+        estimated_bytes=held + _UNFILTER_PLANES * height * width * 4,
+        warn=False,
+    )
 
 
 def _may_unfilter(layer: SmartObjectLayer) -> bool:
@@ -3581,25 +3757,36 @@ def _blend_unfiltered(
     shape: np.ndarray | None,
     weight: np.ndarray,
     source: tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None],
+    box: _Box | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``lerp(source, stored, weight)`` with straight colour, on ``layer.bbox``.
+    """``lerp(source, stored, weight)`` with straight colour, on ``box``, by default ``layer.bbox``.
 
-    *weight* is the filter mask on the box, 1 = filtered, and is overwritten.
+    *weight* is the filter mask on the box, 1 = filtered, and may be overwritten.
     The filtered pixels stand where the source is not stored.
     """
-    box = layer.bbox
+    if box is None:
+        box = layer.bbox
     sbox, src_color, src_alpha = source
     height, width = color.shape[:2]
     inputs = (color, shape, weight, src_color, src_alpha)
-    check_pixel_size(
+    _check_unfilter(
+        layer,
         width,
         height,
-        3,
-        max_alloc_bytes=layer._psd._max_alloc_bytes,
-        estimated_bytes=sum(numpy_io._backing_bytes(a) for a in inputs if a is not None)
-        + _UNFILTER_PLANES * height * width * 4,
-        warn=False,
+        sum(numpy_io._backing_bytes(a) for a in inputs if a is not None),
     )
+    if _unfilter_fits(box, sbox, color, shape, weight, src_color, src_alpha):
+        out, alpha = _cblend.unfilter(
+            color,
+            shape,
+            weight,
+            src_color,
+            src_alpha,
+            sbox[1] - box[1],
+            sbox[0] - box[0],
+        )
+        logger.debug("Smart filter mask applied to %r", layer.name)
+        return out, alpha
     stored = np.broadcast_to(np.float32(1), (*src_color.shape[:2], 1))
     unfiltered = paste(box, sbox, stored)
     unfiltered *= 1 - weight
@@ -3620,6 +3807,38 @@ def _blend_unfiltered(
     np.copyto(out, color, where=alpha <= 0)
     logger.debug("Smart filter mask applied to %r", layer.name)
     return out, alpha
+
+
+def _unfilter_fits(
+    box: tuple[int, int, int, int],
+    sbox: tuple[int, int, int, int],
+    color: np.ndarray,
+    shape: np.ndarray | None,
+    weight: np.ndarray,
+    src_color: np.ndarray,
+    src_alpha: np.ndarray | None,
+) -> bool:
+    """Whether ``_cblend.unfilter`` takes these as :py:func:`_blend_unfiltered`'s numpy would."""
+    if _cblend is None or not hasattr(_cblend, "unfilter"):
+        return False
+    size = (box[3] - box[1], box[2] - box[0])
+    src_size = (sbox[3] - sbox[1], sbox[2] - sbox[0])
+
+    def packed(a: object, dims: tuple[int, ...]) -> bool:
+        return (
+            isinstance(a, np.ndarray)
+            and a.dtype == np.uint8
+            and a.shape == dims
+            and a.flags.c_contiguous
+        )
+
+    ones = (weight,) if shape is None else (weight, shape)
+    return (
+        utils.in_rows(ones, (color,))
+        and color.shape == (*size, 3)
+        and packed(src_color, (*src_size, 3))
+        and (src_alpha is None or packed(src_alpha, src_size))
+    )
 
 
 def _is_one(factor: float | np.ndarray) -> bool:
@@ -4138,6 +4357,8 @@ class Compositor:
             # The fill's share and the stroke's are disjoint, so they add.
             shape = np.minimum(shape + stroke[0] * stroke_mask, 1.0)
             alpha = np.minimum(alpha + stroke[1] * stroke_mask * opacity, 1.0)
+        if _holds_alpha(layer, is_group, mask, opacity):
+            alpha = _held(alpha, layer._psd.depth)
         if region is None:
             # An object's effects cover its shape, the redrawn stroke included.
             # A group with no style to draw never has its region read.
@@ -4325,13 +4546,13 @@ class Compositor:
     def _traces_mask(self, layer: Layer) -> bool:
         """Whether the layer's strokes follow its mask rather than its coverage.
 
-        A layer drawn from a fill, or force-redrawn from its vector mask, has
-        no source shape worth tracing; an adjustment layer has no shape but
-        its mask.
+        A layer drawn from a fill, or redrawn from its vector mask
+        (:py:meth:`_redraws`), has no source shape worth tracing; an
+        adjustment layer has no shape but its mask.
         """
         return (
             isinstance(layer, AdjustmentLayer)
-            or (self._force and layer.has_vector_mask())
+            or (self._redraws(layer) and layer.has_vector_mask())
             or (not layer.has_pixels() and utils.has_fill(layer))
         )
 
@@ -5325,7 +5546,7 @@ class Compositor:
         if color is not None:
             numpy_io.check_shape_read(layer, numpy_io._backing_bytes(color))
         shape = layer.numpy("shape")
-        if (self._force or not layer.has_pixels()) and utils.has_fill(layer):
+        if (self._redraws(layer) or not layer.has_pixels()) and utils.has_fill(layer):
             color, shape = paint.create_fill(layer, layer.bbox)
             if shape is None:
                 shape = np.ones((layer.height, layer.width, 1), dtype=np.float32)
@@ -5342,11 +5563,12 @@ class Compositor:
     def _read_rows(
         self, layer: Layer, viewport: tuple[int, int, int, int], color: bool = True
     ) -> tuple[np.ndarray, np.ndarray | None, tuple[int, int, int, int]] | None:
-        """:py:meth:`_read_object`'s stored pixels on the part ``viewport`` crosses, and its box.
+        """:py:meth:`_read_object`'s pixels on the part ``viewport`` crosses, and its box.
 
-        A render need not decode the rest of a tall or wide layer. None where
-        the read runs whole: the whole box crossed or no row, a fill, a smart
-        filter mask (:py:func:`_unfilter_under_mask` blends on the whole box),
+        A render need not decode the rest of a tall or wide layer. A smart
+        filter mask the whole box blends blends on the part alone
+        (:py:func:`_unfilter_part`). None where the read runs whole: the whole
+        box crossed or no row, a fill, a smart object already blended whole,
         or data only the whole decode reads. Without ``color`` the colour is
         ``_UNREAD``.
         """
@@ -5361,27 +5583,47 @@ class Compositor:
             x0, x1 = 0, right - left
         if start == 0 and stop == bottom - top and x0 == 0 and x1 == right - left:
             return None
-        if not layer.has_pixels() or (self._force and utils.has_fill(layer)):
+        if not layer.has_pixels() or (self._redraws(layer) and utils.has_fill(layer)):
             return None
+        plan = None
         if isinstance(layer, SmartObjectLayer) and _may_unfilter(layer):
-            return None
-        rows = numpy_io.get_layer_rows(layer, start, stop, x0, x1, color=color)
+            memo = self._cache.unfiltered
+            if memo is not None and memo[0] is layer:
+                return None
+            plan = self._unfilter_plan(layer)
+        rows = numpy_io.get_layer_rows(
+            layer, start, stop, x0, x1, color=color or plan is not None
+        )
         if rows is None:
             return None
-        return (
-            _UNREAD if rows[0] is None else rows[0],
-            rows[1],
-            (left + x0, top + start, left + x1, top + stop),
-        )
+        box = (left + x0, top + start, left + x1, top + stop)
+        if plan is None:
+            return _UNREAD if rows[0] is None else rows[0], rows[1], box
+        assert rows[0] is not None
+        assert isinstance(layer, SmartObjectLayer)
+        return (*_unfilter_part(layer, rows[0], rows[1], plan, box), box)
+
+    def _unfilter_plan(self, layer: SmartObjectLayer) -> _UnfilterPlan | None:
+        """:py:func:`_whole_unfilter_plan`, once per pass."""
+        plans = self._cache.unfilter_plans
+        key = id(layer)
+        if key not in plans:
+            plans[key] = _whole_unfilter_plan(layer)
+        return plans[key]
 
     def _shape_alone(self, layer: Layer) -> bool:
         """Whether :py:meth:`_read_object`'s coverage is the stored one, read without colour.
 
-        Not for a redrawn fill or a smart filter mask, which make both at once.
+        Not for a redrawn fill or a smart filter mask that blends, which make
+        both at once.
         """
-        if (self._force or not layer.has_pixels()) and utils.has_fill(layer):
+        if (self._redraws(layer) or not layer.has_pixels()) and utils.has_fill(layer):
             return False
-        return not (isinstance(layer, SmartObjectLayer) and _may_unfilter(layer))
+        return not (
+            isinstance(layer, SmartObjectLayer)
+            and _may_unfilter(layer)
+            and self._unfilter_plan(layer) is not None
+        )
 
     def _read_shape(self, layer: Layer) -> tuple[np.ndarray | None, np.ndarray | None]:
         """:py:meth:`_read_object` for a :py:meth:`_shape_alone` layer, its colour unread.
@@ -5458,13 +5700,44 @@ class Compositor:
             own = np.minimum(own + stroke[1 if alpha else 0] * stroke_mask, 1.0)
         return own
 
+    def _redraws(self, layer: Layer) -> bool:
+        """Whether a layer with stored pixels is drawn from its fill and path instead.
+
+        Every one is under ``force``. Otherwise one whose clip layers would
+        paint over the vector stroke in its pixels: Photoshop draws the stroke
+        over them. A stroke of no width (the templates' 'Clip ... to this'
+        shapes) has nothing to cover.
+        """
+        if self._force:
+            return True
+        stroke = layer.stroke
+        if stroke is None or not stroke.enabled:
+            return False
+        try:
+            width = float(stroke._data.get("strokeStyleLineWidth", 1.0))
+        except (TypeError, ValueError):
+            return False
+        vector_mask = layer.vector_mask
+        if not (
+            0.0 < width < math.inf
+            and vector_mask is not None
+            and not vector_mask.disabled
+            and layer.has_pixels()
+            and utils.has_fill(layer)
+            and not utils.is_fill_disabled(layer)
+        ):
+            return False
+        shown = self._layer_filter
+        return any(shown is None or shown(clip) for clip in layer.clip_layers)
+
     def _has_redrawn_stroke(self, layer: Layer) -> bool:
         """Whether this layer's vector stroke is drawn from the path.
 
-        A layer read from stored pixels has its stroke in them already.
+        A layer read from stored pixels has its stroke in them already, unless
+        it is redrawn (:py:meth:`_redraws`).
         """
         return bool(
-            (self._force or not layer.has_pixels())
+            (self._redraws(layer) or not layer.has_pixels())
             and layer.has_vector_mask()
             and layer.stroke is not None
             and layer.stroke.enabled
@@ -5577,7 +5850,7 @@ class Compositor:
                 shape_s = bounded
             return color, shape, alpha, (shape_s * uncovered, alpha_s * uncovered)
 
-        if fill_off and (self._force or not layer.has_pixels()):
+        if fill_off and (self._redraws(layer) or not layer.has_pixels()):
             shape, alpha = shape * 0.0, alpha * 0.0
         if clip is not None:
             color = self._apply_clip_layers(clip, color)
@@ -5631,7 +5904,7 @@ class Compositor:
         if (
             mask is None
             or not isinstance(layer, (ShapeLayer, FillLayer))
-            or self._force
+            or self._redraws(layer)
             or not layer.has_pixels()
             or mask.real_flags is not None
             or mask.bbox != layer.bbox
@@ -5644,6 +5917,8 @@ class Compositor:
                 mask.parameters.vector_mask_density,
             )
         ):
+            return False
+        if _mask_feather(mask):
             return False
         stored = layer.numpy("mask", real_mask=True)
         if stored is None:
@@ -5664,7 +5939,7 @@ class Compositor:
         viewport: tuple[int, int, int, int] | None = None,
         clip_to_path: bool = True,
     ) -> float | np.ndarray:
-        """The layer's mask coverage, with any mask density already folded in.
+        """The layer's mask coverage, with any mask feather and density folded in.
 
         ``viewport`` defaults to this compositor's; a stroke effect passes the
         box it draws on, which may reach outside it (#804). ``clip_to_path=False``
@@ -5685,12 +5960,12 @@ class Compositor:
             # TODO: When force, ignore real mask.
             mask = layer.numpy("mask", real_mask=not self._force)
             if mask is not None:
-                shape = paste(
-                    viewport,
-                    layer.mask.bbox,
-                    mask,
-                    layer.mask.background_color / 255.0,
-                )
+                bbox = layer.mask.bbox
+                background = layer.mask.background_color / 255.0
+                sigma = _mask_feather(layer.mask)
+                if sigma:
+                    bbox, mask = self._feather_mask(layer, mask, sigma, background)
+                shape = paste(viewport, bbox, mask, background)
             if layer.mask.parameters:
                 density = layer.mask.parameters.user_mask_density
                 if density is None:
@@ -5706,7 +5981,7 @@ class Compositor:
             and layer.vector_mask is not None
             and not layer.vector_mask.disabled
             and (
-                self._force
+                self._redraws(layer)
                 or not layer.has_pixels()
                 or (
                     not utils.has_fill(layer)
@@ -5727,6 +6002,42 @@ class Compositor:
                 shape = d * shape + (1.0 - d)
 
         return shape
+
+    def _feather_mask(
+        self, layer: Layer, mask: np.ndarray, sigma: float, background: float
+    ) -> tuple[tuple[int, int, int, int], np.ndarray]:
+        """The whole mask blurred by its feather, on its box grown by the reach.
+
+        A gaussian of ``sigma`` pixels, as Photoshop 2023 draws a Properties
+        feather; past the box the mask is its background. Blurred whole, not
+        on the viewport, so every box of a render reads the same values.
+        Without scipy, or on a canvas out of proportion (a forged feather), the
+        mask stays as stored.
+        """
+        stored = cast(Mask, layer.mask).bbox
+        box = _feather_box(cast(Mask, layer.mask), sigma)
+        try:
+            check_growth(
+                _pixels(box),
+                max(_pixels(layer._psd.viewbox), _pixels(stored)),
+                _CANVAS_GROWTH,
+            )
+        except ValueError as error:
+            logger.warning("Mask feather of %s left out: %s", layer, error)
+            return stored, mask
+        if not self._has_scipy("Mask feathers"):
+            return stored, mask
+        from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+        canvas = paste(box, stored, mask, background)[..., 0].astype(np.float64)
+        blurred = ndimage.gaussian_filter(
+            canvas,
+            sigma,
+            mode="constant",
+            cval=background,
+            truncate=_FEATHER_TRUNCATE,
+        )
+        return box, blurred.astype(np.float32)[..., None]
 
     def _get_const(self, layer: Layer) -> tuple[float, float]:
         """Get constant attributes."""
@@ -5755,8 +6066,8 @@ class Compositor:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Get stroke source, on ``viewport`` or this compositor's.
 
-        The fill is drawn on the layer's box grown by the stroke width and
-        pasted onto the viewport, but laid out across the path's own box:
+        The fill is drawn on :py:func:`_vector_stroke_box` and pasted onto
+        the viewport, but laid out across the path's own box:
         Photoshop maps a pattern's phase and a gradient's ramp across the
         path whatever the width. The coverage is rasterized straight onto
         that viewport: a path is placed in document coordinates,
@@ -5773,13 +6084,7 @@ class Compositor:
             width = math.ceil(desc.get("strokeStyleLineWidth", 1.0))
         except OverflowError as error:
             raise ValueError("Stroke width is not finite.") from error
-        fill_bbox = cast(
-            tuple[int, int, int, int],
-            tuple(
-                x + d
-                for x, d in zip(layer.bbox, (-width, -width, width, width), strict=True)
-            ),
-        )
+        fill_bbox = _vector_stroke_box(layer, width, viewport)
         # The width is the file's, and it grows the box the fill is drawn on.
         if fill_bbox[0] < fill_bbox[2] and fill_bbox[1] < fill_bbox[3]:
             check_growth(
@@ -5853,7 +6158,7 @@ class Compositor:
                     # Read, so it fails as the draw would; no shape of its own.
                     paint._get_color(layer._psd.color_mode, effect.descriptor)
                     fill, shape_e = _UNREAD, None
-                opacity = effect.opacity / 100.0
+                opacity = _opacity_at_8_bits(effect.opacity, layer._psd.depth)
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:
                 logger.debug(
@@ -6231,7 +6536,7 @@ class Compositor:
             band = paste(viewport, bbox, band - inside)
             outside = band if outside is None else np.maximum(outside, band)
             if covers:
-                share = band * _stroke_paint(effect)
+                share = band * _stroke_paint(effect, layer._psd.depth)
                 painted = share if painted is None else np.maximum(painted, share)
         shape = silhouette if outside is None else np.minimum(silhouette + outside, 1.0)
         if not covers:
@@ -6506,7 +6811,7 @@ class Compositor:
                 )
             coverage = paste(self._viewport, bbox, coverage)
             if coverage.any():
-                faded = coverage * effect_opacity
+                faded = _faded_at_8_bits(coverage, glow.opacity, layer._psd.depth)
                 self._apply_source(
                     color if self._alpha_only else paste(self._viewport, bbox, color),
                     coverage,
@@ -6554,8 +6859,12 @@ class Compositor:
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an inner effect of %s: %s", layer, error)
                 continue
-            coverage = paste(self._viewport, bbox, coverage)
-            canvas.over(canvas.within(coverage), color, blend_mode, opacity)
+            coverage = canvas.within(paste(self._viewport, bbox, coverage))
+            if layer._psd.depth == 8:
+                # Matte and opacity held at 8 bits, as a drop shadow's.
+                coverage = _faded_at_8_bits(coverage, effect.opacity, 8)
+                opacity = 1.0
+            canvas.over(coverage, color, blend_mode, opacity)
 
     def _inner_box(self, layer: Layer, reach: float) -> tuple[int, int, int, int]:
         """The box an inner effect reaching ``reach`` past an edge is drawn on.
@@ -6956,7 +7265,7 @@ class Compositor:
                     if rkey is not None:
                         assert self._cache.rc is not None
                         self._cache.rc.put(rkey, (color, mask_in_bbox, inside_in_bbox))
-                opacity = effect.opacity / 100.0
+                opacity = _opacity_at_8_bits(effect.opacity, layer._psd.depth)
                 blend_mode = effect.blend_mode
             except _UNREADABLE as error:
                 logger.debug("Cannot draw a stroke effect of %s: %s", layer, error)

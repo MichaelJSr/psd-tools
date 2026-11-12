@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import hashlib
 import io
 import random
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
@@ -15,7 +17,7 @@ from PIL import Image
 
 from psd_tools import PSDImage
 from psd_tools.api.layers import Layer, PixelLayer, TypeLayer
-from psd_tools.composite import composite
+from psd_tools.composite import composite, rcache
 from psd_tools.composite.rcache import CacheMismatch, RenderCache, doc_key, layer_key
 from psd_tools.constants import BlendMode, Tag
 from psd_tools.psd.lazy import load
@@ -314,6 +316,50 @@ def test_the_digests_go_with_their_document(tmp_path: Path, lazy: bool) -> None:
     del psd
     gc.collect()
     assert not cache._digests and cache._pinned == 0
+
+
+def test_a_reopened_file_takes_the_digests_by_its_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    psd = PSDImage.new("RGB", (320, 320))
+    noise = np.random.default_rng(0).integers(0, 256, (320, 320, 3), np.uint8)
+    psd.append(PixelLayer.frompil(Image.fromarray(noise, "RGB"), psd, "noise"))
+    path = tmp_path / "noise.psd"
+    psd.save(path)
+    want = _keys(PSDImage.open(path), None)
+    hashed: list[int] = []
+
+    def counted(data: bytes | memoryview = b"") -> object:
+        if len(data) >= rcache._SAME_MIN:
+            hashed.append(len(data))
+        return hashlib.sha256(data)
+
+    monkeypatch.setattr(rcache, "hashlib", SimpleNamespace(sha256=counted))
+    cache = RenderCache()
+    # Path (eager), then BytesIO (unread spans) twice.
+    docs = [PSDImage.open(path)]
+    docs += [PSDImage.open(io.BytesIO(path.read_bytes())) for _ in range(2)]
+    assert [_keys(doc, cache) for doc in docs] == [want] * 3
+    assert len(hashed) == 3  # the noise channels, once each
+    assert len(cache._same) == 3
+    del docs
+    gc.collect()
+    assert not cache._same and not cache._digests and cache._pinned == 0
+
+
+class _Owner:
+    pass
+
+
+def test_a_payload_over_a_mutable_buffer_is_never_matched() -> None:
+    buffer = bytearray(rcache._SAME_MIN)
+    owners = [_Owner(), _Owner()]
+    cache = RenderCache()
+    rcache._digest(cache, 1, buffer, len(buffer), lambda: memoryview(buffer), owners[0])
+    buffer[len(buffer) // 2] = 1  # its head and tail as they were
+    now = bytes(buffer)
+    got = rcache._digest(cache, 2, now, len(now), lambda: now, owners[1])
+    assert got == hashlib.sha256(now).digest()
 
 
 _PROPERTY_FILES = [

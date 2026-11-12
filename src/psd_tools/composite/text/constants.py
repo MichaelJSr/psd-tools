@@ -43,10 +43,19 @@ FAUX_BOLD_EM = 0.027
 # Faux italic shears the outline by tan 12 degrees.
 FAUX_ITALIC_SHEAR = 0.2126
 
-# AntA Strong, and Smooth from SMOOTH_SMALL_PX up, embolden the outline by
-# this 26.6 amount in x and y, fitted to Photoshop 2023's relayouts; scaled
-# to the sample render, rounded.
+# AntA Strong, and Smooth from SMOOTH_SMALL_PX up, embolden the exact-area
+# coverage by this 26.6 amount in x and y, fitted to Photoshop 2023's
+# relayouts; scaled to the sample render, rounded. Their colour glyphs only
+# take it as the sign to draw the Strong way (svg.rasterize).
 STRONG_EMBOLDEN_26_6 = 17.5
+
+# Their other glyphs are touch-sampled, as Photoshop 2023: a sample counts
+# where the outline covers any of its cell, so a straight edge grows 1/8 px.
+# Origins go on the sample render's 26.6 grid and a second render, one unit
+# towards the exact origin, joins the first: right (down) when the origin is
+# more than this many units past the grid, else left (up). An edge on a
+# cell border so counts on the left and top only.
+TOUCH_TIE = 0.05
 
 # Smooth with both ems (x and y) under this many px is not emboldened and puts
 # each glyph origin on 1/SMOOTH_GRID px, rotated too (Photoshop 2023).

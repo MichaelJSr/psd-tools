@@ -18,6 +18,7 @@ def test_values() -> None:
     assert c.FAUX_BOLD_EM == 0.027
     assert c.FAUX_ITALIC_SHEAR == 0.2126
     assert c.STRONG_EMBOLDEN_26_6 == 17.5
+    assert c.TOUCH_TIE == 0.05
     assert pytest.approx(0.5 ** (1 / 1.25), abs=5e-4) == c.NONE_THRESHOLD
     assert c.CRISP_SUBPIXEL_X == ((24.0, 4), (32.0, 2))
     assert c.GENERAL_TRANSFORM_EPS == 0.01
