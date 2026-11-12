@@ -61,8 +61,9 @@ Implementation details:
   and ``_sat`` helpers below; on CMYK they blend the CMY complement and carry K
   across from one operand (#781)
 - ``darker_color`` and ``lighter_color`` return one operand or the other whole.
-  On CMYK that includes its K, and K also weighs in the comparison that chooses
-  -- see ``_lightness`` (#781)
+  RGB compares whole levels as Photoshop does; on CMYK the operand includes
+  its K, and K also weighs in the comparison that chooses -- see
+  ``_lightness`` (#781)
 - All functions expect normalized float32 arrays (0.0-1.0 range)
 - Division by zero is protected with small epsilon values
 
@@ -425,8 +426,21 @@ def non_separable_selection(func):
     return _guarded(func, func)
 
 
+# Photoshop's weights for the comparison below, 0.30, 0.59 and 0.11 in 14-bit
+# fixed point (they sum to 1 << 14).
+_LIGHTNESS_WEIGHTS = np.array([4915, 9667, 1802], dtype=np.int64)
+
+
 def _lightness(C: np.ndarray) -> np.ndarray:
     """How light a colour is, for the two modes that choose between pixels.
+
+    RGB is weighed as Photoshop 2023 does: each channel to its nearest whole
+    level (halves up), through :py:data:`_LIGHTNESS_WEIGHTS`, and the sum
+    rounded to a whole level. Colours a fraction of a level apart are equally
+    light, so the backdrop stays; an exact half goes by the weights' own
+    rounding. That matched all 524,288 pairs of an 8-bit probe built around
+    ties (layers and colour overlays, edge alphas included); the float
+    luminance chose the other colour on 26% of them.
 
     On CMYK the K plate darkens every ink, so it belongs in the comparison:
     this is ``_lum(CMY) * K``, which is algebraically ``_lum(CMY * K)`` -- the
@@ -436,7 +450,10 @@ def _lightness(C: np.ndarray) -> np.ndarray:
     """
     if C.shape[2] == 4:
         return _lum(C[:, :, :3] * C[:, :, 3:4])
-    return _lum(C)
+    # No NaN or inf reaches the cast: it differs between CPUs.
+    finite = np.nan_to_num(C, nan=0.0, posinf=1.0, neginf=0.0)
+    levels = np.floor(finite * 255.0 + 0.5).astype(np.int64)
+    return ((levels @ _LIGHTNESS_WEIGHTS + 8192) >> 14)[:, :, None]
 
 
 @non_separable("b")

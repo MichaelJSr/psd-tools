@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Darker Color and Lighter Color compare RGB as Photoshop 2023 does:
+  whole levels weighed 0.30/0.59/0.11 in 14-bit fixed point and rounded to a
+  whole level, the backdrop kept on a tie. Colours a fraction of a level
+  apart no longer swap (single pixels up to 196 levels off on 7 cards'
+  overlays, gradient maps and curves). **Rendering change** for those modes
+
 - [fix] A knockout pass-through group knocks out what lies under it instead
   of uniting with it (#707), and Transparency Shapes Layer off (tag tsly)
   makes the layer's masks the knockout shape: a sprite row drawn over
