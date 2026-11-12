@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Outer glows with a gradient cover what Photoshop 2023 covers: a
+  gradient fading from opaque to clear in two stops covers the glow's falloff
+  as a solid colour does (wherever its stops sit), with its noise, which
+  moves the coverage and never the colour; any other gradient is full where
+  its matte reaches 12% (25/3 times the matte, was 8), held under its
+  transparency. **Rendering change**
 - [fix] A knockout pass-through group knocks out what lies under it instead
   of uniting with it (#707), and Transparency Shapes Layer off (tag tsly)
   makes the layer's masks the knockout shape: a sprite row drawn over

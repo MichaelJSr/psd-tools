@@ -39,7 +39,14 @@ from psd_tools.constants import (
     Tag,
 )
 from psd_tools.psd.base import ByteElement
-from psd_tools.psd.descriptor import Bool, Descriptor, Double, Enumerated, List
+from psd_tools.psd.descriptor import (
+    Bool,
+    Descriptor,
+    Double,
+    Enumerated,
+    Integer,
+    List,
+)
 from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
@@ -1321,8 +1328,8 @@ def test_precise_glows_render_to_photoshops_preview(force: bool) -> None:
     assert error * _IMPROVEMENT < float(_mse(reference, unglowed))
 
 
-def test_a_gradient_glow_covers_its_matte_eightfold_whatever_its_range() -> None:
-    """Given the matte, an opaque gradient covers eight times it at every range.
+def test_a_gradient_glow_covers_its_gained_matte_whatever_its_range() -> None:
+    """Given the matte, an opaque gradient is full where it reaches 12%, at every range.
 
     Its colour still runs along the ranged falloff.
     """
@@ -1343,6 +1350,76 @@ def test_a_gradient_glow_covers_its_matte_eightfold_whatever_its_range() -> None
     assert not np.allclose(colors[0], colors[2], atol=1e-3)
 
 
+def _fade(*stops: tuple[int, float]) -> Descriptor:
+    """``_gradient_glow()``'s glow with these ``(location, opacity)`` transparency stops."""
+    desc, _, _ = _gradient_glow()
+    gradient = desc[Key.Gradient]
+    model = gradient[Key.Transparency][0]
+    faded = []
+    for location, opacity in stops:
+        stop = copy.deepcopy(model)
+        stop[Key.Location] = Integer(location)
+        stop[Key.Opacity] = Double(opacity)
+        faded.append(stop)
+    gradient[Key.Transparency] = List(faded)
+    return desc
+
+
+@pytest.mark.parametrize(
+    "stops",
+    [
+        ((0, 100.0), (4096, 0.0)),
+        ((693, 100.0), (4096, 0.0)),
+        ((1000, 100.0), (3000, 0.0)),
+    ],
+)
+def test_a_gradient_fading_opaque_to_clear_covers_what_a_solid_colour_would(
+    stops: tuple[tuple[int, float], ...],
+) -> None:
+    """Two transparency stops, opaque then clear, cover the falloff wherever they sit.
+
+    Photoshop 2023 takes them for its solid glow's own fade. Another opacity
+    at either end, or a third stop, holds the gained matte under the stops.
+    """
+    disc = _disc(81, _RADIUS)
+    matte = effects.glow_matte(disc, size=12.0, spread=0.0)
+    falloff = effects.glow_ranged(matte, range_=50.0)
+
+    def covers(desc: Descriptor) -> np.ndarray:
+        return effects.glow_paint(
+            (0, 0, 81, 81), ColorMode.RGB, desc, disc, falloff, matte=matte
+        )[1]
+
+    assert np.allclose(covers(_fade(*stops)), _glow(disc, range_=50.0, size=12.0))
+    for held in (
+        ((0, 80.0), (4096, 0.0)),
+        ((0, 100.0), (4096, 1.0)),
+        (*stops, (4096, 0.0)),
+    ):
+        desc = _fade(*held)
+        assert not effects.fades_to_clear(desc[Key.Gradient])
+        assert not np.allclose(covers(desc), covers(_fade(*stops)), atol=1e-2)
+
+
+def test_noise_moves_a_fade_to_clears_coverage_and_not_its_colour() -> None:
+    """Its coverage is the noisy falloff, as a solid glow's; its colour the clean one's."""
+    desc = _fade((0, 100.0), (4096, 0.0))
+    disc = _disc(81, _RADIUS)
+    viewport = (0, 0, 81, 81)
+    matte = effects.glow_matte(disc, size=12.0, spread=0.0)
+    falloff = effects.glow_ranged(matte, range_=50.0)
+    noisy = effects.glow_ranged(matte, range_=50.0, noise=50.0, viewport=viewport)
+    clean, _ = effects.glow_paint(
+        viewport, ColorMode.RGB, desc, disc, falloff, matte=matte
+    )
+    color, painted = effects.glow_paint(
+        viewport, ColorMode.RGB, desc, disc, falloff, matte=matte, noisy=noisy
+    )
+    assert np.array_equal(color, clean)
+    assert np.allclose(painted, effects._beside(noisy, disc))
+    assert not np.allclose(noisy, falloff, atol=1e-2)
+
+
 # effects/outer-glow-laws.psd: on a dark backdrop, white Normal soft glows
 # round a 70 x 30 bar at sizes 5 (no spread) and 21 (spread 9%) and ranges 100,
 # 50, 5 and 1%; size-0 glows on a feathered star; and gradient glows round the
@@ -1351,10 +1428,9 @@ def test_a_gradient_glow_covers_its_matte_eightfold_whatever_its_range() -> None
 # composite is the reference.
 _LAWS_FIXTURE = "effects/outer-glow-laws.psd"
 
-# Levels a cell may stray from Photoshop's: the solid glows land within a
-# level, a gradient's colour lookup within a few.
+# Levels a cell may stray from Photoshop's: solid and gradient glows alike land
+# within a level.
 _LAWS_SOLID = 1.5
-_LAWS_GRADIENT = 12.0
 
 
 def _laws_errors(psd: PSDImage) -> dict[str, float]:
@@ -1379,8 +1455,7 @@ def test_outer_glows_render_to_photoshops_composite() -> None:
     errors = _laws_errors(PSDImage.open(full_name(_LAWS_FIXTURE)))
     assert len(errors) == 14
     for name, error in errors.items():
-        bound = _LAWS_GRADIENT if name.startswith("gradient") else _LAWS_SOLID
-        assert error <= bound, (name, error)
+        assert error <= _LAWS_SOLID, (name, error)
 
 
 @pytest.mark.parametrize(
@@ -1389,13 +1464,17 @@ def test_outer_glows_render_to_photoshops_composite() -> None:
         (lambda m: setattr(effects, "_GLOW_RANGE_STEPS", 100), ("glow s21 r1",)),
         (lambda m: setattr(effects, "_GRADIENT_GLOW_GAIN", 1.0), ("gradient glow bw",)),
         (
+            lambda m: setattr(effects, "fades_to_clear", lambda g: False),
+            ("gradient glow fading",),
+        ),
+        (
             lambda m: setattr(
                 effects, "_shadow_matte", lambda a, s, p, outside=0.0: m(a, s, p)
             ),
             ("glow s21 r100", "glow s5 r100"),
         ),
     ],
-    ids=["range-steps", "gradient-gain", "tent"],
+    ids=["range-steps", "gradient-gain", "fade-to-clear", "tent"],
 )
 def test_each_glow_law_is_read_off_the_fixture(
     monkeypatch: pytest.MonkeyPatch, undo: Callable[[Any], None], names: tuple[str, ...]
@@ -1413,6 +1492,7 @@ def test_each_glow_law_is_read_off_the_fixture(
     with monkeypatch.context() as patch:
         patch.setattr(effects, "_GLOW_RANGE_STEPS", effects._GLOW_RANGE_STEPS)
         patch.setattr(effects, "_GRADIENT_GLOW_GAIN", effects._GRADIENT_GLOW_GAIN)
+        patch.setattr(effects, "fades_to_clear", effects.fades_to_clear)
         patch.setattr(effects, "_shadow_matte", effects._shadow_matte)
         undo(gaussian)
         errors = _laws_errors(PSDImage.open(full_name(_LAWS_FIXTURE)))

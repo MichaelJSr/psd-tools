@@ -78,6 +78,7 @@ from psd_tools.composite.effects import (
     draw_satin,
     draw_stroke_effect_split,
     drop_shadow_bbox,
+    fades_to_clear,
     glow_geometry,
     glow_matte,
     glow_paint,
@@ -6470,9 +6471,12 @@ class Compositor:
                 continue
             if bbox == (0, 0, 0, 0):
                 continue
-            if noise > 0.0 and Key.Gradient in glow.descriptor:
+            # A gradient's noise moves only a fade to clear's coverage.
+            gradient = glow.descriptor.get(Key.Gradient)
+            noisy_paint = gradient is not None and noise > 0.0
+            if noisy_paint and not fades_to_clear(gradient):
                 logger.debug("The noise of a gradient glow of %s is not applied", layer)
-                noise = 0.0
+                noise, noisy_paint = 0.0, False
             if jitter > 0.0:
                 logger.debug("The jitter of an outer glow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
@@ -6485,9 +6489,19 @@ class Compositor:
                     range_=range_,
                     contour=contour,
                     anti_aliased=anti_aliased,
-                    noise=noise,
+                    noise=0.0 if noisy_paint else noise,
                     viewport=bbox,
                 )
+                noisy = None
+                if noisy_paint:
+                    noisy = glow_ranged(
+                        matte,
+                        range_=range_,
+                        contour=contour,
+                        anti_aliased=anti_aliased,
+                        noise=noise,
+                        viewport=bbox,
+                    )
                 color, coverage = glow_paint(
                     bbox,
                     layer._psd.color_mode,
@@ -6496,6 +6510,7 @@ class Compositor:
                     falloff,
                     over=0.0 if banded else over,
                     matte=matte,
+                    noisy=noisy,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an outer glow of %s: %s", layer, error)

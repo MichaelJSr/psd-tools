@@ -1200,9 +1200,10 @@ _DEFAULT_GLOW_RANGE = 50.0
 # as a byte, so a 1% range squeezes the falloff by 255 / 3 and not 100.
 _GLOW_RANGE_STEPS = 255
 
-# How much stronger than its matte a gradient glow covers, whatever its range:
-# full out to about half its size from a straight edge.
-_GRADIENT_GLOW_GAIN = 8.0
+# How much stronger than its matte a gradient glow covers, whatever its range,
+# size or technique: full where the matte reaches 12%. Fitted to Photoshop
+# 2023 within half a level.
+_GRADIENT_GLOW_GAIN = 25.0 / 3.0
 
 # What one pixel of a shadow's or glow's canvas costs at the peak of
 # ``draw_drop_shadow()`` or ``glow_falloff()``: the silhouette it is cast
@@ -1932,6 +1933,7 @@ def glow_paint(
     falloff: np.ndarray,
     over: float = 0.0,
     matte: np.ndarray | None = None,
+    noisy: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """What an outer glow is painted with, on ``viewport``: its colour and coverage.
 
@@ -1941,13 +1943,17 @@ def glow_paint(
     laid along the falloff instead: its start at the silhouette's edge,
     where the falloff is full, and its end where the falloff dies away, so
     the opaque end of Photoshop's default glow gradient sits against the
-    layer. What it covers does not follow the range: it is the matte held
-    :data:`_GRADIENT_GLOW_GAIN` times as strong, or the falloff when no
-    matte is given, and its transparency stops, read at the same place as
-    its colour stops, hold the coverage under them: the glow is as opaque as
-    that or the transparency there, whichever is less. The gradient's
-    reverse flag turns it around, and its stops blend in the method ``gs99``
-    names, as an overlay's do. Either way the coverage is cut away under the
+    layer. A gradient whose transparency is that default's, two stops fading
+    from opaque to clear, covers the falloff as a solid colour does, wherever
+    the stops sit (:py:func:`fades_to_clear`), or ``noisy``, that falloff with
+    the glow's noise moved in, when given: noise moves its coverage only,
+    never its colour. Any other does not follow the range: it covers the
+    matte held :data:`_GRADIENT_GLOW_GAIN` times as strong, or the falloff
+    when no matte is given, and its transparency stops, read at the same
+    place as its colour stops, hold the coverage under them: the glow is as
+    opaque as that or the transparency there, whichever is less. The
+    gradient's reverse flag turns it around, and its stops blend in the
+    method ``gs99`` names, as an overlay's do. Either way the coverage is cut away under the
     silhouette. ``over`` is how much of the silhouette a Normal layer
     composited on top paints, its fill opacity and opacity together; the
     coverage under it is raised so the glow shows at ``1 - shape`` once the
@@ -1967,11 +1973,34 @@ def glow_paint(
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)
     coverage = falloff
+    if fades_to_clear(desc[Key.Gradient]):
+        if noisy is not None:
+            coverage = noisy
+        return color, _beside(coverage, shape, over)
     if matte is not None:
         coverage = np.clip(matte * _GRADIENT_GLOW_GAIN, 0.0, 1.0)
     if opacities is not None:
         coverage = np.minimum(coverage, np.asarray(opacities(along), dtype=np.float32))
     return color, _beside(coverage, shape, over)
+
+
+def fades_to_clear(gradient: Descriptor) -> bool:
+    """Whether a glow gradient's transparency is two stops, opaque then clear.
+
+    Photoshop 2023 draws such a glow's coverage as a solid colour's, noise
+    included, ignoring the stops' locations, midpoint and smoothness; one more
+    stop, or any other opacity at either end (80% to clear, opaque to 1%),
+    and it does not. Opacities are read in whole levels, by location.
+    """
+    try:
+        stops = list(gradient.get(Key.Transparency) or [])
+        if len(stops) != 2:
+            return False
+        ordered = sorted(stops, key=lambda stop: float(stop.get(Key.Location)))
+        levels = [round(float(stop.get(Key.Opacity)) * 2.55) for stop in ordered]
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+    return levels == [255, 0]
 
 
 def _glow_range(matte: np.ndarray, glow_range: float) -> np.ndarray:
