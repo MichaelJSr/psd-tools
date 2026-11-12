@@ -10,6 +10,7 @@ x < 100 and the grey row from there on.
 
 import numpy as np
 
+from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite
 from psd_tools.constants import Tag
@@ -20,7 +21,7 @@ _YELLOW = [250, 200, 50, 128]
 _GREY = [40, 40, 40, 255]
 
 
-def _bar() -> tuple[PSDImage, object]:
+def _bar() -> tuple[PSDImage, Layer]:
     psd = PSDImage.open(full_name("transparency/knockout-passthrough-masks.psb"))
     return psd, next(layer for layer in psd if layer.name == "Light")
 
@@ -39,7 +40,9 @@ def test_the_mask_shapes_the_knockout() -> None:
 
 def test_a_moved_mask_draws_photoshops_comp() -> None:
     psd, light = _bar()
-    light.mask.offset = (light.mask.left - 100, light.mask.top)
+    mask = light.mask
+    assert mask is not None
+    mask.offset = (mask.left - 100, mask.top)
     row = _row(psd)
     np.testing.assert_allclose(row[:100], [_YELLOW] * 100, atol=1)
     np.testing.assert_allclose(row[100:], [_GREY] * 300, atol=1)
