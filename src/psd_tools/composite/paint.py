@@ -328,34 +328,35 @@ def pattern_origin(
 def create_fill(
     layer: "Layer",
     viewport: tuple[int, int, int, int],
+    anchor: tuple[int, int, int, int] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Create a fill image."""
+    """Create a fill image, laid out on ``anchor`` (default ``viewport``) and drawn on ``viewport``."""
     if is_fill_disabled(layer):
         return None, None
     blocks = layer.tagged_blocks
     if (desc := blocks.get_data(Tag.SOLID_COLOR_SHEET_SETTING)) is not None:
         return draw_solid_color_fill(viewport, layer._psd.color_mode, desc)
     if (desc := blocks.get_data(Tag.PATTERN_FILL_SETTING)) is not None:
-        return draw_pattern_fill(viewport, layer._psd, desc)
+        return draw_pattern_fill(viewport, layer._psd, desc, anchor)
     if (desc := blocks.get_data(Tag.GRADIENT_FILL_SETTING)) is not None:
         return draw_gradient_fill(
             viewport,
             layer._psd.color_mode,
             desc,
-            gradient_anchor(layer._psd, desc),
+            gradient_anchor(layer._psd, desc, anchor),
             layer._psd.depth,
         )
     if (desc := blocks.get_data(Tag.VECTOR_STROKE_CONTENT_DATA)) is not None:
         if Key.Color in desc:
             return draw_solid_color_fill(viewport, layer._psd.color_mode, desc)
         elif Key.Pattern in desc:
-            return draw_pattern_fill(viewport, layer._psd, desc)
+            return draw_pattern_fill(viewport, layer._psd, desc, anchor)
         elif Key.Gradient in desc:
             return draw_gradient_fill(
                 viewport,
                 layer._psd.color_mode,
                 desc,
-                gradient_anchor(layer._psd, desc),
+                gradient_anchor(layer._psd, desc, anchor),
                 layer._psd.depth,
             )
     return None, None
