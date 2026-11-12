@@ -4,6 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] RenderCache: a payload of 64 KiB or more with the bytes of
+  one the cache hashed under another mark (the same card opened again, its
+  saved copy reopened) is compared with it and takes its digest instead of
+  being hashed again. Keys and renders are unchanged
 - [refactor] Spread drop shadows and outer glows, and choked inner shadows
   and inner glows, are drawn only on the part of their box within reach of
   the viewport (their unspread reach and a pixel), as unspread ones are, and
