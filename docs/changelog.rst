@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
+  of the document's own profile, its colorants adapted to D65 by Bradford,
+  as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp
+  moved up to 8 levels. sRGB and untagged documents are unchanged. A linear
+  gradient stroke's ramp runs between whole-pixel ends (a scaled half cut
+  first), at any angle. **Rendering change**
 - [fix] A knockout pass-through group knocks out what lies under it instead
   of uniting with it (#707), and Transparency Shapes Layer off (tag tsly)
   makes the layer's masks the knockout shape: a sprite row drawn over

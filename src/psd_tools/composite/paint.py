@@ -1,8 +1,10 @@
 """Paint and fill operations for compositing."""
 
+import functools
 import io
 import logging
 import math
+import struct
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +29,13 @@ from psd_tools.color_convert import (
 )
 from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.utils import is_fill_disabled
-from psd_tools.constants import GRADIENT_METHOD_KEY, ColorMode, GradientMethod, Tag
+from psd_tools.constants import (
+    GRADIENT_METHOD_KEY,
+    ColorMode,
+    GradientMethod,
+    Resource,
+    Tag,
+)
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key, Klass, Type
 
@@ -275,15 +283,67 @@ def create_fill_desc(
             desc,
             gradient_anchor(layer._psd, desc, anchor),
             layer._psd.depth,
+            document_lms(layer._psd),
         )
     return None, None
+
+
+# Within this of a whole pixel, a ramp's end is on it.
+_END_SNAP = 1e-9
+
+
+def ramp_ends_on_pixels(
+    box: tuple[float, float, float, float], desc: Descriptor
+) -> tuple[tuple[float, float, float, float], float | None]:
+    """``box`` and the angle Photoshop 2023 lays a stroke's linear ramp on.
+
+    The ramp runs from the box's centre less half its length along the angle
+    to the centre plus it, each end cut to whole pixels toward zero; a scaled
+    ramp's half is cut so first, on each axis, as an overlay's
+    (``composite._scaled_layout``). So it runs between the cut ends: the box
+    returned is about their midpoint, scaled to their distance, and the angle
+    is theirs. Another gradient kind, an offset, or a scale it cannot read
+    keep ``box`` and the angle (None).
+    """
+    kind = desc.get(Key.Type)
+    if getattr(kind, "enum", None) != Enum.Linear:
+        return box, None
+    offset = get_descriptor(desc, Key.Offset)
+    if _offset_share(offset, Key.Horizontal) or _offset_share(offset, Key.Vertical):
+        return box, None
+    scale = _finite(desc, Key.Scale, 100.0) / 100.0
+    if not scale > 0.0:
+        return box, None
+    angle = _finite(desc, Key.Angle, 0.0)
+    width, height = max(box[2] - box[0], 1), max(box[3] - box[1], 1)
+    half = scale * _gradient_length(angle, width, height) / 2.0
+    theta = math.radians(angle)
+    ux, uy = math.cos(theta), -math.sin(theta)
+    ux, uy = (0.0 if abs(ux) < 1e-9 else ux), (0.0 if abs(uy) < 1e-9 else uy)
+    cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+
+    def cut(value: float) -> int:
+        return math.trunc(value + math.copysign(_END_SNAP, value))
+
+    hx, hy = half * ux, half * uy
+    if scale != 1.0:
+        hx, hy = cut(hx), cut(hy)
+    x0, y0 = cut(cx - hx), cut(cy - hy)
+    x1, y1 = cut(cx + hx), cut(cy + hy)
+    if x0 == x1 and y0 == y1:
+        return box, None
+    turned = math.degrees(math.atan2(y0 - y1, x1 - x0))
+    k = math.hypot(x1 - x0, y1 - y0) / (scale * _gradient_length(turned, width, height))
+    mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    w, h = width * k / 2.0, height * k / 2.0
+    return (mx - w, my - h, mx + w, my + h), turned
 
 
 def gradient_anchor(
     psd: "PSDProtocol",
     desc: Descriptor,
-    box: tuple[int, int, int, int] | None = None,
-) -> tuple[int, int, int, int] | None:
+    box: tuple[float, float, float, float] | None = None,
+) -> tuple[float, float, float, float] | None:
     """The box a gradient is laid out on: ``box``, or the document's with ``Algn`` off.
 
     ``None`` lays the gradient out on the viewport it is drawn on.
@@ -344,6 +404,7 @@ def create_fill(
             desc,
             gradient_anchor(layer._psd, desc),
             layer._psd.depth,
+            document_lms(layer._psd),
         )
     if (desc := blocks.get_data(Tag.VECTOR_STROKE_CONTENT_DATA)) is not None:
         if Key.Color in desc:
@@ -357,6 +418,7 @@ def create_fill(
                 desc,
                 gradient_anchor(layer._psd, desc),
                 layer._psd.depth,
+                document_lms(layer._psd),
             )
     return None, None
 
@@ -622,6 +684,8 @@ def draw_gradient_fill(
     desc: Descriptor,
     anchor: tuple[float, float, float, float] | None = None,
     depth: int | None = None,
+    rgb_lms: tuple[float, ...] | None = None,
+    angle: float | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """
     Create a gradient fill image.
@@ -631,7 +695,9 @@ def draw_gradient_fill(
 
     In an 8-bit ``depth`` the colour and transparency come out in whole
     levels, as Photoshop rasters a gradient before it blends; other depths,
-    and ``None``, leave them unrounded.
+    and ``None``, leave them unrounded. ``rgb_lms`` is the document's
+    :py:func:`document_lms`, for the perceptual method; ``angle`` stands in
+    for the descriptor's.
 
     Requires scipy for gradient color interpolation.
     """
@@ -640,7 +706,8 @@ def draw_gradient_fill(
     # A path with no extent along an axis ramps as a single pixel there.
     box_height, box_width = max(box[3] - box[1], 1), max(box[2] - box[0], 1)
 
-    angle = _finite(desc, Key.Angle, 0.0)
+    if angle is None:
+        angle = _finite(desc, Key.Angle, 0.0)
     scale = float(desc.get(Key.Scale, 100.0)) / 100.0
     scale *= _gradient_length(angle, box_width, box_height)
     # ``Ofst`` moves the ramp's centre by a share of the box.
@@ -678,7 +745,7 @@ def draw_gradient_fill(
         Z = 1.0 - Z
 
     G, Ga = _make_gradient_color(
-        color_mode, desc.get(Key.Gradient), _gradient_method(desc)
+        color_mode, desc.get(Key.Gradient), _gradient_method(desc), rgb_lms
     )
     color = G(Z) if G is not None else None
     shape = np.expand_dims(Ga(Z), 2) if Ga is not None else None
@@ -805,27 +872,33 @@ _RAMPS_HELD = 64
 
 
 def _make_gradient_color(
-    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
+    color_mode: ColorMode,
+    grad: Descriptor,
+    method: bytes | None = None,
+    rgb_lms: tuple[float, ...] | None = None,
 ) -> tuple[Any | None, Any | None]:
     written = io.BytesIO()
     grad.write(written)
-    key = (color_mode, method, written.getvalue())
+    key = (color_mode, method, rgb_lms, written.getvalue())
     known = _RAMPS.get(key)
     if known is None:
         if len(_RAMPS) >= _RAMPS_HELD:
             _RAMPS.clear()
-        known = _RAMPS[key] = _build_gradient_color(color_mode, grad, method)
+        known = _RAMPS[key] = _build_gradient_color(color_mode, grad, method, rgb_lms)
     return known
 
 
 def _build_gradient_color(
-    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
+    color_mode: ColorMode,
+    grad: Descriptor,
+    method: bytes | None = None,
+    rgb_lms: tuple[float, ...] | None = None,
 ) -> tuple[Any | None, Any | None]:
     gradient_form = grad.get(Type.GradientForm).enum
     if gradient_form == Enum.ColorNoise:
         return _make_noise_gradient_color(color_mode, grad)
     elif gradient_form == Enum.CustomStops:
-        return _make_linear_gradient_color(color_mode, grad, method)
+        return _make_linear_gradient_color(color_mode, grad, method, rgb_lms)
 
     logger.error("Unknown gradient form: %s", gradient_form)
     return None, None
@@ -994,6 +1067,87 @@ def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
     return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ _OKLAB_LMS_INV.T)
 
 
+# An ICC profile's connection space white (D50), sRGB's colorants as a
+# profile states them (adapted to D50), and Bradford's cone matrix.
+_ICC_D50 = np.array([0.9642, 1.0, 0.8249])
+_ICC_SRGB_COLORANTS = np.array(
+    [[0.4361, 0.3851, 0.1431], [0.2225, 0.7169, 0.0606], [0.0139, 0.0971, 0.7141]]
+)
+_BRADFORD = np.array(
+    [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]]
+)
+_D65 = np.array([0.95047, 1.0, 1.08883])
+# Oklab's matrix from D65 XYZ to LMS (Ottosson 2020).
+_OKLAB_XYZ_LMS = np.array(
+    [
+        [0.8189330101, 0.3618667424, -0.1288597137],
+        [0.0329845436, 0.9293118715, 0.0361456387],
+        [0.0482003018, 0.2643662691, 0.6338517070],
+    ]
+)
+
+
+def _icc_tags(data: bytes) -> tuple[int, dict[bytes, bytes]] | None:
+    """An ICC profile's major version and tags by signature, or None."""
+    try:
+        (count,) = struct.unpack_from(">I", data, 128)
+        tags = {}
+        for index in range(count):
+            name, start, size = struct.unpack_from(">4sII", data, 132 + 12 * index)
+            tags[name] = data[start : start + size]
+    except struct.error:
+        return None
+    return data[8], tags
+
+
+def _icc_xyz(tag: bytes) -> tuple[float, float, float]:
+    """The first value of an ICC ``XYZ `` tag."""
+    x, y, z = struct.unpack_from(">3i", tag, 8)
+    return (x / 65536, y / 65536, z / 65536)
+
+
+@functools.lru_cache(maxsize=8)
+def _profile_lms(data: bytes) -> tuple[float, ...] | None:
+    """A matrix RGB profile's linear RGB to Oklab LMS, row by row, or None.
+
+    The colorants are read in the D50 connection space and adapted to Oklab's
+    D65 by Bradford. None for a profile without colorants or with sRGB's,
+    where Oklab's own sRGB matrix stands.
+    """
+    profile = _icc_tags(data)
+    if profile is None:
+        return None
+    try:
+        colorants = np.array(
+            [_icc_xyz(profile[1][key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
+        ).T
+    except (KeyError, struct.error):
+        return None
+    if np.allclose(colorants, _ICC_SRGB_COLORANTS, atol=2e-3):
+        return None
+    cone = (_BRADFORD @ _D65) / (_BRADFORD @ _ICC_D50)
+    adapt = np.linalg.solve(_BRADFORD, cone[:, None] * _BRADFORD)
+    lms = _OKLAB_XYZ_LMS @ adapt @ colorants
+    if not np.all(np.isfinite(lms)) or abs(np.linalg.det(lms)) < 1e-6:
+        return None
+    return tuple(float(value) for value in lms.ravel())
+
+
+def document_lms(psd: "PSDProtocol") -> tuple[float, ...] | None:
+    """The matrix the perceptual method takes ``psd``'s linear RGB to Oklab by.
+
+    Photoshop 2023 blends a perceptual gradient in the Oklab of the
+    document's own profile (its colorants; the transfer curve stays sRGB's,
+    which both profiles on the cards have). None keeps sRGB's: no profile, or
+    one :py:func:`_profile_lms` cannot use.
+    """
+    resources = psd.image_resources
+    if Resource.ICC_PROFILE not in resources:
+        return None
+    data = resources.get_data(Resource.ICC_PROFILE)
+    return _profile_lms(data) if isinstance(data, bytes) else None
+
+
 # The perceptual method blends opacity raised to 1 / this. Fitted to
 # Photoshop 2023's foreground-to-transparent fills and to the cards.
 _PERCEPTUAL_ALPHA_GAMMA = 1.728
@@ -1025,6 +1179,25 @@ _BLEND_SPACES: dict[bytes, _BlendSpace] = {
 _ALPHA_BLEND_SPACES: dict[bytes, _BlendSpace] = {
     GradientMethod.PERCEPTUAL.value: (_unease_alpha, _ease_alpha),
 }
+
+
+def _blend_space(
+    method: bytes | None, rgb_lms: tuple[float, ...] | None = None
+) -> _BlendSpace | None:
+    """``_BLEND_SPACES[method]``, its Oklab through ``rgb_lms`` when given."""
+    space = _BLEND_SPACES.get(method) if method is not None else None
+    if space is None or rgb_lms is None or space[0] is not _srgb_to_oklab:
+        return space
+    forward = np.array(rgb_lms).reshape(3, 3)
+    inverse = np.linalg.inv(forward)
+
+    def encode(rgb: np.ndarray) -> np.ndarray:
+        return np.cbrt(_srgb_to_linear(rgb) @ forward.T) @ _OKLAB_LAB.T
+
+    def decode(lab: np.ndarray) -> np.ndarray:
+        return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ inverse.T)
+
+    return encode, decode
 
 
 def _canvas_rows(color_mode: ColorMode, rgb: np.ndarray) -> np.ndarray:
@@ -1082,7 +1255,10 @@ class _Lookup:
 
 
 def _make_linear_gradient_color(
-    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
+    color_mode: ColorMode,
+    grad: Descriptor,
+    method: bytes | None = None,
+    rgb_lms: tuple[float, ...] | None = None,
 ) -> tuple[Any | None, Any | None]:
     smoothness = _clamp01(_finite(grad, Key.Interpolation, 4096.0) / 4096.0)
     colors = grad.get(Key.Colors, [])
@@ -1090,7 +1266,7 @@ def _make_linear_gradient_color(
         *_collect_stops(colors, lambda stop: np.array(_get_color(color_mode, stop))),
         smoothness,
     )
-    space = _BLEND_SPACES.get(method) if method is not None else None
+    space = _blend_space(method, rgb_lms)
     if space is not None:
         encode, decode = space
         X, Y, M = _collect_stops(

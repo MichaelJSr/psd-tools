@@ -820,6 +820,7 @@ def _draw_gradient_overlay(
         descriptor,
         path or paint.gradient_anchor(layer._psd, descriptor, layout),
         layer._psd.depth,
+        paint.document_lms(layer._psd),
     )
 
 
