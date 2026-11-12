@@ -385,7 +385,6 @@ def _style_draws(layer: Layer) -> bool:
 
 def _blends_through(
     layer: Layer,
-    color_mode: ColorMode,
     as_pixels: Callable[[Layer], bool] | None = None,
 ) -> tuple[bool, bool]:
     """Whether the layer's own paint and effects blend with what lies beneath.
@@ -393,8 +392,10 @@ def _blends_through(
     The pair is (in a mode the isolated render changes, in one it does not):
     a type layer's own paint, a group in a mode of its own and anything in a
     mode Photoshop fades by fill opacity land as they would pass through.
-    Normal, Dissolve and a solid colour its mode blends to itself
-    (:py:data:`_FIXED_POINTS`) blend alike either way. A type layer that
+    Normal and Dissolve blend alike either way. Any other mode does not,
+    even in a colour it blends to itself (white in Screen, black in
+    Multiply): the group's law weighs it against what the group shows so
+    far (:py:meth:`Compositor._mixed_by_law`). A type layer that
     ``as_pixels`` says Photoshop composites from its stored raster
     (:py:meth:`Compositor._drawn_as_pixels`) blends as the pixel layer it is
     drawn as.
@@ -411,20 +412,12 @@ def _blends_through(
     for name in _EFFECT_KINDS:
         for effect in _readable(layer, name):
             try:
-                for blend_mode, opacity, desc in _effect_paints(name, effect):
+                for blend_mode, opacity, _ in _effect_paints(name, effect):
                     if not opacity > 0.0 or blend_mode in _COVERS_BENEATH:
                         continue
                     if blend_mode in _FILL_FADED:
                         keeps = True
-                    elif (
-                        blend_mode not in _FIXED_POINTS
-                        or Key.Gradient in desc
-                        or Key.Pattern in desc
-                        or any(
-                            value != _FIXED_POINTS[blend_mode]
-                            for value in paint._get_color(color_mode, desc)
-                        )
-                    ):
+                    else:
                         mixes = True
             except _UNREADABLE as error:
                 logger.debug("Cannot read an effect of %s: %s", layer, error)
@@ -468,7 +461,6 @@ def _mixes_isolated(
         layer.has_clip_layers() or (_has_enabled_effects(layer) and _style_draws(layer))
     ):
         return False
-    color_mode = layer._psd.color_mode
     mixes = False
     stack = [
         child
@@ -481,7 +473,7 @@ def _mixes_isolated(
             return False
         if isinstance(child, AdjustmentLayer):
             continue
-        child_mixes, keeps = _blends_through(child, color_mode, as_pixels)
+        child_mixes, keeps = _blends_through(child, as_pixels)
         if keeps:
             return False
         mixes = mixes or child_mixes

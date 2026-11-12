@@ -350,6 +350,15 @@ def test_which_clipped_groups_mix(case: str) -> None:
 _LAW = "effects/mixing-law"
 
 
+def _law_error(psd: PSDImage, name: str) -> int:
+    """The largest difference from Photoshop's PNG ``name``, in levels."""
+    theirs = np.asarray(Image.open(full_name(name + ".png")).convert("RGBA"), dtype=int)
+    ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
+    alpha = theirs[..., 3:] / 255.0
+    color = np.abs(ours[..., :3] * ours[..., 3:] / 255.0 - theirs[..., :3] * alpha)
+    return int(max(np.abs(ours[..., 3] - theirs[..., 3]).max(), color.max()))
+
+
 def test_blend_sources_over_a_mixing_groups_content_follow_its_law(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -359,18 +368,43 @@ def test_blend_sources_over_a_mixing_groups_content_follow_its_law(
     levels; by the law every pixel is Photoshop's within 3.
     """
     psd = PSDImage.open(full_name(_LAW + ".psd"))
-    theirs = np.asarray(Image.open(full_name(_LAW + ".png")), dtype=int)
-
-    def error() -> int:
-        ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
-        alpha = theirs[..., 3:] / 255.0
-        color = np.abs(ours[..., :3] * ours[..., 3:] / 255.0 - theirs[..., :3] * alpha)
-        return int(max(np.abs(ours[..., 3] - theirs[..., 3]).max(), color.max()))
-
-    assert error() <= 3
+    assert _law_error(psd, _LAW) <= 3
 
     def plain(self: Any, *args: Any) -> np.ndarray:
         return self._color
 
     monkeypatch.setattr(composite_module.Compositor, "_mixed_by_law", plain)
-    assert error() > 12
+    assert _law_error(psd, _LAW) > 12
+
+
+# effects/mixing-fixed-points.psd: three cells over stripes, each a pass-through
+# group: a ramp fading in down the cell under a bar whose effect is in a colour
+# its mode blends to itself, a white Screen outer glow over a dark ramp, then a
+# black Multiply drop shadow over a light one. A hidden layer clips to those two
+# groups; the third is the first without it. Photoshop 2023's PNG of it is the
+# reference.
+_FIXED = "effects/mixing-fixed-points"
+
+
+def test_fixed_point_effects_follow_a_mixing_groups_law(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """White in Screen and black in Multiply blend to themselves, yet mix.
+
+    Blended through, the two mixing cells stray by up to 29 levels where the
+    effect meets the ramp; by the law every pixel is Photoshop's within 2.
+    """
+    psd = PSDImage.open(full_name(_FIXED + ".psd"))
+    groups = [layer for layer in psd if layer.is_group()]
+    assert [composite_module._mixes_isolated(g, None) for g in groups] == [
+        True,
+        True,
+        False,
+    ]
+    assert _law_error(psd, _FIXED) <= 2
+
+    def never(*args: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(composite_module, "_mixes_isolated", never)
+    assert _law_error(psd, _FIXED) > 20
