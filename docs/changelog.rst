@@ -4,6 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] 8-bit documents: a layer's alpha times its opacity and mask is
+  rounded to whole levels before it blends, as Photoshop 2023 does (50% over
+  a soft edge blends at round(a x 128 / 255)). Groups, layers with effects,
+  fill opacity and other depths keep the float product. **Rendering change**
 - [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
   as drop shadows do (matte and opacity held at 8 bits, their product
   rounded), and colour, gradient and pattern overlays and stroke effects
