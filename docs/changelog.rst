@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] 8-bit documents: Hue/Saturation with the master alone at hue 0
+  and saturation 0 or -100 works in whole levels, as Photoshop 2023 does:
+  lightness scales each channel's level by a whole-level ``K / 255``
+  (toward black below 0, toward white above), rounded, and desaturation
+  then sets every channel to the floored midrange of the three. Exact on
+  every colour for desaturation; other settings, colour ranges, colorize
+  and other depths keep the old model. **Rendering change**
 - [fix] Color and Luminosity blend in Photoshop 2023's integers in an 8-bit
   RGB document: whole-level operands (a fill's colour too), lightness
   ``(4915 R + 9667 G + 1802 B + 8192) >> 14``, and a colour pushed past 0 or
