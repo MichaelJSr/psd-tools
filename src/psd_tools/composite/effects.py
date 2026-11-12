@@ -2189,7 +2189,8 @@ _BEVEL_SLOPE_PER_DEPTH = 1.0
 # How high a bevel's texture stands at a texture depth of 100%, per pixel the
 # bevel's surface stands, and how a slope along one axis is smoothed along
 # the other: evenly over three pixels, a Prewitt operator. Read off Photoshop
-# 2023 exports of textured and untextured bevels.
+# 2023 exports of textured and untextured bevels, and of smooth bevels with a
+# shape contour at range 0, which light every slope by its direction.
 _TEXTURE_HEIGHT_PER_DEPTH = 1.0
 _SLOPE_ACROSS = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
 

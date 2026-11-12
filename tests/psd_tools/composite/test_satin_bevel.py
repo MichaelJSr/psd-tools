@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from psd_tools.api import utils as api_utils
 from psd_tools.api.effects import BevelEmboss
@@ -773,8 +774,8 @@ _FITTED = {
 
 # Not fitted to a preview: none carries a chisel soft bevel or a textured
 # bevel. The texture height and the slope's smoothing are read off Photoshop
-# 2023 exports instead (effects/bevel-texture-laws.psd). Pinned so that a
-# change to them is deliberate.
+# 2023 exports instead (effects/bevel-texture-laws.psd and
+# bevel-contour-range0.psd). Pinned so that a change to them is deliberate.
 _ASSUMED = {
     "_SLOPE_LIMIT_SIGMA_PER_SIZE": 0.125,
     "_TEXTURE_HEIGHT_PER_DEPTH": 1.0,
@@ -1135,6 +1136,33 @@ def test_an_unreadable_shape_range_draws_the_bevel_without_it(
         color, _, _ = composite(psd)
     assert "Cannot read a bevel's shape" in caplog.text
     assert np.array_equal(color, composite(plain)[0])
+
+
+def test_a_range_0_shape_contour_matches_photoshop_2023(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every pixel of ``bevel-contour-range0.psd`` is near Photoshop 2023's PNG.
+
+    A disc, a diamond and a ring, black on white, with a smooth inner bevel
+    of size 2 and a Linear shape contour at range 0 (red highlight, blue
+    shadow): above as Golden Bomb's name has it, anti-aliased and lit from
+    30 degrees, below not anti-aliased and lit from 90. So steep a surface
+    is lit by the direction of its slope alone, which a Sobel operator
+    turns toward the axes: up to 47 levels off on the curves.
+    """
+    psd = PSDImage.open(full_name("effects/bevel-contour-range0.psd"))
+    theirs = np.asarray(
+        Image.open(full_name("effects/bevel-contour-range0.png")), dtype=int
+    )
+
+    def error() -> np.ndarray:
+        ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
+        return np.abs(ours - theirs).max(axis=2)
+
+    off = error()
+    assert int(off[:36].max()) <= 10 and int(off.max()) <= 14
+    monkeypatch.setattr(effects, "_SLOPE_ACROSS", (0.25, 0.5, 0.25))
+    assert int(error().max()) > 24
 
 
 # effects/bevel-smooth-outer-emboss.psd: as the fixture above, with smooth
