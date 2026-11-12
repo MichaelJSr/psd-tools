@@ -7,8 +7,8 @@ Changelog
 - [fix] A shape with no stored pixels is filled wherever its path covers,
   not only inside its box, which truncates the origination box and can
   stop a row short of an Align Edges path (Old_Chica, Uumuu, Green_Mage,
-  Bobberlington: a missing or transparent row now matches Photoshop 2023).
-  **Rendering change**
+  Bobberlington: a missing or transparent row now matches Photoshop 2023),
+  in box renders too. **Rendering change**
 - [fix] A knockout pass-through group knocks out what lies under it instead
   of uniting with it (#707), and Transparency Shapes Layer off (tag tsly)
   makes the layer's masks the knockout shape: a sprite row drawn over
