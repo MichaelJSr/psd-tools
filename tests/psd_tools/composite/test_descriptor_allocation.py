@@ -65,12 +65,15 @@ def _peak(run: Callable[[], object]) -> int:
 
 @pytest.mark.parametrize("shape", [(1, 1, 2), (5, 5, 4), (37, 23, 4)])
 @pytest.mark.parametrize("scale", [1.0, 1.7, 0.5])
+@pytest.mark.parametrize("levels", [False, True])
 def test_the_sample_estimate_covers_its_peak(
-    shape: tuple[int, int, int], scale: float
+    shape: tuple[int, int, int], scale: float, levels: bool
 ) -> None:
     panel = np.ones(shape, dtype=np.float32)
     viewport = (5, 7, 305, 207)
-    peak = _peak(lambda: paint._sample_tiling(panel, viewport, (-3, 11), scale))
+    peak = _peak(
+        lambda: paint._sample_tiling(panel, viewport, (-3, 11), scale, 1, levels)
+    )
     assert paint._sample_peak_bytes(panel, viewport, scale) >= peak
 
 
@@ -80,8 +83,9 @@ def test_the_box_estimate_covers_its_peak(
     shape: tuple[int, int, int], width: int
 ) -> None:
     panel = np.ones(shape, dtype=np.float32)
-    peak = _peak(lambda: paint._box_average(panel, width))
-    assert paint._box_peak_bytes(panel, width) >= peak
+    for reduce in (paint._box_average, paint._halve_levels):
+        peak = _peak(lambda: reduce(panel, width))
+        assert paint._box_peak_bytes(panel, width) >= peak
 
 
 @pytest.mark.parametrize("scale", [100.0, 7.0])

@@ -53,6 +53,13 @@ _FILL_METHOD_KEY = b"gradientsInterpolationMethod"
 _MIN_SCALE = 1.0
 _MAX_SCALE = 1000.0
 
+# Photoshop 2023 halves a pattern three times at most: below 1/8 it samples
+# the third halving further apart.
+_MAX_REDUCTION_BOX = 8
+
+# An 8-bit pattern's bilinear weights, in 256ths.
+_WEIGHT_STEPS = 256.0
+
 # What a numpy call leaves on tracemalloc besides its arrays' data: the array
 # objects, the index arrays and the lists moveaxis builds.
 _CALL_OVERHEAD_BYTES = 32768
@@ -450,13 +457,40 @@ def _turn_panel(panel: np.ndarray, desc: Descriptor) -> np.ndarray:
 def _reduction_box(scale: float) -> int:
     """The box a pattern reduced by ``scale`` is averaged over: 2**L samples.
 
-    L is the deepest halving that does not reduce the panel past the scale.
+    L is the deepest halving that does not reduce the panel past the scale,
+    three at most.
     """
     width = 1
     # A scale read as percent / 100 can fall a hair short of the halving it names.
-    while width * 2 * scale <= 1.0 + 1e-9:
+    while width < _MAX_REDUCTION_BOX and width * 2 * scale <= 1.0 + 1e-9:
         width *= 2
     return width
+
+
+def _holds_8_bit_levels(pattern: Any, psd: Any) -> bool:
+    """Whether ``pattern`` is 8-bit in an 8-bit document."""
+    return getattr(psd, "depth", 8) == 8 and all(
+        channel.pixel_depth == 8
+        for channel in pattern.data.channels
+        if channel.is_written
+    )
+
+
+def _halve_levels(panel: np.ndarray, width: int) -> np.ndarray:
+    """Whole 8-bit levels halved until ``width``, as Photoshop 2023 does.
+
+    Each halving takes every sample with the next one on both axes, wrapping,
+    as ``(a + b + c + d + 2) >> 2``. Float32 holds these sums exactly.
+    """
+    step = 1
+    while step < width:
+        total = panel + np.roll(panel, -step, axis=0)
+        total += np.roll(total, -step, axis=1)
+        total += 2.0
+        total *= 0.25
+        panel = np.floor(total, out=total)
+        step *= 2
+    return panel
 
 
 def _box_average(panel: np.ndarray, width: int) -> np.ndarray:
@@ -486,19 +520,29 @@ def _box_peak_bytes(panel: np.ndarray, width: int) -> int:
 
 
 def _tile_axis(
-    start: int, length: int, origin: int, size: int, scale: float, step: int = 1
+    start: int,
+    length: int,
+    origin: int,
+    size: int,
+    scale: float,
+    step: int = 1,
+    levels: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Panel indices and weights along one axis for a tiling scaled by ``scale``.
 
     The sample at ``origin`` is the panel's first, and each output pixel
     blends the two samples either side of its scaled position on a grid
     ``step`` samples apart, as Photoshop 2023 samples a reduction's level.
+    With ``levels`` the weight is in whole 256ths, cut toward zero.
     """
     position = (
         (np.arange(start, start + length, dtype=np.float64) - origin) / scale / step
     )
     first = np.floor(position)
-    weight = (position - first).astype(np.float32)
+    weight = position - first
+    if levels:
+        weight = np.floor(weight * _WEIGHT_STEPS)
+    weight = weight.astype(np.float32)
     index = first.astype(np.int64) * step % size
     return index, (index + step) % size, weight
 
@@ -509,10 +553,14 @@ def _sample_tiling(
     origin: tuple[int, int],
     scale: float,
     step: int = 1,
+    levels: bool = False,
 ) -> np.ndarray:
     """The panel tiled across ``viewport`` from ``origin``, bilinear and wrapping.
 
     ``step`` is the reduction box: the samples blended are that far apart.
+    With ``levels`` the panel holds whole 8-bit levels, blended as Photoshop
+    2023 blends them (weights in 256ths, one rounding half up), and the
+    result is back in [0, 1].
     """
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
     if scale == 1.0:
@@ -532,16 +580,26 @@ def _sample_tiling(
             rows * panel.shape[0], columns * panel.shape[1], panel.shape[2]
         )[:height, :width]
     top, bottom, down = _tile_axis(
-        viewport[1], height, origin[1], panel.shape[0], scale, step
+        viewport[1], height, origin[1], panel.shape[0], scale, step, levels
     )
     left, right, across = _tile_axis(
-        viewport[0], width, origin[0], panel.shape[1], scale, step
+        viewport[0], width, origin[0], panel.shape[1], scale, step, levels
     )
-    rows = panel[top] * (1 - down)[:, None, None] + panel[bottom] * down[:, None, None]
-    return (
-        rows[:, left] * (1 - across)[None, :, None]
+    whole = _WEIGHT_STEPS if levels else 1.0
+    rows = (
+        panel[top] * (whole - down)[:, None, None] + panel[bottom] * down[:, None, None]
+    )
+    pixels = (
+        rows[:, left] * (whole - across)[None, :, None]
         + rows[:, right] * across[None, :, None]
     )
+    if levels:
+        # Whole numbers below 2**24, so float32 is exact.
+        pixels += whole * whole / 2
+        pixels *= 1.0 / (whole * whole)
+        np.floor(pixels, out=pixels)
+        pixels /= _LEVELS_8
+    return pixels
 
 
 def _sample_peak_bytes(
@@ -597,7 +655,8 @@ def draw_pattern_fill(
     larger than the anchor continues the same tiling. ``Angl`` turns the
     tiles about that point, in right angles only; ``Scl `` scales them about
     it. A reduction is bilinear between samples of the panel's box average
-    one box apart.
+    one box apart. An 8-bit pattern in an 8-bit document is reduced and
+    blended in whole levels, as Photoshop 2023 does.
 
     Example descriptor::
 
@@ -629,6 +688,11 @@ def draw_pattern_fill(
 
     scale = _pattern_scale(desc)
     panel = _turn_panel(panel, desc)
+    levels = scale != 1.0 and _holds_8_bit_levels(pattern, psd)
+    if levels:
+        # Back to whole levels, in place: get_pattern's array is ours.
+        np.multiply(panel, _LEVELS_8, out=panel)
+        np.rint(panel, out=panel)
     box = _reduction_box(scale)
     if box > 1:
         check_pixel_size(
@@ -639,7 +703,7 @@ def draw_pattern_fill(
             estimated_bytes=_box_peak_bytes(panel, box),
             warn=False,
         )
-        panel = _box_average(panel, box)
+        panel = _halve_levels(panel, box) if levels else _box_average(panel, box)
 
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
     if origin is None:
@@ -663,7 +727,7 @@ def draw_pattern_fill(
     # never split off, and the array reached the canvas one plane too wide and
     # was rejected as inconsistent with it (#741).
     channels = numpy_io.get_pattern_color_channels(pattern)
-    pixels = _sample_tiling(panel, viewport, origin, scale, box)
+    pixels = _sample_tiling(panel, viewport, origin, scale, box, levels)
     if pixels.shape[2] > channels:
         return pixels[:, :, :channels], pixels[:, :, -1:]
     return pixels, None
