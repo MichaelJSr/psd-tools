@@ -4,6 +4,11 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Colour balance with midtones alone draws Photoshop 2023's Levels
+  curve per channel: gamma ``2 ** (amount / 100)`` to 0.01, Levels' toe
+  above 1, the plain power below; Preserve Luminosity first takes the
+  midrange of the three amounts, truncated toward zero, off each. Shadows
+  or highlights keep the old model. **Rendering change**
 - [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
   as drop shadows do (matte and opacity held at 8 bits, their product
   rounded), and colour, gradient and pattern overlays and stroke effects

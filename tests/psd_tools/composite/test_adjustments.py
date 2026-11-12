@@ -20,6 +20,7 @@ from psd_tools.composite.adjustments import (
     _apply_lut,
     _brightness_curve,
     _brightnesscontrast_tables,
+    _colorbalance_gammas,
     _huesaturation,
     _legacy_brightnesscontrast_lut,
     _levels_gamma,
@@ -1474,6 +1475,34 @@ def test_color_balance_preserving_luminosity_centres_every_range(name: str) -> N
         out, _applied(apply_colorbalance(_RAMP, ColorMode.RGB, centred)), atol=1e-6
     )
     assert out[0, 5, 0] > _RAMP[0, 5, 0] > out[0, 5, 1]
+
+
+# Photoshop 2023's three Levels gammas, read off its curves over all 16.7 M
+# colours. (0, -87, 26) takes off -30: half of -61, truncated toward zero.
+@pytest.mark.parametrize(
+    ("midtones", "luminosity", "gammas"),
+    [
+        ((0, -87, 26), True, [1.23, 0.67, 1.47]),
+        ((100, 0, 0), True, [1.41, 0.71, 0.71]),
+        ((-20, -39, 38), False, [0.87, 0.76, 1.3]),
+    ],
+)
+def test_color_balance_midtones_are_photoshops_levels_gammas(
+    midtones: tuple[int, int, int], luminosity: bool, gammas: list[float]
+) -> None:
+    assert _colorbalance_gammas(midtones, luminosity) == gammas
+
+
+@pytest.mark.parametrize("name", ["colorbalance_luminosity", "colorbalance_midtones"])
+def test_color_balance_misses_photoshop_only_in_a_brightening_toe(name: str) -> None:
+    """Every level exact but a few of the Levels toe, below level 32."""
+    psd = PSDImage.open(full_name(f"adjustments/{name}_rgb.psd"))
+    reference = np.rint(psd.numpy()[..., :3] * 255)
+    result = np.asarray(psd.composite(force=True, apply_icc=False), np.float64)
+    source = psd[0].numpy()
+    assert source is not None
+    off = result[..., :3] != reference
+    assert np.all(np.rint(source[..., :3] * 255)[off] < 32)
 
 
 def test_color_balance_keeps_black_white_and_channel_order() -> None:
