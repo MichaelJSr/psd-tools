@@ -567,7 +567,7 @@ huesaturation_tests = {
     "huesaturation": LOOSE,  # lower accuracy is due to how _apply_saturation works
     "huesaturation_saturation": ACCURATE,  # test saturation in isolation
     "huesaturation_lightness": ACCURATE,  # test lightness in isolation
-    "huesaturation_colorize": ACCURATE,
+    "huesaturation_colorize": STRICT,
 }
 huesaturation_colorspaces = ["rgb"]  # CMYK not implemented
 
@@ -593,6 +593,59 @@ def test_huesaturation_near_white_stays_white() -> None:
     assert rgb2hsl(img)[0, 0, 1] == 0
     master = (np.float32(0.1), np.float32(0.2), np.float32(0))
     np.testing.assert_allclose(_huesaturation(img, [], master), 1.0, atol=1e-6)
+
+
+# Photoshop 2023's Colorize in an 8-bit document without a profile: the output
+# for the gray of every level at 56 settings, 4000 colours at The Panda
+# Future's (49, 76, -46), and its 16-bit export of the grays at that setting.
+with np.load(full_name("adjustments/colorize_8bit_codes.npz")) as _data:
+    _COLORIZE = {key: _data[key] for key in _data.files}
+
+
+def _colorize_layer(
+    hue: int, saturation: int, lightness: int
+) -> adjustments.HueSaturation:
+    psd = PSDImage.open(full_name("adjustments/huesaturation_colorize_rgb.psd"))
+    layer = next(x for x in psd.descendants() if x.kind == "huesaturation")
+    assert isinstance(layer, adjustments.HueSaturation)
+    layer._data = HueSaturationData(
+        colorization=(hue, saturation, lightness), master=(-53, 0, 0)
+    )
+    return layer
+
+
+def _colorized(image: np.ndarray, setting: tuple[int, int, int]) -> np.ndarray:
+    out = apply_huesaturation(
+        image.astype(np.float32) / 255, ColorMode.RGB, _colorize_layer(*setting)
+    )
+    return np.rint(_applied(out) * 255).astype(np.int64)
+
+
+def test_colorize_matches_photoshop_in_8_bits() -> None:
+    """Every colour reads its setting's table at ``(max + min) // 2``."""
+    colours = np.random.default_rng(3).integers(0, 256, (1, 3000, 3))
+    image = np.concatenate([np.arange(256)[None, :, None].repeat(3, 2), colours], 1)
+    level = (image.max(axis=2) + image.min(axis=2)) // 2
+    for setting, table in zip(_COLORIZE["settings"], _COLORIZE["tables"], strict=True):
+        hue, sat, light = (int(v) for v in setting)
+        out = _colorized(image, (hue, sat, light))
+        assert np.array_equal(out, table[level].astype(np.int64)), setting
+
+
+def test_colorize_matches_photoshop_on_the_panda_future() -> None:
+    out = _colorized(_COLORIZE["card_src"][None], (49, 76, -46))
+    assert np.array_equal(out[0], _COLORIZE["card_out"])
+
+
+def test_colorize_in_16_bits_mixes_plain_hsl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        importlib.import_module("psd_tools.composite.adjustments"),
+        "_get_lut_size",
+        lambda layer: 65536,
+    )
+    gray = np.arange(256)[None, :, None].repeat(3, 2).astype(np.float32) / 255
+    out = apply_huesaturation(gray, ColorMode.RGB, _colorize_layer(49, 76, -46))
+    assert np.abs(_applied(out)[0] * 255 - _COLORIZE["gray16"]).max() < 0.06
 
 
 # Invert

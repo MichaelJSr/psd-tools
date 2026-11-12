@@ -671,6 +671,8 @@ def apply_huesaturation(
         return img
 
     if layer.enable_colorization:
+        if _get_lut_size(layer) == 256:
+            return _colorize_8bit(img, *colorization)
         hsl_colorize_tuple = _normalize_hsl(colorization)
         return (
             _huesaturation_colorize(img, hsl_colorize_tuple)
@@ -711,6 +713,72 @@ def _huesaturation_colorize(
     hsl[..., 2:3] = _apply_lightness(hsl[..., 2:3], lightness)
 
     return hsl2rgb(hsl)
+
+
+def _colorize_8bit(
+    img: np.ndarray, hue: int, saturation: int, lightness: int
+) -> NDArray[np.float32]:
+    """Photoshop 2023's Colorize in 8-bit documents, exact.
+
+    The pixel's whole levels give its lightness level, ``(max + min) // 2``,
+    and that level reads the setting's table.
+    """
+    nan = np.isnan(img)
+    levels = _level_index(np.where(nan, _0, img), 256)
+    out = _colorize_levels(hue, saturation, lightness)[
+        (levels.max(axis=2) + levels.min(axis=2)) // 2
+    ]
+    out[nan.any(axis=2)] = np.nan
+    return out
+
+
+def _colorize_ramp() -> tuple[int, ...]:
+    # A sector's rising channel at steps of 60/42.5 degrees: the mix of its
+    # two ends at that angle on a circle, not on a hexagon.
+    angles = [math.radians(k * 60 / 42.5) for k in range(42)]
+    return tuple(
+        math.floor(255 * math.sin(a) / math.sin(a + math.pi / 3) + 0.5) for a in angles
+    )
+
+
+_COLORIZE_RAMP = _colorize_ramp()
+
+
+@functools.lru_cache(maxsize=16)
+def _colorize_levels(hue: int, saturation: int, lightness: int) -> NDArray[np.float32]:
+    """Colorize's output (256, 3) by lightness level, in Photoshop's integers.
+
+    Read off Photoshop 2023 (every hue, saturation and lightness): the hue
+    in 256ths of a turn, its channels a third of a turn apart (85 and 170),
+    the saturation in 255ths over 127, the lightness in 255ths. 16-bit
+    documents mix plain HSL instead.
+    """
+    sat = max(0, min(100, saturation)) * 255 // 100
+    light = min(100, abs(lightness)) * 255 // 100
+    level = np.arange(256, dtype=np.int64)
+    if lightness < 0:
+        level = (level * (255 - light) + 127) // 255
+    else:
+        level = (level * (255 - light) + 255 * light + 127) // 255
+    chroma = np.minimum(level, 255 - level) * sat // 127
+    high = np.minimum(255, (2 * level + chroma + 1) // 2)
+
+    index = hue % 360 * 256 // 360
+    shares = []
+    for offset in (85, 0, 170):
+        t = (index + offset) % 256
+        if t < 42:
+            shares.append(_COLORIZE_RAMP[t])
+        elif t <= 128:
+            shares.append(255)
+        elif t <= 170:
+            shares.append(_COLORIZE_RAMP[170 - t])
+        else:
+            shares.append(0)
+    out = (high - chroma)[:, None] + (chroma[:, None] * np.array(shares) + 127) // 255
+    table = (out / _255).astype(np.float32)
+    table.flags.writeable = False
+    return table
 
 
 def _huesaturation(
