@@ -1299,13 +1299,6 @@ _VIBRANCE_VALUES = np.r_[np.arange(0.0, 256.0, 4.0), 255.0]
 _VIBRANCE_SATURATIONS = np.r_[
     (1 - np.cos(np.pi * np.linspace(0.0, 1.0, 41))) / 2, 1.1, 1.25, 1.5, 2.0
 ]
-_ICC_D50 = np.array([0.9642, 1.0, 0.8249])
-_ICC_SRGB_COLORANTS = np.array(
-    [[0.4361, 0.3851, 0.1431], [0.2225, 0.7169, 0.0606], [0.0139, 0.0971, 0.7141]]
-)
-_BRADFORD = np.array(
-    [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]]
-)
 
 
 def _vibrance_space(layer: Layer) -> NDArray[np.float64] | None:
@@ -1319,46 +1312,27 @@ def _vibrance_space(layer: Layer) -> NDArray[np.float64] | None:
     resources = layer._psd.image_resources
     if Resource.ICC_PROFILE not in resources:
         return None
-    profile = _icc_tags(resources.get_data(Resource.ICC_PROFILE))
+    profile = paint._icc_tags(resources.get_data(Resource.ICC_PROFILE))
     if profile is None:
         return None
     version, tags = profile
     if version != 2 or b"chad" not in tags:
         return None
     try:
-        white = np.array(_icc_xyz(tags[b"wtpt"]))
+        white = np.array(paint._icc_xyz(tags[b"wtpt"]))
         colorants = np.array(
-            [_icc_xyz(tags[key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
+            [paint._icc_xyz(tags[key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
         ).T
     except (KeyError, struct.error):
         return None
-    if np.allclose(white, _ICC_D50, atol=2e-3) or np.allclose(
-        colorants, _ICC_SRGB_COLORANTS, atol=2e-3
+    if np.allclose(white, paint._ICC_D50, atol=2e-3) or np.allclose(
+        colorants, paint._ICC_SRGB_COLORANTS, atol=2e-3
     ):
         return None
-    cone = _BRADFORD @ white / (_BRADFORD @ _ICC_D50)
-    adapt = np.linalg.solve(_BRADFORD, cone[:, None] * _BRADFORD)
-    moved = (_ICC_D50 / white)[:, None] * adapt @ colorants
+    cone = paint._BRADFORD @ white / (paint._BRADFORD @ paint._ICC_D50)
+    adapt = np.linalg.solve(paint._BRADFORD, cone[:, None] * paint._BRADFORD)
+    moved = (paint._ICC_D50 / white)[:, None] * adapt @ colorants
     return np.linalg.solve(colorants, moved)
-
-
-def _icc_tags(data: bytes) -> tuple[int, dict[bytes, bytes]] | None:
-    """An ICC profile's major version and tags by signature, or None."""
-    try:
-        (count,) = struct.unpack_from(">I", data, 128)
-        tags = {}
-        for index in range(count):
-            name, start, size = struct.unpack_from(">4sII", data, 132 + 12 * index)
-            tags[name] = data[start : start + size]
-    except struct.error:
-        return None
-    return data[8], tags
-
-
-def _icc_xyz(tag: bytes) -> tuple[float, float, float]:
-    """The first value of an ICC ``XYZ `` tag."""
-    x, y, z = struct.unpack_from(">3i", tag, 8)
-    return (x / 65536, y / 65536, z / 65536)
 
 
 def _vibrance(linear: np.ndarray, vibrance: float, saturation: float) -> np.ndarray:
