@@ -14,6 +14,13 @@ Changelog
   one the cache hashed under another mark (the same card opened again, its
   saved copy reopened) is compared with it and takes its digest instead of
   being hashed again. Keys and renders are unchanged
+- [fix] 8-bit documents: Hue/Saturation with the master alone at hue 0
+  and saturation 0 or -100 works in whole levels, as Photoshop 2023 does:
+  lightness scales each channel's level by a whole-level ``K / 255``
+  (toward black below 0, toward white above), rounded, and desaturation
+  then sets every channel to the floored midrange of the three. Exact on
+  every colour for desaturation; other settings, colour ranges, colorize
+  and other depths keep the old model. **Rendering change**
 - [refactor] Spread drop shadows and outer glows, and choked inner shadows
   and inner glows, are drawn only on the part of their box within reach of
   the viewport (their unspread reach and a pixel), as unspread ones are, and

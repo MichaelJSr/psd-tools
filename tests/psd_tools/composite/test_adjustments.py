@@ -596,6 +596,49 @@ def test_huesaturation_near_white_stays_white() -> None:
     np.testing.assert_allclose(_huesaturation(img, [], master), 1.0, atol=1e-6)
 
 
+_HS_COLORS = [(200, 30, 101), (13, 250, 77), (255, 0, 128), (1, 2, 4), (90, 91, 240)]
+
+
+def _master_huesaturation(master: tuple[int, int, int]) -> np.ndarray:
+    layer = PSDImage.open(full_name("fill_adjustments.psd"))[9]
+    assert isinstance(layer, adjustments.HueSaturation) and layer._psd.depth == 8
+    layer._data = HueSaturationData(enable=0, colorization=(0, 25, 0), master=master)
+    img = np.array([_HS_COLORS], dtype=np.float32) / np.float32(255)
+    out = _applied(apply_huesaturation(img, ColorMode.RGB, layer))
+    assert np.array_equal(out, np.rint(out * 255) / np.float32(255))
+    return np.rint(out[0] * 255).astype(int)
+
+
+# Photoshop 2023's 8-bit output, read off its all-colour lattice.
+@pytest.mark.parametrize(
+    ("master", "greys"),
+    [
+        ((0, -100, 0), [115, 131, 127, 2, 165]),
+        ((0, -100, -58), [49, 56, 54, 1, 70]),
+        ((0, -100, 47), [180, 189, 187, 120, 207]),
+    ],
+)
+def test_huesaturation_desaturates_as_photoshop(
+    master: tuple[int, int, int], greys: list[int]
+) -> None:
+    out = _master_huesaturation(master)
+    assert out.tolist() == [[grey] * 3 for grey in greys]
+
+
+def test_huesaturation_lightness_alone_as_photoshop() -> None:
+    """Exact on each colour's brightest and darkest channel; the middle may miss."""
+    out = _master_huesaturation((0, 0, -41))
+    photoshop = np.array(
+        [(118, 18, 60), (8, 148, 46), (151, 0, 75), (1, 1, 2), (53, 54, 142)]
+    )
+    colors = np.array(_HS_COLORS)
+    ends = (colors == colors.max(1, keepdims=True)) | (
+        colors == colors.min(1, keepdims=True)
+    )
+    assert np.array_equal(out[ends], photoshop[ends])
+    assert np.abs(out - photoshop).max() <= 1
+
+
 # Invert
 invert_tests = {
     "invert": ACCURATE,
