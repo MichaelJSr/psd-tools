@@ -3083,7 +3083,9 @@ class _EffectCanvas:
             # The colour fades in place of the coverage, and the faded colour
             # covers all the effect reaches, the layer's clear part included.
             color, alpha = faded, (alpha > 0.0).astype(np.float32)
-        blend_fn = get_blend_func(blend_mode, self._compositor._color_mode)
+        # A stand-in compositor may hold no depth: float, as before.
+        depth = getattr(self._compositor, "_depth", None)
+        blend_fn = get_blend_func(blend_mode, self._compositor._color_mode, depth)
         # ``normal`` ignores what is under it, and is also what an effect whose
         # blend mode this module does not know answers, so the un-premultiply
         # is skipped rather than computed for a function that will drop it.
@@ -3778,6 +3780,10 @@ class Compositor:
         color, shape, alpha = compositor.finish()
     """
 
+    # The bits per channel of the document whose layer goes on (set by
+    # apply()), for the blend modes Photoshop computes in integers at 8.
+    _depth: int | None = None
+
     def __init__(
         self,
         viewport: tuple[int, int, int, int],
@@ -3876,6 +3882,7 @@ class Compositor:
     def apply(self, layer: Layer, clip_compositing: bool = False) -> None:
         """Composite a layer into the stack."""
         logger.debug("Compositing %s", layer)
+        self._depth = layer._psd.depth
 
         if not self._accepts(layer, clip_compositing):
             return
@@ -4646,7 +4653,7 @@ class Compositor:
         color_b = knockout_color if knocks_out else self._color
 
         blend_fn = fade_source(
-            get_blend_func(blend_mode, self._color_mode), blend_mode, faded
+            get_blend_func(blend_mode, self._color_mode, self._depth), blend_mode, faded
         )
         if text_gamma is not None:
             mixed = self._mix_in_text_space(
@@ -4946,7 +4953,7 @@ class Compositor:
         # document on every path the library builds. Where they could differ, a
         # compositor built by hand, the canvas is this one's and so is the mode
         # that describes it.
-        blend_fn = get_blend_func(layer.blend_mode, self._color_mode)
+        blend_fn = get_blend_func(layer.blend_mode, self._color_mode, layer._psd.depth)
         blended = blend_fn(content, transformed_color)
         # An 8-bit canvas holds whole levels where an adjustment applies.
         levels = layer._psd.depth == 8
@@ -5034,6 +5041,7 @@ class Compositor:
             mixing=self._mixing,
             alpha_only=self._alpha_only,
         )
+        scratch._depth = self._depth
         scratch._apply_source(
             source.color, paint, paint, layer.blend_mode, text_gamma=source.text_gamma
         )

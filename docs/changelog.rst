@@ -4,6 +4,17 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Color and Luminosity blend in Photoshop 2023's integers in an 8-bit
+  RGB document: whole-level operands (a fill's colour too), lightness
+  ``(4915 R + 9667 G + 1802 B + 8192) >> 14``, and a colour pushed past 0 or
+  255 drawn towards it by ``L + ((c - L) * span + room // 2) / room``, the
+  division truncated towards zero, so a channel clipped low lands on 1, not
+  0. Exact on 2,160,000 random pairs each (the rounded float formula: 53%),
+  over translucent backdrops and sources too. Infected Crossroads' Field
+  icon, whose Colour fills a +150 Brightness/Contrast magnifies, was up to 7
+  levels off (1,801 px over 4), now within 3 (none over 4); the cards'
+  Colour-mode fills and overlays are exact or within a level. Other depths
+  and CMYK are unchanged. **Rendering change**
 - [fix] Hue/Saturation's Colorize in an 8-bit document follows Photoshop
   2023's integers, exact on every hue, saturation and lightness probed: the
   pixel's lightness level ``(max + min) // 2`` takes the lightness in 255ths,
