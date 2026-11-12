@@ -4,6 +4,10 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] Box renders read only the rows and columns they cross of a
+  smart object with a filter mask: an all-white mask reads as a plain layer,
+  and any other mask blends the unfiltered source on that part alone, as the
+  whole box decides. Renders are unchanged
 - [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
   as drop shadows do (matte and opacity held at 8 bits, their product
   rounded), and colour, gradient and pattern overlays and stroke effects
