@@ -1326,14 +1326,48 @@ def apply_vibrance(
     saturation = layer.saturation / 100.0
     if vibrance == 0 and saturation == 0:
         return img
-    linear = paint._srgb_to_linear(img)
+    linear = _srgb_to_linear(img)
     space = _vibrance_space(layer)
     if space is None:
         out = _vibrance(linear, vibrance, saturation)
     else:
         out = _vibrance(_dot3(linear, space.T), vibrance, saturation)
         out = np.clip(_dot3(out, np.linalg.inv(space).T), _0, _1)
-    return paint._linear_to_srgb(out).astype(np.float32, copy=False)
+    # In float64, cast once: float32 powers differ between CPUs.
+    out = paint._linear_to_srgb(out.astype(np.float64, copy=False))
+    return out.astype(np.float32, copy=False)
+
+
+# The float32 exponent ``** SRGB_GAMMA`` applies to a float32 array.
+_SRGB_GAMMA32 = np.float32(SRGB_GAMMA)
+
+
+@functools.cache
+def _srgb_level_powers() -> NDArray[np.float32]:
+    """The sRGB curve's power at each whole 8-bit level, in float64, cast once."""
+    base = (np.arange(256, dtype=np.float32) / _255 + SRGB_OFFSET) / (1.0 + SRGB_OFFSET)
+    exponent = float(_SRGB_GAMMA32)
+    return np.array([math.pow(b, exponent) for b in base.tolist()], np.float32)
+
+
+def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
+    """``paint._srgb_to_linear`` with its float32 power the same on every CPU.
+
+    Whole 8-bit levels read a table; other values are worked in float64.
+    """
+    if rgb.dtype != np.float32:
+        return paint._srgb_to_linear(rgb)
+    level = np.rint(rgb * _255)
+    if (
+        level.size
+        and np.array_equal(level / _255, rgb)
+        and level.min() >= 0
+        and level.max() <= 255
+    ):
+        power = _srgb_level_powers()[level.astype(np.intp)]
+    else:
+        power = _powf((rgb + SRGB_OFFSET) / (1.0 + SRGB_OFFSET), _SRGB_GAMMA32)
+    return np.where(rgb <= SRGB_SLOPE * SRGB_CUTOFF, rgb / SRGB_SLOPE, power)
 
 
 # In linear light vibrance keeps each pixel's hue: its brightest channel H

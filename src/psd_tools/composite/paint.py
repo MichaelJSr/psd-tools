@@ -773,7 +773,7 @@ def _make_linear_gradient(X: np.ndarray, Y: np.ndarray, angle: float) -> np.ndar
 
 def _make_radial_gradient(X: np.ndarray, Y: np.ndarray) -> np.ndarray:
     """Generate index map for radial gradients."""
-    Z = np.sqrt(np.power(X, 2) + np.power(Y, 2))
+    Z = np.sqrt(X * X + Y * Y)
     return Z
 
 

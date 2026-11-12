@@ -27,6 +27,7 @@ from psd_tools.composite.adjustments import (
     _lut_domain,
     _natural_spline,
     _rows_from_rgb,
+    _srgb_to_linear,
     _vibrance_space,
     apply_blackandwhite,
     apply_brightnesscontrast,
@@ -1746,6 +1747,47 @@ def test_saturation_keeps_photoshops_gray_unless_a_profile_moves_it() -> None:
         layer._data = data
         out = _applied(apply_vibrance(blue, ColorMode.RGB, layer))
         assert _linear(out[0, 0, 0]) == pytest.approx(gray, abs=1 / 255)
+
+
+def _linear_once(value: np.ndarray) -> np.ndarray:
+    """``_linear`` of float32 values, its power in float64 per value, cast once."""
+    base = (value + 0.055) / (1.0 + 0.055)
+    exponent = float(np.float32(2.4))
+    power = np.array([math.pow(b, exponent) if b > 0 else 0.0 for b in base.tolist()])
+    return np.where(value <= 12.92 * 0.0031308, value / 12.92, power.astype(np.float32))
+
+
+def test_vibrance_reads_whole_levels_off_a_table_worked_in_float64() -> None:
+    """The same on every CPU; whole values past the 8-bit range work it out."""
+    levels = np.arange(256, dtype=np.float32) / np.float32(255)
+    assert np.array_equal(_srgb_to_linear(levels), _linear_once(levels))
+    past = np.array([-1, 0, 255, 510], np.float32) / np.float32(255)
+    assert np.array_equal(_srgb_to_linear(past), _linear_once(past))
+
+
+def test_vibrance_works_other_values_in_float64() -> None:
+    values = np.random.default_rng(7).random(1024, dtype=np.float32)
+    out = _srgb_to_linear(values)
+    assert out.dtype == np.float32
+    assert np.array_equal(out, _linear_once(values))
+
+
+def test_saturation_alone_is_encoded_in_float64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """float32 powers differ between CPUs: the result is cast once."""
+    seen: list[np.dtype] = []
+    encode = paint._linear_to_srgb
+
+    def spy(rgb: np.ndarray) -> np.ndarray:
+        seen.append(rgb.dtype)
+        return encode(rgb)
+
+    monkeypatch.setattr(paint, "_linear_to_srgb", spy)
+    image = np.array([[_PALE_BLUE, _DEEP_BLUE]], dtype=np.float32)
+    out = _applied(apply_vibrance(image, ColorMode.RGB, _vibrance_layer(0, -40)))
+    assert seen == [np.float64]
+    assert out.dtype == np.float32
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
