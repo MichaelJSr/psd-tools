@@ -36,7 +36,7 @@ def _square() -> tuple[PSDImage, Mask]:
 
 
 def test_a_feathered_mask_is_its_box_blurred_whole() -> None:
-    """The layer's alpha is the mask's box blurred.
+    """The layer's alpha is the mask's box blurred, held at 8-bit levels.
 
     The blur reaches past the mask's box, and a box render reads the whole
     render's values. Density goes on after the feather.
@@ -47,7 +47,7 @@ def test_a_feathered_mask_is_its_box_blurred_whole() -> None:
     _, _, alpha = composite(psd, force=True)
     t = np.arange(64, dtype=np.float64)
     expected = np.outer(_edge(t, 22, 42), _edge(t, 22, 42))
-    assert np.allclose(alpha[..., 0], expected, atol=2e-3)
+    assert np.allclose(alpha[..., 0], expected, atol=2e-3 + 0.5 / 255)
     assert alpha[30, 19, 0] > 0.1
 
     box = (10, 15, 30, 40)
@@ -59,7 +59,7 @@ def test_a_feathered_mask_is_its_box_blurred_whole() -> None:
     )
     _, _, dense = composite(psd, force=True)
     share = 128 / 255
-    assert np.allclose(dense, share * alpha + (1.0 - share), atol=1e-6)
+    assert np.allclose(dense, share * alpha + (1.0 - share), atol=1 / 255)
 
 
 @pytest.mark.parametrize("feather", [1e308, 900.0])
