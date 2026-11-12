@@ -4,6 +4,17 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Bevels take their slopes through a Prewitt operator (a step's
+  slope spread evenly over three pixels across it), as Photoshop 2023 does,
+  not a Sobel one: pixel-art edges and a texture's corners were up to 34
+  levels off (Royal Eradicator Main Cannon's textured stars, Golden Bomb's
+  and Golden Metronome's names, now within 7). A bevel texture stands as high
+  as the smooth bevel's surface (a pixel at least, so a size 1 bevel's as a
+  size 2's and a shallow one's no lower than a pixel), and tiles from the
+  layer's reference point when linked, a group's too, else from the
+  document's origin; its phase is not read. A one-plane multichannel
+  pattern (Photoshop's preset Watercolor) textures as a grey one instead of
+  being left out. **Rendering change**
 - [fix] An 8-bit pattern scaled in an 8-bit document is drawn in whole levels,
   as Photoshop 2023 draws it: each halving of a reduction rounds
   ``(a + b + c + d + 2) >> 2``, three halvings at most (below 12.5% the third
