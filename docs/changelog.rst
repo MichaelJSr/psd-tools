@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] PSB documents opened from bytes keep their layers' tagged
+  blocks as bytes until read, as PSD documents do (8-byte lengths
+  included), and read their layer records in a few struct reads. An
+  embedded smart object's PSB opens 3 to 5 times faster; parse output and
+  saved bytes are unchanged. An unreadable or over-limit layer block in a
+  PSB is reported at its first read, not at open
 - [refactor] Spread drop shadows and outer glows, and choked inner shadows
   and inner glows, are drawn only on the part of their box within reach of
   the viewport (their unspread reach and a pixel), as unspread ones are, and

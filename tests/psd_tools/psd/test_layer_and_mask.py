@@ -125,33 +125,37 @@ def _record_bytes(
     mask: bytes = b"",
     channels: tuple[tuple[int, int], ...] = ((-1, 2), (0, 2)),
     blocks: bytes = b"8BIMlyid" + struct.pack(">II", 4, 7),
+    version: int = 1,
 ) -> bytes:
     extra = struct.pack(">I", len(mask)) + mask + struct.pack(">I", len(ranges))
     extra += ranges + name + blocks
     head = struct.pack(">4iH", 1, 2, 3, 4, len(channels))
-    head += b"".join(struct.pack(">hI", *channel) for channel in channels)
+    channel = (">hI", ">hQ")[version - 1]
+    head += b"".join(struct.pack(channel, *item) for item in channels)
     return head + b"8BIMnorm\xff\x00\x08\x00" + struct.pack(">I", len(extra)) + extra
 
 
+@pytest.mark.parametrize("version", [1, 2])
 @pytest.mark.parametrize(
-    ("data", "taken"),
+    ("kwargs", "taken"),
     [
-        (_record_bytes(), 2),
-        (_record_bytes(ranges=b"", name=bytes(4)), 2),
-        (_record_bytes(ranges=bytes(range(12)), name=b"\x01a\x00\x00"), 2),
-        (_record_bytes(name=b"\x09ab"), 2),
-        (_record_bytes(ranges=b"", name=bytes(4), channels=((0, 2),) * 9), 2),
-        (_record_bytes(ranges=b"", name=bytes(4), blocks=b""), 2),
-        (_record_bytes(ranges=bytes(4)), 1),
-        (_record_bytes(mask=bytes(20), channels=((-2, 2), (0, 2))), 1),
-        (_record_bytes(channels=((99, 2),)), 0),
+        ({}, 2),
+        ({"ranges": b"", "name": bytes(4)}, 2),
+        ({"ranges": bytes(range(12)), "name": b"\x01a\x00\x00"}, 2),
+        ({"name": b"\x09ab"}, 2),
+        ({"ranges": b"", "name": bytes(4), "channels": ((0, 2),) * 9}, 2),
+        ({"ranges": b"", "name": bytes(4), "blocks": b""}, 2),
+        ({"ranges": bytes(4)}, 1),
+        ({"mask": bytes(20), "channels": ((-2, 2), (0, 2))}, 1),
+        ({"channels": ((99, 2),)}, 0),
     ],
 )
 def test_layer_record_fast_read_matches_readers(
-    data: bytes, taken: int, monkeypatch: pytest.MonkeyPatch
+    kwargs: dict[str, Any], taken: int, version: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The struct reads give the readers' record, error, position and charges."""
-    head = layer_and_mask._record_head(io.BytesIO(data))
+    data = _record_bytes(**kwargs, version=version)
+    head = layer_and_mask._record_head(io.BytesIO(data), version)
     extra = head and layer_and_mask._record_extra(head[-1], "macroman")
     assert (head is not None) + (extra is not None) == taken
 
@@ -161,13 +165,13 @@ def test_layer_record_fast_read_matches_readers(
         try:
             with parse_context(limits):
                 budgets.append(current_budget())
-                record = LayerRecord.read(fp)
+                record = LayerRecord.read(fp, version=version)
         except (OSError, ValueError) as e:
             result: Any = (type(e), str(e))
         else:  # held blocks stay unread: the budget is spent
             channels = [(type(c.id), c.id, c.length) for c in record.channel_info]
-            result = (record.tobytes(), channels, record.flags, record.name)
-            result += (record.blending_ranges, record.mask_data)
+            result = (record.tobytes(version=version), channels, record.flags)
+            result += (record.name, record.blending_ranges, record.mask_data)
         budget = budgets[0]
         assert budget is not None
         return result, fp.tell(), budget.objects, budget.total_bytes
@@ -178,7 +182,7 @@ def test_layer_record_fast_read_matches_readers(
     cases += [(data, ParseLimits(max_read_bytes=n)) for n in range(1, 120)]
     cases.append((data, ParseLimits()))
     fast = [outcome(*case) for case in cases]
-    monkeypatch.setattr(layer_and_mask, "_record_head", lambda fp: None)
+    monkeypatch.setattr(layer_and_mask, "_record_head", lambda fp, *a: None)
     monkeypatch.setattr(layer_and_mask, "_record_extra", lambda data, encoding: None)
     assert fast == [outcome(*case) for case in cases]
 
