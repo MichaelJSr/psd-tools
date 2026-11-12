@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] In a styled or clipped pass-through group each blend-mode source
+  (a child, or an effect such as a Screen outer glow) goes on by Photoshop
+  2023's law against what the group shows so far, instead of one mix of the
+  group's two renders: where it meets earlier content (a star under another's
+  glow, a Screen square over a 50% one) the group was up to 20 levels off,
+  now within 3, over opaque and semi-transparent backdrops. A group whose one
+  blending child comes first is unchanged. **Rendering change**
 - [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
   of the document's own profile, its colorants adapted to D65 by Bradford,
   as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp
