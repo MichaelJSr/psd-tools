@@ -1422,8 +1422,8 @@ def _reads_near(layer: Layer) -> bool:
     """Whether each effect ``layer`` draws reads only near its silhouette.
 
     So a box around part of its contents draws, there, what the whole box
-    does: no spread matte, gradient or pattern stroke, overlay but a colour,
-    satin or bevel, all of which read their whole box.
+    does: no gradient or pattern stroke, overlay but a colour, satin or
+    bevel, all of which read their whole box, and no effect it cannot read.
     """
     if not _has_enabled_effects(layer):
         return True
@@ -1440,14 +1440,10 @@ def _reads_near(layer: Layer) -> bool:
                 if stroke_reach(effect.descriptor) is None:
                     return False
             elif isinstance(effect, (DropShadow, InnerShadow)):
-                geometry = shadow_geometry(effect.descriptor, effect.angle)
-                if geometry.size > 0.0 and geometry.spread > 0.0:
-                    return False
+                # Read for what it raises.
+                shadow_geometry(effect.descriptor, effect.angle)
             elif isinstance(effect, (OuterGlow, InnerGlow)):
-                size, spread, _ = glow_geometry(effect.descriptor)
-                precise = effect.glow_type == GlowTechnique.PRECISE_MATTE
-                if glow_reach(size, spread, precise) is None:
-                    return False
+                glow_geometry(effect.descriptor)
             else:
                 return False
     except _UNREADABLE:
