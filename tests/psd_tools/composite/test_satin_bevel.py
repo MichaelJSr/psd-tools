@@ -763,7 +763,7 @@ def test_satin_and_bevel_render_to_photoshops_preview(
 
 # The fitted constants: the gaussian widths per pixel of size of the satin's
 # blur, of the blur that rounds a smooth bevel other than a wide inner one
-# (the emboss's) and of soften, and the slope of a bevel's faces at 100%
+# (the emboss's) and of a chisel bevel's soften, and the slope of a bevel's faces at 100%
 # depth. The cases above hold them to Photoshop's previews.
 _FITTED = {
     "_SATIN_SIGMA_PER_SIZE": 0.45,
@@ -1048,6 +1048,83 @@ def test_a_gaussian_across_an_inner_band_misses_photoshops(
     )
     missed = _smooth_profile(13, 1000) - np.array(_SMOOTH_PROFILES[13, 1000])
     assert np.abs(missed).max() > 24
+
+
+# Photoshop 2023's softened smooth inner bevels on a 40 px square, lit from 90
+# degrees at 30, a black Normal shadow alone: up the middle column from the
+# bottom row, the shadow in levels, to the first unshaded pixel. Keyed by
+# size, depth and soften.
+_SOFTENED_PROFILES = {
+    (5, 100, 5): [226, 209, 174, 132, 88, 53, 25, 10, 2, 0],
+    (5, 1000, 11): [178, 175, 166, 155, 137, 116, 96, 77, 59, 45, 32, 21, 13, 6, 2, 0],
+    (16, 147, 11): [
+        255,
+        253,
+        252,
+        249,
+        245,
+        237,
+        230,
+        218,
+        207,
+        191,
+        175,
+        158,
+        137,
+        118,
+        97,
+        80,
+        61,
+        45,
+        29,
+        14,
+        0,
+    ],
+    (6, 1000, 1): [255, 255, 255, 255, 255, 191, 64, 0],
+}
+
+
+def _softened_misses() -> int:
+    """The most levels any softened profile is off Photoshop's."""
+    shape = np.zeros((60, 60, 1), dtype=np.float32)
+    shape[10:50, 10:50] = 1.0
+    missed = 0
+    for (size, depth, soften), levels in _SOFTENED_PROFILES.items():
+        _, shadow = _bevel(
+            shape, size=float(size), depth=float(depth), soften=float(soften)
+        )
+        profile = np.round(shadow[49:9:-1, 30, 0] * 255)[: len(levels)]
+        missed = max(missed, int(np.abs(profile - np.array(levels)).max()))
+    return missed
+
+
+def test_a_softened_smooth_bevel_shades_as_photoshop_draws_it() -> None:
+    """Held to unlit, then two box passes.
+
+    A gaussian over the light as it was, unheld, missed by up to 139 levels.
+    """
+    assert _softened_misses() <= 1
+
+
+def test_a_gaussian_soften_misses_photoshops(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    sigma = effects._SOFTEN_SIGMA_PER_SIZE
+    monkeypatch.setattr(
+        effects,
+        "_soften_smooth",
+        lambda light, soften: ndimage.gaussian_filter(
+            light, sigma * soften, mode="nearest", truncate=1.0 / sigma
+        ),
+    )
+    assert _softened_misses() > 24
+
+
+def test_a_soften_of_1_blurs_a_smooth_bevel_as_2_does() -> None:
+    one = _bevel(_square(), size=5.0, depth=300.0, soften=1.0)
+    two = _bevel(_square(), size=5.0, depth=300.0, soften=2.0)
+    assert np.array_equal(one[0], two[0]) and np.array_equal(one[1], two[1])
+    assert not np.array_equal(one[1], _bevel(_square(), size=5.0, depth=300.0)[1])
 
 
 def test_a_smooth_bevel_of_size_0_lights_its_edge_whatever_its_depth() -> None:
