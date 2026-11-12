@@ -525,6 +525,34 @@ def test_non_separable_matches_photoshop_on_cmyk(pair: int, mode: str) -> None:
     assert ink == pytest.approx(expected[mode], abs=2 * _ONE_STEP * 100.0)
 
 
+# Photoshop 2023's choice between near-equal RGB colours (8-bit probe: layers
+# and colour overlays). Format: (mode, backdrop, source, winner).
+PHOTOSHOP_NEAR_TIES = [
+    ("darker_color", (95, 146, 241), (10, 187, 251), "b"),  # one level, 141
+    ("darker_color", (2, 160, 60), (130, 102, 22), "b"),  # equal 0.30/0.59/0.11
+    ("darker_color", (133, 142, 162), (10, 187, 251), "b"),  # 141.50 down
+    ("darker_color", (192, 134, 44), (10, 187, 251), "s"),  # 141.50 up
+    ("darker_color", (104, 60, 90), (255, 0, 0), "b"),  # 76.50 both down
+    ("darker_color", (35, 99, 69), (255, 0, 0), "s"),  # 76.50 up and down
+    ("darker_color", (95, 146, 241), (9.848, 186.708, 251.0), "b"),  # Sans
+    ("darker_color", (60, 115, 175), (100.5, 120.5, 30.5), "b"),  # halves up
+    ("lighter_color", (113, 13, 104), (70, 11, 232), "b"),
+    ("lighter_color", (4, 166, 176), (146, 110, 95), "b"),
+    ("lighter_color", (242, 91, 11), (133, 124, 132), "s"),
+]
+
+
+@pytest.mark.parametrize(("mode", "backdrop", "source", "winner"), PHOTOSHOP_NEAR_TIES)
+def test_darker_and_lighter_color_weigh_whole_levels(
+    mode: str, backdrop: tuple, source: tuple, winner: str
+) -> None:
+    """Colours a fraction of a level apart are equally light: the backdrop stays."""
+    Cb = (np.array(backdrop, dtype=np.float32) / 255).reshape(1, 1, 3)
+    Cs = (np.array(source, dtype=np.float32) / 255).reshape(1, 1, 3)
+    result = getattr(blend_module, mode)(Cb, Cs, ColorMode.RGB)
+    assert np.array_equal(result, Cb if winner == "b" else Cs)
+
+
 @pytest.mark.parametrize("func", NON_SEPARABLE, ids=lambda f: f.__name__)
 def test_non_separable_is_the_identity_on_equal_cmyk_operands(func: Callable) -> None:
     """Blending a colour with itself must return it (#781).

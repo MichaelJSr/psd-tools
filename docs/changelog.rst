@@ -4,6 +4,11 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Darker Color and Lighter Color compare RGB as Photoshop 2023 does:
+  whole levels weighed 0.30/0.59/0.11 in 14-bit fixed point and rounded to a
+  whole level, the backdrop kept on a tie. Colours a fraction of a level
+  apart no longer swap (single pixels up to 196 levels off on 7 cards'
+  overlays, gradient maps and curves). **Rendering change** for those modes
 - [fix] Smooth inner bevels of size 3 or more climb their band as Photoshop
   2023 draws them: the silhouette is blurred by a tent that reaches zero at
   the band's width (a shadow's two box passes), not a truncated gaussian, so
