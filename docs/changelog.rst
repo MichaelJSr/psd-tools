@@ -9,6 +9,10 @@ Changelog
   the viewport (their unspread reach and a pixel), as unspread ones are, and
   a group carrying one can be drawn in parts. Viewport renders near such a
   layer cost a fraction of what they did; renders are unchanged
+- [refactor] Box renders read only the rows and columns they cross of a
+  smart object with a filter mask: an all-white mask reads as a plain layer,
+  and any other mask blends the unfiltered source on that part alone, as the
+  whole box decides. Renders are unchanged
 - [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
   as drop shadows do (matte and opacity held at 8 bits, their product
   rounded), and colour, gradient and pattern overlays and stroke effects

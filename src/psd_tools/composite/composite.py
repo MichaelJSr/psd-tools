@@ -1198,6 +1198,10 @@ _ContentBBoxes = dict[int, tuple[int, int, int, int]]
 _GroupAlphas = dict[tuple[int, tuple[int, int, int, int]], np.ndarray]
 # A compositor's colour, alpha and group alpha, as they stood at some point.
 _Canvas = tuple[np.ndarray, np.ndarray, np.ndarray]
+# A smart filter mask's box and plane, the value past it, and the source.
+_UnfilterPlan = tuple[
+    tuple[_Box, np.ndarray], float, tuple[_Box, np.ndarray, np.ndarray | None]
+]
 
 
 @dataclass
@@ -1271,6 +1275,8 @@ class _PassCache:
     :py:func:`_unfilter_under_mask` blended, with the result: each effect cast
     from the layer reads it again, and the blend decodes the document's
     ``FEid`` planes. It holds the layer itself, and one layer's pixels.
+    ``unfilter_plans`` holds, per smart object a part of the box reads,
+    :py:func:`_whole_unfilter_plan`: the mask and source, uint8.
 
     ``stroke_bands`` carries a stroke's band from the drop shadow's knockout to
     the stroke drawn after it (:py:func:`effects.stroke_band`).
@@ -1287,6 +1293,7 @@ class _PassCache:
     group_alphas: _GroupAlphas = field(default_factory=dict)
     scipy_warned: bool = False
     unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
+    unfilter_plans: dict[int, _UnfilterPlan | None] = field(default_factory=dict)
     text: _TextBlend = field(default_factory=_TextBlend)
     stroke_bands: dict = field(default_factory=dict)
     change_bboxes: _ContentBBoxes = field(default_factory=dict)
@@ -3586,31 +3593,125 @@ def _unfilter_under_mask(
     block leaves the stored pixels as they are.
     """
     try:
-        so = layer.smart_object
-        if (
-            layer._psd.color_mode != ColorMode.RGB
-            or color.shape[-1] != 3
-            or not (so.has_enabled_filters and so.filter_mask_enabled)
-        ):
-            return color, shape
         held = sum(numpy_io._backing_bytes(a) for a in (color, shape) if a is not None)
-        mask = so._filter_mask(held)
-        if mask is None:
+        found = _unfilter_plan(layer, color.shape[-1], held)
+        if found is None:
             return color, shape
-        box = layer.bbox
-        fill = 255.0 if so.filter_mask_extends_white else 0.0
-        weight = paste(box, mask[0], mask[1][..., None], background=fill)
-        del mask
-        if weight.min() == 255:
-            return color, shape
-        source = so._filter_source(held + numpy_io._backing_bytes(weight))
-        if source is None:
-            return color, shape
+        (_, _, source), weight = found
+        del found
+        assert weight is not None
         weight /= 255
         return _blend_unfiltered(layer, color, shape, weight, source)
     except Exception as exc:  # the stored pixels are the safe fallback
         logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
         return color, shape
+
+
+def _unfilter_plan(
+    layer: SmartObjectLayer, channels: int, held: int, weigh: bool = True
+) -> tuple[_UnfilterPlan, np.ndarray | None] | None:
+    """What :py:func:`_unfilter_under_mask` blends with, and the mask on ``layer.bbox``.
+
+    *channels* is the stored colour's, *held* the bytes its colour and shape
+    keep live. Without *weigh* the mask is tested on its plane and not laid
+    on the box. None keeps the stored pixels. Raises as the decodes do.
+    """
+    so = layer.smart_object
+    if (
+        layer._psd.color_mode != ColorMode.RGB
+        or channels != 3
+        or not (so.has_enabled_filters and so.filter_mask_enabled)
+    ):
+        return None
+    mask = so._filter_mask(held)
+    if mask is None:
+        return None
+    fill = 255.0 if so.filter_mask_extends_white else 0.0
+    weight = None
+    if weigh:
+        weight = paste(layer.bbox, mask[0], mask[1][..., None], background=fill)
+        if weight.min() == 255:
+            return None
+    elif _white_on(layer.bbox, *mask, fill):
+        return None
+    # The mask on the box, float32, stays live across the decode.
+    source = so._filter_source(held + layer.width * layer.height * 4)
+    if source is None:
+        return None
+    return (mask, fill, source), weight
+
+
+def _white_on(box: _Box, mask_box: _Box, plane: np.ndarray, fill: float) -> bool:
+    """Whether ``paste(box, mask_box, plane[..., None], fill)`` is 255 throughout."""
+    inter = utils.intersect(box, mask_box)
+    if inter != box and fill != 255:
+        return False
+    if inter == (0, 0, 0, 0):
+        return True
+    x0, y0 = mask_box[0], mask_box[1]
+    return bool(
+        plane[inter[1] - y0 : inter[3] - y0, inter[0] - x0 : inter[2] - x0].min() == 255
+    )
+
+
+def _whole_unfilter_plan(layer: SmartObjectLayer) -> _UnfilterPlan | None:
+    """:py:func:`_unfilter_plan` for the whole read, the layer's pixels undecoded.
+
+    The whole box decides, budget included, so a part blends exactly where
+    the whole would: an all-white test on a part could pass where the whole
+    blends, and ``(s * c) / s`` is not always ``c`` in float32.
+    """
+    try:
+        channels, held = numpy_io.layer_read_size(layer)
+        found = _unfilter_plan(layer, channels, held, weigh=False)
+        if found is None:
+            return None
+        plan = found[0]
+        _, src_color, src_alpha = plan[2]
+        held += layer.width * layer.height * 4  # the mask on the box
+        held += sum(
+            numpy_io._backing_bytes(a) for a in (src_color, src_alpha) if a is not None
+        )
+        _check_unfilter(layer, layer.width, layer.height, held)
+        return plan
+    except Exception as exc:  # the stored pixels are the safe fallback
+        logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
+        return None
+
+
+def _unfilter_part(
+    layer: SmartObjectLayer,
+    color: np.ndarray,
+    shape: np.ndarray | None,
+    plan: _UnfilterPlan,
+    box: _Box,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """:py:func:`_unfilter_under_mask` on ``box``, a part of ``layer.bbox``, by the whole box's *plan*.
+
+    Every step is per pixel, so these are the whole blend's pixels on ``box``.
+    """
+    (mask_box, plane), fill, source = plan
+    try:
+        weight = paste(box, mask_box, plane[..., None], background=fill)
+        weight /= 255
+        return _blend_unfiltered(layer, color, shape, weight, source, box)
+    except Exception as exc:  # the stored pixels are the safe fallback
+        logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
+        return color, shape
+
+
+def _check_unfilter(
+    layer: SmartObjectLayer, width: int, height: int, held: int
+) -> None:
+    """Refuse :py:func:`_blend_unfiltered` on a box over the budget; *held* is its inputs' bytes."""
+    check_pixel_size(
+        width,
+        height,
+        3,
+        max_alloc_bytes=layer._psd._max_alloc_bytes,
+        estimated_bytes=held + _UNFILTER_PLANES * height * width * 4,
+        warn=False,
+    )
 
 
 def _may_unfilter(layer: SmartObjectLayer) -> bool:
@@ -3628,24 +3729,23 @@ def _blend_unfiltered(
     shape: np.ndarray | None,
     weight: np.ndarray,
     source: tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None],
+    box: _Box | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """``lerp(source, stored, weight)`` with straight colour, on ``layer.bbox``.
+    """``lerp(source, stored, weight)`` with straight colour, on ``box``, by default ``layer.bbox``.
 
     *weight* is the filter mask on the box, 1 = filtered, and may be overwritten.
     The filtered pixels stand where the source is not stored.
     """
-    box = layer.bbox
+    if box is None:
+        box = layer.bbox
     sbox, src_color, src_alpha = source
     height, width = color.shape[:2]
     inputs = (color, shape, weight, src_color, src_alpha)
-    check_pixel_size(
+    _check_unfilter(
+        layer,
         width,
         height,
-        3,
-        max_alloc_bytes=layer._psd._max_alloc_bytes,
-        estimated_bytes=sum(numpy_io._backing_bytes(a) for a in inputs if a is not None)
-        + _UNFILTER_PLANES * height * width * 4,
-        warn=False,
+        sum(numpy_io._backing_bytes(a) for a in inputs if a is not None),
     )
     if _unfilter_fits(box, sbox, color, shape, weight, src_color, src_alpha):
         out, alpha = _cblend.unfilter(
@@ -5378,11 +5478,12 @@ class Compositor:
     def _read_rows(
         self, layer: Layer, viewport: tuple[int, int, int, int], color: bool = True
     ) -> tuple[np.ndarray, np.ndarray | None, tuple[int, int, int, int]] | None:
-        """:py:meth:`_read_object`'s stored pixels on the part ``viewport`` crosses, and its box.
+        """:py:meth:`_read_object`'s pixels on the part ``viewport`` crosses, and its box.
 
-        A render need not decode the rest of a tall or wide layer. None where
-        the read runs whole: the whole box crossed or no row, a fill, a smart
-        filter mask (:py:func:`_unfilter_under_mask` blends on the whole box),
+        A render need not decode the rest of a tall or wide layer. A smart
+        filter mask the whole box blends blends on the part alone
+        (:py:func:`_unfilter_part`). None where the read runs whole: the whole
+        box crossed or no row, a fill, a smart object already blended whole,
         or data only the whole decode reads. Without ``color`` the colour is
         ``_UNREAD``.
         """
@@ -5399,25 +5500,45 @@ class Compositor:
             return None
         if not layer.has_pixels() or (self._redraws(layer) and utils.has_fill(layer)):
             return None
+        plan = None
         if isinstance(layer, SmartObjectLayer) and _may_unfilter(layer):
-            return None
-        rows = numpy_io.get_layer_rows(layer, start, stop, x0, x1, color=color)
+            memo = self._cache.unfiltered
+            if memo is not None and memo[0] is layer:
+                return None
+            plan = self._unfilter_plan(layer)
+        rows = numpy_io.get_layer_rows(
+            layer, start, stop, x0, x1, color=color or plan is not None
+        )
         if rows is None:
             return None
-        return (
-            _UNREAD if rows[0] is None else rows[0],
-            rows[1],
-            (left + x0, top + start, left + x1, top + stop),
-        )
+        box = (left + x0, top + start, left + x1, top + stop)
+        if plan is None:
+            return _UNREAD if rows[0] is None else rows[0], rows[1], box
+        assert rows[0] is not None
+        assert isinstance(layer, SmartObjectLayer)
+        return (*_unfilter_part(layer, rows[0], rows[1], plan, box), box)
+
+    def _unfilter_plan(self, layer: SmartObjectLayer) -> _UnfilterPlan | None:
+        """:py:func:`_whole_unfilter_plan`, once per pass."""
+        plans = self._cache.unfilter_plans
+        key = id(layer)
+        if key not in plans:
+            plans[key] = _whole_unfilter_plan(layer)
+        return plans[key]
 
     def _shape_alone(self, layer: Layer) -> bool:
         """Whether :py:meth:`_read_object`'s coverage is the stored one, read without colour.
 
-        Not for a redrawn fill or a smart filter mask, which make both at once.
+        Not for a redrawn fill or a smart filter mask that blends, which make
+        both at once.
         """
         if (self._redraws(layer) or not layer.has_pixels()) and utils.has_fill(layer):
             return False
-        return not (isinstance(layer, SmartObjectLayer) and _may_unfilter(layer))
+        return not (
+            isinstance(layer, SmartObjectLayer)
+            and _may_unfilter(layer)
+            and self._unfilter_plan(layer) is not None
+        )
 
     def _read_shape(self, layer: Layer) -> tuple[np.ndarray | None, np.ndarray | None]:
         """:py:meth:`_read_object` for a :py:meth:`_shape_alone` layer, its colour unread.
