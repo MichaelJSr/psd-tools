@@ -2178,8 +2178,8 @@ def draw_inner_glow(
 
 # How wide a gaussian stands in for the blur of a satin, and for the blur
 # that rounds a smooth bevel other than a wide inner one, per pixel of the
-# effect's size; how far a bevel's soften blurs its shading per pixel of
-# soften; and how steep a bevel's faces are at a depth of 100%. Fitted
+# effect's size; how far a chisel bevel's soften blurs its shading per pixel
+# of soften (a smooth one's is :py:func:`_soften_smooth`); and how steep a bevel's faces are at a depth of 100%. Fitted
 # against Photoshop's previews, and asserted in the tests.
 _SATIN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SIGMA_PER_SIZE = 0.45
@@ -2583,6 +2583,28 @@ def _lit(
     return ((nx * lx + ny * ly + lz) / norm).astype(np.float32)
 
 
+def _soften_smooth(light: np.ndarray, soften: float) -> np.ndarray:
+    """A smooth bevel's ``light`` (0 to 1) softened as Photoshop 2023 does.
+
+    Two box passes ``soften`` wide along each axis, as :py:func:`_tent_blur`
+    takes them (a soften of 1 blurs as 2 does), the edge pixels repeating
+    past the canvas. Read off its renders at soften 1 to 16 and depths 50%
+    to 1000%, where the gaussian it replaces was up to 6 levels off.
+    """
+    if soften < 1.0:
+        return light
+    soften = max(soften, _MIN_BOX_WIDTH)
+    reach = math.ceil(soften) - 1
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    taps = np.arange(-reach, reach + 1, dtype=np.float64)
+    weights = 1.0 - np.abs(taps) / soften
+    weights /= weights.sum()
+    for axis in range(2):
+        light = ndimage.correlate1d(light, weights, axis=axis, mode="nearest")
+    return light
+
+
 def draw_bevel(
     viewport: tuple[int, int, int, int],
     shape: np.ndarray,
@@ -2609,7 +2631,9 @@ def draw_bevel(
     more than the flat layer is takes the highlight, in proportion to how far
     it is from the flat toward full light, and one lit less the shadow, in
     proportion to how far toward none; the flat layer takes neither.
-    ``soften`` blurs the lighting before that split, and ``contour`` (the
+    ``soften`` blurs the lighting before that split (a smooth bevel's held
+    to unlit first, so a face turned past the light softens as unlit, not
+    darker), and ``contour`` (the
     gloss contour, read as :py:func:`draw_drop_shadow` reads one) maps the
     lighting first, the flat layer's with it, so a flat face takes neither
     under any contour. The slope is a Sobel operator's, fitted to one
@@ -2676,17 +2700,18 @@ def draw_bevel(
                     lit = np.clip(lit, 0.0, 1.0)
                 light += lit
         light /= len(samples) ** 2
+        light = _soften_smooth(np.clip(light, 0.0, 1.0), max(float(soften), 0.0))
     else:
         height = _bevel_height(alpha, style, technique, size)
         if bumps is not None:
             height = height + bumps
         light = _lit(height, slope if up else -slope, lx, ly, lz)
-    soften = max(float(soften), 0.0)
-    sigma = soften * _SOFTEN_SIGMA_PER_SIZE
-    if sigma > 1e-3 and soften >= 1.0:
-        light = ndimage.gaussian_filter(
-            light, sigma, mode="nearest", truncate=soften / sigma
-        )
+        soften = max(float(soften), 0.0)
+        sigma = soften * _SOFTEN_SIGMA_PER_SIZE
+        if sigma > 1e-3 and soften >= 1.0:
+            light = ndimage.gaussian_filter(
+                light, sigma, mode="nearest", truncate=soften / sigma
+            )
     light = np.clip(light, 0.0, 1.0)
     flat = lz
     if contour is not None:

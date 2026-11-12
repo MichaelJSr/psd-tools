@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A smooth bevel's soften blurs its light as Photoshop 2023 does: held
+  to unlit first, so a face turned past the light softens as unlit, not
+  darker, then two box passes of the soften (1 as 2), not a gaussian.
+  Crowned_Magolor's names (depth 136-147%, soften 5-11) and Clot_Bone's
+  type (1000%, soften 2) were up to 31 levels dark, now within 2. Chisel
+  bevels and soften 0 are unchanged. **Rendering change**
 - [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
   of the document's own profile, its colorants adapted to D65 by Bradford,
   as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp
