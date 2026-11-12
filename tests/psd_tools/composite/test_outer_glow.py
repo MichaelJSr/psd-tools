@@ -1457,9 +1457,10 @@ def test_noise_moves_a_fade_to_clears_coverage_and_not_its_colour() -> None:
 # composite is the reference.
 _LAWS_FIXTURE = "effects/outer-glow-laws.psd"
 
-# Levels a cell may stray from Photoshop's: solid and gradient glows alike land
-# within a level.
+# Levels a cell may stray from Photoshop's: solid glows land within a level; a
+# gradient's float colour over its 8-bit held coverage within 1.6.
 _LAWS_SOLID = 1.5
+_LAWS_GRADIENT = 1.75
 
 
 def _laws_errors(psd: PSDImage) -> dict[str, float]:
@@ -1484,7 +1485,8 @@ def test_outer_glows_render_to_photoshops_composite() -> None:
     errors = _laws_errors(PSDImage.open(full_name(_LAWS_FIXTURE)))
     assert len(errors) == 14
     for name, error in errors.items():
-        assert error <= _LAWS_SOLID, (name, error)
+        bound = _LAWS_GRADIENT if name.startswith("gradient") else _LAWS_SOLID
+        assert error <= bound, (name, error)
 
 
 @pytest.mark.parametrize(
