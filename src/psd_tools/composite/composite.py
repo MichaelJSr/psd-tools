@@ -84,7 +84,9 @@ from psd_tools.composite.effects import (
     glow_paint,
     glow_ranged,
     glow_reach,
+    gradient_inner_glow_bbox,
     inner_bbox,
+    inner_glow_paint,
     outer_glow_bbox,
     satin_geometry,
     shadow_geometry,
@@ -6680,8 +6682,13 @@ class Compositor:
             if silhouette is None:
                 silhouette = silhouettes[bbox] = self._cast_shape(layer, bbox)
             try:
-                coverage = draw(bbox, silhouette)
-                color = self._solid_color(layer, effect.descriptor)
+                coverage, painted = draw(bbox, silhouette)
+                if painted is None:
+                    color = self._solid_color(layer, effect.descriptor)
+                elif self._alpha_only:
+                    color = painted
+                else:
+                    color = paste(self._viewport, bbox, painted)
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an inner effect of %s: %s", layer, error)
                 continue
@@ -6783,9 +6790,16 @@ class Compositor:
         cast_from: tuple[int, int, int, int],
     ) -> tuple[
         tuple[int, int, int, int],
-        Callable[[tuple[int, int, int, int], np.ndarray], np.ndarray],
+        Callable[
+            [tuple[int, int, int, int], np.ndarray],
+            tuple[np.ndarray, np.ndarray | None],
+        ],
     ]:
-        """An inner effect's box, cut to what reaches the viewport, and its draw."""
+        """An inner effect's box, cut to what reaches the viewport, and its draw.
+
+        The draw gives the coverage, and a gradient glow's colour on the box
+        (``None`` for the effect's solid colour).
+        """
         inner = cast(InnerShadow | InnerGlow, effect)
         desc = inner.descriptor
         what = "Inner shadow" if isinstance(inner, InnerShadow) else "Inner glow"
@@ -6803,7 +6817,7 @@ class Compositor:
 
             def draw_shadow(
                 box: tuple[int, int, int, int], shape: np.ndarray
-            ) -> np.ndarray:
+            ) -> tuple[np.ndarray, None]:
                 return draw_inner_shadow(
                     box,
                     shape,
@@ -6814,30 +6828,40 @@ class Compositor:
                     contour=contour,
                     anti_aliased=anti_aliased,
                     noise=noise,
-                )
+                ), None
 
             return bbox, draw_shadow
         glow = inner
-        if glow.gradient is not None and desc.get(Key.Color) is None:
-            raise ValueError("a gradient glow is not drawn")
+        gradient = glow.gradient is not None and desc.get(Key.Color) is None
+        if gradient:
+            bbox = gradient_inner_glow_bbox(
+                cast_from, size, layer._psd._max_alloc_bytes
+            )
         center = glow.glow_source == GlowSource.CENTER
         precise = glow.glow_type == GlowTechnique.PRECISE_MATTE
         glow_range = float(desc.get(Key.InputRange, 50.0))
         bbox = _within_reach(bbox, self._viewport, glow_reach(size, choke, precise))
+        color_mode = layer._psd.color_mode
+        values: dict[str, Any] = {
+            "size": size,
+            "choke": choke,
+            "center": center,
+            "precise": precise,
+            "glow_range": glow_range,
+            "contour": contour,
+            "anti_aliased": anti_aliased,
+            "noise": noise,
+        }
 
-        def draw_glow(box: tuple[int, int, int, int], shape: np.ndarray) -> np.ndarray:
-            return draw_inner_glow(
-                box,
-                shape,
-                size=size,
-                choke=choke,
-                center=center,
-                precise=precise,
-                glow_range=glow_range,
-                contour=contour,
-                anti_aliased=anti_aliased,
-                noise=noise,
-            )
+        def draw_glow(
+            box: tuple[int, int, int, int], shape: np.ndarray
+        ) -> tuple[np.ndarray, np.ndarray | None]:
+            if gradient:
+                color, coverage = inner_glow_paint(
+                    box, color_mode, desc, shape, **values
+                )
+                return coverage, color
+            return draw_inner_glow(box, shape, **values), None
 
         return bbox, draw_glow
 

@@ -32,9 +32,9 @@ Currently supported effects:
   - Jitter is read but not applied
 - **Inner shadow** and **inner glow**: the same blur, cast from the outside of
   the silhouette and painted inside the layer
-  - Solid color; honors distance, angle, size, choke, contour, noise,
-    opacity and blend mode, and an inner glow's source, technique and range;
-    a gradient glow is not drawn
+  - Solid color, or for an inner glow a gradient along the falloff;
+    honors distance, angle, size, choke, contour, noise, opacity and blend
+    mode, and an inner glow's source, technique and range
 
 - **Satin**: Two offset, blurred copies of the silhouette and their difference,
   painted inside the layer
@@ -1327,6 +1327,20 @@ def outer_glow_bbox(
     return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, per_pixel)
 
 
+def gradient_inner_glow_bbox(
+    bbox: tuple[int, int, int, int],
+    size: float,
+    max_alloc_bytes: AllocBudget | None = None,
+) -> tuple[int, int, int, int]:
+    """The canvas a gradient inner glow is drawn on.
+
+    :py:func:`drop_shadow_bbox`'s for a shadow cast nowhere, checked against
+    what painting the gradient peaks at, as :py:func:`outer_glow_bbox`
+    checks a gradient outer glow's.
+    """
+    return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, _GLOW_GRADIENT_BYTES)
+
+
 def _cast_canvas(
     bbox: tuple[int, int, int, int],
     dx: float,
@@ -2124,8 +2138,9 @@ def draw_inner_glow(
     """The coverage an inner glow puts inside ``shape``, on ``viewport``.
 
     From the edge, the glow is full at the boundary and fades over ``size``
-    inward; from the ``center``, it is the complement, full inside and fading
-    out towards the edge. ``choke`` is a percentage of ``size`` held at full
+    inward; from the ``center``, it is the complement of that, range
+    included, clear at the boundary and full inside, as Photoshop 2023
+    draws it. ``choke`` is a percentage of ``size`` held at full
     strength before the fade. The softer technique fades along the blur
     :py:func:`draw_inner_shadow` uses, the ``precise`` one linearly with the
     distance to the edge, read at each pixel's centre, as a precise outer
@@ -2136,6 +2151,48 @@ def draw_inner_glow(
     inner shadow's. The result is ``(height, width, 1)`` and never exceeds
     ``shape``.
     """
+    glow = _inner_glow(
+        viewport,
+        shape,
+        size=size,
+        choke=choke,
+        center=center,
+        precise=precise,
+        glow_range=glow_range,
+        contour=contour,
+        anti_aliased=anti_aliased,
+        noise=noise,
+    )
+    return (glow.falloff * glow.alpha)[:, :, None]
+
+
+class _InnerGlow(NamedTuple):
+    """An inner glow's steps.
+
+    The layer's alpha, the matte before the range, the contoured falloff,
+    and that falloff with the noise moved in.
+    """
+
+    alpha: np.ndarray
+    matte: np.ndarray
+    clean: np.ndarray
+    falloff: np.ndarray
+
+
+def _inner_glow(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    size: float,
+    choke: float,
+    center: bool,
+    precise: bool,
+    glow_range: float,
+    contour: np.ndarray | None,
+    anti_aliased: bool,
+    noise: float,
+) -> _InnerGlow:
+    """:py:func:`draw_inner_glow` before the cut to ``shape``."""
     _require_scipy("Inner glow effects")
     if not all(math.isfinite(value) for value in (size, choke, glow_range)):
         raise ValueError(
@@ -2160,10 +2217,14 @@ def draw_inner_glow(
             what="Inner glow",
         )
     if center:
+        # Photoshop ranges the edge's fade, then turns it around.
+        ranged = falloff = 1.0 - _glow_range(matte, glow_range)
         matte = 1.0 - matte
-    ranged = falloff = _glow_range(matte, glow_range)
+    else:
+        ranged = falloff = _glow_range(matte, glow_range)
     if contour is not None:
         falloff = _contoured(falloff, contour, anti_aliased)
+    clean = falloff
     if noise > 0.0:
         falloff = effect_noise.noisy(
             falloff,
@@ -2173,7 +2234,68 @@ def draw_inner_glow(
             inside=True,
             lit=_contour_lit(ranged, contour),
         )
-    return (falloff * alpha)[:, :, None]
+    return _InnerGlow(alpha, matte, clean, falloff)
+
+
+def inner_glow_paint(
+    viewport: tuple[int, int, int, int],
+    color_mode: ColorMode,
+    desc: Descriptor,
+    shape: np.ndarray,
+    *,
+    size: float,
+    choke: float,
+    center: bool = False,
+    precise: bool = False,
+    glow_range: float = 50.0,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+    noise: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """A gradient inner glow on ``viewport``: its colour and coverage.
+
+    The falloff is :py:func:`draw_inner_glow`'s, and the gradient is laid
+    along it as an outer glow's is (:py:func:`glow_paint`): its start where
+    the falloff is full, its end where it dies away. A gradient that fades
+    to clear (:py:func:`fades_to_clear`) covers the falloff, noise included.
+    Any other covers the whole layer, as opaque as its transparency where
+    its colour is read, with the noise moved in wherever that is not clear.
+    Noise never moves the colour. Read off Photoshop 2023. Raises
+    ``ValueError`` for a gradient with no colour stops.
+    """
+    glow = _inner_glow(
+        viewport,
+        shape,
+        size=size,
+        choke=choke,
+        center=center,
+        precise=precise,
+        glow_range=glow_range,
+        contour=contour,
+        anti_aliased=anti_aliased,
+        noise=noise,
+    )
+    gradient = desc[Key.Gradient]
+    along = 1.0 - glow.clean
+    if bool(desc.get(Key.Reverse, False)):
+        along = 1.0 - along
+    colors, opacities = paint._make_gradient_color(
+        color_mode, gradient, paint._gradient_method(desc)
+    )
+    if colors is None:
+        raise ValueError("Inner glow gradient has no colour stops.")
+    color = np.asarray(colors(along), dtype=np.float32)
+    if fades_to_clear(gradient):
+        coverage = glow.falloff
+    else:
+        coverage = np.ones_like(glow.clean)
+        if opacities is not None:
+            coverage = np.asarray(opacities(along), dtype=np.float32)
+        if noise > 0.0:
+            coverage = effect_noise.noisy(
+                coverage, noise, viewport, coverage, inside=True
+            )
+    return color, (coverage * glow.alpha)[:, :, None]
 
 
 # How wide a gaussian stands in for the blur of a satin, and for the blur

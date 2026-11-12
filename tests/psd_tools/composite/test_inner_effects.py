@@ -20,7 +20,7 @@ from psd_tools.api.effects import InnerGlow
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite, effects
-from psd_tools.constants import Resource, Tag
+from psd_tools.constants import ColorMode, Resource, Tag
 from psd_tools.psd.descriptor import Descriptor, Double, Enumerated
 from psd_tools.terminology import Enum, Key, Klass, Type
 
@@ -167,11 +167,15 @@ def test_an_edge_glow_is_full_at_the_edge_and_fades_inward() -> None:
     assert float(row[20]) > 0.5
 
 
+@pytest.mark.parametrize("glow_range", [100.0, 50.0, 1.0])
 @pytest.mark.parametrize("precise", [False, True])
-def test_a_center_glow_is_the_complement_of_the_edge_glow(precise: bool) -> None:
+def test_a_center_glow_is_the_complement_of_the_edge_glow(
+    precise: bool, glow_range: float
+) -> None:
+    """At every range: the edge's ranged fade turned around, clear at the rim."""
     shape = _disc(81, 20.0)
-    edge = _glow(shape, precise=precise)
-    center = _glow(shape, precise=precise, center=True)
+    edge = _glow(shape, precise=precise, glow_range=glow_range)
+    center = _glow(shape, precise=precise, center=True, glow_range=glow_range)
     assert np.allclose(edge + center, shape, atol=1e-6)
 
 
@@ -238,6 +242,81 @@ def test_an_inverted_contour_turns_an_edge_glow_into_a_center_one() -> None:
     shape = _disc(81, 20.0)
     inverted = _glow(shape, contour=table, anti_aliased=True)
     assert np.allclose(inverted, _glow(shape, center=True), atol=1e-5)
+
+
+# effects/inner-glow-gradients.psd, saved by Photoshop 2023: six 64 x 48 bars,
+# each with one softer inner glow. From the edge: the cards' gold-to-white
+# fade to clear in Multiply at 52% (size 21, choke 14) on a pale bar, and on
+# grey bars at size 12 in Normal, red to blue fading to clear, red to blue
+# opaque, and red to blue from opaque to half with noise 9. From the centre:
+# solid red, and red to blue fading to clear. Photoshop's composite is the
+# reference.
+_GRADIENTS_FIXTURE = "effects/inner-glow-gradients.psd"
+
+
+def _fixture_glow(name: str) -> Descriptor:
+    """The inner glow of the fixture's layer ``name``."""
+    psd = PSDImage.open(full_name(_GRADIENTS_FIXTURE))
+    layer = next(layer for layer in psd if layer.name == name)
+    return copy.deepcopy(next(iter(layer.effects.find("innerglow"))).descriptor)
+
+
+def _paint(name: str, shape: np.ndarray, **values: Any) -> tuple[Any, Any]:
+    params: dict[str, Any] = {"size": 8.0, "choke": 0.0, "glow_range": 50.0}
+    params.update(values)
+    return effects.inner_glow_paint(
+        _BOX, ColorMode.RGB, _fixture_glow(name), shape, **params
+    )
+
+
+def _rim_and_middle(shape: np.ndarray, glow: np.ndarray) -> tuple[Any, Any]:
+    """Where the solid glow is full inside ``shape``, and where it is gone."""
+    inside = shape[..., 0] == 1.0
+    full, gone = inside & (glow[..., 0] >= 1.0), inside & (glow[..., 0] == 0.0)
+    assert full.any() and gone.any()
+    return full, gone
+
+
+def test_a_gradient_inner_glow_fading_to_clear_covers_the_solid_falloff() -> None:
+    """Its coverage is the solid glow's; its colour runs along that falloff.
+
+    The first stop, red, where the glow is full at the rim; the last, blue,
+    where it has died away in the middle.
+    """
+    shape = _disc(81, 20.0)
+    color, coverage = _paint("fade normal", shape)
+    assert np.array_equal(coverage, _glow(shape, glow_range=50.0))
+    full, gone = _rim_and_middle(shape, coverage)
+    assert np.allclose(color[full] * 255.0, (230.0, 40.0, 20.0), atol=1.0)
+    assert np.allclose(color[gone] * 255.0, (20.0, 60.0, 220.0), atol=1.0)
+
+
+def test_any_other_gradient_covers_the_whole_layer_as_its_stops_do() -> None:
+    """Photoshop 2023 does not hold it under the falloff, as it does outside.
+
+    An opaque gradient covers all of the layer; one from opaque to half
+    covers the rim fully and the middle by half.
+    """
+    shape = _disc(81, 20.0)
+    _, opaque = _paint("opaque normal", shape)
+    assert np.array_equal(opaque, shape)
+    _, partial = _paint("partial noise", shape)
+    full, gone = _rim_and_middle(shape, _glow(shape, glow_range=50.0))
+    assert np.allclose(partial[..., 0][full], 1.0, atol=1e-3)
+    # Photoshop saved the half as 128 levels.
+    assert np.allclose(partial[..., 0][gone], 128.0 / 255.0, atol=1e-3)
+
+
+@pytest.mark.parametrize("name", ["fade normal", "partial noise"])
+def test_noise_moves_a_gradient_inner_glows_coverage_never_its_colour(
+    name: str,
+) -> None:
+    shape = _disc(81, 20.0)
+    clean_color, clean = _paint(name, shape)
+    color, noisy = _paint(name, shape, noise=50.0)
+    assert np.array_equal(color, clean_color)
+    assert not np.allclose(noisy, clean, atol=1e-2)
+    assert np.all(noisy <= shape)
 
 
 @pytest.mark.parametrize(
@@ -506,14 +585,14 @@ _UNDRAWABLE: dict[str, Callable[[Descriptor], Any]] = {
 
 
 def _gradient_glow(desc: Descriptor) -> None:
-    """A glow painted with a gradient rather than a colour, which is not drawn."""
+    """A glow painted with a gradient that holds no stops, which cannot be drawn."""
     desc.pop(Key.Color)
     desc[Key.Gradient] = Descriptor()
 
 
 _UNDRAWABLE_GLOW: dict[str, Callable[[Descriptor], Any]] = {
     "nan-range": _setting(Key.InputRange, Double(float("nan"))),
-    "gradient": _gradient_glow,
+    "empty-gradient": _gradient_glow,
 }
 _DEFECTS = [(Klass.InnerShadow, defect) for defect in sorted(_UNDRAWABLE)] + [
     (Klass.InnerGlow, defect) for defect in sorted({**_UNDRAWABLE, **_UNDRAWABLE_GLOW})
@@ -636,6 +715,44 @@ def test_an_inner_glow_renders_to_photoshops_preview() -> None:
     red_green = slice(0, 2)
     assert _preview_error("Inner Glow", "innerglow", False, red_green) >= 5e-2
     assert _preview_error("Inner Glow", "innerglow", True, red_green) <= 3e-4
+
+
+# Levels a gradient glow's bar may stray from Photoshop's.
+_GRADIENTS_LEVELS = 3.0
+
+
+def _gradient_errors() -> dict[str, float]:
+    """Per glow of the fixture, its largest difference from Photoshop's."""
+    psd = PSDImage.open(full_name(_GRADIENTS_FIXTURE))
+    color, _, _ = composite(psd)
+    diff = np.abs(color[..., :3] - psd.numpy()[..., :3]).max(axis=2) * 255.0
+    errors = {}
+    for layer in psd:
+        left, top, right, bottom = layer.bbox
+        errors[layer.name] = float(diff[top:bottom, left:right].max())
+    return errors
+
+
+def test_gradient_inner_glows_render_to_photoshops_composite() -> None:
+    errors = _gradient_errors()
+    assert len(errors) == 6
+    for name, error in errors.items():
+        assert error <= _GRADIENTS_LEVELS, (name, error)
+
+
+@pytest.mark.parametrize(
+    ("fades", "names"),
+    [(False, ("fade corpus", "fade normal")), (True, ("opaque normal",))],
+    ids=["fade-to-clear", "covers-the-layer"],
+)
+def test_each_gradient_inner_glow_law_is_read_off_the_fixture(
+    monkeypatch: pytest.MonkeyPatch, fades: bool, names: tuple[str, ...]
+) -> None:
+    """Drawing a glow by the other law puts it past its bound."""
+    monkeypatch.setattr(effects, "fades_to_clear", lambda gradient: fades)
+    errors = _gradient_errors()
+    for name in names:
+        assert errors[name] > _GRADIENTS_LEVELS * 2, (name, errors[name])
 
 
 # effects/precise-inner-glow-choke.psd: on mid grey, a 48 px white square and
