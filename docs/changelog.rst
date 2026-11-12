@@ -17,6 +17,11 @@ Changelog
   rounded to whole levels before it blends, as Photoshop 2023 does (50% over
   a soft edge blends at round(a x 128 / 255)). Groups, layers with effects,
   fill opacity and other depths keep the float product. **Rendering change**
+- [fix] Colour balance with midtones alone draws Photoshop 2023's Levels
+  curve per channel: gamma ``2 ** (amount / 100)`` to 0.01, Levels' toe
+  above 1, the plain power below; Preserve Luminosity first takes the
+  midrange of the three amounts, truncated toward zero, off each. Shadows
+  or highlights keep the old model. **Rendering change**
 - [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
   as drop shadows do (matte and opacity held at 8 bits, their product
   rounded), and colour, gradient and pattern overlays and stroke effects
