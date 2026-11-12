@@ -1225,6 +1225,21 @@ def test_gradient_map_perceptual_blends_in_oklab() -> None:
     assert np.allclose(out, mid_gray, atol=1 / 255)
 
 
+def test_gradient_map_smooth_method_blends_as_perceptual() -> None:
+    """'Smoo' maps blend in Oklab, as Photoshop draws Rock_Bottom's."""
+    stops = [(0, 50, (0.0, 0.8, 1.0)), (4096, 50, _BLACK)]
+
+    def mapped(method: bytes) -> np.ndarray:
+        data = _gradient_map_data(stops, method=method, smoothness=4096)
+        return _applied(
+            apply_gradientmap(_RAMP, ColorMode.RGB, _gradient_map_layer(data))
+        )
+
+    smooth = mapped(b"Smoo")
+    assert np.array_equal(smooth, mapped(b"Perc"))
+    assert not np.allclose(smooth, mapped(b"Gcls"), atol=2 / 255)
+
+
 def test_gradient_map_smoothness_eases_the_blend_towards_a_smoothstep() -> None:
     """At 100% the blend lands halfway between linear and a smoothstep, as a fill's."""
     gray = np.array([0.25, 0.5, 0.75], dtype=np.float32)
