@@ -437,12 +437,13 @@ def _mixes_isolated(
     shown: Callable[[Layer], bool] | None,
     as_pixels: Callable[[Layer], bool] | None = None,
 ) -> bool:
-    """Whether a styled or clipped pass-through group mixes in its isolated render.
+    """Whether a styled or clipped pass-through group mixes.
 
     Photoshop renders a pass-through group whose style draws
     (:py:func:`_style_draws`), or that any layer clips to, shown or hidden,
     between its children blended through to the backdrop and the group
-    composited on its own (:py:meth:`Compositor._mix_isolated`); a clipped
+    composited on its own, by a law of its own for each blend-mode source
+    (:py:meth:`Compositor._mixed_by_law`); a clipped
     group lands exactly where a styled one does. Only content that blends with the
     backdrop tells the two apart: a child in a mode other than Normal, or an
     effect in one. Photoshop keeps a type layer's own paint in such a mode,
@@ -3366,6 +3367,21 @@ class _Isolation:
     backdrop_alpha: np.ndarray
 
 
+@dataclass
+class _MixLaw:
+    """What a styled or clipped pass-through group mixes against.
+
+    The backdrop it was seeded with and how opaque its own content was when
+    this compositor began: zero for the group's own, the group's alpha so
+    far for a pass-through group nested in it. On this compositor's viewport.
+    See :py:meth:`Compositor._mixed_by_law`.
+    """
+
+    backdrop_color: np.ndarray
+    backdrop_alpha: np.ndarray
+    alpha: np.ndarray
+
+
 class _HeldChannels(NamedTuple):
     """The channels a layer is excluded from, as they were before it went on."""
 
@@ -3795,15 +3811,18 @@ class Compositor:
         text_isolated: bool = False,
         mixing: bool = False,
         alpha_only: bool = False,
+        mix_law: _MixLaw | None = None,
     ):
         self._viewport = viewport
         # Only shape and alpha are wanted: colour is left as seeded, and work
         # that only feeds colour is skipped. Every sub-compositor inherits it.
         self._alpha_only = alpha_only
-        # Whether this compositor renders inside a group that mixes in its
-        # isolated render (:py:meth:`_mix_isolated`): Photoshop mixes once, at
-        # the outermost such group.
+        # Whether this compositor renders inside a group that mixes
+        # (:py:meth:`_mixed_by_law`): Photoshop mixes once, at the outermost
+        # such group.
         self._mixing = mixing
+        # Set where blend-mode sources go on by that group's law.
+        self._law = mix_law
         self._layer_filter = layer_filter
         self._force = force
         # The space a type layer's edge blends in, or None for the document's
@@ -3977,6 +3996,12 @@ class Compositor:
                 backdrop_color=self._enclosing.backdrop_color[sl],
                 backdrop_alpha=self._enclosing.backdrop_alpha[sl],
             )
+        if self._law is not None:
+            sub._law = _MixLaw(
+                backdrop_color=self._law.backdrop_color[sl],
+                backdrop_alpha=self._law.backdrop_alpha[sl],
+                alpha=self._law.alpha[sl],
+            )
         parent_resolve = self._resolve_document_backdrop
 
         def document_backdrop() -> tuple[np.ndarray, np.ndarray] | None:
@@ -4027,9 +4052,9 @@ class Compositor:
         # its shadow and glow are part of that canvas. A pass-through group
         # that knocks out loses their colour the way it loses that of every
         # layer beneath it, because it is resolved over its knockout backdrop
-        # and re-applied against this canvas (#707). A group that mixes in its
-        # isolated render goes on as one layer: its children blend with the
-        # canvas as it stood before its own shadow and glow.
+        # and re-applied against this canvas (#707). A group that mixes goes on as
+        # one layer: its children blend with the canvas as it stood before its
+        # own shadow and glow.
         under: _Canvas | None = None
         if layer.is_group() and self._mixes_isolated(layer):
             source = self._resolve_source(layer)
@@ -4675,6 +4700,7 @@ class Compositor:
             ):
                 self._color = mixed
                 return
+        canvas = self._color
         self._color = _over(
             shape,
             alpha,
@@ -4683,9 +4709,18 @@ class Compositor:
             color,
             blend_fn(color_b, color),
             alpha_previous,
-            self._color,
+            canvas,
             self._alpha,
         )
+        if (
+            self._law is not None
+            and not knocks_out
+            and blend_mode not in _COVERS_BENEATH
+            and blend_mode != BlendMode.PASS_THROUGH
+        ):
+            self._color = self._mixed_by_law(
+                color, alpha, alpha_g_previous, alpha_previous, canvas, blend_fn
+            )
 
     def _unite(self, shape: np.ndarray, alpha: np.ndarray) -> None:
         """Union a source's ``shape`` and ``alpha`` into the group canvases."""
@@ -4697,6 +4732,68 @@ class Compositor:
         self._shape_g = cast(np.ndarray, utils.union(self._shape_g, shape))
         self._alpha_g = cast(np.ndarray, utils.union(self._alpha_g, alpha))
         self._alpha = cast(np.ndarray, utils.union(self._alpha_0, self._alpha_g))
+
+    def _mixed_by_law(
+        self,
+        color: np.ndarray,
+        alpha: np.ndarray,
+        alpha_g_previous: np.ndarray,
+        alpha_previous: np.ndarray,
+        canvas: np.ndarray,
+        blend_fn: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    ) -> np.ndarray:
+        """The canvas once a blend-mode source goes on in a mixing group.
+
+        Photoshop 2023 in a styled or clipped pass-through group, read off
+        its composites (any modes, one or more blending children): the group
+        over backdrop ``D`` at ``aD`` has its own alpha ``A`` and shows
+        ``canvas`` at ``alpha_previous``. A source of alpha ``t`` takes the
+        group to ``A' = A + t - A t`` and blends with
+
+            M = (alpha_previous canvas - (1 - A') aD D) / Am,
+            Am = A + aD t (1 - A),
+
+        what the group so far shows spread over ``A'``. The group's colour
+        becomes the mean of ``M``, the source and the blend, weighted
+        ``A (1 - t)``, ``t (1 - A) ((1 - t) + t (1 - aD) / Am)`` and ``t``.
+        One source over an opaque backdrop is the mix by ``(1 - t) / (2 - t)``
+        of its blend and its Normal colour. Where ``aD`` is 0 it is the plain
+        blend, which ``self._color`` already holds, and where the group is
+        already opaque the law gives that blend too.
+        """
+        law = cast(_MixLaw, self._law)
+        backdrop, backdrop_alpha = law.backdrop_color, law.backdrop_alpha
+        own = utils.union(law.alpha, alpha_g_previous)
+        after = utils.union(own, alpha)
+        spread = own + backdrop_alpha * alpha * (1.0 - own)
+        seen = utils.clip(
+            utils.divide(
+                alpha_previous * canvas - (1.0 - after) * backdrop_alpha * backdrop,
+                spread,
+                fill=0.0,
+            )
+        )
+        normal = (
+            alpha
+            * (1.0 - own)
+            * ((1.0 - alpha) + alpha * utils.divide(1.0 - backdrop_alpha, spread, 0.0))
+        )
+        kept = own * (1.0 - alpha)
+        group = utils.divide(
+            kept * seen + normal * color + alpha * blend_fn(seen, color),
+            kept + normal + alpha,
+            fill=0.0,
+        )
+        mixed = utils.clip(
+            utils.divide(
+                after * group + (1.0 - after) * backdrop_alpha * backdrop,
+                self._alpha,
+                fill=0.0,
+            )
+        )
+        return np.where(
+            (backdrop_alpha > 0.0) & (alpha > 0.0) & (own < 1.0), mixed, self._color
+        )
 
     def _mix_in_text_space(
         self,
@@ -5253,6 +5350,24 @@ class Compositor:
             seed = (
                 color_b if same_box else paste(viewport, self._viewport, color_b, 1.0)
             )
+        # A mixing group's blend-mode sources go on by its law, and so do
+        # those of a pass-through group inside it, against its backdrop.
+        law: _MixLaw | None = None
+        if self._alpha_only:
+            pass
+        elif mixes:
+            law = _MixLaw(seed, group_alpha, np.zeros_like(group_alpha))
+        elif self._law is not None and is_passthrough and not knockout:
+            enclosing = self._law
+            own = utils.union(enclosing.alpha, self._alpha_g)
+            if same_box:
+                law = _MixLaw(enclosing.backdrop_color, enclosing.backdrop_alpha, own)
+            else:
+                law = _MixLaw(
+                    paste(viewport, self._viewport, enclosing.backdrop_color, 1.0),
+                    paste(viewport, self._viewport, enclosing.backdrop_alpha),
+                    paste(viewport, self._viewport, own),
+                )
         group_compositor = Compositor(
             viewport,
             color=seed,
@@ -5270,6 +5385,7 @@ class Compositor:
             text_isolated=self._text_isolated or isolate_adjustments,
             mixing=self._mixing or mixes,
             alpha_only=self._alpha_only,
+            mix_law=law,
         )
 
         for sublayer in cast(GroupMixin, layer):
@@ -5293,9 +5409,6 @@ class Compositor:
             color = group_compositor.result_over_backdrop()
         shape = group_compositor.shape
         alpha = group_compositor.alpha
-        if mixes:
-            color = self._mix_isolated(layer, viewport, color, alpha, color_b)
-
         if not same_box:
             color = paste(self._viewport, viewport, color, 1.0)
             shape = paste(self._viewport, viewport, shape)
@@ -5343,49 +5456,12 @@ class Compositor:
     def _covers_beneath(self, layer: Layer) -> bool:
         """:py:func:`_covers_beneath`, for a group that mixes too.
 
-        A group that mixes in its isolated render goes on as one layer in
-        Normal, so it covers whatever its children's modes.
+        A group that mixes goes on as one layer in Normal, so it covers
+        whatever its children's modes.
         """
         if layer.is_group() and self._mixes_isolated(layer):
             return True
         return _covers_beneath(layer, self._layer_filter)
-
-    def _mix_isolated(
-        self,
-        layer: Layer,
-        viewport: tuple[int, int, int, int],
-        color: np.ndarray,
-        alpha: np.ndarray,
-        color_b: np.ndarray,
-    ) -> np.ndarray:
-        """A styled pass-through group's content, its isolated render mixed in.
-
-        ``color`` is the group's content with its children blended through
-        to the backdrop. Photoshop lands between that and the group composited
-        on its own, in Normal: where the group's alpha is ``a`` it mixes the
-        two contents by ``(1 - a) / (2 - a)``, so an opaque pixel keeps its
-        pass-through blend and a faint one goes halfway.
-        """
-        h, w = viewport[3] - viewport[1], viewport[2] - viewport[0]
-        isolated = Compositor(
-            viewport,
-            color=paste(viewport, self._viewport, color_b, 1.0),
-            alpha=np.zeros((h, w, 1), dtype=np.float32),
-            layer_filter=self._layer_filter,
-            force=self._force,
-            adjustment_isolated=True,
-            widen=self._widen,
-            color_mode=self._color_mode,
-            cache=self._cache,
-            text_gamma=self._text_gamma,
-            text_isolated=True,
-            mixing=True,
-        )
-        for sublayer in cast(GroupMixin, layer):
-            isolated.apply(sublayer)
-        a = np.clip(alpha, 0.0, 1.0)
-        share = (1.0 - a) / (2.0 - a)
-        return color + share * (isolated.result_isolated() - color)
 
     def _read_object(
         self, layer: Layer, box: tuple[int, int, int, int] | None = None

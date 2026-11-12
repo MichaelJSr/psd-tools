@@ -1,9 +1,10 @@
 """A pass-through group carrying a layer style, over children that blend.
 
 Photoshop renders such a group between its children blended through to the
-backdrop and the group composited on its own in Normal, mixing the two by
-``(1 - a) / (2 - a)`` where the group's alpha is ``a``; the group then goes on
-as one layer, over its own shadow and glow.
+backdrop and the group composited on its own in Normal: one child by
+``(1 - a) / (2 - a)`` where its alpha is ``a``, each blend-mode source after
+it by the same law against what the group shows so far; the group then goes
+on as one layer, over its own shadow and glow.
 """
 
 import importlib
@@ -11,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from psd_tools.api.layers import Group, Layer, TypeLayer
 from psd_tools.api.psd_image import PSDImage
@@ -73,7 +75,7 @@ _KEPT = (
 _BOUND = 2.0
 _BOUNDS = {
     # The type layer's stroke edge under its glow strays furthest.
-    "glowing text": 16.0,
+    "glowing text": 3.0,
     # The template stroke's corners, whatever the group's children do.
     "pin light text": 10.0,
 }
@@ -222,11 +224,6 @@ def test_a_fill_faded_child_mixes_by_its_fill() -> None:
     assert _errors()["linear dodge fill"] <= _BOUND
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="where two children of a mixing group overlap, Photoshop lands "
-    "elsewhere than one mix of the group's two renders",
-)
 def test_overlapping_children_mix_as_photoshop_mixes_them() -> None:
     assert _errors()["overlap"] <= _BOUND
 
@@ -314,8 +311,6 @@ def test_a_normal_group_child_mixes_as_a_layer_would(name: str) -> None:
 # 2023's composite is the reference: every clipped case renders as "styled".
 _CLIPPED = "effects/clipped-pass-through.psd"
 _CLIPS = ("hadj", "vadj", "hpx", "vempty")
-# The styled shadow's own stray (the mix is not exact on a shadow's tail).
-_CLIPPED_BOUNDS = {"shadow": 6.0}
 
 
 def _clipped_errors() -> dict[str, float]:
@@ -337,7 +332,7 @@ def test_a_clipped_pass_through_group_renders_as_a_styled_one() -> None:
     errors = _clipped_errors()
     assert len(errors) == 18
     for name, error in errors.items():
-        assert error <= _CLIPPED_BOUNDS.get(name.split("|")[0], _BOUND), (name, error)
+        assert error <= _BOUND, (name, error)
 
 
 @pytest.mark.parametrize("case", ("pt", *_CLIPS))
@@ -345,3 +340,37 @@ def test_which_clipped_groups_mix(case: str) -> None:
     psd = PSDImage.open(full_name(_CLIPPED))
     group = next(layer for layer in psd if layer.name == f"multiply|{case}")
     assert composite_module._mixes_isolated(group, None) is (case != "pt")
+
+
+# effects/mixing-law.psd: eight cells over stripes, opaque on the top row and at
+# 50% on the bottom, each a pass-through group a hidden layer clips to (the
+# last a 0% outside stroke instead): a Normal or Screen square fading in down
+# the cell under a Screen or Multiply square fading out across it, or under a
+# bar with a Screen outer glow. Photoshop 2023's PNG of it is the reference.
+_LAW = "effects/mixing-law"
+
+
+def test_blend_sources_over_a_mixing_groups_content_follow_its_law(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where a blend-mode source meets what the group already shows.
+
+    Blended through, or mixed once as a whole, each cell strays by 14 to 20
+    levels; by the law every pixel is Photoshop's within 3.
+    """
+    psd = PSDImage.open(full_name(_LAW + ".psd"))
+    theirs = np.asarray(Image.open(full_name(_LAW + ".png")), dtype=int)
+
+    def error() -> int:
+        ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
+        alpha = theirs[..., 3:] / 255.0
+        color = np.abs(ours[..., :3] * ours[..., 3:] / 255.0 - theirs[..., :3] * alpha)
+        return int(max(np.abs(ours[..., 3] - theirs[..., 3]).max(), color.max()))
+
+    assert error() <= 3
+
+    def plain(self: Any, *args: Any) -> np.ndarray:
+        return self._color
+
+    monkeypatch.setattr(composite_module.Compositor, "_mixed_by_law", plain)
+    assert error() > 12
