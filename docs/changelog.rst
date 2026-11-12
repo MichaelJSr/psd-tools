@@ -4,6 +4,15 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] An inner glow filled with a gradient is drawn (it was skipped), as
+  Photoshop 2023 draws it: the gradient runs along the falloff, its start
+  where the glow is full. A gradient of two stops fading opaque to clear
+  covers the falloff as a solid glow does, noise included; any other covers
+  the whole layer as opaque as its stops, noise moving that coverage. Noise
+  never moves the colour. The FNAF cards' linked Gold Star
+  (``Springtrap - Gold_Star.svg.psb``) was up to 132 levels off (4,839 px
+  over 8), now within 3; its hidden 'star test' layers from 133 to 2. Solid
+  glows are unchanged. **Rendering change**
 - [fix] Color and Luminosity blend in Photoshop 2023's integers in an 8-bit
   RGB document: whole-level operands (a fill's colour too), lightness
   ``(4915 R + 9667 G + 1802 B + 8192) >> 14``, and a colour pushed past 0 or
