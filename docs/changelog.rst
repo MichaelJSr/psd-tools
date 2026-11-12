@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] An inner glow from the centre is the edge glow's complement range
+  included, as Photoshop 2023 draws it: the edge's ranged fade turned
+  around, clear at the layer's edge. It was turned around before the range,
+  so at any range under 100% it covered the edge too: up to 235 levels off
+  on every centre probe, solid or gradient, now within 2. No card uses it;
+  edge glows are unchanged. **Rendering change**
 - [fix] An inner glow filled with a gradient is drawn (it was skipped), as
   Photoshop 2023 draws it: the gradient runs along the falloff, its start
   where the glow is full. A gradient of two stops fading opaque to clear

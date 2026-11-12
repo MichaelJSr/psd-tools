@@ -167,11 +167,15 @@ def test_an_edge_glow_is_full_at_the_edge_and_fades_inward() -> None:
     assert float(row[20]) > 0.5
 
 
+@pytest.mark.parametrize("glow_range", [100.0, 50.0, 1.0])
 @pytest.mark.parametrize("precise", [False, True])
-def test_a_center_glow_is_the_complement_of_the_edge_glow(precise: bool) -> None:
+def test_a_center_glow_is_the_complement_of_the_edge_glow(
+    precise: bool, glow_range: float
+) -> None:
+    """At every range: the edge's ranged fade turned around, clear at the rim."""
     shape = _disc(81, 20.0)
-    edge = _glow(shape, precise=precise)
-    center = _glow(shape, precise=precise, center=True)
+    edge = _glow(shape, precise=precise, glow_range=glow_range)
+    center = _glow(shape, precise=precise, center=True, glow_range=glow_range)
     assert np.allclose(edge + center, shape, atol=1e-6)
 
 
@@ -718,14 +722,12 @@ _GRADIENTS_LEVELS = 3.0
 
 
 def _gradient_errors() -> dict[str, float]:
-    """Per edge glow of the fixture, its largest difference from Photoshop's."""
+    """Per glow of the fixture, its largest difference from Photoshop's."""
     psd = PSDImage.open(full_name(_GRADIENTS_FIXTURE))
     color, _, _ = composite(psd)
     diff = np.abs(color[..., :3] - psd.numpy()[..., :3]).max(axis=2) * 255.0
     errors = {}
     for layer in psd:
-        if layer.name.startswith("centre"):
-            continue
         left, top, right, bottom = layer.bbox
         errors[layer.name] = float(diff[top:bottom, left:right].max())
     return errors
@@ -733,7 +735,7 @@ def _gradient_errors() -> dict[str, float]:
 
 def test_gradient_inner_glows_render_to_photoshops_composite() -> None:
     errors = _gradient_errors()
-    assert len(errors) == 4
+    assert len(errors) == 6
     for name, error in errors.items():
         assert error <= _GRADIENTS_LEVELS, (name, error)
 

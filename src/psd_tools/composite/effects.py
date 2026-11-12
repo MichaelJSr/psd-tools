@@ -2138,8 +2138,9 @@ def draw_inner_glow(
     """The coverage an inner glow puts inside ``shape``, on ``viewport``.
 
     From the edge, the glow is full at the boundary and fades over ``size``
-    inward; from the ``center``, it is the complement, full inside and fading
-    out towards the edge. ``choke`` is a percentage of ``size`` held at full
+    inward; from the ``center``, it is the complement of that, range
+    included, clear at the boundary and full inside, as Photoshop 2023
+    draws it. ``choke`` is a percentage of ``size`` held at full
     strength before the fade. The softer technique fades along the blur
     :py:func:`draw_inner_shadow` uses, the ``precise`` one linearly with the
     distance to the edge, read at each pixel's centre, as a precise outer
@@ -2216,8 +2217,11 @@ def _inner_glow(
             what="Inner glow",
         )
     if center:
+        # Photoshop ranges the edge's fade, then turns it around.
+        ranged = falloff = 1.0 - _glow_range(matte, glow_range)
         matte = 1.0 - matte
-    ranged = falloff = _glow_range(matte, glow_range)
+    else:
+        ranged = falloff = _glow_range(matte, glow_range)
     if contour is not None:
         falloff = _contoured(falloff, contour, anti_aliased)
     clean = falloff
