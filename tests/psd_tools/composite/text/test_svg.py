@@ -499,19 +499,29 @@ def test_sample_counts_match_the_reshaped_sum(n: int) -> None:
     assert share.dtype == mean.dtype and share.tobytes() == mean.tobytes()
 
 
-def test_strong_colours_mix_grown_samples_in_srgb() -> None:
+def test_strong_colours_mix_touch_samples_in_srgb() -> None:
     """Photoshop 2023's Strong badge edges are quarter mixes in sRGB.
 
-    Fills grow by half the embolden a side (0.137 px); a stroke ring does not.
+    A fill's colour counts the samples whose cell it touches at all; a stroke
+    ring's and the joint alpha count the point samples.
     """
     blue, strong = "#2563eb", 17.5 / 64
-    # White over [1, 1.5] of column 1 grows to 1.637: 3 of 4 sample columns.
-    white = '<rect x="0" y="0" width="1.5" height="3" fill="#fff"/>'
-    drawing = _drawing(_square(blue, 0, 0, 3), white)
+    # White to 1.5 touches 2 of column 1's 4 sample cells, to 1.55 three.
+    for right, share in ((1.5, 0.5), (1.55, 0.75)):
+        white = f'<rect x="0" y="0" width="{right}" height="3" fill="#fff"/>'
+        drawing = _drawing(_square(blue, 0, 0, 3), white)
+        _, _, rgba = svg.rasterize(drawing, svg.IDENTITY, 4, embolden=strong)
+        expect = (1 - share) * _hex(blue) + share
+        assert rgba[1, 1, :3] == pytest.approx(expect, abs=1e-6)
+    # A fill to 2.55 touches 3 cells of column 2, but 2 sample points are in.
+    drawing = _drawing('<rect x="0" y="0" width="2.55" height="3" fill="#00f"/>')
     _, _, rgba = svg.rasterize(drawing, svg.IDENTITY, 4, embolden=strong)
-    assert rgba[1, 1, :3] == pytest.approx(0.25 * _hex(blue) + 0.75, abs=1e-6)
-    # The ring covers [1, 1.5] of column 1, over the red fill: half and half.
-    ring = '<rect x="1" y="1" width="4" height="4" fill="#f00" stroke="#00f"/>'
+    assert rgba[1, 2, 3] == pytest.approx(0.5)
+    # The ring covers [0.45, 1.55] of column 1, over the red fill: 2 points.
+    ring = (
+        '<rect x="1" y="1" width="4" height="4" fill="#f00" stroke="#00f" '
+        'stroke-width="1.1"/>'
+    )
     drawing = _drawing(ring)
     assert [i.stroke for i in drawing.items if isinstance(i, svg.Shape)] == [
         False,
@@ -522,15 +532,16 @@ def test_strong_colours_mix_grown_samples_in_srgb() -> None:
 
 
 def test_gradient_in_object_bounding_box_units() -> None:
+    """Sampled at each pixel's top-left corner from a 256-entry table."""
     drawing = _drawing(
         '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
         f'<stop offset="0" stop-color="{TOP}"/><stop offset="1" stop-color="{BOTTOM}"/>'
-        '</linearGradient></defs><rect x="0" y="0" width="2" height="10" fill="url(#g)"/>'
+        '</linearGradient></defs><rect x="0" y="0" width="2" height="7" fill="url(#g)"/>'
     )
     _, _, rgba = svg.rasterize(drawing, svg.IDENTITY)
-    # Interpolated in sRGB at each pixel centre.
-    for row in (0, 4, 9):
-        t = (row + 0.5) / 10
+    # Interpolated in sRGB.
+    for row in (0, 1, 3, 6):
+        t = round(row / 7 * 255) / 255
         expect = (1 - t) * _hex(TOP) + t * _hex(BOTTOM)
         assert rgba[row, 0, :3] == pytest.approx(expect, abs=1e-5)
 

@@ -118,7 +118,8 @@ class _Mode:
     #: both ems under this many px: no embolden, origins on 1/SMOOTH_GRID px
     small_px: float = 0.0
     #: point samples count where the outline touches their cell (TOUCH_TIE)
-    #: instead of the embolden, which only colour glyphs and area keep
+    #: instead of the embolden, which only area keeps; colour glyphs' fills
+    #: touch too (svg.rasterize)
     touch: bool = False
 
     def snaps(self, general: bool) -> bool:
