@@ -4,6 +4,11 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [refactor] Spread drop shadows and outer glows, and choked inner shadows
+  and inner glows, are drawn only on the part of their box within reach of
+  the viewport (their unspread reach and a pixel), as unspread ones are, and
+  a group carrying one can be drawn in parts. Viewport renders near such a
+  layer cost a fraction of what they did; renders are unchanged
 - [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
   as drop shadows do (matte and opacity held at 8 bits, their product
   rounded), and colour, gradient and pattern overlays and stroke effects
