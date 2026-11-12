@@ -382,18 +382,26 @@ def _style_draws(layer: Layer) -> bool:
     return False
 
 
-def _blends_through(layer: Layer, color_mode: ColorMode) -> tuple[bool, bool]:
+def _blends_through(
+    layer: Layer,
+    color_mode: ColorMode,
+    as_pixels: Callable[[Layer], bool] | None = None,
+) -> tuple[bool, bool]:
     """Whether the layer's own paint and effects blend with what lies beneath.
 
     The pair is (in a mode the isolated render changes, in one it does not):
     a type layer's own paint, a group in a mode of its own and anything in a
     mode Photoshop fades by fill opacity land as they would pass through.
     Normal, Dissolve and a solid colour its mode blends to itself
-    (:py:data:`_FIXED_POINTS`) blend alike either way.
+    (:py:data:`_FIXED_POINTS`) blend alike either way. A type layer that
+    ``as_pixels`` says Photoshop composites from its stored raster
+    (:py:meth:`Compositor._drawn_as_pixels`) blends as the pixel layer it is
+    drawn as.
     """
     mixes = keeps = False
     if layer.blend_mode not in _COVERS_BENEATH | {BlendMode.PASS_THROUGH}:
-        if layer.kind == "type" or layer.is_group() or layer.blend_mode in _FILL_FADED:
+        live_type = layer.kind == "type" and not (as_pixels and as_pixels(layer))
+        if live_type or layer.is_group() or layer.blend_mode in _FILL_FADED:
             keeps = True
         else:
             mixes = True
@@ -423,7 +431,11 @@ def _blends_through(layer: Layer, color_mode: ColorMode) -> tuple[bool, bool]:
     return mixes, keeps
 
 
-def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
+def _mixes_isolated(
+    layer: Layer,
+    shown: Callable[[Layer], bool] | None,
+    as_pixels: Callable[[Layer], bool] | None = None,
+) -> bool:
     """Whether a styled or clipped pass-through group mixes in its isolated render.
 
     Photoshop renders a pass-through group whose style draws
@@ -434,7 +446,10 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     backdrop tells the two apart: a child in a mode other than Normal, or an
     effect in one. Photoshop keeps a type layer's own paint in such a mode,
     a group in one, and a mode faded by fill opacity, as they pass through,
-    so a group holding any keeps its pass-through render whole. A clipping
+    so a group holding any keeps its pass-through render whole. A type layer
+    Photoshop composites from its stored raster is not live text there: it
+    mixes as a pixel layer does (``as_pixels``, see
+    :py:func:`_blends_through`). A clipping
     child blends with its base, not the backdrop; a group that is not
     pass-through blends its contents on its own. Only a group at full fill and
     opacity, holding no knockout, mixes: no Photoshop render of a faded group
@@ -464,7 +479,7 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
             return False
         if isinstance(child, AdjustmentLayer):
             continue
-        child_mixes, keeps = _blends_through(child, color_mode)
+        child_mixes, keeps = _blends_through(child, color_mode, as_pixels)
         if keeps:
             return False
         mixes = mixes or child_mixes
@@ -1157,6 +1172,8 @@ class _TextBlend:
     """
 
     overrides: Mapping[int, float | None] = field(default_factory=dict)
+    # The pass's text gamma: None mixes every type layer straight.
+    gamma: float | None = TEXT_BLEND_GAMMA
     reference: Callable[[], np.ndarray | None] | None = None
     chosen: dict[int, bool] = field(default_factory=dict)
     leaning: dict[int, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
@@ -1957,6 +1974,7 @@ def _composite_pass(
         on = _within(viewport, box)
         cache = _PassCache()
         cache.text.overrides = overrides
+        cache.text.gamma = text_gamma
         cache.text.reference = reference
         cache.text.chosen = dict(chosen)
         compositor = Compositor(
@@ -2561,11 +2579,20 @@ def _blends_in_text_space(layer: Layer, color_mode: ColorMode | None) -> bool:
         return False
     if color_mode not in (None, ColorMode.RGB) or layer._psd.depth == 32:
         return False
-    # Unreadable text data leaves nothing but the stored pixels.
+    return not _keeps_stored_raster(layer)
+
+
+def _keeps_stored_raster(layer: TypeLayer) -> bool:
+    """Whether Photoshop draws the type layer from its stored raster alone.
+
+    So for a layer whose font was substituted or whose text data predates
+    the ``bounds`` key, and for unreadable text data, which leaves nothing
+    but the stored pixels.
+    """
     if layer._type_data is None:
-        return False
+        return True
     text_data = layer._type_data.text_data
-    return b"bounds" in text_data and not text_data.get(b"substitutesUsed", False)
+    return b"bounds" not in text_data or bool(text_data.get(b"substitutesUsed", False))
 
 
 # A type layer's edge pixel counts where the straight and gamma mixes differ by
@@ -5261,8 +5288,32 @@ class Compositor:
         memo = self._cache.mixes_isolated
         key = id(layer)
         if key not in memo:
-            memo[key] = _mixes_isolated(layer, self._layer_filter)
+            memo[key] = _mixes_isolated(
+                layer, self._layer_filter, self._drawn_as_pixels
+            )
         return memo[key]
+
+    def _drawn_as_pixels(self, layer: Layer) -> bool:
+        """Whether Photoshop composites the type layer from its stored raster.
+
+        As it does a layer it leaves to that raster
+        (:py:func:`_keeps_stored_raster`) and, in the text space, one this
+        pass mixes straight (:py:meth:`_text_blend`: pinned so, or so read
+        off the reference): its edge mixes straight and its paint blends as
+        a pixel layer's. Photoshop 2023 does so with a layer whose text it
+        would lay out anew, flagged ``textWarningLevel`` 1, such as text a
+        later Photoshop wrote; nothing in the file says which.
+        """
+        if not isinstance(layer, TypeLayer):
+            return False
+        if not _blends_in_text_space(layer, self._color_mode):
+            return _keeps_stored_raster(layer)
+        # The pass's blend, not this compositor's: a scratch or alpha-only
+        # one runs without a text gamma of its own.
+        blend = self._cache.text
+        if layer.layer_id in blend.overrides:
+            return blend.overrides[layer.layer_id] is None
+        return blend.gamma is None or blend.chosen.get(id(layer)) is True
 
     def _covers_beneath(self, layer: Layer) -> bool:
         """:py:func:`_covers_beneath`, for a group that mixes too.

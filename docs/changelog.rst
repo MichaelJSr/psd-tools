@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A type layer drawn from its stored raster (font substituted, text
+  data without ``bounds``, or mixed straight: pinned so by
+  ``layer_text_gamma``, ``text_gamma=None`` or the preview) is a pixel layer
+  in a styled or clipped pass-through group too: in a mode other than Normal
+  it mixes there instead of keeping its pass-through blend, as Photoshop 2023
+  draws a type layer it flags ``textWarningLevel`` 1 (text another Photoshop
+  or writer laid out). Live type renders as before: no card changes unpinned
 - [fix] Darker Color and Lighter Color compare RGB as Photoshop 2023 does:
   whole levels weighed 0.30/0.59/0.11 in 14-bit fixed point and rounded to a
   whole level, the backdrop kept on a tie. Colours a fraction of a level
