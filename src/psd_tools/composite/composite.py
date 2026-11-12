@@ -4021,7 +4021,8 @@ class Compositor:
         a stroke reaches outside the layer: a layer whose own box has cleared
         the viewport can still paint the part of its stroke that falls back
         inside, and rejecting it here would lose the stroke along with the
-        layer (#815). A drop shadow reaches out the same way. ``_effect_reach()``
+        layer (#815). A drop shadow reaches out the same way, and so does a
+        fill drawn from its path past its box (:py:meth:`_fill_box`). ``_effect_reach()``
         rather than ``_paint_bbox()`` because the group half of that
         measurement is unreachable from here: a group is exempt from the cull,
         so the box is only ever measured for a layer that has no contents to
@@ -4041,9 +4042,12 @@ class Compositor:
         if self._layer_filter is not None and not self._layer_filter(layer):
             logger.debug("Ignore %s", layer)
             return False
-        if not (
-            isinstance(layer, AdjustmentLayer) or layer.is_group()
-        ) and utils.intersect(self._viewport, _effect_reach(layer)) == (0, 0, 0, 0):
+        if (
+            not (isinstance(layer, AdjustmentLayer) or layer.is_group())
+            and utils.intersect(self._viewport, _effect_reach(layer)) == (0, 0, 0, 0)
+            and utils.intersect(self._viewport, self._fill_box(layer, self._viewport))
+            == (0, 0, 0, 0)
+        ):
             logger.debug("Out of viewport %s", layer)
             return False
         # A clipping layer is composited by its base, through _apply_clip_layers().

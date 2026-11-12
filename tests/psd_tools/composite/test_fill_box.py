@@ -10,7 +10,9 @@ from psd_tools.composite.composite import Compositor
 from ..utils import full_name
 
 
-def _render(cut: tuple[int, int]) -> np.ndarray:
+def _render(
+    cut: tuple[int, int], viewport: tuple[int, int, int, int] | None = None
+) -> np.ndarray:
     """``vector-mask.psd`` with ``Shape 1``'s box cut short by ``cut`` (right, bottom).
 
     A shape with no pixels takes its box from the origination box, truncated
@@ -22,11 +24,14 @@ def _render(cut: tuple[int, int]) -> np.ndarray:
     assert not layer.has_pixels()
     left, top, right, bottom = layer.bbox
     layer._bbox = (left, top, right - cut[0], bottom - cut[1])
-    return np.asarray(psd.composite(ignore_preview=True))
+    return np.asarray(psd.composite(viewport=viewport, ignore_preview=True))
 
 
 def test_a_fill_without_pixels_is_drawn_where_its_path_is() -> None:
-    assert np.array_equal(_render((2, 3)), _render((0, 0)))
+    whole = _render((0, 0))
+    assert np.array_equal(_render((2, 3)), whole)
+    # A box past the cut box still draws the fill there.
+    assert np.array_equal(_render((2, 3), (51, 42, 53, 68)), whole[42:68, 51:53])
 
 
 def test_only_a_fill_without_pixels_grows_past_its_box() -> None:
