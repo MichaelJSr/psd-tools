@@ -4,6 +4,14 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A bevel's slope is smoothed across evenly over three pixels (a
+  Prewitt operator, was Sobel's quarter-half-quarter), as Photoshop 2023
+  lights it: a smooth inner bevel with a Linear shape contour at range 0
+  (Golden Bomb's and Golden Metronome's names, Golden Metronome's
+  Negation icon) was up to 26 levels off on curved and slanted edges, now
+  within 10; smooth bevels without a contour move up to 8 levels nearer
+  on slanted edges, and Royal Eradicator's textured stars from 34 to 6.
+  **Rendering change**
 - [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
   of the document's own profile, its colorants adapted to D65 by Bradford,
   as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp

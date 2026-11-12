@@ -2187,11 +2187,12 @@ _SOFTEN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SLOPE_PER_DEPTH = 1.0
 
 # How high a bevel's texture stands at a texture depth of 100%, per pixel of
-# the effect's size, and how a slope along one axis is smoothed along the
-# other (a Sobel operator). Fitted against a Photoshop export of a textured
-# bevel, not a preview fixture.
+# the effect's size, fitted against a Photoshop export of a textured bevel.
+# How a slope along one axis is smoothed along the other: evenly over three
+# pixels (a Prewitt operator), read off Photoshop 2023's smooth bevels with
+# a shape contour at range 0, which light every slope by its direction.
 _TEXTURE_HEIGHT_PER_DEPTH = 1.0
-_SLOPE_ACROSS = (0.25, 0.5, 0.25)
+_SLOPE_ACROSS = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
 
 # How wide the gaussian that rounds a chisel soft bevel's faces is, per pixel
 # of size, and how far it reads, in sigmas. Not fitted: no fixture preview
@@ -2555,7 +2556,7 @@ def texture_height(
 
 
 def _slopes(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The surface's slope down and across, as a Sobel operator takes it.
+    """The surface's slope down and across, as a Prewitt operator takes it.
 
     A central difference along each axis, smoothed by ``_SLOPE_ACROSS``
     along the other; the edge pixels repeat past the border.
@@ -2612,8 +2613,8 @@ def draw_bevel(
     ``soften`` blurs the lighting before that split, and ``contour`` (the
     gloss contour, read as :py:func:`draw_drop_shadow` reads one) maps the
     lighting first, the flat layer's with it, so a flat face takes neither
-    under any contour. The slope is a Sobel operator's, fitted to one
-    Photoshop export: a one pixel step lights the two pixels astride it.
+    under any contour. The slope is a Prewitt operator's, read off
+    Photoshop 2023: a one pixel step lights the two pixels astride it.
 
     ``texture`` (from :py:func:`texture_height`, on ``viewport``) is laid on
     the surface before it is lit, so the bevel's faces and the flat layer
