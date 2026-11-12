@@ -21,6 +21,13 @@ Changelog
   then sets every channel to the floored midrange of the three. Exact on
   every colour for desaturation; other settings, colour ranges, colorize
   and other depths keep the old model. **Rendering change**
+- [fix] Colour (SVG) glyphs: gradients are sampled at each pixel's
+  top-left corner from a 256-entry table (``rint(t x 255)``), and Strong
+  text's fills take their colour from touch samples (a sample counts where
+  the shape covers any part of its cell) instead of point samples of the
+  shape grown by half the embolden, as Photoshop 2023 draws them. Strokes
+  and the joint alpha keep point samples. **Rendering change** for colour
+  glyphs the fork draws
 - [refactor] Spread drop shadows and outer glows, and choked inner shadows
   and inner glows, are drawn only on the part of their box within reach of
   the viewport (their unspread reach and a pixel), as unspread ones are, and
