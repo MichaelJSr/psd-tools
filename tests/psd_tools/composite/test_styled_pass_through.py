@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from psd_tools.api.layers import Group, Layer
+from psd_tools.api.layers import Group, Layer, TypeLayer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.composite import composite
 from psd_tools.constants import Knockout, Tag
@@ -173,6 +173,35 @@ def test_which_groups_mix(name: str, mixes: bool) -> None:
     assert composite_module._mixes_isolated(group, None) is mixes
 
 
+def test_a_type_layer_drawn_as_its_pixels_mixes_as_they_do() -> None:
+    """Composited from its stored raster, a type layer is pixels to the group.
+
+    Photoshop 2023 does so with a type layer whose text it would lay out anew
+    (``textWarningLevel`` 1), such as text a later Photoshop laid out; pinned
+    straight, the fork takes it for one. "screen text" then lands where
+    Photoshop puts "rasterized text", the same pixels over the same stripes
+    80 px below, which it mixes; a substituted font is drawn the same way.
+    """
+    psd = PSDImage.open(full_name(_FIXTURE))
+    cells = {layer.name: layer for layer in psd if isinstance(layer, Group)}
+    text, raster = cells["screen text"][0], cells["rasterized text"][0]
+    assert isinstance(text, TypeLayer)
+    pixels, twin_pixels = text.numpy(), raster.numpy()
+    assert pixels is not None and twin_pixels is not None
+    assert np.array_equal(pixels, twin_pixels)
+    left, top, right, bottom = _cell(cells["screen text"])
+    shift = _cell(cells["rasterized text"])[1] - top
+    twin = psd.numpy()[top + shift : bottom + shift, left:right, :3]
+    for straight in ({"layer_text_gamma": {text.layer_id: None}}, {"text_gamma": None}):
+        color, _, _ = composite(psd, **straight)
+        assert np.abs(color[top:bottom, left:right, :3] - twin).max() * 255.0 <= _BOUND
+
+    assert composite_module._mixes_isolated(cells["screen text"], None) is False
+    text._data.text_data[b"substitutesUsed"] = True
+    color, _, _ = composite(psd)
+    assert np.abs(color[top:bottom, left:right, :3] - twin).max() * 255.0 <= _BOUND
+
+
 def test_a_group_holding_a_knockout_does_not_mix() -> None:
     """No Photoshop render of one has been read: it keeps its pass-through one."""
     psd = PSDImage.open(full_name(_FIXTURE))
@@ -255,8 +284,8 @@ def test_a_group_child_in_a_mode_of_its_own_passes_through(
 
     mixes = composite_module._mixes_isolated
 
-    def forced(layer: Layer, shown: Any) -> bool:
-        return layer.name == _NESTED_KEPT or mixes(layer, shown)
+    def forced(layer: Layer, *args: Any) -> bool:
+        return layer.name == _NESTED_KEPT or mixes(layer, *args)
 
     monkeypatch.setattr(composite_module, "_mixes_isolated", forced)
     assert _nested_errors(PSDImage.open(full_name(_NESTED)))[_NESTED_KEPT] > 20.0
