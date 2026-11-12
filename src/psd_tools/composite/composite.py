@@ -697,6 +697,19 @@ def _tiling_origin(
     return paint.pattern_origin(descriptor, layout, point)
 
 
+def _texture_origin(layer: Layer, descriptor: Descriptor) -> tuple[int, int]:
+    """Where a bevel's texture tiles from, in document coordinates.
+
+    Linked with the layer, from its reference point (a group's too), rounded
+    to the pixel; unlinked or without one, from the document's origin. The
+    phase is not read: Photoshop 2023 draws none of it.
+    """
+    point = _reference_point(layer)
+    if point is None or not bool(descriptor.get(Key.Alignment, True)):
+        return 0, 0
+    return math.floor(point[0] + 0.5), math.floor(point[1] + 0.5)
+
+
 def _draw_pattern_overlay(
     layer: Layer, descriptor: Any, channels: int, box: _Box, layout: _Box
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
@@ -3549,8 +3562,13 @@ def _remix(
 
 
 # A bevel texture's colour planes, by its pattern's mode. An indexed pattern's
-# one plane holds palette indices, not grey levels.
-_TEXTURE_PLANES = {ColorMode.RGB: 3, ColorMode.GRAYSCALE: 1}
+# one plane holds palette indices, not grey levels; a multichannel one of one
+# plane (Photoshop's preset textures, Watercolor) reads as grey.
+_TEXTURE_PLANES = {
+    ColorMode.RGB: 3,
+    ColorMode.GRAYSCALE: 1,
+    ColorMode.MULTICHANNEL: 1,
+}
 
 # Float32 planes of ``layer.bbox`` that _blend_unfiltered() allocates at its
 # peak, beside the arrays it is given.
@@ -6885,7 +6903,7 @@ class Compositor:
                     )
             texture = None
             if bevel.use_texture:
-                texture = self._bevel_texture(layer, bevel, bbox, size)
+                texture = self._bevel_texture(layer, bevel, bbox)
             silhouette = self._cast_shape(layer, bbox)
             try:
                 amounts = draw_bevel(
@@ -6932,16 +6950,15 @@ class Compositor:
         layer: Layer,
         bevel: BevelEmboss,
         bbox: tuple[int, int, int, int],
-        size: float,
     ) -> np.ndarray | None:
         """A bevel's texture on ``bbox``: its pattern's luminance as a height field.
 
-        The pattern tiles from where a pattern overlay of the layer would
-        (:py:func:`_tiling_origin`), at the texture's scale;
-        :py:func:`texture_height` turns its luminance into height; the
-        pattern's alpha is not read. None, and the bevel goes on untextured,
-        when the pattern is not in the document or cannot be read, or the
-        document or the pattern is neither RGB nor grayscale.
+        The pattern tiles at the texture's scale from
+        :py:func:`_texture_origin`; :py:func:`texture_height` turns its
+        luminance into height; the pattern's alpha is not read. None, and
+        the bevel goes on untextured, when the pattern is not in the document
+        or cannot be read, the document is neither RGB nor grayscale, or the
+        pattern is none of those nor one-plane multichannel.
         """
         if layer._psd.color_mode not in (ColorMode.RGB, ColorMode.GRAYSCALE):
             logger.debug(
@@ -6959,12 +6976,11 @@ class Compositor:
                     layer,
                 )
                 return None
-            _, layout = _overlay_boxes(
-                layer, self._viewport, self._cache.content_bboxes
-            )
-            origin = _tiling_origin(layer, bevel.descriptor, layout)
             fill, _ = paint.draw_pattern_fill(
-                bbox, layer._psd, bevel.descriptor, origin=origin
+                bbox,
+                layer._psd,
+                bevel.descriptor,
+                origin=_texture_origin(layer, bevel.descriptor),
             )
         except _UNREADABLE as error:
             logger.debug("Cannot read the texture of a bevel of %s: %s", layer, error)
@@ -6975,7 +6991,6 @@ class Compositor:
         luminance = fill[:, :, 0] if planes == 1 else fill @ _BT601_LUMINANCE
         return texture_height(
             np.clip(luminance, 0.0, 1.0),
-            size=size,
             depth=bevel.texture_depth,
             inverted=bevel.texture_inverted,
         )

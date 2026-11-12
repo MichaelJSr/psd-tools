@@ -772,12 +772,13 @@ _FITTED = {
 }
 
 # Not fitted to a preview: none carries a chisel soft bevel or a textured
-# bevel. The texture height and the slope's smoothing are fitted to a
-# Photoshop export instead. Pinned so that a change to them is deliberate.
+# bevel. The texture height and the slope's smoothing are read off Photoshop
+# 2023 exports instead (effects/bevel-texture-laws.psd). Pinned so that a
+# change to them is deliberate.
 _ASSUMED = {
     "_SLOPE_LIMIT_SIGMA_PER_SIZE": 0.125,
     "_TEXTURE_HEIGHT_PER_DEPTH": 1.0,
-    "_SLOPE_ACROSS": (0.25, 0.5, 0.25),
+    "_SLOPE_ACROSS": (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
 }
 
 
@@ -817,25 +818,43 @@ def _flat_layer(size: int = 24) -> np.ndarray:
 
 
 def test_a_textures_dark_pixels_stand_as_high_as_the_bevel() -> None:
-    """At 100% a black texture pixel is ``size`` high and a white one flat.
+    """At 100% a black texture pixel is as high as the surface and a white one flat.
 
     The depth scales that, and ``inverted`` or a negative depth turns it over.
     """
     luminance = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
-    height = effects.texture_height(luminance, size=2.0, depth=100.0, inverted=False)
-    assert np.allclose(height, [[2.0, 1.0, 0.0]])
+    height = effects.texture_height(luminance, depth=100.0, inverted=False)
+    assert np.allclose(height, [[1.0, 0.5, 0.0]])
     assert np.allclose(
-        effects.texture_height(luminance, size=2.0, depth=400.0, inverted=False),
-        [[8.0, 4.0, 0.0]],
+        effects.texture_height(luminance, depth=400.0, inverted=False),
+        [[4.0, 2.0, 0.0]],
     )
     assert np.allclose(
-        effects.texture_height(luminance, size=2.0, depth=100.0, inverted=True),
-        [[0.0, 1.0, 2.0]],
+        effects.texture_height(luminance, depth=100.0, inverted=True),
+        [[0.0, 0.5, 1.0]],
     )
     assert np.allclose(
-        effects.texture_height(luminance, size=2.0, depth=-100.0, inverted=False),
-        [[-2.0, -1.0, 0.0]],
+        effects.texture_height(luminance, depth=-100.0, inverted=False),
+        [[-1.0, -0.5, 0.0]],
     )
+
+
+def test_a_texture_stands_as_high_as_a_smooth_bevels_surface() -> None:
+    """A size 1 bevel's as a size 2's, and below 100 / size a pixel high.
+
+    Photoshop 2023 raises the texture with the surface: a depth of 30 or 50
+    at size 2, both under a pixel of rise, light it alike.
+    """
+    luminance = np.ones((24, 24), dtype=np.float32)
+    luminance[8:16, 4:20] = 0.0
+    texture = effects.texture_height(luminance, depth=100.0, inverted=False)
+    one = _bevel(_flat_layer(), size=1.0, texture=texture)
+    two = _bevel(_flat_layer(), size=2.0, texture=texture)
+    assert np.array_equal(one[0], two[0]) and np.array_equal(one[1], two[1])
+    shallow = _bevel(_flat_layer(), size=2.0, depth=30.0, texture=texture)
+    half = _bevel(_flat_layer(), size=2.0, depth=50.0, texture=texture)
+    assert np.array_equal(shallow[0], half[0]) and np.array_equal(shallow[1], half[1])
+    assert not np.array_equal(half[0], two[0])
 
 
 def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
@@ -848,7 +867,7 @@ def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
     shape = _flat_layer()
     luminance = np.ones((24, 24), dtype=np.float32)
     luminance[8:16, 4:20] = 0.0
-    texture = effects.texture_height(luminance, size=2.0, depth=400.0, inverted=False)
+    texture = effects.texture_height(luminance, depth=400.0, inverted=False)
     highlight, shadow = _bevel(shape, size=2.0, texture=texture)
     column = 12
     assert highlight[7, column, 0] > 0.9 and highlight[8, column, 0] > 0.9
@@ -864,21 +883,23 @@ def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
 def test_a_slope_is_smoothed_across_the_step() -> None:
     """A one pixel step lights the two rows astride it equally.
 
-    The step's end columns carry three quarters of the slope and the columns
-    beside them a quarter: a Sobel operator.
+    The step's end columns carry two thirds of the slope and the columns
+    beside them a third: a Prewitt operator, as Photoshop 2023 lights a
+    texture's corners and a pixel-art edge's.
     """
     height = np.zeros((9, 9), dtype=np.float32)
     height[4:, 3:6] = 1.0
     gy, gx = effects._slopes(height)
+    sixth = 1.0 / 6.0
     assert np.allclose(gy[3, 4], 0.5) and np.allclose(gy[4, 4], 0.5)
-    assert np.allclose(gy[3, 3], 0.375) and np.allclose(gy[3, 5], 0.375)
-    assert np.allclose(gy[3, 2], 0.125) and np.allclose(gy[3, 6], 0.125)
+    assert np.allclose(gy[3, 3], 2 * sixth) and np.allclose(gy[3, 5], 2 * sixth)
+    assert np.allclose(gy[3, 2], sixth) and np.allclose(gy[3, 6], sixth)
     assert gy[2, 4] == 0.0 and gy[5, 4] == 0.0 and gy[3, 1] == 0.0
     assert np.allclose(gx[6, 2], 0.5) and np.allclose(gx[6, 3], 0.5)
-    assert np.allclose(gx[4, 2], 0.375) and np.allclose(gx[3, 2], 0.125)
+    assert np.allclose(gx[4, 2], 2 * sixth) and np.allclose(gx[3, 2], sixth)
 
 
-def test_a_bevel_lights_a_step_through_a_sobel_operator() -> None:
+def test_a_bevel_lights_a_step_through_a_prewitt_operator() -> None:
     """A raised block three columns wide, lit from above.
 
     Along its top edge the end columns take less light than the middle one,
@@ -886,7 +907,7 @@ def test_a_bevel_lights_a_step_through_a_sobel_operator() -> None:
     """
     luminance = np.ones((24, 24), dtype=np.float32)
     luminance[8:16, 10:13] = 0.0
-    texture = effects.texture_height(luminance, size=1.0, depth=100.0, inverted=False)
+    texture = effects.texture_height(luminance, depth=50.0, inverted=False)
     highlight, _ = _bevel(_flat_layer(), size=1.0, texture=texture)
     edge = highlight[7, :, 0]
     assert edge[11] > edge[10] > edge[9] > 0.0

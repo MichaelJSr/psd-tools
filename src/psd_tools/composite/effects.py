@@ -2186,12 +2186,12 @@ _BEVEL_SIGMA_PER_SIZE = 0.45
 _SOFTEN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SLOPE_PER_DEPTH = 1.0
 
-# How high a bevel's texture stands at a texture depth of 100%, per pixel of
-# the effect's size, and how a slope along one axis is smoothed along the
-# other (a Sobel operator). Fitted against a Photoshop export of a textured
-# bevel, not a preview fixture.
+# How high a bevel's texture stands at a texture depth of 100%, per pixel the
+# bevel's surface stands, and how a slope along one axis is smoothed along
+# the other: evenly over three pixels, a Prewitt operator. Read off Photoshop
+# 2023 exports of textured and untextured bevels.
 _TEXTURE_HEIGHT_PER_DEPTH = 1.0
-_SLOPE_ACROSS = (0.25, 0.5, 0.25)
+_SLOPE_ACROSS = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
 
 # How wide the gaussian that rounds a chisel soft bevel's faces is, per pixel
 # of size, and how far it reads, in sigmas. Not fitted: no fixture preview
@@ -2538,24 +2538,25 @@ def _bevel_height(
 
 
 def texture_height(
-    luminance: np.ndarray, *, size: float, depth: float, inverted: bool
+    luminance: np.ndarray, *, depth: float, inverted: bool
 ) -> np.ndarray:
-    """A bevel texture's surface, in pixels of height, from the pattern's luminance.
+    """A bevel texture's surface from the pattern's luminance, per pixel of rise.
 
     The pattern's dark pixels stand up and its light ones sink, the other
     way round when ``inverted``; at a texture ``depth`` of 100% the darkest
-    pixel is as high as the bevel's band is wide (``size``), and the depth
-    scales that, negative depths turning the texture over. A depth past what
-    Photoshop writes is held to it.
+    pixel is as high as the bevel's surface stands, which
+    :py:func:`draw_bevel` multiplies in, and the depth scales that, negative
+    depths turning the texture over. A depth past what Photoshop writes is
+    held to it.
     """
     relief = luminance if inverted else 1.0 - luminance
     depth = float(np.clip(depth, -_MAX_BEVEL_DEPTH, _MAX_BEVEL_DEPTH))
-    scale = max(float(size), 0.0) * depth / 100.0 * _TEXTURE_HEIGHT_PER_DEPTH
+    scale = depth / 100.0 * _TEXTURE_HEIGHT_PER_DEPTH
     return (relief * scale).astype(np.float32)
 
 
 def _slopes(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The surface's slope down and across, as a Sobel operator takes it.
+    """The surface's slope down and across, as a Prewitt operator takes it.
 
     A central difference along each axis, smoothed by ``_SLOPE_ACROSS``
     along the other; the edge pixels repeat past the border.
@@ -2612,12 +2613,15 @@ def draw_bevel(
     ``soften`` blurs the lighting before that split, and ``contour`` (the
     gloss contour, read as :py:func:`draw_drop_shadow` reads one) maps the
     lighting first, the flat layer's with it, so a flat face takes neither
-    under any contour. The slope is a Sobel operator's, fitted to one
-    Photoshop export: a one pixel step lights the two pixels astride it.
+    under any contour. The slope is a Prewitt operator's, read off
+    Photoshop 2023: a one pixel step lights the two pixels astride it, and
+    a corner a third less.
 
     ``texture`` (from :py:func:`texture_height`, on ``viewport``) is laid on
     the surface before it is lit, so the bevel's faces and the flat layer
-    alike carry its bumps.
+    alike carry its bumps: a smooth bevel's as high as its surface stands
+    (:py:func:`_smooth_rise`, a pixel at least), a chisel one's ``size``
+    pixels, its slope scaled by ``depth`` with the rest.
 
     A smooth bevel's surface is :py:func:`_smooth_surface`'s,
     :py:func:`_smooth_rise` pixels high at its top, and ``depth`` is in that
@@ -2656,7 +2660,7 @@ def draw_bevel(
         surface = _smooth_surface(alpha, style, size)
         rise = _smooth_rise(style, size, depth)
         if bumps is not None:
-            bumps = bumps * slope
+            bumps = bumps * rise
         samples = (0.0,)
         if bevel_shape is not None and bevel_shape.anti_aliased:
             samples = _SHAPE_AA_SAMPLES
@@ -2679,7 +2683,7 @@ def draw_bevel(
     else:
         height = _bevel_height(alpha, style, technique, size)
         if bumps is not None:
-            height = height + bumps
+            height = height + bumps * size
         light = _lit(height, slope if up else -slope, lx, ly, lz)
     soften = max(float(soften), 0.0)
     sigma = soften * _SOFTEN_SIGMA_PER_SIZE
