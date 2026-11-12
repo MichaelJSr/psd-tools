@@ -112,15 +112,18 @@ def test_a_glow_of_size_zero_is_the_silhouette_ranged(
 def test_spread_at_full_makes_a_hard_band_of_the_size(precise: bool) -> None:
     """At 100% spread the whole size goes to growth and none to the falloff.
 
-    Covered from the disc's edge out to the size, and not a pixel beyond,
-    with either technique.
+    Covered from the disc's edge out to the size with either technique; the
+    softer one's 8-bit steps leave a sliver of the next pixel, as a hard
+    spread shadow's do (``effects/hard-spread.psd``).
     """
     glow = _glow(_disc(81, _RADIUS), size=6.0, spread=100.0, precise=precise)
     row = _ring(glow)
     inside = int(_RADIUS) + 1
     assert np.all(row[:inside] == 0.0), row
     assert np.all(row[inside : inside + 6] == 1.0), row
-    assert np.all(row[inside + 6 :] == 0.0), row
+    sliver = 0.0 if precise else 22.0 / 255.0
+    assert float(row[inside + 6]) == pytest.approx(sliver), row
+    assert np.all(row[inside + 7 :] == 0.0), row
 
 
 def test_the_precise_technique_ramps_straight_with_the_distance() -> None:

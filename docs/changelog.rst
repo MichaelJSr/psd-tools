@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A drop shadow, softer outer glow, inner shadow or softer inner glow
+  whose spread or choke takes its whole size grows as Photoshop 2023 does:
+  in whole steps of an 8-bit field holding the size and a pixel, so its edge
+  reaches up to a pixel past the size (254 px from 127 on), and its noise
+  is held under that edge. Omori's name shadow (noise 70, spread 100%,
+  6 px) was up to 183 levels off at its edge, now within a level; spreads
+  that leave a blur are unchanged. **Rendering change**
 - [fix] A knockout pass-through group knocks out what lies under it instead
   of uniting with it (#707), and Transparency Shapes Layer off (tag tsly)
   makes the layer's masks the knockout shape: a sprite row drawn over
