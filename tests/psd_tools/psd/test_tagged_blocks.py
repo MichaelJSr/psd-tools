@@ -8,11 +8,16 @@ from typing import Any
 import pytest
 
 from psd_tools.constants import BlendMode, SectionDivider, Tag
-from psd_tools.psd import PSD
+from psd_tools.psd import PSD, tagged_blocks
 from psd_tools.psd.base import IntegerElement
 from psd_tools.psd.bin_utils import write_bytes, write_length_block
 from psd_tools.psd.layer_and_mask import ChannelImageData, LayerInfoBlock, LayerRecords
-from psd_tools.psd.parse_limits import ParseLimitError
+from psd_tools.psd.parse_limits import (
+    ParseLimitError,
+    ParseLimits,
+    current_budget,
+    parse_context,
+)
 from psd_tools.psd.tagged_blocks import (
     Annotation,
     Annotations,
@@ -241,6 +246,45 @@ def test_a_held_block_is_written_as_a_length_block(padding: int, size: int) -> N
     blocks = TaggedBlocks.frombytes(raw, padding=padding)
     assert blocks[Tag.LAYER_ID]._held is not None
     assert blocks.tobytes(padding=padding) == raw
+
+
+@pytest.mark.parametrize("padding", [1, 4])
+def test_psb_blocks_are_held_as_the_readers_read_them(
+    padding: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Version 2: 8-byte lengths, a cut-short head, an unheld block mid-run."""
+
+    def block(key: bytes, payload: bytes, length: str = ">I") -> bytes:
+        head = b"8BIM" + key + struct.pack(length, len(payload))
+        return head + payload + bytes(-len(payload) % padding)
+
+    color = struct.pack(">5H", 0, 1, 2, 3, 4)
+    data = block(b"LMsk", color + struct.pack(">HBx", 50, 128), ">Q")
+    data += block(b"zzzz", b"abc") + block(b"lyid", struct.pack(">I", 7))
+    data += block(b"FMsk", color + struct.pack(">H", 9), ">Q")
+
+    def outcome(data: bytes) -> Any:
+        fp = io.BytesIO(data)
+        try:
+            with parse_context(ParseLimits()):
+                budget = current_budget()
+                assert budget is not None
+                blocks = TaggedBlocks.read(fp, version=2, padding=padding)
+                held = [blocks[key]._held for key in blocks]
+                written = blocks.tobytes(version=2, padding=padding)
+                loaded = [(key, blocks[key].data) for key in blocks]
+                spent = budget.objects, budget.total_bytes
+        except (OSError, ValueError) as e:
+            return type(e), str(e)
+        return held, written, loaded, spent, fp.tell()
+
+    fast = [outcome(data[:size]) for size in range(len(data) + 1)]
+    held = fast[-1][0]
+    assert [item and item[3] for item in held] == [2, None, 2, 2]
+    assert fast[-1][1] == data
+    monkeypatch.setattr(tagged_blocks, "_hold", lambda *a: True)
+    eager = [outcome(data[:size]) for size in range(len(data) + 1)]
+    assert [item[1:] for item in fast] == [item[1:] for item in eager]
 
 
 def test_nested_layer_info_blocks_raise_a_parse_limit_error() -> None:
