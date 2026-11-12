@@ -4,7 +4,8 @@
 Each is the numpy expression it replaces in ``composite.py`` (``lut_levels``:
 ``adjustments._apply_lut``; ``to_bytes``: ``composite_pil``; ``divide`` and
 ``clip``: ``utils``; ``vibrance_step``: ``adjustments._vibrance_step``;
-``text_mix``: ``Compositor._mix_in_text_space``), its
+``text_mix``: ``Compositor._mix_in_text_space``; ``unfilter``:
+``composite._blend_unfiltered``), its
 operations in the same dtypes and order, so the results are bit-identical.
 ``distinct_pixels`` numbers a canvas' distinct colours for ``composite._adjust``.
 ``whole_levels``, and ``mix_toward`` and ``remix`` with ``levels`` set, round to
@@ -767,6 +768,85 @@ def effect_source(
                 o_sh[x] = _clip(r * (shape_scalar if scalar else p_s[x]))
                 o_al[x] = _clip(a)
     return out_color, out_shape, out_alpha
+
+
+def unfilter(
+    const float[:, :, :] color,
+    const float[:, :, :] shape,
+    const float[:, :, :] weight,
+    const unsigned char[:, :, ::1] src_color,
+    const unsigned char[:, ::1] src_alpha,
+    Py_ssize_t oy,
+    Py_ssize_t ox,
+):
+    """``composite._blend_unfiltered``: ``(out, alpha)``.
+
+    The source's top left is at row ``oy``, column ``ox`` of the box; ``shape``
+    and ``src_alpha`` may be None. ``weight`` is only read.
+    """
+    cdef Py_ssize_t h = color.shape[0], w = color.shape[1], n = color.shape[2]
+    cdef Py_ssize_t sh = src_color.shape[0], sw = src_color.shape[1]
+    cdef Py_ssize_t y, x, c, i, s, x0, x1
+    cdef bint has_shape = shape is not None, has_alpha = src_alpha is not None
+    cdef bint row_in, inside
+    cdef float u, wt, a, q
+    _rows(weight, h, w, 1)
+    if has_shape:
+        _rows(shape, h, w, 1)
+    _rows(color, h, w, n)
+    if src_color.shape[2] != n or has_alpha and (
+        src_alpha.shape[0] != sh or src_alpha.shape[1] != sw
+    ):
+        raise ValueError("source planes do not match")
+    out_color = np.empty((h, w, n), dtype=np.float32)
+    out_alpha = np.empty((h, w, 1), dtype=np.float32)
+    if h == 0 or w == 0 or n == 0:
+        return out_color, out_alpha
+    cdef float[:, :, ::1] co = out_color
+    cdef float[:, :, ::1] al = out_alpha
+    cdef const float *p_c
+    cdef const float *p_w
+    cdef const float *p_s = NULL
+    cdef const unsigned char *p_sc = NULL
+    cdef const unsigned char *p_sa = NULL
+    cdef float *o_co
+    cdef float *o_al
+    # The source's columns in the box.
+    x0 = min(max(ox, 0), w)
+    x1 = max(min(ox + sw, w), x0)
+    with nogil:
+        for y in range(h):
+            p_c, p_w, o_co, o_al = &color[y, 0, 0], &weight[y, 0, 0], &co[y, 0, 0], &al[y, 0, 0]
+            if has_shape:
+                p_s = &shape[y, 0, 0]
+            row_in = 0 <= y - oy < sh and x0 < x1
+            if row_in:
+                p_sc = &src_color[y - oy, 0, 0]
+                if has_alpha:
+                    p_sa = &src_alpha[y - oy, 0]
+            # numpy's steps per pixel, in its order and in float32.
+            for x in range(w):
+                inside = row_in and x0 <= x < x1
+                s = x - ox
+                u = (<float>1.0 if inside else <float>0.0) * (<float>1.0 - p_w[x])
+                wt = <float>1.0 - u
+                if has_alpha:
+                    u = u * ((<float>p_sa[s] if inside else <float>0.0) / <float>255.0)
+                if has_shape:
+                    wt = wt * p_s[x]
+                a = wt + u
+                o_al[x] = a
+                u = u / <float>255.0
+                for c in range(n):
+                    i = x * n + c
+                    q = (<float>p_sc[s * n + c] if inside else <float>0.0) * u
+                    q = q + wt * p_c[i]
+                    if a > 0:
+                        q = q / a
+                    elif a <= 0:
+                        q = p_c[i]
+                    o_co[i] = q
+    return out_color, out_alpha
 
 
 ctypedef fused real:

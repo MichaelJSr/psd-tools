@@ -3572,8 +3572,9 @@ def _remix(
 # one plane holds palette indices, not grey levels.
 _TEXTURE_PLANES = {ColorMode.RGB: 3, ColorMode.GRAYSCALE: 1}
 
-# Float32 planes of ``layer.bbox`` that _blend_unfiltered() allocates at its
-# peak, beside the arrays it is given.
+# Float32 planes of ``layer.bbox`` that _blend_unfiltered()'s numpy steps
+# allocate at their peak, beside the arrays it is given. The compiled loop
+# takes 4, but the budget check counts these either way.
 _UNFILTER_PLANES = 8
 
 
@@ -3634,7 +3635,7 @@ def _blend_unfiltered(
 ) -> tuple[np.ndarray, np.ndarray]:
     """``lerp(source, stored, weight)`` with straight colour, on ``layer.bbox``.
 
-    *weight* is the filter mask on the box, 1 = filtered, and is overwritten.
+    *weight* is the filter mask on the box, 1 = filtered, and may be overwritten.
     The filtered pixels stand where the source is not stored.
     """
     box = layer.bbox
@@ -3650,6 +3651,18 @@ def _blend_unfiltered(
         + _UNFILTER_PLANES * height * width * 4,
         warn=False,
     )
+    if _unfilter_fits(box, sbox, color, shape, weight, src_color, src_alpha):
+        out, alpha = _cblend.unfilter(
+            color,
+            shape,
+            weight,
+            src_color,
+            src_alpha,
+            sbox[1] - box[1],
+            sbox[0] - box[0],
+        )
+        logger.debug("Smart filter mask applied to %r", layer.name)
+        return out, alpha
     stored = np.broadcast_to(np.float32(1), (*src_color.shape[:2], 1))
     unfiltered = paste(box, sbox, stored)
     unfiltered *= 1 - weight
@@ -3670,6 +3683,38 @@ def _blend_unfiltered(
     np.copyto(out, color, where=alpha <= 0)
     logger.debug("Smart filter mask applied to %r", layer.name)
     return out, alpha
+
+
+def _unfilter_fits(
+    box: tuple[int, int, int, int],
+    sbox: tuple[int, int, int, int],
+    color: np.ndarray,
+    shape: np.ndarray | None,
+    weight: np.ndarray,
+    src_color: np.ndarray,
+    src_alpha: np.ndarray | None,
+) -> bool:
+    """Whether ``_cblend.unfilter`` takes these as :py:func:`_blend_unfiltered`'s numpy would."""
+    if _cblend is None or not hasattr(_cblend, "unfilter"):
+        return False
+    size = (box[3] - box[1], box[2] - box[0])
+    src_size = (sbox[3] - sbox[1], sbox[2] - sbox[0])
+
+    def packed(a: object, dims: tuple[int, ...]) -> bool:
+        return (
+            isinstance(a, np.ndarray)
+            and a.dtype == np.uint8
+            and a.shape == dims
+            and a.flags.c_contiguous
+        )
+
+    ones = (weight,) if shape is None else (weight, shape)
+    return (
+        utils.in_rows(ones, (color,))
+        and color.shape == (*size, 3)
+        and packed(src_color, (*src_size, 3))
+        and (src_alpha is None or packed(src_alpha, src_size))
+    )
 
 
 def _is_one(factor: float | np.ndarray) -> bool:
