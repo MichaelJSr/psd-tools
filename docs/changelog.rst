@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A knockout pass-through group knocks out what lies under it instead
+  of uniting with it (#707), and Transparency Shapes Layer off (tag tsly)
+  makes the layer's masks the knockout shape: a sprite row drawn over
+  another through a moved mask hides it, as Photoshop 2023 draws stat bars
+  built that way (no doubled shadows). Card-level renders are unchanged: no
+  card holds such a layer outside a smart object's own document
 - [fix] 8-bit documents: adjustment layers give whole levels, as Photoshop
   2023's 8-bit composite: each adjustment's result and the canvas where it
   applies are rounded to the nearest level, the channel mixer's exact halves

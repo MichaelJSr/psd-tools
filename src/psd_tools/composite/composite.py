@@ -2206,6 +2206,14 @@ def _read_knockout(layer: Layer) -> Knockout:
         return Knockout.NONE
 
 
+def _read_shapes_layer(layer: Layer) -> bool:
+    """Blending Options > Transparency Shapes Layer: on unless tsly says 0."""
+    blocks = layer.tagged_blocks
+    if blocks is None:
+        return True
+    return bool(blocks.get_data(Tag.TRANSPARENCY_SHAPES_LAYER, 1))
+
+
 def _excluded_channels(layer: Layer, channels: int) -> list[int]:
     """The colour channels a layer's Blending Options > Channels leaves out.
 
@@ -2535,6 +2543,9 @@ class _Source:
     # The type layer's ``id()`` while its blend is still to be read off the
     # reference: see :py:class:`_TextBlend`.
     text_key: int | None = None
+    # Blending Options > Transparency Shapes Layer (tag tsly). Off, a
+    # knockout punches with the layer's masks, not its content.
+    shapes_layer: bool = True
 
 
 def _blends_in_text_space(layer: Layer, color_mode: ColorMode | None) -> bool:
@@ -4132,6 +4143,14 @@ class Compositor:
             # A group with no style to draw never has its region read.
             region = shape
 
+        # Transparency Shapes Layer off: the knockout punches with the masks
+        # over the whole layer, not with what the layer paints.
+        shapes_layer = _read_shapes_layer(layer) if knockout else True
+        knockout_shape = shape
+        if not shapes_layer:
+            knockout_shape = np.broadcast_to(
+                np.asarray(shape_mask, dtype=np.float32), shape.shape
+            ).copy()
         text_gamma, text_key = self._text_blend(layer)
         return _Source(
             color=color,
@@ -4143,10 +4162,11 @@ class Compositor:
             opacity=opacity,
             knockout=knockout,
             adjustment_isolated=adjustment_isolated,
-            knockout_shape=shape,
+            knockout_shape=knockout_shape,
             region=region,
             text_gamma=text_gamma,
             text_key=text_key,
+            shapes_layer=shapes_layer,
         )
 
     def _text_blend(self, layer: Layer) -> tuple[float | None, int | None]:
@@ -4225,6 +4245,9 @@ class Compositor:
         # source's own canvases: times 1 is the same bits.
         fill = source.fill_opacity
         if _composites_as_passthrough(source, blend_mode):
+            if source.knockout and not self._alpha_only:
+                self._apply_passthrough_knockout(source)
+                return
             self._apply_passthrough_source(
                 source.color,
                 _times(source.shape, fill),
@@ -4377,9 +4400,8 @@ class Compositor:
         # must happen in premultiplied space so a transparent (or partially
         # transparent) backdrop does not bleed its color into the result.
         #
-        # TODO(#707): knockout is ignored here while _get_group() honors it, so
-        # a knockout pass-through group interpolates against a different backdrop
-        # than it was composited over, and the result varies with nesting depth.
+        # A knockout pass-through group goes on by _apply_passthrough_knockout()
+        # instead (#707); only the alpha-only pass still comes here with one.
         color_b = self._color
         alpha_b = self._alpha
 
@@ -4414,6 +4436,50 @@ class Compositor:
         # Where the result is fully transparent the color is arbitrary, so fall
         # back to the group's own color rather than to white.
         self._color = utils.clip(utils.divide(color_t, self._alpha, fill=color))
+
+    def _apply_passthrough_knockout(self, source: _Source) -> None:
+        """Re-apply a knockout pass-through group: it replaces the canvas.
+
+        ``source`` is the group composited over its knockout backdrop
+        (:py:meth:`_get_group`), times ``m``, its masks, opacity and fill.
+        Within the knockout shape ``k`` it takes the canvas's place instead of
+        uniting with it (#707), as :py:meth:`_apply_source` knocks out:
+
+            A = (1 - k) A_now + m A_group + (k - m) A_kb
+
+        and the same for premultiplied colour. ``k`` is ``m`` with
+        Transparency Shapes Layer off (the masks shape the group, so a sprite
+        drawn over a different one hides it), else the content's shape under
+        them, where ``k - m`` takes back the backdrop the group was seeded
+        with outside its content.
+        """
+        fill = source.fill_opacity
+        alpha = _times(source.alpha, fill)
+        weight = np.broadcast_to(
+            np.asarray(source.mask, dtype=np.float32) * fill, alpha.shape
+        )
+        if source.shapes_layer:
+            punch = np.broadcast_to(source.shape * (source.opacity * fill), alpha.shape)
+        else:
+            punch = weight
+        color = self._fit_source(source.color)
+        color_kb, alpha_kb = self._knockout_backdrop(source.knockout)
+        color_kb = self._widen(color_kb, self._channels)
+        rest = punch - weight
+        alpha_new = utils.clip((1.0 - punch) * self._alpha + alpha + rest * alpha_kb)
+        premultiplied = (
+            (1.0 - punch) * self._alpha * self._color
+            + alpha * color
+            + rest * alpha_kb * color_kb
+        )
+        self._shape_g = cast(np.ndarray, utils.union(self._shape_g, punch))
+        self._alpha_g = utils.clip(
+            utils.divide(alpha_new - self._alpha_0, 1.0 - self._alpha_0, fill=alpha_new)
+        ).astype(np.float32)
+        self._alpha = alpha_new.astype(np.float32)
+        self._color = utils.clip(
+            utils.divide(premultiplied, self._alpha, fill=color)
+        ).astype(np.float32)
 
     def _fit_source(self, color: np.ndarray) -> np.ndarray:
         """Bring a source to this compositor's width, checking the invariant.
