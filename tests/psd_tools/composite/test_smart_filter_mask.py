@@ -16,13 +16,17 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import GroupMixin, Layer, SmartObjectLayer
 from psd_tools.api.smart_object import SmartObject
 from psd_tools.api.utils import get_color_channels
+from psd_tools.composite import utils as composite_utils
 from psd_tools.composite.composite import (
     _UNFILTER_PLANES,
     Compositor,
     _blend_unfiltered,
     _unfilter_under_mask,
+    _white_on,
     composite,
+    paste,
 )
+from psd_tools.composite.rcache import RenderCache
 from psd_tools.compression import PSDDecompressionWarning
 from psd_tools.constants import Compression, Tag
 from psd_tools.psd.descriptor import Bool, Descriptor
@@ -496,3 +500,89 @@ def test_an_all_white_mask_does_not_decode_the_source(
     out = _rgba(filtered.layer)[..., :3]
     assert calls == []
     assert np.abs(out - filtered.stored)[filtered.opaque].max() == 0
+
+
+def _masked(kind: str) -> Filtered:
+    """:py:func:`_filtered`, its mask white on the left half, all white, or on the top rows.
+
+    "budget" is "half" with a budget the whole box's blend is over.
+    """
+    filtered = _filtered()
+    if kind == "budget":
+        filtered.psd.max_alloc_bytes = 40 * filtered.layer.width * filtered.layer.height
+    elif kind != "half":
+        h, w = filtered.stored.shape[:2]
+        mask = np.full((h, w), 255, np.uint8)
+        if kind == "top":
+            mask[h // 2 :] = 0
+        item = filtered.layer.smart_object.filter_effect()
+        assert item is not None
+        item.extra = feid_item(filtered.layer.bbox, mask[..., None], mask, mask).extra
+    return filtered
+
+
+@pytest.mark.parametrize("compiled", [True, False])
+@pytest.mark.parametrize("kind", ["half", "white", "top", "budget"])
+def test_a_box_render_reads_its_rows_and_is_the_whole_renders_crop(
+    kind: str, compiled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blend runs on the rows alone; "top" is all white there, not on the whole box."""
+    cblend = composite_module._cblend
+    if compiled and (cblend is None or not hasattr(cblend, "unfilter")):
+        pytest.skip("compiled loops not built")
+    if not compiled:
+        monkeypatch.setattr(composite_module, "_cblend", None)
+        monkeypatch.setattr(composite_utils, "_cblend", None)
+    filtered = _masked(kind)
+    x0, y0, _, y1 = filtered.layer.bbox
+    box = (x0 + 3, y0 + 2, x0 + 15, (y0 + y1) // 2 - 1)
+    whole = composite(filtered.psd)
+    reads: list[Layer] = []
+    blends: list[object] = []
+    read, blend = Compositor._read_object, _blend_unfiltered
+
+    def counted_read(self: Compositor, layer: Layer) -> tuple:
+        reads.append(layer)
+        return read(self, layer)
+
+    def counted_blend(layer: SmartObjectLayer, *args: object) -> tuple:
+        blends.append(args[-1])
+        return blend(layer, *args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Compositor, "_read_object", counted_read)
+    monkeypatch.setattr(composite_module, "_blend_unfiltered", counted_blend)
+    part = composite(filtered.psd, viewport=box)
+    crop = (slice(box[1], box[3]), slice(box[0], box[2]))
+    for a, b in zip(part, whole, strict=True):
+        assert a.tobytes() == b[crop].tobytes()
+    assert filtered.layer not in reads
+    assert blends == ([] if kind in ("white", "budget") else [box])
+
+
+def test_box_renders_of_a_blend_verify_against_the_render_cache() -> None:
+    filtered = _masked("top")
+    x0, y0, x1, _ = filtered.layer.bbox
+    box = (x0, y0 + 1, x1, y0 + 6)
+    with RenderCache(verify=True):
+        first = composite(filtered.psd, viewport=box)
+        again = composite(filtered.psd, viewport=box)
+        whole = composite(filtered.psd)
+    crop = (slice(box[1], box[3]), slice(box[0], box[2]))
+    for a, b, c in zip(first, again, whole, strict=True):
+        assert a.tobytes() == b.tobytes() == c[crop].tobytes()
+
+
+def test_white_on_the_plane_is_the_pasted_masks_test() -> None:
+    """Rects inside, across, around and apart from the box, either fill."""
+    rng = np.random.default_rng(2)
+    box = (10, 20, 30, 35)
+    for _ in range(400):
+        x0, y0 = rng.integers(0, 40, 2)
+        w, h = rng.integers(1, 30, 2)
+        mask_box = (int(x0), int(y0), int(x0 + w), int(y0 + h))
+        plane = np.full((h, w), 255, np.uint8)
+        if rng.random() < 0.5:
+            plane[rng.integers(h), rng.integers(w)] = rng.integers(255)
+        fill = float(rng.choice([0.0, 255.0]))
+        pasted = paste(box, mask_box, plane[..., None], background=fill)
+        assert _white_on(box, mask_box, plane, fill) == (pasted.min() == 255)

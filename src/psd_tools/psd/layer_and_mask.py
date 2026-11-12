@@ -608,7 +608,7 @@ class LayerRecord(BaseElement):
     ) -> Self:
         """Read the structure from a file-like object."""
         start_pos = fp.tell()
-        head = _record_head(fp) if version == 1 else None
+        head = _record_head(fp, version) if version in (1, 2) else None
         if head is None:
             top, left, bottom, right, num_channels = read_fmt("4iH", fp)
             channel_info = [ChannelInfo.read(fp, version) for i in range(num_channels)]
@@ -619,7 +619,7 @@ class LayerRecord(BaseElement):
             top, left, bottom, right, channel_info = head[:5]
             signature, blend_mode, opacity, clipping, flags, data = head[5:]
         logger.debug("  read layer record, len=%d", fp.tell() - start_pos)
-        extra = _record_extra(data, encoding) if version == 1 else None
+        extra = _record_extra(data, encoding) if version in (1, 2) else None
         with io.BytesIO(data) as f:
             if extra is None:
                 has_real_mask = any(
@@ -802,11 +802,13 @@ class LayerRecord(BaseElement):
         return sizes
 
 
-# Version 1 records in a few struct reads. Elements are built without their
-# __init__ (no budget charge, no attrs hooks): charge() takes what the readers
-# would. Anything odd returns None, and the readers run and raise as before.
+# Records in a few struct reads (a PSB's channel lengths: 8 bytes). Elements
+# are built without their __init__ (no budget charge, no attrs hooks): charge()
+# takes what the readers would. Anything odd returns None, and the readers run
+# and raise as before.
 _RECORD_HEAD = struct.Struct(">4iH")
 _RECORD_CHANNEL = struct.Struct(">hI")
+_RECORD_CHANNEL2 = struct.Struct(">hQ")
 _RECORD_TAIL = struct.Struct(">4s4sBBBxI")
 _EXTRA_HEAD = struct.Struct(">II")
 _RANGE = struct.Struct(">4H")
@@ -817,28 +819,31 @@ _FLAG_NAMES = tuple(item.name for item in fields(LayerFlags))
 _FLAG_VALUES = tuple(_flag_values(flags) for flags in range(256))
 
 
-def _record_head(fp: IO[bytes]) -> tuple[Any, ...] | None:
+def _record_head(fp: IO[bytes], version: int = 1) -> tuple[Any, ...] | None:
     """Read a record up to its extra block's bytes; None leaves ``fp``."""
     start = fp.tell()
-    head = _record_fields(fp, _remaining_bytes(fp))
+    head = _record_fields(fp, _remaining_bytes(fp), version)
     if head is None:
         fp.seek(start)
     return head
 
 
-def _record_fields(fp: IO[bytes], remaining: int) -> tuple[Any, ...] | None:
+def _record_fields(
+    fp: IO[bytes], remaining: int, version: int = 1
+) -> tuple[Any, ...] | None:
     head = fp.read(18) if remaining >= 18 else b""
     if len(head) != 18:
         return None
     top, left, bottom, right, count = _RECORD_HEAD.unpack(head)
-    size = 6 * count + 16
+    step, unpack = (6, _RECORD_CHANNEL) if version == 1 else (10, _RECORD_CHANNEL2)
+    size = step * count + 16
     rest = fp.read(size) if 18 + size <= remaining else b""
     if len(rest) != size:
         return None
     new, set_ = object.__new__, object.__setattr__
     channel_info = []
-    for offset in range(0, 6 * count, 6):
-        number, length = _RECORD_CHANNEL.unpack_from(rest, offset)
+    for offset in range(0, step * count, step):
+        number, length = unpack.unpack_from(rest, offset)
         if number not in _CHANNEL_IDS:
             return None  # ChannelID() raises
         channel = new(ChannelInfo)
@@ -846,7 +851,7 @@ def _record_fields(fp: IO[bytes], remaining: int) -> tuple[Any, ...] | None:
         set_(channel, "length", length)
         channel_info.append(channel)
     signature, blend_mode, opacity, clipping, flag_byte, extra = (
-        _RECORD_TAIL.unpack_from(rest, 6 * count)
+        _RECORD_TAIL.unpack_from(rest, step * count)
     )
     total = 18 + size + extra
     # Values: 5 for 4iH, 2 a channel, 4 for 4s4sBB, 1 for B, 1 for xI;

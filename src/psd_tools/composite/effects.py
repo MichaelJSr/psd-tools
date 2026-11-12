@@ -1370,7 +1370,7 @@ def _cast_canvas(
     return grown
 
 
-def cast_reach(distance: float, angle: float, size: float, spread: float) -> int | None:
+def cast_reach(distance: float, angle: float, size: float, spread: float) -> int:
     """How far a cast matte reads from each pixel it covers, in pixels.
 
     The blur's radius rounded out and the offset, with the fringe the
@@ -1378,24 +1378,23 @@ def cast_reach(distance: float, angle: float, size: float, spread: float) -> int
     than that moves no pixel of the matte, so the matte on a box is the
     matte on any larger box, cut.
 
-    None when the matte is spread; such a matte is drawn on its whole box.
-    A spread of a size-0 matte grows nothing.
+    A spread reads a pixel further: :py:func:`_spread` grows each pixel from
+    the covered ones within its whole pixels, and the blur takes the rest of
+    the size. A spread of a size-0 matte grows nothing.
     """
-    if size > 0.0 and spread > 0.0:
-        return None
     dx, dy = _shadow_offset(distance, angle)
-    return math.ceil(max(size, 0.0)) + math.ceil(max(abs(dx), abs(dy))) + 3
+    grown = 1 if size > 0.0 and spread > 0.0 else 0
+    return math.ceil(max(size, 0.0)) + math.ceil(max(abs(dx), abs(dy))) + 3 + grown
 
 
-def glow_reach(size: float, spread: float, precise: bool) -> int | None:
+def glow_reach(size: float, spread: float, precise: bool) -> int:
     """How far a glow's falloff reads from each pixel, as :py:func:`cast_reach`.
 
     A precise glow reads the silhouette no further than its size and a
     pixel or two, so it is bounded whatever its spread.
     """
-    if not precise and size > 0.0 and spread > 0.0:
-        return None
-    return math.ceil(max(size, 0.0)) + 3
+    grown = 1 if not precise and size > 0.0 and spread > 0.0 else 0
+    return math.ceil(max(size, 0.0)) + 3 + grown
 
 
 def contour_table(desc: Descriptor | None) -> np.ndarray | None:

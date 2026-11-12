@@ -159,7 +159,7 @@ class Shape:
     opacity: float
     nonzero: bool
     bbox: tuple[float, float, float, float]  #: of the geometry, user space
-    #: A rectangle's stroke ring, which embolden does not grow.
+    #: A rectangle's stroke ring: Strong colours take its point samples.
     stroke: bool = False
 
 
@@ -1029,41 +1029,6 @@ def _device_contours(shape: Shape, m: Affine) -> list[np.ndarray]:
     return out
 
 
-def _signed_area(c: np.ndarray) -> float:
-    x, y = c[:, 0], c[:, 1]
-    return 0.5 * float((x * np.roll(y, -1) - np.roll(x, -1) * y).sum())
-
-
-def _grown(contours: list[np.ndarray], d: float) -> list[np.ndarray]:
-    """``contours`` moved ``d`` px away from their fill, as FreeType emboldens.
-
-    Each vertex moves along the bisector of its edges' normals by ``d`` over
-    the cosine of half the turn, at most ``4 d``. The largest contour's
-    winding says which side is out, so a hole wound against it shrinks.
-    """
-    if not contours:
-        return contours
-    sign = 1.0 if max((_signed_area(c) for c in contours), key=abs) > 0 else -1.0
-    grown = []
-    for c in contours:
-        if len(c) < 3:
-            grown.append(c)
-            continue
-        edge = np.roll(c, -1, axis=0) - c
-        c = c[np.hypot(edge[:, 0], edge[:, 1]) > 1e-9]
-        edge = np.roll(c, -1, axis=0) - c
-        length = np.hypot(edge[:, 0], edge[:, 1])
-        length[length == 0] = 1
-        normal = np.stack([edge[:, 1], -edge[:, 0]], -1) * (sign / length)[:, None]
-        bisector = np.roll(normal, 1, axis=0) + normal
-        size = np.hypot(bisector[:, 0], bisector[:, 1])
-        size[size < 1e-9] = 1
-        bisector /= size[:, None]
-        cos = (bisector * normal).sum(-1).clip(0.25, 1)
-        grown.append(c + bisector * (d / cos)[:, None])
-    return grown
-
-
 def _gradient_t(g: Gradient, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """Gradient parameter at gradient-space points."""
     if g.radius is None:
@@ -1101,7 +1066,11 @@ def _spread(t: np.ndarray, how: str) -> np.ndarray:
 def _paint_rgba(
     paint: Paint, shape: Shape, m: Affine, x0: int, y0: int, w: int, h: int
 ) -> np.ndarray:
-    """Straight RGBA per pixel centre of a ``w`` x ``h`` window at ``(x0, y0)``."""
+    """Straight RGBA per pixel of a ``w`` x ``h`` window at ``(x0, y0)``.
+
+    Gradients are sampled at each pixel's top-left corner from a 256-entry
+    table, as Photoshop 2023 draws them.
+    """
     if paint is None:
         return np.zeros((h, w, 4), np.float32)
     if not isinstance(paint, Gradient):
@@ -1117,10 +1086,11 @@ def _paint_rgba(
     if inv is None:
         return np.zeros((h, w, 4), np.float32)
     ys, xs = np.mgrid[0:h, 0:w]
-    px, py = xs + x0 + 0.5, ys + y0 + 0.5
+    px, py = xs + x0, ys + y0
     a, b, c, d, e, f = inv
     gx, gy = a * px + c * py + e, b * px + d * py + f
     t = _spread(_gradient_t(g, gx, gy), g.spread)
+    t = np.rint(t * 255) / 255
     offs = np.array(g.offsets)
     cols = np.array(g.colors, np.float64)
     # Interpolate premultiplied so a stop's colour does not bleed through its alpha.
@@ -1427,17 +1397,10 @@ def _encode(out: np.ndarray, decode: bool) -> None:
     out[..., :3][ink] = color * alpha[ink]
 
 
-def _inside(
-    shape: Shape,
-    m: Affine,
-    x0: int,
-    y0: int,
-    w: int,
-    h: int,
-    n: int,
-    grow: float = 0.0,
+def _sample_coverage(
+    shape: Shape, m: Affine, x0: int, y0: int, w: int, h: int, n: int
 ) -> np.ndarray:
-    """Which of ``n`` x ``n`` samples a pixel ``shape`` covers, grown ``grow`` px a side."""
+    """``shape``'s area coverage of each of ``n`` x ``n`` cells a pixel."""
     hi: Affine = (
         m[0] * n,
         m[1] * n,
@@ -1447,10 +1410,15 @@ def _inside(
         (m[5] - y0) * n,
     )
     contours = _device_contours(shape, hi)
-    if grow:
-        contours = _grown(contours, grow * n)
+    return fill_coverage(contours, w * n, h * n, nonzero=shape.nonzero)
+
+
+def _inside(
+    shape: Shape, m: Affine, x0: int, y0: int, w: int, h: int, n: int
+) -> np.ndarray:
+    """Which of ``n`` x ``n`` point samples a pixel ``shape`` covers."""
     # A cell's area coverage passes one half where its centre is inside.
-    return fill_coverage(contours, w * n, h * n, nonzero=shape.nonzero) >= 0.5
+    return _sample_coverage(shape, m, x0, y0, w, h, n) >= 0.5
 
 
 def _sampled_alpha(
@@ -1546,12 +1514,13 @@ def rasterize(
     interpolated in sRGB and composited in linear light, as Photoshop does.
     With ``alpha_grid`` the shapes' alpha comes from that many point samples
     a side per pixel, as Photoshop's Crisp, Strong and Smooth text has it,
-    while their colours keep the exact coverage. With ``embolden`` too (px
-    in all, Strong text's) each filled shape grows by half of it a side and
-    the colours take the same point samples and composite in sRGB, as
-    Photoshop 2023 draws them. ``nudge`` is what the exact place adds to
-    ``m``'s translation where the caller rounded it: images Photoshop draws
-    by nearest neighbour or copies take it.
+    while their colours keep the exact coverage. With ``embolden`` too
+    (Strong text's; only whether it is set counts) a filled shape's colour
+    takes touch samples of the same grid, a sample counting where the shape
+    covers any part of its cell, a stroke's the point samples, and they
+    composite in sRGB, as Photoshop 2023 draws them. ``nudge`` is what the
+    exact place adds to ``m``'s translation where the caller rounded it:
+    images Photoshop draws by nearest neighbour or copies take it.
     """
     box = device_bbox(drawing, m, nudge)
     if box is None or box[2] <= box[0] or box[3] <= box[1]:
@@ -1581,11 +1550,11 @@ def rasterize(
             rgba = _paint_rgba(item.paint, item, m, x0, y0, w, h)
             color = to_linear(rgba[..., :3])
         else:
-            inside = _inside(item, m, x0, y0, w, h, n)
-            ink = inside
-            if not item.stroke:
-                ink = _inside(item, m, x0, y0, w, h, n, embolden / 2)
-            if not (inside.any() or ink.any()):
+            cells = _sample_coverage(item, m, x0, y0, w, h, n)
+            inside = cells >= 0.5
+            # A fill's colour counts where it touches a cell at all.
+            ink = inside if item.stroke else cells > 1e-6
+            if not ink.any():
                 continue
             rgba = _paint_rgba(item.paint, item, m, x0, y0, w, h)
             _clear(keep, inside, rgba[..., 3] * item.opacity, n)

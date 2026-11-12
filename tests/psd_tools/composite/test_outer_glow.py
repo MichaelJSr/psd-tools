@@ -51,7 +51,15 @@ from psd_tools.terminology import Enum, Key, Klass, Type
 
 from ..utils import full_name
 from .test_composite import _feathered_stroke_layer, _mse
-from .test_drop_shadow import _alone, _around, _contour, _disc, _masks_card
+from .test_drop_shadow import (
+    _HALF_LEVEL,
+    _alone,
+    _around,
+    _contour,
+    _disc,
+    _level,
+    _masks_card,
+)
 
 scipy_ndimage = pytest.importorskip("scipy.ndimage")
 
@@ -734,7 +742,7 @@ def test_an_adjustment_layers_glow_is_cut_by_its_mask_alone(
     document. Given a hard glow and a mask ramping up over 20 px, the glow
     alone over nothing has exactly what the ramp leaves of each pixel, and
     nothing under the solid mask, rather than the full glow a layer that
-    painted over it would be given to cover.
+    painted over it would be given to cover. Held at 8-bit levels.
     """
     psd = PSDImage.open(full_name("adjustments/exposure_rgb.psd"))
     layer = next(each for each in psd.descendants() if each.name == "Exposure 1")
@@ -760,7 +768,7 @@ def test_an_adjustment_layers_glow_is_cut_by_its_mask_alone(
     ramp = np.clip((np.arange(100) - 50) / 20.0, 0.0, 1.0)
     assert np.all(alpha[:10] == 0.0)  # beyond the glow's size
     assert np.allclose(alpha[30:50], 1.0, atol=1e-6)
-    assert np.allclose(alpha[50:70], 1.0 - ramp[50:70], atol=1e-6), alpha[50:70]
+    assert np.allclose(alpha[50:70], 1.0 - ramp[50:70], atol=_HALF_LEVEL), alpha[50:70]
     assert np.all(alpha[70:] == 0.0)
 
 
@@ -906,7 +914,7 @@ def test_a_faint_stroke_shows_the_backdrop_through_itself_not_the_glow() -> None
     glow[Key.Enabled] = False
     bare = _over_grey(layer, viewport)
 
-    assert np.allclose(alpha[_ROW, _BAND, 0], 0.71, atol=1e-6)
+    assert np.allclose(alpha[_ROW, _BAND, 0], _level(71.0), atol=1e-6)
     assert np.allclose(alpha[_ROW, _PAST, 0], 1.0, atol=1e-6)
     assert np.allclose(glowing[_ROW, _BAND], bare[_ROW, _BAND], atol=1e-6)
 
@@ -930,7 +938,7 @@ def test_a_strokes_antialiased_rim_hides_the_glow_at_its_opacity(
     viewport = layer._psd.viewbox
     alpha = _alone(layer, viewport)[:, :, 0]
     glow[Key.Enabled] = False
-    o = opacity / 100.0
+    o = _level(opacity)
     band = _alone(layer, viewport)[:, :, 0] / o
     beside = np.ones(band.shape, dtype=bool)
     beside[20:40, 20:40] = False
@@ -940,7 +948,25 @@ def test_a_strokes_antialiased_rim_hides_the_glow_at_its_opacity(
     b = band[rim]
     p = o if mode == Enum.Normal else 0.0
     expected = o * b + (1.0 - o * b) * (1.0 - b) / (1.0 - p * b)
-    assert np.allclose(alpha[rim], expected, atol=1e-5), alpha[rim]
+    assert np.allclose(alpha[rim], expected, atol=_HALF_LEVEL), alpha[rim]
+
+
+def test_an_8_bit_glow_fades_as_a_drop_shadow_does() -> None:
+    """Its matte and its opacity are held at 8 bits, and their product rounded.
+
+    So at 61% (156/255) every level of the opaque glow fades to a level.
+    """
+    _, layer = _masks_card()
+    glow = _forge_glow(layer, Blur=20.0, Opacity=100.0)
+    left, _, right, bottom = layer.bbox
+    strip = (left, bottom, right, bottom + 24)
+    whole = _alone(layer, strip) * 255.0
+    glow[Key.Opacity] = Double(61.0)
+    faded = _alone(layer, strip) * 255.0
+    assert np.allclose(whole, np.rint(whole), atol=1e-3)
+    assert len(np.unique(np.rint(whole))) > 10, "no soft tail"
+    expected = np.floor(np.rint(whole) * 156 / 255 + 0.5)
+    assert np.allclose(faded, expected, atol=1e-3)
 
 
 def test_a_glow_reaches_a_viewport_its_layer_misses() -> None:

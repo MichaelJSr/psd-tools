@@ -684,14 +684,14 @@ def test_a_transparency_midpoint_shapes_the_alpha_ramp_alone() -> None:
 
 
 # What a black-to-white ramp is halfway along in each method: the classic
-# blend is the sRGB mean, perceptual is Oklab lightness 0.5 (linear light
-# 0.125) and linear is linear-light 0.5, both re-encoded as sRGB. Smooth and
-# an unknown method blend as classic.
+# blend is the sRGB mean, perceptual (and smooth) is Oklab lightness 0.5
+# (linear light 0.125) and linear is linear-light 0.5, both re-encoded as
+# sRGB. An unknown method blends as classic.
 HALFWAY_GREY = {
     None: 0.5,
     b"XXXX": 0.5,
     GradientMethod.CLASSIC.value: 0.5,
-    GradientMethod.SMOOTH.value: 0.5,
+    GradientMethod.SMOOTH.value: 1.055 * 0.125 ** (1 / 2.4) - 0.055,
     GradientMethod.PERCEPTUAL.value: 1.055 * 0.125 ** (1 / 2.4) - 0.055,
     GradientMethod.LINEAR.value: 1.055 * 0.5 ** (1 / 2.4) - 0.055,
 }

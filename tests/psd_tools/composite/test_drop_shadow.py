@@ -59,6 +59,11 @@ logger = logging.getLogger(__name__)
 _HALF_LEVEL = 0.5 / 255.0 + 1e-6
 
 
+def _level(opacity: float) -> float:
+    """An effect's opacity percent as an 8-bit document applies it: a level."""
+    return math.floor(opacity * 255.0 / 100.0 + 0.5) / 255.0
+
+
 def _disc(size: int, radius: float) -> np.ndarray:
     """A hard-edged disc centred on a ``size`` x ``size`` canvas."""
     centre = size // 2
@@ -915,14 +920,15 @@ def test_a_faint_stroke_beside_a_soft_edge_shows_the_backdrop_not_the_shadow() -
 
     Over the ramp the square and its outset stroke together claim every
     pixel whole, so nothing of the shadow may show there. At 50% the stroke
-    paints half of its share, and the backdrop shows through the other half.
+    paints its level of that share (128/255), and the backdrop shows through
+    the rest.
     """
     layer, _ = _soft_square(keep_stroke=True)
     stroke = cast(Stroke, next(iter(layer.effects.find("stroke"))))
     stroke.descriptor[Key.Opacity] = Double(50.0)
     assert stroke.opacity == 50.0
     ramp, row, x0 = _ramp_row(layer)
-    expected = ramp + 0.5 * (1.0 - ramp)
+    expected = ramp + _level(50.0) * (1.0 - ramp)
     assert np.allclose(row[x0 : x0 + 6], expected, atol=1e-5), row[x0 : x0 + 6]
 
 
@@ -956,7 +962,7 @@ def test_a_strokes_antialiased_rim_hides_the_shadow_at_its_opacity(
 
     alpha = _alone(layer, viewport)[:, :, 0]
     shadow[Key.Enabled] = False
-    o = opacity / 100.0
+    o = _level(opacity)
     band = _alone(layer, viewport)[:, :, 0] / o
     rim = beside & (band > 0.0) & (band < 1.0)
     assert rim.any()
@@ -1381,7 +1387,7 @@ def test_a_groups_stroke_and_its_knockout_follow_the_groups_alpha(
     assert 0.0 < stroke.opacity < 100.0, "a faint stroke, so the knockout shows"
 
     c = 128 / 255.0
-    painted = c + (1.0 - c) * stroke.opacity / 100.0
+    painted = c + (1.0 - c) * _level(stroke.opacity)
     assert float(_alone(group, psd.viewbox)[30, 30, 0]) == pytest.approx(
         painted, abs=1e-5
     )
@@ -1889,7 +1895,9 @@ def test_a_redrawn_shape_casts_what_it_is_resolved_to(
     )
     source = compositor._resolve_source(layer)
     silhouette = compositor._cast_shape(layer, viewport)
-    assert np.allclose(silhouette, source.alpha / source.opacity, atol=1e-6)
+    # Its shadow off, the 8-bit layer has no style: its alpha is held.
+    held = _held(silhouette * source.opacity, layer._psd.depth)
+    assert np.allclose(held, source.alpha, atol=1e-6)
     assert float(silhouette[height // 2, width // 2, 0]) == float(fill_enabled)
     assert silhouette.max() > 0.0, "the stroke casts"
 

@@ -108,6 +108,76 @@ Changelog
   whole level, the backdrop kept on a tie. Colours a fraction of a level
   apart no longer swap (single pixels up to 196 levels off on 7 cards'
   overlays, gradient maps and curves). **Rendering change** for those modes
+- [refactor] PSB documents opened from bytes keep their layers' tagged
+  blocks as bytes until read, as PSD documents do (8-byte lengths
+  included), and read their layer records in a few struct reads. An
+  embedded smart object's PSB opens 3 to 5 times faster; parse output and
+  saved bytes are unchanged. An unreadable or over-limit layer block in a
+  PSB is reported at its first read, not at open
+- [refactor] RenderCache: a payload of 64 KiB or more with the bytes of
+  one the cache hashed under another mark (the same card opened again, its
+  saved copy reopened) is compared with it and takes its digest instead of
+  being hashed again. Keys and renders are unchanged
+- [fix] Colour (SVG) glyphs: gradients are sampled at each pixel's
+  top-left corner from a 256-entry table (``rint(t x 255)``), and Strong
+  text's fills take their colour from touch samples (a sample counts where
+  the shape covers any part of its cell) instead of point samples of the
+  shape grown by half the embolden, as Photoshop 2023 draws them. Strokes
+  and the joint alpha keep point samples. **Rendering change** for colour
+  glyphs the fork draws
+- [refactor] Spread drop shadows and outer glows, and choked inner shadows
+  and inner glows, are drawn only on the part of their box within reach of
+  the viewport (their unspread reach and a pixel), as unspread ones are, and
+  a group carrying one can be drawn in parts. Viewport renders near such a
+  layer cost a fraction of what they did; renders are unchanged
+- [refactor] Box renders read only the rows and columns they cross of a
+  smart object with a filter mask: an all-white mask reads as a plain layer,
+  and any other mask blends the unfiltered source on that part alone, as the
+  whole box decides. Renders are unchanged
+- [fix] 8-bit documents: a layer's alpha times its opacity and mask is
+  rounded to whole levels before it blends, as Photoshop 2023 does (50% over
+  a soft edge blends at round(a x 128 / 255)). Groups, layers with effects,
+  fill opacity and other depths keep the float product. **Rendering change**
+- [fix] Colour balance with midtones alone draws Photoshop 2023's Levels
+  curve per channel: gamma ``2 ** (amount / 100)`` to 0.01, Levels' toe
+  above 1, the plain power below; Preserve Luminosity first takes the
+  midrange of the three amounts, truncated toward zero, off each. Shadows
+  or highlights keep the old model. **Rendering change**
+- [fix] 8-bit documents: outer glows, inner glows and inner shadows fade
+  as drop shadows do (matte and opacity held at 8 bits, their product
+  rounded), and colour, gradient and pattern overlays and stroke effects
+  apply their opacity as a whole level, halves up (61% is 156/255, as
+  Photoshop 2023 draws it). Other depths keep the float opacity.
+  **Rendering change**
+- [fix] Gradients with Photoshop's Smooth method (``Smoo``) blend their
+  colours in Oklab, as perceptual, instead of as classic, as Photoshop draws
+  the cards' Smooth gradient maps; fills, overlays and strokes follow, and
+  opacity stops still blend as classic. **Rendering change**
+- [fix] Vector strokes: the stroke's colour is drawn up to the path's own
+  box, a pixel wider, so a stroke past a stored box that stops short of the
+  path (a truncated origination box) is no longer white there. A shape with
+  stored pixels, a stroke wider than 0 and a shown clip layer is redrawn
+  from its fill and path without ``force`` too, so the stroke goes over the
+  clip layers as in Photoshop. **Rendering change** for those layers
+- [refactor] A smart object's filter mask blends the unfiltered source in
+  one compiled pass (``_blend.unfilter``) instead of numpy's steps: about
+  85% less CPU for the blend and half its float32 planes. Renders are
+  unchanged; without the compiled module numpy runs as before
+- [fix] A user mask's Properties feather is drawn: the whole mask is blurred
+  by a gaussian of the feather in pixels, as Photoshop 2023 draws it, before
+  its density. A real mask and a vector mask's feather are drawn as before.
+  **Rendering change** for layers with a feathered mask
+- [fix] Gradient maps in 8-bit documents read Photoshop's 4096-step table;
+  **Rendering change** on steep ramps
+- [fix] Text: AntA Strong, and Smooth from 100 px, count a point sample
+  where the outline touches any of its cell, as Photoshop 2023 (a straight
+  edge grows 1/8 px), instead of the fitted 17.5/64 embolden. Glyph origins
+  go on the sample render's own 26.6 grid, and a second render one unit
+  towards the exact origin (left and up on a tie, ``TOUCH_TIE``) joins the
+  first, so an edge on a sample cell's border counts on the left and top
+  only. Colour glyphs and ``coverage="area"`` keep the embolden. About half
+  the bad pixels against Photoshop 2023's relayouts; a redraw takes about
+  10% more CPU. **Rendering change** for text the fork draws
 - [fix] Smooth inner bevels of size 3 or more climb their band as Photoshop
   2023 draws them: the silhouette is blurred by a tent that reaches zero at
   the band's width (a shadow's two box passes), not a truncated gaussian, so

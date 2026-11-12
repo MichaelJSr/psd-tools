@@ -7,7 +7,6 @@ for every kind that can repeat.
 """
 
 import copy
-import math
 
 import numpy as np
 import pytest
@@ -21,6 +20,7 @@ from psd_tools.psd.descriptor import Descriptor, Double, Enumerated, List
 from psd_tools.terminology import Enum, Key, Klass
 
 from ..utils import full_name
+from .test_drop_shadow import _level
 
 pytest.importorskip("scipy")
 
@@ -138,7 +138,7 @@ def test_a_faded_first_listed_stroke_shows_the_backdrop_not_the_second(
     psd, layer = _rectangle()
     backdrop = _backdrop(psd)
     _strokes(layer, (1.0, _RED, opacity), (3.0, _BLUE, 100.0))
-    mixed = _over(opacity / 100.0, _RED, tuple(backdrop[0]))
+    mixed = _over(_level(opacity), _RED, tuple(backdrop[0]))
     np.testing.assert_allclose(_below(psd), [mixed, _BLUE, _BLUE], atol=1e-6)
 
 
@@ -161,7 +161,7 @@ def test_rings_that_meet_within_a_pixel_fill_it_between_them(opacity: float) -> 
     psd, layer = _rectangle()
     backdrop = _backdrop(psd)
     _strokes(layer, (1.5, _RED, opacity), (3.0, _BLUE, 100.0))
-    first = _over(opacity / 100.0, _RED, tuple(backdrop[1]))
+    first = _over(_level(opacity), _RED, tuple(backdrop[1]))
     half = _over(0.5, first, _BLUE)
     np.testing.assert_allclose(_below(psd)[1], half, atol=1e-6)
 
@@ -188,7 +188,7 @@ def test_bands_keep_their_stacking_order_across_blend_modes(
     _instances(layer, b"frameFXMulti", 3)[1][Key.Mode] = Enumerated(
         typeID=b"BlnM", enum=Enum.Multiply
     )
-    first = _over(opacity / 100.0, _RED, tuple(backdrop[1]))
+    first = _over(_level(opacity), _RED, tuple(backdrop[1]))
     multiplied = tuple(backdrop[1] * _GREY)
     shared = _over(0.5, first, multiplied)
     expected = _over(layer_opacity / 255.0, shared, tuple(backdrop[1]))
@@ -215,7 +215,7 @@ def test_a_faded_normal_inset_ring_replaces_the_layer_over_a_screen_one(
     )
     color = composite(psd)[0]
     paint = color[_INSIDE][12, 12]
-    first = _over(opacity / 100.0, _RED, backdrop)
+    first = _over(_level(opacity), _RED, backdrop)
     screened = tuple(1.0 - (1.0 - paint) * (1.0 - np.array(_GREY)))
     np.testing.assert_allclose(
         color[row, _COLUMN], _over(0.5, first, screened), atol=1e-6
@@ -257,14 +257,17 @@ def test_the_first_listed_overlay_is_on_top(
     np.testing.assert_allclose(center, first, atol=1e-6)
 
 
-@pytest.mark.parametrize("opacity", [25.0, 50.0, 75.0])
+@pytest.mark.parametrize("opacity", [25.0, 50.0, 61.0, 75.0])
 def test_a_faded_first_listed_overlay_is_composited_over_the_second(
     opacity: float,
 ) -> None:
-    """``t * first + (1 - t) * second`` over the whole layer."""
+    """``t * first + (1 - t) * second`` over the whole layer.
+
+    ``t`` is the opacity's 8-bit level: 61% is 156/255, as Photoshop draws it.
+    """
     psd, layer = _rectangle()
     _overlays(layer, (_RED, opacity), (_BLUE, 100.0), (_RED, 100.0))
-    mixed = _over(opacity / 100.0, _RED, _BLUE)
+    mixed = _over(_level(opacity), _RED, _BLUE)
     inside = composite(psd)[0][_INSIDE]
     np.testing.assert_allclose(inside, np.broadcast_to(mixed, inside.shape), atol=1e-6)
 
@@ -289,6 +292,5 @@ def test_a_faded_first_listed_drop_shadow_is_composited_over_the_second(
         desc[b"Dstn"] = Double(2.0)
         desc[b"blur"] = Double(0.0)
         desc[b"Ckmt"] = Double(0.0)
-    # An 8-bit document holds the shadow's opacity at a level (_faded_at_8_bits).
-    mixed = _over(math.floor(opacity * 255.0 / 100.0 + 0.5) / 255.0, _RED, _BLUE)
+    mixed = _over(_level(opacity), _RED, _BLUE)
     np.testing.assert_allclose(_below(psd), [mixed, mixed, (1.0, 1.0, 1.0)], atol=1e-6)

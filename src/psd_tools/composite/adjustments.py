@@ -467,15 +467,19 @@ def _master_gamma(records: LevelsData, colormode: ColorMode) -> float:
 
 
 def _levels_gamma(
-    values: np.ndarray, gamma: float, lut_size: int
+    values: np.ndarray,
+    gamma: float,
+    lut_size: int,
+    power: NDArray[np.float32] | None = None,
 ) -> NDArray[np.float32]:
     """``values`` raised to ``1 / gamma``, with Photoshop's toe above gamma 1.
 
     The toe is a cubic from black, at a slope of ``2 ** gamma``, to the point
     where it joins the power curve at the curve's own slope; that point falls
-    on the LUT's levels.
+    on the LUT's levels. ``power``: that power, if worked out already.
     """
-    power = np.power(values, np.float32(1.0 / gamma), dtype=np.float32)
+    if power is None:
+        power = np.power(values, np.float32(1.0 / gamma), dtype=np.float32)
     if gamma <= 1.0:
         return power
     steps = lut_size - 1
@@ -1168,8 +1172,13 @@ def apply_gradientmap(
     luminance = np.clip(_gradientmap_luminance(img, colormode), 0, 1)
     if layer.reversed:
         luminance = _1 - luminance
-    index = np.rint(luminance[..., 0] * (lut.shape[0] - 1)).astype(np.intp)
-    return lut[index]
+    size = lut.shape[0]
+    if size == _GRADIENTMAP_STEPS:
+        # Read at rint(luminance * 4096), as Photoshop's table is.
+        index = np.minimum(np.rint(luminance[..., 0] * np.float32(size)), size - 1)
+    else:
+        index = np.rint(luminance[..., 0] * np.float32(size - 1))
+    return lut[index.astype(np.intp)]
 
 
 def _gradientmap_luminance(
@@ -1192,6 +1201,15 @@ _STOP_GRAY_MAX = np.float32(10000.0)
 _STOP_LOCATION_MAX = 4096.0
 # The block's smoothness at 100%, as a gradient descriptor's ``Intr`` is.
 _SMOOTHNESS_MAX = 4096.0
+# Photoshop's table for an 8-bit document: 4096 steps, k / 4096.
+_GRADIENTMAP_STEPS = 4096
+
+
+@functools.lru_cache(maxsize=1)
+def _gradientmap_steps() -> NDArray[np.float32]:
+    return np.arange(_GRADIENTMAP_STEPS, dtype=np.float32) / np.float32(
+        _GRADIENTMAP_STEPS
+    )
 
 
 def _gradientmap_lut(
@@ -1225,7 +1243,7 @@ def _gradientmap_lut(
     size = _get_lut_size(layer)
     smoothness = min(max(float(block.interpolation) / _SMOOTHNESS_MAX, 0.0), 1.0)
     ramp = _gradient_ramp(
-        _lut_domain(size),
+        _gradientmap_steps() if size == 256 else _lut_domain(size),
         np.array(locations),
         np.array(midpoints),
         np.clip(np.array(colors, dtype=np.float32), _0, _1),
@@ -1265,10 +1283,10 @@ def _gradient_ramp(
 
     Stops are taken in location order. Each segment blends as a gradient
     fill's does (``paint._smooth_segments``), in the space the method names:
-    perceptual in Oklab, linear in linear light, classic and the rest on the
-    sRGB values. Two stops at one location make a hard edge: the segment into
-    it ends in the first stop's colour and the segment out of it starts in
-    the second's.
+    perceptual and smooth in Oklab, linear in linear light, classic and the
+    rest on the sRGB values. Two stops at one location make a hard edge: the
+    segment into it ends in the first stop's colour and the segment out of it
+    starts in the second's.
     """
     if len(locations) == 1:
         return np.repeat(colors[:1], len(t), axis=0)
@@ -1303,10 +1321,21 @@ def apply_colorbalance(
     shadows, midtones, highlights = layer.shadows, layer.midtones, layer.highlights
     if shadows is None or midtones is None or highlights is None:
         return None
+    if not any(shadows) and not any(highlights):
+        # Midtones alone: Photoshop 2023's Levels gamma per channel.
+        size = _get_lut_size(layer)
+        curves = {
+            channel + 1: _colorbalance_gamma_lut(gamma, size)
+            for channel, gamma in enumerate(
+                _colorbalance_gammas(midtones, bool(layer.luminosity))
+            )
+        }
+        return _apply_luts(curves, img, colormode)
 
-    # A midtone amount is a per-channel gamma. A shadow or highlight amount
-    # adds up to that many levels, weighted toward its own end of the range and
-    # zero at black and white; that weight is a shape choice, not a fit.
+    # With shadows or highlights, a stand-in. A midtone amount is a per-channel
+    # gamma. A shadow or highlight amount adds up to that many levels, weighted
+    # toward its own end of the range and zero at black and white; that weight
+    # is a shape choice, not a fit.
     # Preserve Luminosity keeps every channel a curve of its own: Photoshop
     # takes the midrange of the three midtone amounts off each, so that a shift
     # toward one primary darkens the other two. Shadows and highlights lose
@@ -1337,6 +1366,36 @@ _COLORBALANCE_PEAK = np.float32(27 / 4)
 # A brightening midtone gamma leaves black on a parabola instead of the power
 # curve's vertical tangent, and joins the curve where its slope falls to this.
 _COLORBALANCE_TOE_SLOPE = 1.4
+
+
+def _colorbalance_gammas(
+    midtones: tuple[int, int, int], luminosity: bool
+) -> list[float]:
+    """Photoshop 2023's Levels gamma per channel for midtones alone.
+
+    ``2 ** (amount / 100)`` to 0.01. Preserve Luminosity first takes the
+    midrange of the three amounts, truncated toward zero, off each.
+    """
+    amounts = [int(amount) for amount in midtones]
+    if luminosity:
+        centre = int((max(amounts) + min(amounts)) / 2)
+        amounts = [amount - centre for amount in amounts]
+    return [math.floor(100 * 2.0 ** (amount / 100) + 0.5) / 100 for amount in amounts]
+
+
+def _colorbalance_gamma_lut(gamma: float, lut_size: int) -> NDArray[np.float32]:
+    """Levels' curve at ``gamma``, its power in float64 and cast once.
+
+    So every CPU gets the same table (numpy's float32 power differs by CPU).
+    """
+    level = _lut_domain(lut_size)
+    exponent = 1.0 / gamma
+    lut = np.array(
+        [math.pow(value, exponent) for value in level.tolist()], np.float64
+    ).astype(np.float32)
+    if gamma > 1.0:
+        lut = _levels_gamma(level, gamma, lut_size, lut)
+    return np.clip(lut, _0, _1)
 
 
 def _colorbalance_shadows(level: np.ndarray) -> np.ndarray:

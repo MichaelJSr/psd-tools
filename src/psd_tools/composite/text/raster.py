@@ -37,6 +37,7 @@ from psd_tools.composite.text.constants import (
     SMOOTH_GRID,
     SMOOTH_SMALL_PX,
     STRONG_EMBOLDEN_26_6,
+    TOUCH_TIE,
 )
 from psd_tools.composite.text.fonts import Face, TextRenderError, outline_points
 from psd_tools.composite.text.layout import Layout, PlacedGlyph, Rule
@@ -54,6 +55,8 @@ _GLYPH_BYTES = 1 + 1
 #: A point-sampled glyph, per pixel of its large render: the uint8 hits,
 #: the inside mask and at most the row counts.
 _SAMPLED_BYTES = 1 + 1 + 1
+#: A touch-sampled glyph adds its second render's copy and the joined one.
+_TOUCH_BYTES = 1 + 1
 #: A rule: the float32 coverage, its scaling and the uint8 result.
 _RULE_BYTES = 4 + 4 + 1
 #: The canvas: uint32 coverage sum, the ink's int64 indices and float32
@@ -114,12 +117,18 @@ class _Mode:
     samples: int = 1  #: point samples a side per pixel; 1 is the exact area
     #: both ems under this many px: no embolden, origins on 1/SMOOTH_GRID px
     small_px: float = 0.0
+    #: point samples count where the outline touches their cell (TOUCH_TIE)
+    #: instead of the embolden, which only area keeps; colour glyphs' fills
+    #: touch too (svg.rasterize)
+    touch: bool = False
 
     def snaps(self, general: bool) -> bool:
         return self.origin == "integer" or (self.origin == "crisp" and not general)
 
 
-_STRONG = _Mode(_UNHINTED, STRONG_EMBOLDEN_26_6, "fractional", None, COVERAGE_SAMPLES)
+_STRONG = _Mode(
+    _UNHINTED, STRONG_EMBOLDEN_26_6, "fractional", None, COVERAGE_SAMPLES, touch=True
+)
 _MODES: dict[int, _Mode] = {
     0: _Mode(_UNHINTED, 0, "fractional", NONE_THRESHOLD),
     1: _Mode(_UNHINTED, 0, "crisp", None, COVERAGE_SAMPLES),
@@ -292,8 +301,14 @@ def _render_glyph(
     delta: tuple[int, int],
     flags: int,
     embolden: tuple[int, int],
+    side: tuple[int, int] | None = None,
 ) -> Glyph:
-    """``(bitmap_left, bitmap_top, coverage uint8)`` of one glyph."""
+    """``(bitmap_left, bitmap_top, coverage uint8)`` of one glyph.
+
+    With ``side`` an outline renders a second time, moved that many 26.6
+    units in x and y (y down) and without the embolden (faux bold: nearer
+    Photoshop than a moved bold copy); the larger coverage of the two wins.
+    """
     ft = face.ft
     points = face.instructed(gid) if flags == _UNHINTED else None
     # The size, transform and glyph slot are state of the shared face.
@@ -301,22 +316,69 @@ def _render_glyph(
         try:
             ft.set_char_size(size66[0], size66[1], 72, 72)
             ft.set_transform(freetype.FT_Matrix(*matrix), freetype.FT_Vector(*delta))
-            ft.load_glyph(gid, flags)
-            slot = ft.glyph
-            if points is not None and slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE:
-                _place_points(slot, points, size66, matrix, delta, face.metrics.upem)
-            if embolden != (0, 0) and slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE:
-                # FreeType grows the outline towards +x and +y by the whole
-                # strength; translating back by half of it centres the dilation.
-                outline = ctypes.byref(slot.outline._FT_Outline)
-                freetype.FT_Outline_EmboldenXY(outline, embolden[0], embolden[1])
-                freetype.FT_Outline_Translate(
-                    outline, -(embolden[0] // 2), -(embolden[1] // 2)
+            glyph, outline = _load(
+                face, gid, flags, points, size66, matrix, delta, embolden
+            )
+            if side is not None and outline:
+                moved, _ = _load(
+                    face, gid, flags, points, size66, matrix, delta, (0, 0), side
                 )
-            slot.render(freetype.FT_RENDER_MODE_NORMAL)
+                glyph = _join(glyph, moved)
         except freetype.FT_Exception as ex:
             raise TextRenderError(f"glyph {gid} of {face.key[0]}: {ex}") from ex
-        return slot.bitmap_left, slot.bitmap_top, _bitmap(slot)
+        return glyph
+
+
+def _load(
+    face: Face,
+    gid: int,
+    flags: int,
+    points: np.ndarray | None,
+    size66: tuple[int, int],
+    matrix: tuple[int, int, int, int],
+    delta: tuple[int, int],
+    embolden: tuple[int, int],
+    shift: tuple[int, int] = (0, 0),
+) -> tuple[Glyph, bool]:
+    """Load and render ``gid`` on the set face; and whether it is an outline.
+
+    An outline takes ``points``, the embolden and ``shift`` (26.6, y down).
+    """
+    face.ft.load_glyph(gid, flags)
+    slot = face.ft.glyph
+    outline = slot.format == freetype.FT_GLYPH_FORMAT_OUTLINE
+    if outline:
+        if points is not None:
+            _place_points(slot, points, size66, matrix, delta, face.metrics.upem)
+        # FreeType grows the outline towards +x and +y by the whole strength;
+        # translating back by half of it centres the dilation.
+        mx, my = shift[0] - embolden[0] // 2, -shift[1] - embolden[1] // 2
+        ref = ctypes.byref(slot.outline._FT_Outline)
+        if embolden != (0, 0):
+            freetype.FT_Outline_EmboldenXY(ref, embolden[0], embolden[1])
+        if (mx, my) != (0, 0):
+            freetype.FT_Outline_Translate(ref, mx, my)
+    slot.render(freetype.FT_RENDER_MODE_NORMAL)
+    return (slot.bitmap_left, slot.bitmap_top, _bitmap(slot)), outline
+
+
+def _join(a: Glyph, b: Glyph) -> Glyph:
+    """The larger coverage of two glyph bitmaps, over both."""
+    (l0, t0, c0), (l1, t1, c1) = a, b
+    if not c1.size:
+        return a
+    if not c0.size:
+        return b
+    if (l0, t0, c0.shape) == (l1, t1, c1.shape):
+        return l0, t0, np.maximum(c0, c1, out=c0)
+    left, top = min(l0, l1), max(t0, t1)
+    right = max(l0 + c0.shape[1], l1 + c1.shape[1])
+    bottom = min(t0 - c0.shape[0], t1 - c1.shape[0])
+    out = np.zeros((top - bottom, right - left), np.uint8)
+    for x, y, c in (a, b):
+        part = out[top - y : top - y + c.shape[0], x - left : x - left + c.shape[1]]
+        np.maximum(part, c, out=part)
+    return left, top, out
 
 
 def _place_points(
@@ -345,11 +407,12 @@ def _samples(mode: _Mode, options: Options) -> int:
     return mode.samples if options.coverage == "samples" else 1
 
 
-def _point_sampled(glyph: Glyph, n: int) -> Glyph:
+def _point_sampled(glyph: Glyph, n: int, touch: bool = False) -> Glyph:
     """``glyph`` rendered at ``n`` times the size, as ``n`` x ``n`` point samples.
 
     A pixel of the large render holds a sample where its centre is inside,
-    which is where its coverage reaches one half.
+    which is where its coverage reaches one half; under ``touch`` where it
+    has any coverage.
     """
     left, top, cov = glyph
     if n == 1 or not cov.size:
@@ -359,10 +422,15 @@ def _point_sampled(glyph: Glyph, n: int) -> Glyph:
     x1, y1 = -(-(left + w) // n), -(-(h - top) // n)
     hits = np.zeros(((y1 - y0) * n, (x1 - x0) * n), np.uint8)
     hits[-top - y0 * n : -top - y0 * n + h, left - x0 * n : left - x0 * n + w] = (
-        cov >= 128
+        cov >= (1 if touch else 128)
     )
     count = svg.sample_counts(hits, n).astype(np.uint64)
     return x0, -y0, ((count * 255 + n * n // 2) // (n * n)).astype(np.uint8)
+
+
+def _side(residual: float) -> int:
+    """Where the second touch render goes: +1 right (down), else -1."""
+    return 1 if residual > TOUCH_TIE else -1
 
 
 def _fixed(v: float) -> int:
@@ -410,8 +478,11 @@ def _glyph_items(
         size66 = (round(64 * px_w * n * k), round(64 * px_h * n * k))
         if not size66[0] or not size66[1]:
             continue
+        small = max(px_w, px_h) < mode.small_px
+        touch = mode.touch and n > 1 and not small
         w, h = math.ceil(px_w * n), math.ceil(px_h * n)
         per_pixel = _GLYPH_BYTES + (_SAMPLED_BYTES if n > 1 else 0)
+        per_pixel += _TOUCH_BYTES if touch else 0
         _guard("glyph", w, h, w * h * per_pixel, options, budget)
         m = base
         if g.faux_italic:
@@ -425,7 +496,6 @@ def _glyph_items(
         )
         x = xx * g.x + yx * g.y + tx
         y = xy * g.x + yy * g.y + ty
-        small = max(px_w, px_h) < mode.small_px
         if snap:
             steps = crisp_x_steps(size66[1] // (k * n)) if mode.origin == "crisp" else 1
             x, y = round(x * steps) / steps, float(round(y))
@@ -433,17 +503,22 @@ def _glyph_items(
             x = round(x * SMOOTH_GRID) / SMOOTH_GRID
             y = round(y * SMOOTH_GRID) / SMOOTH_GRID
         ix, iy = math.floor(x), math.floor(y)
-        dx, dy = round((x - ix) * 64), round((y - iy) * 64)
-        if dx == 64:
+        # Touch sampling puts the origin on the sample render's own 26.6 grid
+        # and moves the second render towards the exact origin.
+        res = 64 * n if touch else 64
+        fx, fy = (x - ix) * res, (y - iy) * res
+        dx, dy = round(fx), round(fy)
+        side = (_side(fx - dx), _side(fy - dy)) if touch else None
+        if dx == res:
             ix, dx = ix + 1, 0
-        if dy == 64:
+        if dy == res:
             iy, dy = iy + 1, 0
-        ex = ey = 0.0 if small else mode.embolden
+        ex = ey = 0.0 if small or touch else mode.embolden
         if g.faux_bold:
             ex += round(64 * px_w * FAUX_BOLD_EM)
             ey += round(64 * px_h * FAUX_BOLD_EM)
-        delta = (dx * n, -dy * n)
-        key = (g.face.key, g.gid, size66, matrix, delta, mode.flags, ex, ey, n)
+        delta = (dx, -dy) if touch else (dx * n, -dy * n)
+        key = (g.face.key, g.gid, size66, matrix, delta, mode.flags, ex, ey, n, side)
         left, top, cov = cache.get(
             key,
             lambda: _point_sampled(
@@ -455,8 +530,10 @@ def _glyph_items(
                     delta,
                     mode.flags,
                     (round(ex * n), round(ey * n)),
+                    side,
                 ),
                 n,
+                touch,
             ),
         )
         if cov.size:

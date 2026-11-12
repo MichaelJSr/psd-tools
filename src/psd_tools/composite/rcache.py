@@ -12,8 +12,9 @@ stroke bands it draws. Keys hash what a layer subtree *is* now
 (record bytes, channel bytes, children), never ``id()``, so an edit between
 passes changes the key and nothing needs invalidating. A payload that cannot
 change (channel bytes, a block as read, a linked file) is hashed once per
-cache; records are hashed on every pass. Stored arrays are read-only. With no
-cache active a pass pays one ContextVar read.
+cache, and a large one with the bytes of one hashed (another open of the
+file) is compared instead; records are hashed on every pass. Stored arrays
+are read-only. With no cache active a pass pays one ContextVar read.
 
 ``PSD_RCACHE_VERIFY=1`` renders every cached pass a second time without the
 cache and raises :py:class:`CacheMismatch` unless the two are equal.
@@ -95,9 +96,12 @@ class RenderCache:
         self._bytes = 0
         self._tokens: list[Token[RenderCache | None]] = []
         # Payload digests: mark -> (the objects hashed, kept so ids stay unique,
-        # digest, a weakref to their owner that drops the entry, size).
-        self._digests: dict[Hashable, tuple[Any, bytes, Any, int]] = {}
+        # digest, a weakref to their owner that drops the entry, size, its
+        # _same key or None).
+        self._digests: dict[Hashable, tuple[Any, bytes, Any, int, Any]] = {}
         self._pinned = 0
+        # Large pinned payloads by (len, head, tail): [(mark, payload, digest)].
+        self._same: dict[tuple[int, bytes, bytes], list[tuple[Any, Any, bytes]]] = {}
 
     def __enter__(self) -> RenderCache:
         self._tokens.append(_ACTIVE.set(self))
@@ -182,6 +186,7 @@ class RenderCache:
         self._boxes.clear()
         self._bytes = 0
         self._digests.clear()
+        self._same.clear()
         self._pinned = 0
 
     @property
@@ -209,6 +214,24 @@ def _record_bytes(record: Any, version: int) -> bytes:
 
 # Payload bytes the digests may keep alive; past it they start over.
 _PINNED_MAX = 512 << 20
+# From this size a payload is first compared with those of its length hashed.
+_SAME_MIN = 64 << 10
+_SAME_STEP = 1 << 20
+
+
+def _same_key(data: bytes | memoryview) -> tuple[int, bytes, bytes] | None:
+    if type(data) is memoryview and type(data.obj) is not bytes:
+        return None  # over a buffer that may change
+    return (len(data), bytes(data[:64]), bytes(data[-64:]))
+
+
+def _equal(a: bytes | memoryview, b: bytes | memoryview) -> bool:
+    # memcmp's speed; memoryview == unpacks each byte.
+    x, y = np.frombuffer(a, np.uint8), np.frombuffer(b, np.uint8)
+    return x.size == y.size and all(
+        np.array_equal(x[i : i + _SAME_STEP], y[i : i + _SAME_STEP])
+        for i in range(0, x.size, _SAME_STEP)
+    )
 
 
 def _digest(
@@ -219,21 +242,37 @@ def _digest(
     payload: Callable[[], bytes | memoryview],
     owner: Any,
 ) -> bytes:
-    """sha256 of ``payload()``, kept under ``mark`` with ``pin`` while ``owner`` lives."""
+    """sha256 of ``payload()``, kept under ``mark`` with ``pin`` while ``owner`` lives.
+
+    A large payload with the bytes of one hashed before (another open of the
+    file) takes its digest.
+    """
     if rc is None:
         return hashlib.sha256(payload()).digest()
     known = rc._digests.get(mark)
     if known is not None:
         return known[1]
-    digest = hashlib.sha256(payload()).digest()
+    data = payload()
+    same = _same_key(data) if size >= _SAME_MIN else None
+    digest = None
+    if same is not None:  # two at most: past them, sha256
+        candidates = rc._same.get(same, ())[:2]
+        digest = next((d for _, b, d in candidates if _equal(data, b)), None)
+    if digest is None:
+        digest = hashlib.sha256(data).digest()
     try:
         tie = weakref.ref(owner, functools.partial(_forget, weakref.ref(rc), mark))
     except TypeError:
         return digest
     if rc._pinned + size > _PINNED_MAX:
         rc._digests.clear()
+        rc._same.clear()
         rc._pinned = 0
-    rc._digests[mark] = (pin, digest, tie, size)
+    if data is not pin and type(data) is not memoryview:
+        same = None  # bytes made for the hash: kept by nothing else
+    rc._digests[mark] = (pin, digest, tie, size, same)
+    if same is not None:
+        rc._same.setdefault(same, []).append((mark, data, digest))
     rc._pinned += size
     return digest
 
@@ -243,6 +282,13 @@ def _forget(cache: weakref.ref[RenderCache], mark: Hashable, _: object) -> None:
     entry = None if rc is None else rc._digests.pop(mark, None)
     if rc is not None and entry is not None:
         rc._pinned -= entry[3]
+        same = entry[4]
+        if same is not None:
+            kept = [item for item in rc._same.get(same, ()) if item[0] != mark]
+            if kept:
+                rc._same[same] = kept
+            else:
+                rc._same.pop(same, None)
 
 
 def _bytes_digest(rc: RenderCache | None, data: Any, owner: Any) -> bytes:

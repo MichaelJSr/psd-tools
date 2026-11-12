@@ -516,6 +516,20 @@ def _joined8(layer: "LayerProtocol") -> np.ndarray | None:
     return cast(np.ndarray, _cnumpy_io.planes8([*planes, shape], height, width))
 
 
+def layer_read_size(layer: "LayerProtocol") -> tuple[int, int]:
+    """:func:`get_layer_data`'s ``color`` and ``shape`` reads, undecoded.
+
+    The colour's channels, and the bytes the two float32 arrays hold.
+    """
+    pairs = zip(layer._record.channel_info, layer._channels, strict=False)
+    ids = [info.id for info, data in pairs if data._data_length > 0]
+    colors = sum(1 for i in ids if i >= 0)
+    planes = colors + ids.count(ChannelID.TRANSPARENCY_MASK)
+    expected = EXPECTED_CHANNELS.get(layer._psd.color_mode)
+    channels = colors if expected is None else min(colors, expected)
+    return channels, layer.width * layer.height * planes * 4
+
+
 def get_layer_rows(
     layer: "LayerProtocol",
     start: int,

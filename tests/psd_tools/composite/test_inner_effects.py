@@ -480,6 +480,30 @@ def test_an_unblurred_inner_shadow_shades_the_rim_facing_the_light(
     assert np.allclose(shaded, expected, atol=1e-6)
 
 
+@pytest.mark.parametrize("klass", [Klass.InnerShadow, Klass.InnerGlow])
+def test_an_8_bit_inner_effect_fades_as_a_drop_shadow_does(klass: Klass) -> None:
+    """Its matte and its opacity are held at 8 bits, and their product rounded.
+
+    A soft black shadow, or a white glow, at 61% (156/255) over the square.
+    """
+    psd, layer = _square()
+    desc = _forge(layer, klass, Distance=4.0, Blur=6.0)
+    channel = 2 if klass == Klass.InnerShadow else 0
+    left, top, right, bottom = _SQUARE
+
+    def levels() -> np.ndarray:
+        value = _render(psd)[0][top:bottom, left:right, channel] * 255.0
+        return 255.0 - value if klass == Klass.InnerShadow else value
+
+    whole = levels()
+    desc[Key.Opacity] = Double(61.0)
+    faded = levels()
+    assert np.allclose(whole, np.rint(whole), atol=1e-3)
+    assert len(np.unique(np.rint(whole))) > 5, "no soft edge"
+    expected = np.floor(np.rint(whole) * 156 / 255 + 0.5)
+    assert np.allclose(faded, expected, atol=1e-3)
+
+
 def test_an_inner_shadow_follows_the_global_light() -> None:
     """Under global light the angle is the document's, read when it is drawn."""
     psd, layer = _square()

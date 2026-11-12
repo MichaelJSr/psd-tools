@@ -238,7 +238,11 @@ class TaggedBlocks(DictElement):
             with bounded_reader(fp, end_pos - fp.tell()) as body:
                 return cls.read(body, version=version, padding=padding, **kwargs)
         items: list[tuple[Any, TaggedBlock]] = []
-        if version == 1 and type(fp) is io.BytesIO and not _hold(fp, items, padding):
+        if (
+            version in (1, 2)
+            and type(fp) is io.BytesIO
+            and not _hold(fp, items, padding, version)
+        ):
             return cls._of(items)
         while is_readable(fp, 8):  # len(signature) + len(key) = 8
             block = TaggedBlock.read(fp, version, padding)
@@ -363,7 +367,10 @@ class TaggedBlock(BaseElement):
     key: bytes = b""
     _data: Any = field(default=b"", repr=True)
     _span: "tuple[Span, int] | None" = field(default=None, init=False)
-    _held: "tuple[bytes, int, Any] | None" = field(default=None, init=False, repr=False)
+    # Bytes as read: (bytes, padding, budget, version).
+    _held: "tuple[bytes, int, Any, int] | None" = field(
+        default=None, init=False, repr=False
+    )
 
     def _repr_pretty_(self, p: Any, cycle: bool) -> None:
         if self._held is not None:
@@ -372,9 +379,9 @@ class TaggedBlock(BaseElement):
 
     def _load(self) -> None:
         if self._held is not None:
-            raw, _, budget = self._held
+            raw, _, budget, version = self._held
             with resume_budget(budget):
-                self._data = self._parse(self.key, raw, 1)
+                self._data = self._parse(self.key, raw, version)
             self._held = None
         elif self._span is not None:
             span, version = self._span
@@ -460,7 +467,7 @@ class TaggedBlock(BaseElement):
         set_(self, "key", key)
         set_(self, "_data", b"")
         set_(self, "_span", None)
-        set_(self, "_held", (raw, padding, current_budget()))
+        set_(self, "_held", (raw, padding, current_budget(), 1))
         return self
 
     @classmethod
@@ -536,25 +543,28 @@ class TaggedBlock(BaseElement):
     ) -> int:
         """Write the structure to a file-like object and return the bytes written."""
         key = self.key if isinstance(self.key, bytes) else self.key.value
-        if version == 1:
+        if version in (1, 2):
             # Bytes as read (held, or an unread span): no seek back for the length.
             held = self._held
             raw: bytes | memoryview | None = None
-            if held is not None and held[1] == padding:
+            if held is not None and held[1] == padding and held[3] == version:
                 raw = held[0]
-            elif self._span is not None and self._span[1] == 1:
+            elif self._span is not None and self._span[1] == version:
                 raw = self._span[0].view()
             if raw is not None:
                 size = len(raw)
-                gap = -(size + 4) % padding  # as write_length_block pads
-                head = _HEAD.pack(self.signature, key, size)
+                if version == 1 or self.key not in self._BIG_KEYS:
+                    head, width = _HEAD.pack(self.signature, key, size), 12
+                else:  # an 8-byte length
+                    head, width = _HEAD_Q.pack(self.signature, key, size), 16
+                gap = -(size + width - 8) % padding  # as write_length_block pads
                 if (
-                    fp.write(head) != 12
+                    fp.write(head) != width
                     or fp.write(raw) != size
                     or (gap and fp.write(bytes(gap)) != gap)
                 ):
                     raise OSError("Failed to write tagged block %r" % key)
-                return 12 + size + gap
+                return width + size + gap
         written = write_fmt(fp, "4s4s", self.signature, key)
 
         def writer(f: IO[bytes]) -> int:
@@ -1185,6 +1195,7 @@ class UserMask(BaseElement):
 
 
 _HEAD = struct.Struct(">4s4sI")
+_HEAD_Q = struct.Struct(">4s4sQ")
 _SIGNATURES = frozenset(TaggedBlock._SIGNATURES)
 # Keys held as bytes until read: every handled key but the layer tree's own
 # and the lazy payloads.
@@ -1193,9 +1204,13 @@ _HELD = frozenset(
     for key in TYPES
     if key not in TaggedBlock._STRUCTURAL and key not in TaggedBlock._LAZY_KEYS
 )
+# Keys with an 8-byte length in a PSB.
+_BIG = frozenset(key.value for key in TaggedBlock._BIG_KEYS)
 
 
-def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) -> bool:
+def _hold(
+    fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int, version: int = 1
+) -> bool:
     """Read the blocks of ``fp``, keeping the ``_HELD`` keys' bytes unparsed.
 
     Any other block, or one cut short, goes through :py:meth:`TaggedBlock.read`;
@@ -1203,6 +1218,7 @@ def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) ->
     """
     data = fp.getbuffer()
     new, set_ = object.__new__, object.__setattr__
+    big = version == 2
     try:
         position, end = fp.tell(), len(data)
         budget = current_budget()
@@ -1212,11 +1228,17 @@ def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) ->
         while position + 12 <= end:
             signature, key, length = _HEAD.unpack_from(data, position)
             start = position + 12
+            if big and key in _BIG:  # an 8-byte length
+                if position + 16 <= end:
+                    signature, key, length = _HEAD_Q.unpack_from(data, position)
+                    start += 4
+                else:
+                    start = end + 1  # cut short: the reader raises
             stop = start + length
             gap = -length % padding
             if signature not in _SIGNATURES or key not in _HELD or stop + gap > end:
                 fp.seek(position)
-                block = TaggedBlock.read(fp, 1, padding)
+                block = TaggedBlock.read(fp, version, padding)
                 if block is None:
                     return False
                 items.append((block.key, block))
@@ -1226,7 +1248,7 @@ def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) ->
                 # What TaggedBlock.read and the element charge, at once when
                 # no limit is near; else call by call, to raise as they do.
                 objects = budget.objects + 4
-                total = budget.total_bytes + 12 + length + gap
+                total = budget.total_bytes + stop - position + gap
                 if (
                     budget.error is None
                     and (max_objects is None or objects <= max_objects)
@@ -1235,7 +1257,7 @@ def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) ->
                 ):
                     budget.objects, budget.total_bytes = objects, total
                 else:
-                    budget.consume(3, 12)
+                    budget.consume(3, start - position)
                     budget.consume(0, length)
                     if gap:
                         budget.consume(0, gap)
@@ -1246,7 +1268,7 @@ def _hold(fp: io.BytesIO, items: list[tuple[Any, TaggedBlock]], padding: int) ->
             set_(block, "key", tag)
             set_(block, "_data", b"")
             set_(block, "_span", None)
-            set_(block, "_held", (bytes(data[start:stop]), padding, budget))
+            set_(block, "_held", (bytes(data[start:stop]), padding, budget, version))
             items.append((tag, block))
             position = stop + gap
     finally:

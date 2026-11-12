@@ -20,6 +20,7 @@ from psd_tools.composite.adjustments import (
     _apply_lut,
     _brightness_curve,
     _brightnesscontrast_tables,
+    _colorbalance_gammas,
     _huesaturation,
     _legacy_brightnesscontrast_lut,
     _levels_gamma,
@@ -1257,7 +1258,7 @@ def test_gradient_map_keeps_a_hard_edge_between_co_located_stops() -> None:
             ]
         )
     )
-    below, at = 0.5 - 2 / 255, 0.5
+    below, at = 0.5 - 1 / 255, 0.5
     image = np.array([[[below] * 3, [at] * 3, [0.75] * 3]], dtype=np.float32)
     out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out[0, 0], red, atol=3 / 255)
@@ -1319,6 +1320,21 @@ def test_gradient_map_perceptual_blends_in_oklab() -> None:
     mid_gray = 1.055 * (1 / 8) ** (1 / 2.4) - 0.055
     out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))
     assert np.allclose(out, mid_gray, atol=1 / 255)
+
+
+def test_gradient_map_smooth_method_blends_as_perceptual() -> None:
+    """'Smoo' maps blend in Oklab, as Photoshop draws Rock_Bottom's."""
+    stops = [(0, 50, (0.0, 0.8, 1.0)), (4096, 50, _BLACK)]
+
+    def mapped(method: bytes) -> np.ndarray:
+        data = _gradient_map_data(stops, method=method, smoothness=4096)
+        return _applied(
+            apply_gradientmap(_RAMP, ColorMode.RGB, _gradient_map_layer(data))
+        )
+
+    smooth = mapped(b"Smoo")
+    assert np.array_equal(smooth, mapped(b"Perc"))
+    assert not np.allclose(smooth, mapped(b"Gcls"), atol=2 / 255)
 
 
 def test_gradient_map_smoothness_eases_the_blend_towards_a_smoothstep() -> None:
@@ -1411,6 +1427,34 @@ def test_gradient_map_converts_its_table_as_a_fill_would(
     )
     expected = [_from_rgb(colormode, tuple(float(v) for v in row)) for row in rgb]
     assert np.allclose(_rows_from_rgb(colormode, rgb), expected, atol=1e-6)
+
+
+@pytest.mark.parametrize("lut_size", [256, 65536])
+def test_gradient_map_reads_photoshops_4096_step_table_in_8_bits(
+    lut_size: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """8 bits read entry rint(luminance x 4096) of k / 4096, finer than a level.
+
+    Deeper documents keep a table of their own size.
+    """
+    monkeypatch.setattr(
+        importlib.import_module("psd_tools.composite.adjustments"),
+        "_get_lut_size",
+        lambda layer: lut_size,
+    )
+    layer = _gradient_map_layer(
+        _gradient_map_data([(0, 50, _BLACK), (4096, 50, _WHITE)])
+    )
+    gray = np.array([0.5, 0.5 + 0.3 / 255, 0.9, 1.0], dtype=np.float32)
+    image = np.repeat(gray[None, :, None], 3, axis=2)
+    out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))[0, :, 0]
+    # per element, as blend._lum: a matmul's last bit varies by CPU (AVX-512)
+    luminance = 0.3 * image[0, :, 0] + 0.59 * image[0, :, 1] + 0.11 * image[0, :, 2]
+    if lut_size == 256:
+        expected = np.minimum(np.rint(luminance * 4096), 4095) / 4096
+    else:
+        expected = np.rint(luminance * 65535) / 65535
+    assert np.allclose(out, expected, atol=1e-6)
 
 
 def test_gradient_map_with_a_noise_gradient_is_not_rendered() -> None:
@@ -1528,6 +1572,34 @@ def test_color_balance_preserving_luminosity_centres_every_range(name: str) -> N
         out, _applied(apply_colorbalance(_RAMP, ColorMode.RGB, centred)), atol=1e-6
     )
     assert out[0, 5, 0] > _RAMP[0, 5, 0] > out[0, 5, 1]
+
+
+# Photoshop 2023's three Levels gammas, read off its curves over all 16.7 M
+# colours. (0, -87, 26) takes off -30: half of -61, truncated toward zero.
+@pytest.mark.parametrize(
+    ("midtones", "luminosity", "gammas"),
+    [
+        ((0, -87, 26), True, [1.23, 0.67, 1.47]),
+        ((100, 0, 0), True, [1.41, 0.71, 0.71]),
+        ((-20, -39, 38), False, [0.87, 0.76, 1.3]),
+    ],
+)
+def test_color_balance_midtones_are_photoshops_levels_gammas(
+    midtones: tuple[int, int, int], luminosity: bool, gammas: list[float]
+) -> None:
+    assert _colorbalance_gammas(midtones, luminosity) == gammas
+
+
+@pytest.mark.parametrize("name", ["colorbalance_luminosity", "colorbalance_midtones"])
+def test_color_balance_misses_photoshop_only_in_a_brightening_toe(name: str) -> None:
+    """Every level exact but a few of the Levels toe, below level 32."""
+    psd = PSDImage.open(full_name(f"adjustments/{name}_rgb.psd"))
+    reference = np.rint(psd.numpy()[..., :3] * 255)
+    result = np.asarray(psd.composite(force=True, apply_icc=False), np.float64)
+    source = psd[0].numpy()
+    assert source is not None
+    off = result[..., :3] != reference
+    assert np.all(np.rint(source[..., :3] * 255)[off] < 32)
 
 
 def test_color_balance_keeps_black_white_and_channel_order() -> None:
