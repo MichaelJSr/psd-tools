@@ -4,6 +4,15 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Smooth inner bevels of size 3 or more climb their band as Photoshop
+  2023 draws them: the silhouette is blurred by a tent that reaches zero at
+  the band's width (a shadow's two box passes), not a truncated gaussian, so
+  the band's last pixel takes a pixel's worth of slope. A deep bevel's inner
+  rim was up to 32 levels off at size 13 and 56 at size 24 (depth 1000%);
+  now within 4 for sizes 3-24 and depths 10-1000% on Photoshop's renders,
+  and Zigg's stat bars draw within 3 levels at every comp. Sizes 1-2 and the
+  other styles keep the gaussian. **Rendering change** for smooth inner
+  bevels of size 3 or more
 - [fix] A knockout pass-through group knocks out what lies under it instead
   of uniting with it (#707), and Transparency Shapes Layer off (tag tsly)
   makes the layer's masks the knockout shape: a sprite row drawn over

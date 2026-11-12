@@ -2049,10 +2049,10 @@ def draw_inner_glow(
 
 
 # How wide a gaussian stands in for the blur of a satin, and for the blur
-# that rounds a smooth bevel, per pixel of the effect's size; how far a
-# bevel's soften blurs its shading per pixel of soften; and how steep a
-# bevel's faces are at a depth of 100%. Fitted against Photoshop's previews,
-# and asserted in the tests.
+# that rounds a smooth bevel other than a wide inner one, per pixel of the
+# effect's size; how far a bevel's soften blurs its shading per pixel of
+# soften; and how steep a bevel's faces are at a depth of 100%. Fitted
+# against Photoshop's previews, and asserted in the tests.
 _SATIN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SIGMA_PER_SIZE = 0.45
 _SOFTEN_SIGMA_PER_SIZE = 0.45
@@ -2336,15 +2336,21 @@ def _smooth_surface(alpha: np.ndarray, style: bytes, size: float) -> np.ndarray:
     """A smooth bevel's surface, from 0 to 1.
 
     The silhouette blurred across the band, or at size 0 the silhouette
-    itself. A pillow emboss rises away from the edge on both sides, which
-    sinks the edge into what lies under it.
+    itself. An inner bevel's band wider than the least is blurred by
+    :py:func:`_tent_blur` of its width, as a shadow is: two box passes, so
+    its slope falls to a pixel's worth at the band's inner end, as Photoshop
+    2023 draws it (sizes 3 to 24, depths 10% to 1000%). The least band and
+    the other styles keep a gaussian that reaches a pixel short of the band:
+    on their Photoshop renders the tent is no nearer. A pillow emboss rises
+    away from the edge on both sides, which sinks the edge into what lies
+    under it.
     """
     width = _smooth_band(style, size)
     if width <= 0.0:
         surface = alpha.astype(np.float32)
+    elif style == BevelStyle.INNER_BEVEL and width > _SMOOTH_MIN_WIDTH:
+        surface = _tent_blur(alpha.astype(np.float32), width, 0.0)
     else:
-        # The blur reaches a pixel short of the band, so that the band's
-        # width counts the edge pixel.
         surface = _blur(alpha, width * _BEVEL_SIGMA_PER_SIZE, width - 1.0)
     if style == BevelStyle.PILLOW_EMBOSS:
         surface = np.where(alpha >= 0.5, surface, 1.0 - surface)

@@ -761,9 +761,9 @@ def test_satin_and_bevel_render_to_photoshops_preview(
 
 
 # The fitted constants: the gaussian widths per pixel of size of the satin's
-# blur, of the blur that rounds a smooth bevel and of soften, and the slope
-# of a bevel's faces at 100% depth. The cases above hold them to Photoshop's
-# previews.
+# blur, of the blur that rounds a smooth bevel other than a wide inner one
+# (the emboss's) and of soften, and the slope of a bevel's faces at 100%
+# depth. The cases above hold them to Photoshop's previews.
 _FITTED = {
     "_SATIN_SIGMA_PER_SIZE": 0.45,
     "_BEVEL_SIGMA_PER_SIZE": 0.45,
@@ -790,7 +790,7 @@ def test_the_fitted_constants_are_pinned() -> None:
     ("name", "region", "kind"),
     [
         ("_SATIN_SIGMA_PER_SIZE", (383, 560, 563, 608), "satin"),
-        ("_BEVEL_SIGMA_PER_SIZE", (99, 33, 289, 80), "bevelemboss"),
+        ("_BEVEL_SIGMA_PER_SIZE", (305, 10, 623, 105), "bevelemboss"),
         ("_BEVEL_SLOPE_PER_DEPTH", (99, 33, 289, 80), "bevelemboss"),
     ],
 )
@@ -957,6 +957,75 @@ def test_each_smooth_inner_law_is_read_off_the_fixture(
     fitted = sum(_smooth_errors().values())
     monkeypatch.setattr(effects, name, value)
     assert sum(_smooth_errors().values()) > fitted
+
+
+# Photoshop 2023's smooth inner bevels on a black square, lit from 90 degrees
+# at 0 with a white Normal highlight: down the middle column from the top
+# edge, the highlight in levels, over the band and the first flat pixel.
+_SMOOTH_PROFILES = {
+    (5, 1000): [253, 252, 250, 242, 180, 0],
+    (13, 100): [177, 169, 160, 150, 140, 127, 114, 99, 83, 66, 48, 29, 10, 0],
+    (13, 1000): [254, 253, 253, 253, 252, 251, 250, 248, 245, 239, 226, 193, 92, 0],
+    (24, 1000): [
+        254,
+        254,
+        253,
+        253,
+        253,
+        253,
+        253,
+        252,
+        252,
+        252,
+        251,
+        250,
+        250,
+        249,
+        247,
+        246,
+        243,
+        239,
+        234,
+        225,
+        211,
+        185,
+        136,
+        53,
+        0,
+    ],
+}
+
+
+def _smooth_profile(size: int, depth: int) -> np.ndarray:
+    side = 2 * size + 34
+    shape = np.zeros((side, side, 1), dtype=np.float32)
+    shape[4:-4, 4:-4] = 1.0
+    highlight, _ = _bevel(shape, size=float(size), depth=float(depth), altitude=0.0)
+    return np.round(highlight[4 : 5 + size, side // 2, 0] * 255)
+
+
+@pytest.mark.parametrize(("size", "depth"), list(_SMOOTH_PROFILES))
+def test_a_smooth_inner_bevel_climbs_its_band_as_photoshop_draws_it(
+    size: int, depth: int
+) -> None:
+    """The silhouette tent-blurred over the band: the slope ends a pixel short."""
+    expected = np.array(_SMOOTH_PROFILES[size, depth])
+    assert np.abs(_smooth_profile(size, depth) - expected).max() <= 1
+
+
+def test_a_gaussian_across_an_inner_band_misses_photoshops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gaussian the other styles keep: a deep band's inner end too bright."""
+    monkeypatch.setattr(
+        effects,
+        "_tent_blur",
+        lambda alpha, radius, outside: effects._blur(
+            alpha, radius * effects._BEVEL_SIGMA_PER_SIZE, radius - 1.0
+        ),
+    )
+    missed = _smooth_profile(13, 1000) - np.array(_SMOOTH_PROFILES[13, 1000])
+    assert np.abs(missed).max() > 24
 
 
 def test_a_smooth_bevel_of_size_0_lights_its_edge_whatever_its_depth() -> None:
