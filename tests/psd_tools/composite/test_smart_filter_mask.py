@@ -22,7 +22,9 @@ from psd_tools.composite.composite import (
     Compositor,
     _blend_unfiltered,
     _unfilter_under_mask,
+    _white_on,
     composite,
+    paste,
 )
 from psd_tools.composite.rcache import RenderCache
 from psd_tools.compression import PSDDecompressionWarning
@@ -568,3 +570,19 @@ def test_box_renders_of_a_blend_verify_against_the_render_cache() -> None:
     crop = (slice(box[1], box[3]), slice(box[0], box[2]))
     for a, b, c in zip(first, again, whole, strict=True):
         assert a.tobytes() == b.tobytes() == c[crop].tobytes()
+
+
+def test_white_on_the_plane_is_the_pasted_masks_test() -> None:
+    """Rects inside, across, around and apart from the box, either fill."""
+    rng = np.random.default_rng(2)
+    box = (10, 20, 30, 35)
+    for _ in range(400):
+        x0, y0 = rng.integers(0, 40, 2)
+        w, h = rng.integers(1, 30, 2)
+        mask_box = (int(x0), int(y0), int(x0 + w), int(y0 + h))
+        plane = np.full((h, w), 255, np.uint8)
+        if rng.random() < 0.5:
+            plane[rng.integers(h), rng.integers(w)] = rng.integers(255)
+        fill = float(rng.choice([0.0, 255.0]))
+        pasted = paste(box, mask_box, plane[..., None], background=fill)
+        assert _white_on(box, mask_box, plane, fill) == (pasted.min() == 255)

@@ -3603,6 +3603,7 @@ def _unfilter_under_mask(
             return color, shape
         (_, _, source), weight = found
         del found
+        assert weight is not None
         weight /= 255
         return _blend_unfiltered(layer, color, shape, weight, source)
     except Exception as exc:  # the stored pixels are the safe fallback
@@ -3611,12 +3612,13 @@ def _unfilter_under_mask(
 
 
 def _unfilter_plan(
-    layer: SmartObjectLayer, channels: int, held: int
-) -> tuple[_UnfilterPlan, np.ndarray] | None:
+    layer: SmartObjectLayer, channels: int, held: int, weigh: bool = True
+) -> tuple[_UnfilterPlan, np.ndarray | None] | None:
     """What :py:func:`_unfilter_under_mask` blends with, and the mask on ``layer.bbox``.
 
     *channels* is the stored colour's, *held* the bytes its colour and shape
-    keep live. None keeps the stored pixels. Raises as the decodes do.
+    keep live. Without *weigh* the mask is tested on its plane and not laid
+    on the box. None keeps the stored pixels. Raises as the decodes do.
     """
     so = layer.smart_object
     if (
@@ -3629,13 +3631,31 @@ def _unfilter_plan(
     if mask is None:
         return None
     fill = 255.0 if so.filter_mask_extends_white else 0.0
-    weight = paste(layer.bbox, mask[0], mask[1][..., None], background=fill)
-    if weight.min() == 255:
+    weight = None
+    if weigh:
+        weight = paste(layer.bbox, mask[0], mask[1][..., None], background=fill)
+        if weight.min() == 255:
+            return None
+    elif _white_on(layer.bbox, *mask, fill):
         return None
-    source = so._filter_source(held + numpy_io._backing_bytes(weight))
+    # The mask on the box, float32, stays live across the decode.
+    source = so._filter_source(held + layer.width * layer.height * 4)
     if source is None:
         return None
     return (mask, fill, source), weight
+
+
+def _white_on(box: _Box, mask_box: _Box, plane: np.ndarray, fill: float) -> bool:
+    """Whether ``paste(box, mask_box, plane[..., None], fill)`` is 255 throughout."""
+    inter = utils.intersect(box, mask_box)
+    if inter != box and fill != 255:
+        return False
+    if inter == (0, 0, 0, 0):
+        return True
+    x0, y0 = mask_box[0], mask_box[1]
+    return bool(
+        plane[inter[1] - y0 : inter[3] - y0, inter[0] - x0 : inter[2] - x0].min() == 255
+    )
 
 
 def _whole_unfilter_plan(layer: SmartObjectLayer) -> _UnfilterPlan | None:
@@ -3647,22 +3667,16 @@ def _whole_unfilter_plan(layer: SmartObjectLayer) -> _UnfilterPlan | None:
     """
     try:
         channels, held = numpy_io.layer_read_size(layer)
-        found = _unfilter_plan(layer, channels, held)
+        found = _unfilter_plan(layer, channels, held, weigh=False)
         if found is None:
             return None
-        plan, weight = found
+        plan = found[0]
         _, src_color, src_alpha = plan[2]
-        _check_unfilter(
-            layer,
-            layer.width,
-            layer.height,
-            held
-            + sum(
-                numpy_io._backing_bytes(a)
-                for a in (weight, src_color, src_alpha)
-                if a is not None
-            ),
+        held += layer.width * layer.height * 4  # the mask on the box
+        held += sum(
+            numpy_io._backing_bytes(a) for a in (src_color, src_alpha) if a is not None
         )
+        _check_unfilter(layer, layer.width, layer.height, held)
         return plan
     except Exception as exc:  # the stored pixels are the safe fallback
         logger.warning("Smart filter mask of %r not applied: %s", layer.name, exc)
