@@ -685,12 +685,48 @@ def apply_huesaturation(
         for hue_range, hsl_tuple in items
         if hsl_tuple != (_0, _0, _0)
     ]
+    hue, saturation, lightness = (int(value) for value in master)
+    if (
+        not color_ranges
+        and hue == 0
+        and saturation in (0, -100)
+        and (saturation or lightness)
+        and colormode == ColorMode.RGB
+        and layer._psd.depth == 8
+    ):
+        return _huesaturation_levels(img, saturation == -100, lightness)
     hsl_master_tuple = _normalize_hsl(master)
     return (
         _huesaturation(img, color_ranges, hsl_master_tuple)
         if color_ranges or hsl_master_tuple != (_0, _0, _0)
         else img
     )
+
+
+def _huesaturation_levels(
+    img: np.ndarray, desaturate: bool, lightness: int
+) -> NDArray[np.float32]:
+    """Photoshop 2023's 8-bit master lightness, then desaturation.
+
+    On each channel's nearest level ``c``, ``K`` a whole level: lightness
+    below 0 scales ``c`` by ``K / 255``, ``K = ceil(255 * (100 + l) / 100)``;
+    above 0 it moves ``c`` that far toward white, ``K = floor(255 * l / 100)``;
+    both rounded. Desaturation then sets every channel to the floored
+    midrange. Exact in float64: ``c * K / 255`` is never within 1/510 of a
+    half, so every CPU agrees.
+    """
+    level = np.floor(np.clip(img, _0, _1) * _255 + np.float32(0.5))
+    level = level.astype(np.float64)
+    if lightness < 0:
+        k = -((-255 * (100 + lightness)) // 100)
+        level = np.floor(level * k / 255.0 + 0.5)
+    elif lightness > 0:
+        k = 255 * lightness // 100
+        level = np.floor(level + (255.0 - level) * k / 255.0 + 0.5)
+    if desaturate:
+        mid = np.floor((level.max(axis=2) + level.min(axis=2)) / 2.0)
+        level = np.repeat(mid[..., None], img.shape[2], axis=2)
+    return level.astype(np.float32) / _255
 
 
 def _normalize_hsl(

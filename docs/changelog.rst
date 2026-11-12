@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] 8-bit documents: Hue/Saturation with the master alone at hue 0
+  and saturation 0 or -100 works in whole levels, as Photoshop 2023 does:
+  lightness scales each channel's level by a whole-level ``K / 255``
+  (toward black below 0, toward white above), rounded, and desaturation
+  then sets every channel to the floored midrange of the three. Exact on
+  every colour for desaturation; other settings, colour ranges, colorize
+  and other depths keep the old model. **Rendering change**
 - [fix] An inner glow from the centre is the edge glow's complement range
   included, as Photoshop 2023 draws it: the edge's ranged fade turned
   around, clear at the layer's edge. It was turned around before the range,
