@@ -1395,7 +1395,8 @@ def test_gradient_map_reads_photoshops_4096_step_table_in_8_bits(
     gray = np.array([0.5, 0.5 + 0.3 / 255, 0.9, 1.0], dtype=np.float32)
     image = np.repeat(gray[None, :, None], 3, axis=2)
     out = _applied(apply_gradientmap(image, ColorMode.RGB, layer))[0, :, 0]
-    luminance = image[0] @ _LUM
+    # per element, as blend._lum: a matmul's last bit varies by CPU (AVX-512)
+    luminance = 0.3 * image[0, :, 0] + 0.59 * image[0, :, 1] + 0.11 * image[0, :, 2]
     if lut_size == 256:
         expected = np.minimum(np.rint(luminance * 4096), 4095) / 4096
     else:
