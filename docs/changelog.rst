@@ -4,6 +4,14 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Hue/Saturation's Colorize in an 8-bit document follows Photoshop
+  2023's integers, exact on every hue, saturation and lightness probed: the
+  pixel's lightness level ``(max + min) // 2`` takes the lightness in 255ths,
+  the saturation in 255ths over 127, and the hue in 256ths of a turn, each
+  sector's middle channel mixed as on a circle. The Panda Future's art
+  (49, 76, -46) was up to 8 levels green (hue 49 drawn as 46.8), now exact;
+  the colorize fixture from 3 levels to 1. 16-bit documents keep plain HSL,
+  as Photoshop does. **Rendering change**
 - [fix] A smooth bevel's soften blurs its light as Photoshop 2023 does: held
   to unlit first, so a face turned past the light softens as unlit, not
   darker, then two box passes of the soften (1 as 2), not a gaussian.
