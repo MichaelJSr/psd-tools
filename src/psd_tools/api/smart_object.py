@@ -998,7 +998,7 @@ def _has_filters(blocks: TaggedBlocks) -> bool:
     ]
     if len(keys) == 1:
         held = blocks[keys[0]]._held
-        if held is not None and b"filterFX" not in held[0]:
+        if held is not None and b"filterFX" not in held:
             return False  # unparsed, and no such key in its bytes
     for key in keys:
         config = blocks.get_data(key)
