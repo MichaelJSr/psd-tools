@@ -1,8 +1,10 @@
 """Paint and fill operations for compositing."""
 
+import functools
 import io
 import logging
 import math
+import struct
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +29,13 @@ from psd_tools.color_convert import (
 )
 from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.utils import is_fill_disabled
-from psd_tools.constants import GRADIENT_METHOD_KEY, ColorMode, GradientMethod, Tag
+from psd_tools.constants import (
+    GRADIENT_METHOD_KEY,
+    ColorMode,
+    GradientMethod,
+    Resource,
+    Tag,
+)
 from psd_tools.psd.descriptor import Descriptor
 from psd_tools.terminology import Enum, Key, Klass, Type
 
@@ -44,6 +52,13 @@ _FILL_METHOD_KEY = b"gradientsInterpolationMethod"
 # Photoshop's range for a pattern's scale, in percent.
 _MIN_SCALE = 1.0
 _MAX_SCALE = 1000.0
+
+# Photoshop 2023 halves a pattern three times at most: below 1/8 it samples
+# the third halving further apart.
+_MAX_REDUCTION_BOX = 8
+
+# An 8-bit pattern's bilinear weights, in 256ths.
+_WEIGHT_STEPS = 256.0
 
 # What a numpy call leaves on tracemalloc besides its arrays' data: the array
 # objects, the index arrays and the lists moveaxis builds.
@@ -275,15 +290,67 @@ def create_fill_desc(
             desc,
             gradient_anchor(layer._psd, desc, anchor),
             layer._psd.depth,
+            document_lms(layer._psd),
         )
     return None, None
+
+
+# Within this of a whole pixel, a ramp's end is on it.
+_END_SNAP = 1e-9
+
+
+def ramp_ends_on_pixels(
+    box: tuple[float, float, float, float], desc: Descriptor
+) -> tuple[tuple[float, float, float, float], float | None]:
+    """``box`` and the angle Photoshop 2023 lays a stroke's linear ramp on.
+
+    The ramp runs from the box's centre less half its length along the angle
+    to the centre plus it, each end cut to whole pixels toward zero; a scaled
+    ramp's half is cut so first, on each axis, as an overlay's
+    (``composite._scaled_layout``). So it runs between the cut ends: the box
+    returned is about their midpoint, scaled to their distance, and the angle
+    is theirs. Another gradient kind, an offset, or a scale it cannot read
+    keep ``box`` and the angle (None).
+    """
+    kind = desc.get(Key.Type)
+    if getattr(kind, "enum", None) != Enum.Linear:
+        return box, None
+    offset = get_descriptor(desc, Key.Offset)
+    if _offset_share(offset, Key.Horizontal) or _offset_share(offset, Key.Vertical):
+        return box, None
+    scale = _finite(desc, Key.Scale, 100.0) / 100.0
+    if not scale > 0.0:
+        return box, None
+    angle = _finite(desc, Key.Angle, 0.0)
+    width, height = max(box[2] - box[0], 1), max(box[3] - box[1], 1)
+    half = scale * _gradient_length(angle, width, height) / 2.0
+    theta = math.radians(angle)
+    ux, uy = math.cos(theta), -math.sin(theta)
+    ux, uy = (0.0 if abs(ux) < 1e-9 else ux), (0.0 if abs(uy) < 1e-9 else uy)
+    cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+
+    def cut(value: float) -> int:
+        return math.trunc(value + math.copysign(_END_SNAP, value))
+
+    hx, hy = half * ux, half * uy
+    if scale != 1.0:
+        hx, hy = cut(hx), cut(hy)
+    x0, y0 = cut(cx - hx), cut(cy - hy)
+    x1, y1 = cut(cx + hx), cut(cy + hy)
+    if x0 == x1 and y0 == y1:
+        return box, None
+    turned = math.degrees(math.atan2(y0 - y1, x1 - x0))
+    k = math.hypot(x1 - x0, y1 - y0) / (scale * _gradient_length(turned, width, height))
+    mx, my = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    w, h = width * k / 2.0, height * k / 2.0
+    return (mx - w, my - h, mx + w, my + h), turned
 
 
 def gradient_anchor(
     psd: "PSDProtocol",
     desc: Descriptor,
-    box: tuple[int, int, int, int] | None = None,
-) -> tuple[int, int, int, int] | None:
+    box: tuple[float, float, float, float] | None = None,
+) -> tuple[float, float, float, float] | None:
     """The box a gradient is laid out on: ``box``, or the document's with ``Algn`` off.
 
     ``None`` lays the gradient out on the viewport it is drawn on.
@@ -297,12 +364,15 @@ def pattern_origin(
     desc: Descriptor,
     box: tuple[int, int, int, int],
     reference_point: Sequence[float] | None = None,
-) -> tuple[int, int]:
+) -> tuple[float, float]:
     """Where a pattern's tiling starts, in document coordinates.
 
     Aligned with the layer, it starts at the layer's reference point, or at
     ``box``'s top-left without one, moved by the phase. With ``Algn`` off the
     phase is measured from the document's origin.
+
+    Rounded to the pixel, except where Photoshop 2023 places it sub-pixel:
+    an unturned pattern at a scale its reduction does not make whole.
     """
     phase = desc.get(b"phase")
     shift = (0.0, 0.0)
@@ -318,45 +388,61 @@ def pattern_origin(
             if reference_point is None
             else (float(reference_point[0]), float(reference_point[1]))
         )
-    # Rounded to the pixel grid the tiling is drawn on.
-    return (
-        math.floor(start[0] + shift[0] + 0.5),
-        math.floor(start[1] + shift[1] + 0.5),
-    )
+    x, y = start[0] + shift[0], start[1] + shift[1]
+    if _sub_pixel_origin(desc):
+        return x, y
+    return math.floor(x + 0.5), math.floor(y + 0.5)
+
+
+def _sub_pixel_origin(desc: Descriptor) -> bool:
+    """Whether Photoshop 2023 keeps the fraction of the pattern's origin.
+
+    It does for an unturned pattern whose samples fall between the reduced
+    panel's (75%, 7%, 200%); it rounds a turned one, and one at 100%, 50%,
+    25% or 12.5%, where every sample lands on one.
+    """
+    turns = _finite(desc, Key.Angle, 0.0) / 90.0
+    if turns == round(turns) and round(turns) % 4:
+        return False
+    scale = _pattern_scale(desc)
+    return abs(scale * _reduction_box(scale) - 1.0) > 1e-9
 
 
 def create_fill(
     layer: "Layer",
     viewport: tuple[int, int, int, int],
+    anchor: tuple[int, int, int, int] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Create a fill image."""
+    """Create a fill image, laid out on ``anchor`` (default ``viewport``) and drawn on ``viewport``."""
     if is_fill_disabled(layer):
         return None, None
     blocks = layer.tagged_blocks
     if (desc := blocks.get_data(Tag.SOLID_COLOR_SHEET_SETTING)) is not None:
         return draw_solid_color_fill(viewport, layer._psd.color_mode, desc)
     if (desc := blocks.get_data(Tag.PATTERN_FILL_SETTING)) is not None:
-        return draw_pattern_fill(viewport, layer._psd, desc)
+        return draw_pattern_fill(viewport, layer._psd, desc, anchor)
     if (desc := blocks.get_data(Tag.GRADIENT_FILL_SETTING)) is not None:
         return draw_gradient_fill(
             viewport,
             layer._psd.color_mode,
             desc,
-            gradient_anchor(layer._psd, desc),
+            gradient_anchor(layer._psd, desc, anchor),
             layer._psd.depth,
+            document_lms(layer._psd),
         )
     if (desc := blocks.get_data(Tag.VECTOR_STROKE_CONTENT_DATA)) is not None:
         if Key.Color in desc:
             return draw_solid_color_fill(viewport, layer._psd.color_mode, desc)
         elif Key.Pattern in desc:
-            return draw_pattern_fill(viewport, layer._psd, desc)
+            return draw_pattern_fill(viewport, layer._psd, desc, anchor)
         elif Key.Gradient in desc:
             return draw_gradient_fill(
                 viewport,
                 layer._psd.color_mode,
                 desc,
-                gradient_anchor(layer._psd, desc),
+                gradient_anchor(layer._psd, desc, anchor),
                 layer._psd.depth,
+                document_lms(layer._psd),
             )
     return None, None
 
@@ -387,13 +473,40 @@ def _turn_panel(panel: np.ndarray, desc: Descriptor) -> np.ndarray:
 def _reduction_box(scale: float) -> int:
     """The box a pattern reduced by ``scale`` is averaged over: 2**L samples.
 
-    L is the deepest halving that does not reduce the panel past the scale.
+    L is the deepest halving that does not reduce the panel past the scale,
+    three at most.
     """
     width = 1
     # A scale read as percent / 100 can fall a hair short of the halving it names.
-    while width * 2 * scale <= 1.0 + 1e-9:
+    while width < _MAX_REDUCTION_BOX and width * 2 * scale <= 1.0 + 1e-9:
         width *= 2
     return width
+
+
+def _holds_8_bit_levels(pattern: Any, psd: Any) -> bool:
+    """Whether ``pattern`` is 8-bit in an 8-bit document."""
+    return getattr(psd, "depth", 8) == 8 and all(
+        channel.pixel_depth == 8
+        for channel in pattern.data.channels
+        if channel.is_written
+    )
+
+
+def _halve_levels(panel: np.ndarray, width: int) -> np.ndarray:
+    """Whole 8-bit levels halved until ``width``, as Photoshop 2023 does.
+
+    Each halving takes every sample with the next one on both axes, wrapping,
+    as ``(a + b + c + d + 2) >> 2``. Float32 holds these sums exactly.
+    """
+    step = 1
+    while step < width:
+        total = panel + np.roll(panel, -step, axis=0)
+        total += np.roll(total, -step, axis=1)
+        total += 2.0
+        total *= 0.25
+        panel = np.floor(total, out=total)
+        step *= 2
+    return panel
 
 
 def _box_average(panel: np.ndarray, width: int) -> np.ndarray:
@@ -423,19 +536,29 @@ def _box_peak_bytes(panel: np.ndarray, width: int) -> int:
 
 
 def _tile_axis(
-    start: int, length: int, origin: int, size: int, scale: float, step: int = 1
+    start: int,
+    length: int,
+    origin: float,
+    size: int,
+    scale: float,
+    step: int = 1,
+    levels: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Panel indices and weights along one axis for a tiling scaled by ``scale``.
 
     The sample at ``origin`` is the panel's first, and each output pixel
     blends the two samples either side of its scaled position on a grid
     ``step`` samples apart, as Photoshop 2023 samples a reduction's level.
+    With ``levels`` the weight is in whole 256ths, cut toward zero.
     """
     position = (
         (np.arange(start, start + length, dtype=np.float64) - origin) / scale / step
     )
     first = np.floor(position)
-    weight = (position - first).astype(np.float32)
+    weight = position - first
+    if levels:
+        weight = np.floor(weight * _WEIGHT_STEPS)
+    weight = weight.astype(np.float32)
     index = first.astype(np.int64) * step % size
     return index, (index + step) % size, weight
 
@@ -443,21 +566,26 @@ def _tile_axis(
 def _sample_tiling(
     panel: np.ndarray,
     viewport: tuple[int, int, int, int],
-    origin: tuple[int, int],
+    origin: tuple[float, float],
     scale: float,
     step: int = 1,
+    levels: bool = False,
 ) -> np.ndarray:
     """The panel tiled across ``viewport`` from ``origin``, bilinear and wrapping.
 
     ``step`` is the reduction box: the samples blended are that far apart.
+    With ``levels`` the panel holds whole 8-bit levels, blended as Photoshop
+    2023 blends them (weights in 256ths, one rounding half up), and the
+    result is back in [0, 1]. A fractional ``origin`` places the tiling
+    sub-pixel.
     """
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-    if scale == 1.0:
+    if _rolls(scale, origin):
         # Every sample lands on a panel pixel: the panel rolled to the
         # viewport's corner and repeated in one copy.
         rolled = np.roll(
             panel,
-            (origin[1] - viewport[1], origin[0] - viewport[0]),
+            (int(origin[1]) - viewport[1], int(origin[0]) - viewport[0]),
             axis=(0, 1),
         )
         rows, columns = -(-height // panel.shape[0]), -(-width // panel.shape[1])
@@ -469,25 +597,43 @@ def _sample_tiling(
             rows * panel.shape[0], columns * panel.shape[1], panel.shape[2]
         )[:height, :width]
     top, bottom, down = _tile_axis(
-        viewport[1], height, origin[1], panel.shape[0], scale, step
+        viewport[1], height, origin[1], panel.shape[0], scale, step, levels
     )
     left, right, across = _tile_axis(
-        viewport[0], width, origin[0], panel.shape[1], scale, step
+        viewport[0], width, origin[0], panel.shape[1], scale, step, levels
     )
-    rows = panel[top] * (1 - down)[:, None, None] + panel[bottom] * down[:, None, None]
-    return (
-        rows[:, left] * (1 - across)[None, :, None]
+    whole = _WEIGHT_STEPS if levels else 1.0
+    rows = (
+        panel[top] * (whole - down)[:, None, None] + panel[bottom] * down[:, None, None]
+    )
+    pixels = (
+        rows[:, left] * (whole - across)[None, :, None]
         + rows[:, right] * across[None, :, None]
     )
+    if levels:
+        # Whole numbers below 2**24, so float32 is exact.
+        pixels += whole * whole / 2
+        pixels *= 1.0 / (whole * whole)
+        np.floor(pixels, out=pixels)
+        pixels /= _LEVELS_8
+    return pixels
+
+
+def _rolls(scale: float, origin: tuple[float, float]) -> bool:
+    """Whether :py:func:`_sample_tiling` rolls the panel: unscaled, from a whole pixel."""
+    return scale == 1.0 and all(float(value).is_integer() for value in origin)
 
 
 def _sample_peak_bytes(
-    panel: np.ndarray, viewport: tuple[int, int, int, int], scale: float
+    panel: np.ndarray,
+    viewport: tuple[int, int, int, int],
+    scale: float,
+    origin: tuple[float, float] = (0, 0),
 ) -> int:
     """What :py:func:`_sample_tiling` holds at its peak."""
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
     plane = panel.shape[2] * panel.dtype.itemsize
-    if scale == 1.0:
+    if _rolls(scale, origin):
         # The panel, its rolled copy and the tiling rounded up to whole panels.
         rows = -(-height // panel.shape[0]) * panel.shape[0]
         columns = -(-width // panel.shape[1]) * panel.shape[1]
@@ -524,17 +670,19 @@ def draw_pattern_fill(
     psd: Any,
     desc: Descriptor,
     anchor: tuple[int, int, int, int] | None = None,
-    origin: tuple[int, int] | None = None,
+    origin: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     r"""
     Create a pattern fill.
 
-    The tiling starts at ``origin``, in document coordinates, or else at the
-    top-left of ``anchor``, which defaults to ``viewport``, so a viewport
-    larger than the anchor continues the same tiling. ``Angl`` turns the
+    The tiling starts at ``origin``, in document coordinates (a fraction
+    places it sub-pixel), or else at the top-left of ``anchor``, which
+    defaults to ``viewport``, so a viewport larger than the anchor
+    continues the same tiling. ``Angl`` turns the
     tiles about that point, in right angles only; ``Scl `` scales them about
     it. A reduction is bilinear between samples of the panel's box average
-    one box apart.
+    one box apart. An 8-bit pattern in an 8-bit document is reduced and
+    blended in whole levels, as Photoshop 2023 does.
 
     Example descriptor::
 
@@ -566,6 +714,11 @@ def draw_pattern_fill(
 
     scale = _pattern_scale(desc)
     panel = _turn_panel(panel, desc)
+    levels = scale != 1.0 and _holds_8_bit_levels(pattern, psd)
+    if levels:
+        # Back to whole levels, in place: get_pattern's array is ours.
+        np.multiply(panel, _LEVELS_8, out=panel)
+        np.rint(panel, out=panel)
     box = _reduction_box(scale)
     if box > 1:
         check_pixel_size(
@@ -576,7 +729,7 @@ def draw_pattern_fill(
             estimated_bytes=_box_peak_bytes(panel, box),
             warn=False,
         )
-        panel = _box_average(panel, box)
+        panel = _halve_levels(panel, box) if levels else _box_average(panel, box)
 
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
     if origin is None:
@@ -589,7 +742,7 @@ def draw_pattern_fill(
             height,
             panel.shape[2],
             budget,
-            estimated_bytes=_sample_peak_bytes(panel, viewport, scale),
+            estimated_bytes=_sample_peak_bytes(panel, viewport, scale, origin),
             warn=False,
         )
     # Taken from the pattern's own slot layout rather than from its color mode.
@@ -600,7 +753,7 @@ def draw_pattern_fill(
     # never split off, and the array reached the canvas one plane too wide and
     # was rejected as inconsistent with it (#741).
     channels = numpy_io.get_pattern_color_channels(pattern)
-    pixels = _sample_tiling(panel, viewport, origin, scale, box)
+    pixels = _sample_tiling(panel, viewport, origin, scale, box, levels)
     if pixels.shape[2] > channels:
         return pixels[:, :, :channels], pixels[:, :, -1:]
     return pixels, None
@@ -622,6 +775,8 @@ def draw_gradient_fill(
     desc: Descriptor,
     anchor: tuple[float, float, float, float] | None = None,
     depth: int | None = None,
+    rgb_lms: tuple[float, ...] | None = None,
+    angle: float | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     """
     Create a gradient fill image.
@@ -631,7 +786,9 @@ def draw_gradient_fill(
 
     In an 8-bit ``depth`` the colour and transparency come out in whole
     levels, as Photoshop rasters a gradient before it blends; other depths,
-    and ``None``, leave them unrounded.
+    and ``None``, leave them unrounded. ``rgb_lms`` is the document's
+    :py:func:`document_lms`, for the perceptual method; ``angle`` stands in
+    for the descriptor's.
 
     Requires scipy for gradient color interpolation.
     """
@@ -640,7 +797,8 @@ def draw_gradient_fill(
     # A path with no extent along an axis ramps as a single pixel there.
     box_height, box_width = max(box[3] - box[1], 1), max(box[2] - box[0], 1)
 
-    angle = _finite(desc, Key.Angle, 0.0)
+    if angle is None:
+        angle = _finite(desc, Key.Angle, 0.0)
     scale = float(desc.get(Key.Scale, 100.0)) / 100.0
     scale *= _gradient_length(angle, box_width, box_height)
     # ``Ofst`` moves the ramp's centre by a share of the box.
@@ -678,7 +836,7 @@ def draw_gradient_fill(
         Z = 1.0 - Z
 
     G, Ga = _make_gradient_color(
-        color_mode, desc.get(Key.Gradient), _gradient_method(desc)
+        color_mode, desc.get(Key.Gradient), _gradient_method(desc), rgb_lms
     )
     color = G(Z) if G is not None else None
     shape = np.expand_dims(Ga(Z), 2) if Ga is not None else None
@@ -805,27 +963,33 @@ _RAMPS_HELD = 64
 
 
 def _make_gradient_color(
-    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
+    color_mode: ColorMode,
+    grad: Descriptor,
+    method: bytes | None = None,
+    rgb_lms: tuple[float, ...] | None = None,
 ) -> tuple[Any | None, Any | None]:
     written = io.BytesIO()
     grad.write(written)
-    key = (color_mode, method, written.getvalue())
+    key = (color_mode, method, rgb_lms, written.getvalue())
     known = _RAMPS.get(key)
     if known is None:
         if len(_RAMPS) >= _RAMPS_HELD:
             _RAMPS.clear()
-        known = _RAMPS[key] = _build_gradient_color(color_mode, grad, method)
+        known = _RAMPS[key] = _build_gradient_color(color_mode, grad, method, rgb_lms)
     return known
 
 
 def _build_gradient_color(
-    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
+    color_mode: ColorMode,
+    grad: Descriptor,
+    method: bytes | None = None,
+    rgb_lms: tuple[float, ...] | None = None,
 ) -> tuple[Any | None, Any | None]:
     gradient_form = grad.get(Type.GradientForm).enum
     if gradient_form == Enum.ColorNoise:
         return _make_noise_gradient_color(color_mode, grad)
     elif gradient_form == Enum.CustomStops:
-        return _make_linear_gradient_color(color_mode, grad, method)
+        return _make_linear_gradient_color(color_mode, grad, method, rgb_lms)
 
     logger.error("Unknown gradient form: %s", gradient_form)
     return None, None
@@ -994,6 +1158,87 @@ def _oklab_to_srgb(lab: np.ndarray) -> np.ndarray:
     return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ _OKLAB_LMS_INV.T)
 
 
+# An ICC profile's connection space white (D50), sRGB's colorants as a
+# profile states them (adapted to D50), and Bradford's cone matrix.
+_ICC_D50 = np.array([0.9642, 1.0, 0.8249])
+_ICC_SRGB_COLORANTS = np.array(
+    [[0.4361, 0.3851, 0.1431], [0.2225, 0.7169, 0.0606], [0.0139, 0.0971, 0.7141]]
+)
+_BRADFORD = np.array(
+    [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]]
+)
+_D65 = np.array([0.95047, 1.0, 1.08883])
+# Oklab's matrix from D65 XYZ to LMS (Ottosson 2020).
+_OKLAB_XYZ_LMS = np.array(
+    [
+        [0.8189330101, 0.3618667424, -0.1288597137],
+        [0.0329845436, 0.9293118715, 0.0361456387],
+        [0.0482003018, 0.2643662691, 0.6338517070],
+    ]
+)
+
+
+def _icc_tags(data: bytes) -> tuple[int, dict[bytes, bytes]] | None:
+    """An ICC profile's major version and tags by signature, or None."""
+    try:
+        (count,) = struct.unpack_from(">I", data, 128)
+        tags = {}
+        for index in range(count):
+            name, start, size = struct.unpack_from(">4sII", data, 132 + 12 * index)
+            tags[name] = data[start : start + size]
+    except struct.error:
+        return None
+    return data[8], tags
+
+
+def _icc_xyz(tag: bytes) -> tuple[float, float, float]:
+    """The first value of an ICC ``XYZ `` tag."""
+    x, y, z = struct.unpack_from(">3i", tag, 8)
+    return (x / 65536, y / 65536, z / 65536)
+
+
+@functools.lru_cache(maxsize=8)
+def _profile_lms(data: bytes) -> tuple[float, ...] | None:
+    """A matrix RGB profile's linear RGB to Oklab LMS, row by row, or None.
+
+    The colorants are read in the D50 connection space and adapted to Oklab's
+    D65 by Bradford. None for a profile without colorants or with sRGB's,
+    where Oklab's own sRGB matrix stands.
+    """
+    profile = _icc_tags(data)
+    if profile is None:
+        return None
+    try:
+        colorants = np.array(
+            [_icc_xyz(profile[1][key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
+        ).T
+    except (KeyError, struct.error):
+        return None
+    if np.allclose(colorants, _ICC_SRGB_COLORANTS, atol=2e-3):
+        return None
+    cone = (_BRADFORD @ _D65) / (_BRADFORD @ _ICC_D50)
+    adapt = np.linalg.solve(_BRADFORD, cone[:, None] * _BRADFORD)
+    lms = _OKLAB_XYZ_LMS @ adapt @ colorants
+    if not np.all(np.isfinite(lms)) or abs(np.linalg.det(lms)) < 1e-6:
+        return None
+    return tuple(float(value) for value in lms.ravel())
+
+
+def document_lms(psd: "PSDProtocol") -> tuple[float, ...] | None:
+    """The matrix the perceptual method takes ``psd``'s linear RGB to Oklab by.
+
+    Photoshop 2023 blends a perceptual gradient in the Oklab of the
+    document's own profile (its colorants; the transfer curve stays sRGB's,
+    which both profiles on the cards have). None keeps sRGB's: no profile, or
+    one :py:func:`_profile_lms` cannot use.
+    """
+    resources = psd.image_resources
+    if Resource.ICC_PROFILE not in resources:
+        return None
+    data = resources.get_data(Resource.ICC_PROFILE)
+    return _profile_lms(data) if isinstance(data, bytes) else None
+
+
 # The perceptual method blends opacity raised to 1 / this. Fitted to
 # Photoshop 2023's foreground-to-transparent fills and to the cards.
 _PERCEPTUAL_ALPHA_GAMMA = 1.728
@@ -1027,6 +1272,25 @@ _BLEND_SPACES: dict[bytes, _BlendSpace] = {
 _ALPHA_BLEND_SPACES: dict[bytes, _BlendSpace] = {
     GradientMethod.PERCEPTUAL.value: (_unease_alpha, _ease_alpha),
 }
+
+
+def _blend_space(
+    method: bytes | None, rgb_lms: tuple[float, ...] | None = None
+) -> _BlendSpace | None:
+    """``_BLEND_SPACES[method]``, its Oklab through ``rgb_lms`` when given."""
+    space = _BLEND_SPACES.get(method) if method is not None else None
+    if space is None or rgb_lms is None or space[0] is not _srgb_to_oklab:
+        return space
+    forward = np.array(rgb_lms).reshape(3, 3)
+    inverse = np.linalg.inv(forward)
+
+    def encode(rgb: np.ndarray) -> np.ndarray:
+        return np.cbrt(_srgb_to_linear(rgb) @ forward.T) @ _OKLAB_LAB.T
+
+    def decode(lab: np.ndarray) -> np.ndarray:
+        return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ inverse.T)
+
+    return encode, decode
 
 
 def _canvas_rows(color_mode: ColorMode, rgb: np.ndarray) -> np.ndarray:
@@ -1084,7 +1348,10 @@ class _Lookup:
 
 
 def _make_linear_gradient_color(
-    color_mode: ColorMode, grad: Descriptor, method: bytes | None = None
+    color_mode: ColorMode,
+    grad: Descriptor,
+    method: bytes | None = None,
+    rgb_lms: tuple[float, ...] | None = None,
 ) -> tuple[Any | None, Any | None]:
     smoothness = _clamp01(_finite(grad, Key.Interpolation, 4096.0) / 4096.0)
     colors = grad.get(Key.Colors, [])
@@ -1092,7 +1359,7 @@ def _make_linear_gradient_color(
         *_collect_stops(colors, lambda stop: np.array(_get_color(color_mode, stop))),
         smoothness,
     )
-    space = _BLEND_SPACES.get(method) if method is not None else None
+    space = _blend_space(method, rgb_lms)
     if space is not None:
         encode, decode = space
         X, Y, M = _collect_stops(

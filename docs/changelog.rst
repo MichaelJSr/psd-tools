@@ -27,6 +27,127 @@ Changelog
   one (padding, budget, version) tuple per read instead of one each: about
   37% fewer objects for the garbage collector to track after an open. Parse
   output and saved bytes are unchanged
+- [fix] A pattern overlay on a layer without a reference point (``fxrp``)
+  tiles from the document's origin, as Photoshop 2023 reads it; it tiled
+  from the layer's box. An unturned pattern at a scale its reduction does
+  not make whole (75%, 7%, 200%) keeps the fraction of its origin and is
+  placed sub-pixel; turned ones and 100%, 50%, 25% and 12.5% stay rounded.
+  The type icon AC's bake makes for Igor_Robotowski and Igor_Roballtowski
+  (Igor's 7% pattern, no ``fxrp``) was up to 255 levels off (3,948 px over
+  8), now within 1. **Rendering change**
+- [fix] A layer in a mode other than Normal whose drop shadow knocks out
+  shows its paint and interior effects through a window, as Photoshop 2023
+  draws it, when its interior effects go on apart or it is type: they go on
+  over the canvas as it stood before the shadow, and its shape mixes that
+  over the shadow (under a covering overlay the shadow stays whole). It was
+  cut under the whole shape. Type in a styled group mixes its edge in the
+  text gamma against what the group painted, window included. Bob-Ulk's
+  Linear Dodge Name as AC re-lays it was 12 levels off on its glyph edges
+  (279 px over 8), now within 1. **Rendering change**
+- [fix] 8-bit documents: Hue/Saturation with the master alone at hue 0
+  and saturation 0 or -100 works in whole levels, as Photoshop 2023 does:
+  lightness scales each channel's level by a whole-level ``K / 255``
+  (toward black below 0, toward white above), rounded, and desaturation
+  then sets every channel to the floored midrange of the three. Exact on
+  every colour for desaturation; other settings, colour ranges, colorize
+  and other depths keep the old model. **Rendering change**
+- [fix] An inner glow from the centre is the edge glow's complement range
+  included, as Photoshop 2023 draws it: the edge's ranged fade turned
+  around, clear at the layer's edge. It was turned around before the range,
+  so at any range under 100% it covered the edge too: up to 235 levels off
+  on every centre probe, solid or gradient, now within 2. No card uses it;
+  edge glows are unchanged. **Rendering change**
+- [fix] An inner glow filled with a gradient is drawn (it was skipped), as
+  Photoshop 2023 draws it: the gradient runs along the falloff, its start
+  where the glow is full. A gradient of two stops fading opaque to clear
+  covers the falloff as a solid glow does, noise included; any other covers
+  the whole layer as opaque as its stops, noise moving that coverage. Noise
+  never moves the colour. The FNAF cards' linked Gold Star
+  (``Springtrap - Gold_Star.svg.psb``) was up to 132 levels off (4,839 px
+  over 8), now within 3; its hidden 'star test' layers from 133 to 2. Solid
+  glows are unchanged. **Rendering change**
+- [fix] Color and Luminosity blend in Photoshop 2023's integers in an 8-bit
+  RGB document: whole-level operands (a fill's colour too), lightness
+  ``(4915 R + 9667 G + 1802 B + 8192) >> 14``, and a colour pushed past 0 or
+  255 drawn towards it by ``L + ((c - L) * span + room // 2) / room``, the
+  division truncated towards zero, so a channel clipped low lands on 1, not
+  0. Exact on 2,160,000 random pairs each (the rounded float formula: 53%),
+  over translucent backdrops and sources too. Infected Crossroads' Field
+  icon, whose Colour fills a +150 Brightness/Contrast magnifies, was up to 7
+  levels off (1,801 px over 4), now within 3 (none over 4); the cards'
+  Colour-mode fills and overlays are exact or within a level. Other depths
+  and CMYK are unchanged. **Rendering change**
+- [fix] Hue/Saturation's Colorize in an 8-bit document follows Photoshop
+  2023's integers, exact on every hue, saturation and lightness probed: the
+  pixel's lightness level ``(max + min) // 2`` takes the lightness in 255ths,
+  the saturation in 255ths over 127, and the hue in 256ths of a turn, each
+  sector's middle channel mixed as on a circle. The Panda Future's art
+  (49, 76, -46) was up to 8 levels green (hue 49 drawn as 46.8), now exact;
+  the colorize fixture from 3 levels to 1. 16-bit documents keep plain HSL,
+  as Photoshop does. **Rendering change**
+- [fix] A smooth bevel's soften blurs its light as Photoshop 2023 does: held
+  to unlit first, so a face turned past the light softens as unlit, not
+  darker, then two box passes of the soften (1 as 2), not a gaussian.
+  Crowned_Magolor's names (depth 136-147%, soften 5-11) and Clot_Bone's
+  type (1000%, soften 2) were up to 31 levels dark, now within 2. Chisel
+  bevels and soften 0 are unchanged. **Rendering change**
+- [fix] Bevels take their slopes through a Prewitt operator (a step's
+  slope spread evenly over three pixels across it, was Sobel's
+  quarter-half-quarter), as Photoshop 2023 does: a smooth inner bevel with
+  a Linear shape contour at range 0, lit by its slopes' direction alone
+  (Golden Bomb's and Golden Metronome's names, Golden Metronome's Negation
+  icon), was up to 26 levels off on curved and slanted edges, now within
+  10; a texture's corners (Royal Eradicator Main Cannon's stars) from 34
+  to 6; smooth bevels without a contour up to 8 levels nearer on slanted
+  edges. A bevel texture stands as high as the smooth bevel's surface (a
+  pixel at least, so a size 1 bevel's as a size 2's and a shallow one's no
+  lower than a pixel), and tiles from the layer's reference point when
+  linked, a group's too, else from the document's origin; its phase is not
+  read. A one-plane multichannel pattern (Photoshop's preset Watercolor)
+  textures as a grey one instead of being left out. **Rendering change**
+- [fix] An 8-bit pattern scaled in an 8-bit document is drawn in whole levels,
+  as Photoshop 2023 draws it: each halving of a reduction rounds
+  ``(a + b + c + d + 2) >> 2``, three halvings at most (below 12.5% the third
+  is sampled further apart), and the bilinear blend weighs in 256ths and
+  rounds once. Igor's 7% Headtowski overlay was 0.2 levels dark, which Darker
+  Color turned into 27 whole-pixel flips (up to 183 levels); it now matches.
+  Patterns at 100% are unchanged. **Rendering change**
+- [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
+  of the document's own profile, its colorants adapted to D65 by Bradford,
+  as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp
+  moved up to 8 levels. sRGB and untagged documents are unchanged. A linear
+  gradient stroke's ramp runs between whole-pixel ends (a scaled half cut
+  first), at any angle. **Rendering change**
+- [fix] A shape with no stored pixels is filled wherever its path covers,
+  not only inside its box, which truncates the origination box and can
+  stop a row short of an Align Edges path (Old_Chica, Uumuu, Green_Mage,
+  Bobberlington: a missing or transparent row now matches Photoshop 2023),
+  in box renders too. **Rendering change**
+- [fix] A drop shadow, softer outer glow, inner shadow or softer inner glow
+  whose spread or choke takes its whole size grows as Photoshop 2023 does:
+  in whole steps of an 8-bit field holding the size and a pixel, so its edge
+  reaches up to a pixel past the size (254 px from 127 on), and its noise
+  is held under that edge. Omori's name shadow (noise 70, spread 100%,
+  6 px) was up to 183 levels off at its edge, now within a level; spreads
+  that leave a blur are unchanged. **Rendering change**
+- [fix] Outer glows with a gradient cover what Photoshop 2023 covers: a
+  gradient fading from opaque to clear in two stops covers the glow's falloff
+  as a solid colour does (wherever its stops sit), with its noise, which
+  moves the coverage and never the colour; any other gradient is full where
+  its matte reaches 12% (25/3 times the matte, was 8), held under its
+  transparency. **Rendering change**
+- [fix] A type layer drawn from its stored raster (font substituted, text
+  data without ``bounds``, or mixed straight: pinned so by
+  ``layer_text_gamma``, ``text_gamma=None`` or the preview) is a pixel layer
+  in a styled or clipped pass-through group too: in a mode other than Normal
+  it mixes there instead of keeping its pass-through blend, as Photoshop 2023
+  draws a type layer it flags ``textWarningLevel`` 1 (text another Photoshop
+  or writer laid out). Live type renders as before: no card changes unpinned
+- [fix] Darker Color and Lighter Color compare RGB as Photoshop 2023 does:
+  whole levels weighed 0.30/0.59/0.11 in 14-bit fixed point and rounded to a
+  whole level, the backdrop kept on a tie. Colours a fraction of a level
+  apart no longer swap (single pixels up to 196 levels off on 7 cards'
+  overlays, gradient maps and curves). **Rendering change** for those modes
 - [refactor] PSB documents opened from bytes keep their layers' tagged
   blocks as bytes until read, as PSD documents do (8-byte lengths
   included), and read their layer records in a few struct reads. An

@@ -1,5 +1,7 @@
 """A gradient stroke's ramp is laid out on the band's own extent."""
 
+import math
+
 import numpy as np
 import pytest
 
@@ -35,9 +37,11 @@ def _soft_tailed() -> np.ndarray:
     return shape
 
 
-def _stroke(style: bytes, size: float, angle: float = 90.0) -> Descriptor:
+def _stroke(
+    style: bytes, size: float, angle: float = 90.0, scale: float = 100.0
+) -> Descriptor:
     """A stroke effect painted with :py:func:`_gradient`'s ramp."""
-    desc = _gradient(angle=angle)
+    desc = _gradient(angle=angle, scale=scale)
     desc[Key.Style] = Enumerated(typeID=b"FStl", enum=style)
     desc[Key.SizeKey] = Double(size)
     desc[Key.PaintType] = Enumerated(typeID=b"FrFl", enum=Enum.GradientFill)
@@ -111,9 +115,8 @@ def _psd() -> PSDImage:
 # the reference.
 _FIXTURE_CELLS = 12
 
-# Levels a pixel may stray: Photoshop rounds a scaled ramp's ends to whole
-# pixels, which the ramp here does not.
-_STRAY = 4
+# Levels a pixel may stray.
+_STRAY = 2
 
 
 def _cell_errors() -> dict[str, int]:
@@ -141,3 +144,63 @@ def test_gradient_strokes_render_to_photoshops_composite() -> None:
     assert kinds == {"type", "smart", "pixel", "group-pass", "group-normal"}
     for name, error in errors.items():
         assert error <= _STRAY, name
+
+
+# Photoshop 2023's black-to-white stroke (classic, no smoothness) on a Jevil
+# Warpstar whose band box is (922, 17, 1050, 132): levels at band pixels.
+_WARPSTAR_BOX = (922, 17, 1050, 132)
+_WARPSTAR_LEVELS = {
+    150.0: [
+        ((983, 17), 42),
+        ((968, 32), 65),
+        ((953, 48), 90),
+        ((922, 64), 116),
+        ((932, 80), 139),
+        ((1034, 96), 156),
+        ((1031, 125), 200),
+        ((1030, 129), 206),
+    ],
+    100.0: [
+        ((995, 18), 1),
+        ((969, 32), 36),
+        ((1043, 54), 74),
+        ((924, 64), 113),
+        ((1046, 80), 131),
+        ((1035, 111), 201),
+        ((1032, 114), 208),
+        ((1033, 129), 241),
+    ],
+}
+
+
+@pytest.mark.parametrize("scale", sorted(_WARPSTAR_LEVELS))
+def test_a_stroke_ramp_runs_between_whole_pixel_ends(scale: float) -> None:
+    """At -93 degrees the ends are cut to whole pixels, a scaled half first.
+
+    150%: half (-4.52, 86.25) cut to (-4, 86) about (986, 74.5), ends
+    (990, -11) and (982, 160). 100%: ends (989.01, 17) and (982.99, 132) cut
+    to (989, 17) and (982, 132).
+    """
+    desc = _stroke(Enum.OutsetFrame, 7.0, angle=-93.0, scale=scale)
+    box, angle = paint.ramp_ends_on_pixels(_WARPSTAR_BOX, desc)
+    ends = {150.0: ((990, -11), (982, 160)), 100.0: ((989, 17), (982, 132))}[scale]
+    (x0, y0), (x1, y1) = ends
+    assert angle == pytest.approx(math.degrees(math.atan2(y0 - y1, x1 - x0)))
+    assert ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2) == (
+        (x0 + x1) / 2,
+        (y0 + y1) / 2,
+    )
+    viewport = (921, 16, 1058, 140)
+    color, _ = paint.draw_gradient_fill(
+        viewport, ColorMode.RGB, desc, box, 8, angle=angle
+    )
+    assert color is not None
+    for (x, y), level in _WARPSTAR_LEVELS[scale]:
+        got = color[y - viewport[1], x - viewport[0], 0] * 255
+        assert abs(got - level) <= 1, (x, y)
+
+
+def test_a_right_angle_at_full_scale_keeps_its_box() -> None:
+    desc = _stroke(Enum.OutsetFrame, 7.0, angle=90.0)
+    box, angle = paint.ramp_ends_on_pixels(_WARPSTAR_BOX, desc)
+    assert box == _WARPSTAR_BOX and angle == 90.0

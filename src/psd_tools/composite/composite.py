@@ -81,12 +81,15 @@ from psd_tools.composite.effects import (
     draw_satin,
     draw_stroke_effect_split,
     drop_shadow_bbox,
+    fades_to_clear,
     glow_geometry,
     glow_matte,
     glow_paint,
     glow_ranged,
     glow_reach,
+    gradient_inner_glow_bbox,
     inner_bbox,
+    inner_glow_paint,
     outer_glow_bbox,
     satin_geometry,
     shadow_geometry,
@@ -419,18 +422,26 @@ def _style_draws(layer: Layer) -> bool:
     return False
 
 
-def _blends_through(layer: Layer, color_mode: ColorMode) -> tuple[bool, bool]:
+def _blends_through(
+    layer: Layer,
+    color_mode: ColorMode,
+    as_pixels: Callable[[Layer], bool] | None = None,
+) -> tuple[bool, bool]:
     """Whether the layer's own paint and effects blend with what lies beneath.
 
     The pair is (in a mode the isolated render changes, in one it does not):
     a type layer's own paint, a group in a mode of its own and anything in a
     mode Photoshop fades by fill opacity land as they would pass through.
     Normal, Dissolve and a solid colour its mode blends to itself
-    (:py:data:`_FIXED_POINTS`) blend alike either way.
+    (:py:data:`_FIXED_POINTS`) blend alike either way. A type layer that
+    ``as_pixels`` says Photoshop composites from its stored raster
+    (:py:meth:`Compositor._drawn_as_pixels`) blends as the pixel layer it is
+    drawn as.
     """
     mixes = keeps = False
     if layer.blend_mode not in _COVERS_BENEATH | {BlendMode.PASS_THROUGH}:
-        if layer.kind == "type" or layer.is_group() or layer.blend_mode in _FILL_FADED:
+        live_type = layer.kind == "type" and not (as_pixels and as_pixels(layer))
+        if live_type or layer.is_group() or layer.blend_mode in _FILL_FADED:
             keeps = True
         else:
             mixes = True
@@ -460,7 +471,11 @@ def _blends_through(layer: Layer, color_mode: ColorMode) -> tuple[bool, bool]:
     return mixes, keeps
 
 
-def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
+def _mixes_isolated(
+    layer: Layer,
+    shown: Callable[[Layer], bool] | None,
+    as_pixels: Callable[[Layer], bool] | None = None,
+) -> bool:
     """Whether a styled or clipped pass-through group mixes in its isolated render.
 
     Photoshop renders a pass-through group whose style draws
@@ -471,7 +486,10 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
     backdrop tells the two apart: a child in a mode other than Normal, or an
     effect in one. Photoshop keeps a type layer's own paint in such a mode,
     a group in one, and a mode faded by fill opacity, as they pass through,
-    so a group holding any keeps its pass-through render whole. A clipping
+    so a group holding any keeps its pass-through render whole. A type layer
+    Photoshop composites from its stored raster is not live text there: it
+    mixes as a pixel layer does (``as_pixels``, see
+    :py:func:`_blends_through`). A clipping
     child blends with its base, not the backdrop; a group that is not
     pass-through blends its contents on its own. Only a group at full fill and
     opacity, holding no knockout, mixes: no Photoshop render of a faded group
@@ -501,7 +519,7 @@ def _mixes_isolated(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool
             return False
         if isinstance(child, AdjustmentLayer):
             continue
-        child_mixes, keeps = _blends_through(child, color_mode)
+        child_mixes, keeps = _blends_through(child, color_mode, as_pixels)
         if keeps:
             return False
         mixes = mixes or child_mixes
@@ -686,16 +704,15 @@ def _overlay_boxes(
     return box, layer.bbox
 
 
-def _reference_point(layer: Layer) -> tuple[float, float] | None:
+def _reference_point(layer: Layer) -> tuple[float, float]:
     """The layer's ``fxrp`` reference point, in document coordinates.
 
-    None without the tag, so that :py:func:`paint.pattern_origin` falls back
-    to the layer's box; :py:attr:`~psd_tools.api.layers.Layer.reference_point`
-    reads a missing tag as the document's origin.
+    A missing tag reads as the document's origin, as Photoshop 2023 reads
+    it and as :py:attr:`~psd_tools.api.layers.Layer.reference_point` does.
     """
     point = layer.tagged_blocks.get_data(Tag.REFERENCE_POINT)
     if point is None:
-        return None
+        return 0.0, 0.0
     return float(point[0]), float(point[1])
 
 
@@ -707,7 +724,7 @@ def _draw_color_overlay(
 
 def _tiling_origin(
     layer: Layer, descriptor: Descriptor, layout: _Box
-) -> tuple[int, int]:
+) -> tuple[float, float]:
     """Where a pattern of ``layer``'s style laid out across ``layout`` starts.
 
     A layer's tiling starts at its reference point, a group's at its layout
@@ -716,6 +733,19 @@ def _tiling_origin(
     """
     point = None if layer.is_group() else _reference_point(layer)
     return paint.pattern_origin(descriptor, layout, point)
+
+
+def _texture_origin(layer: Layer, descriptor: Descriptor) -> tuple[int, int]:
+    """Where a bevel's texture tiles from, in document coordinates.
+
+    Linked with the layer, from its reference point (a group's too), rounded
+    to the pixel; unlinked, from the document's origin. The phase is not
+    read: Photoshop 2023 draws none of it.
+    """
+    point = _reference_point(layer)
+    if not bool(descriptor.get(Key.Alignment, True)):
+        return 0, 0
+    return math.floor(point[0] + 0.5), math.floor(point[1] + 0.5)
 
 
 def _draw_pattern_overlay(
@@ -857,6 +887,7 @@ def _draw_gradient_overlay(
         descriptor,
         path or paint.gradient_anchor(layer._psd, descriptor, layout),
         layer._psd.depth,
+        paint.document_lms(layer._psd),
     )
 
 
@@ -1174,6 +1205,7 @@ def _beneath_reach(
                     geometry.angle,
                     geometry.size,
                     budget,
+                    geometry.spread,
                 ),
             )
         except _UNREADABLE as error:
@@ -1289,6 +1321,8 @@ class _TextBlend:
     """
 
     overrides: Mapping[int, float | None] = field(default_factory=dict)
+    # The pass's text gamma: None mixes every type layer straight.
+    gamma: float | None = TEXT_BLEND_GAMMA
     reference: Callable[[], np.ndarray | None] | None = None
     chosen: dict[int, bool] = field(default_factory=dict)
     leaning: dict[int, tuple[np.ndarray, np.ndarray]] = field(default_factory=dict)
@@ -2088,6 +2122,7 @@ def _composite_pass(
         on = _within(viewport, box)
         cache = _PassCache()
         cache.text.overrides = overrides
+        cache.text.gamma = text_gamma
         cache.text.reference = reference
         cache.text.chosen = dict(chosen)
         compositor = Compositor(
@@ -2692,11 +2727,20 @@ def _blends_in_text_space(layer: Layer, color_mode: ColorMode | None) -> bool:
         return False
     if color_mode not in (None, ColorMode.RGB) or layer._psd.depth == 32:
         return False
-    # Unreadable text data leaves nothing but the stored pixels.
+    return not _keeps_stored_raster(layer)
+
+
+def _keeps_stored_raster(layer: TypeLayer) -> bool:
+    """Whether Photoshop draws the type layer from its stored raster alone.
+
+    So for a layer whose font was substituted or whose text data predates
+    the ``bounds`` key, and for unreadable text data, which leaves nothing
+    but the stored pixels.
+    """
     if layer._type_data is None:
-        return False
+        return True
     text_data = layer._type_data.text_data
-    return b"bounds" in text_data and not text_data.get(b"substitutesUsed", False)
+    return b"bounds" not in text_data or bool(text_data.get(b"substitutesUsed", False))
 
 
 # A type layer's edge pixel counts where the straight and gamma mixes differ by
@@ -3171,7 +3215,9 @@ class _EffectCanvas:
             # The colour fades in place of the coverage, and the faded colour
             # covers all the effect reaches, the layer's clear part included.
             color, alpha = faded, (alpha > 0.0).astype(np.float32)
-        blend_fn = get_blend_func(blend_mode, self._compositor._color_mode)
+        # A stand-in compositor may hold no depth: float, as before.
+        depth = getattr(self._compositor, "_depth", None)
+        blend_fn = get_blend_func(blend_mode, self._compositor._color_mode, depth)
         # ``normal`` ignores what is under it, and is also what an effect whose
         # blend mode this module does not know answers, so the un-premultiply
         # is skipped rather than computed for a function that will drop it.
@@ -3650,8 +3696,13 @@ def _remix(
 
 
 # A bevel texture's colour planes, by its pattern's mode. An indexed pattern's
-# one plane holds palette indices, not grey levels.
-_TEXTURE_PLANES = {ColorMode.RGB: 3, ColorMode.GRAYSCALE: 1}
+# one plane holds palette indices, not grey levels; a multichannel one of one
+# plane (Photoshop's preset textures, Watercolor) reads as grey.
+_TEXTURE_PLANES = {
+    ColorMode.RGB: 3,
+    ColorMode.GRAYSCALE: 1,
+    ColorMode.MULTICHANNEL: 1,
+}
 
 # Float32 planes of ``layer.bbox`` that _blend_unfiltered()'s numpy steps
 # allocate at their peak, beside the arrays it is given. The compiled loop
@@ -3999,6 +4050,10 @@ class Compositor:
         color, shape, alpha = compositor.finish()
     """
 
+    # The bits per channel of the document whose layer goes on (set by
+    # apply()), for the blend modes Photoshop computes in integers at 8.
+    _depth: int | None = None
+
     def __init__(
         self,
         viewport: tuple[int, int, int, int],
@@ -4097,6 +4152,7 @@ class Compositor:
     def apply(self, layer: Layer, clip_compositing: bool = False) -> None:
         """Composite a layer into the stack."""
         logger.debug("Compositing %s", layer)
+        self._depth = layer._psd.depth
 
         if not self._accepts(layer, clip_compositing):
             return
@@ -4290,7 +4346,8 @@ class Compositor:
         a stroke reaches outside the layer: a layer whose own box has cleared
         the viewport can still paint the part of its stroke that falls back
         inside, and rejecting it here would lose the stroke along with the
-        layer (#815). A drop shadow reaches out the same way. ``_effect_reach()``
+        layer (#815). A drop shadow reaches out the same way, and so does a
+        fill drawn from its path past its box (:py:meth:`_fill_box`). ``_effect_reach()``
         rather than ``_paint_bbox()`` because the group half of that
         measurement is unreachable from here: a group is exempt from the cull,
         so the box is only ever measured for a layer that has no contents to
@@ -4310,9 +4367,12 @@ class Compositor:
         if self._layer_filter is not None and not self._layer_filter(layer):
             logger.debug("Ignore %s", layer)
             return False
-        if not (
-            isinstance(layer, AdjustmentLayer) or layer.is_group()
-        ) and utils.intersect(self._viewport, _effect_reach(layer)) == (0, 0, 0, 0):
+        if (
+            not (isinstance(layer, AdjustmentLayer) or layer.is_group())
+            and utils.intersect(self._viewport, _effect_reach(layer)) == (0, 0, 0, 0)
+            and utils.intersect(self._viewport, self._fill_box(layer, self._viewport))
+            == (0, 0, 0, 0)
+        ):
             logger.debug("Out of viewport %s", layer)
             return False
         # A clipping layer is composited by its base, through _apply_clip_layers().
@@ -4865,7 +4925,7 @@ class Compositor:
         color_b = knockout_color if knocks_out else self._color
 
         blend_fn = fade_source(
-            get_blend_func(blend_mode, self._color_mode), blend_mode, faded
+            get_blend_func(blend_mode, self._color_mode, self._depth), blend_mode, faded
         )
         if text_gamma is not None:
             mixed = self._mix_in_text_space(
@@ -4878,8 +4938,9 @@ class Compositor:
                 alpha_b,
                 blend_fn,
                 text_gamma,
-                isolated=self._text_isolated and not knocks_out,
+                isolated=self._text_isolated and (under is not None or not knocks_out),
                 inside=text_inside,
+                window=knockout_alpha_g if under is not None else None,
             )
             if text_key is None or not self._mixes_straight(
                 text_key,
@@ -4930,6 +4991,7 @@ class Compositor:
         text_gamma: float,
         isolated: bool,
         inside: tuple[np.ndarray, np.ndarray] | None = None,
+        window: np.ndarray | None = None,
     ) -> np.ndarray:
         """The colour canvas after a type layer goes on.
 
@@ -4951,6 +5013,10 @@ class Compositor:
         backdrop, so the canvas keeps standing over it for the layers to come.
         The blend mode still sees the canvas: a pass-through group's children
         blend with the backdrop whether or not the group is styled.
+
+        ``window``, where given, is the group alpha of the canvas a knock-out
+        window shows (:py:meth:`_apply_apart`): isolated, the shape uncovers
+        that content, un-mixed from the backdrop the same way.
         """
         rows = np.flatnonzero(shape.any(axis=(1, 2)))
         columns = np.flatnonzero(shape.any(axis=(0, 2)))
@@ -5040,9 +5106,17 @@ class Compositor:
         )
         blended = (1.0 - alpha_b) * color + alpha_b * blend_fn(backdrop, color)
         source = to_text_space(blended, text_gamma)
+        window_alpha: np.ndarray | None = None
         if isolated:
             color_0 = picked(self._color_0).astype(np.float64)
             alpha_0 = picked(self._alpha_0).astype(np.float64)
+            if window is not None:
+                window_alpha = picked(window).astype(np.float64)
+                backdrop = utils.divide(
+                    backdrop * alpha_b - (1.0 - window_alpha) * alpha_0 * color_0,
+                    window_alpha,
+                    fill=0.0,
+                )
             alpha_b = picked(alpha_g_previous).astype(np.float64)
             # The content so far, un-mixed from the backdrop it stands over;
             # where there is none its colour carries no weight below.
@@ -5051,13 +5125,18 @@ class Compositor:
                 alpha_b,
                 fill=0.0,
             )
-            backdrop = previous
+            if window_alpha is None:
+                backdrop = previous
             alpha_new = picked(self._alpha_g)
         # The canvas outside the shape stays, and the shape uncovers the
         # backdrop for what lies beyond the coverage.
         share = alpha if inside is None else picked(inside[0])
         prior = to_text_space(previous, text_gamma)
-        if isolated:
+        if window_alpha is not None:
+            mixed = (1.0 - shape) * alpha_b * prior + (
+                shape - share
+            ) * window_alpha * to_text_space(backdrop, text_gamma)
+        elif isolated:
             mixed = (1.0 - share) * alpha_b * prior
         else:
             beneath = (
@@ -5069,17 +5148,26 @@ class Compositor:
         if inside is None:
             mixed = mixed + alpha * source
         else:
-            inner_alpha = np.maximum(
-                alpha_new - (1.0 - share) * alpha_b
-                if isolated
-                else alpha_new
-                - (1.0 - shape) * alpha_previous
-                - (shape - share) * alpha_b,
-                0.0,
-            )
+            if window_alpha is not None:
+                inner_alpha = np.maximum(
+                    alpha_new
+                    - (1.0 - shape) * alpha_b
+                    - (shape - share) * window_alpha,
+                    0.0,
+                )
+            else:
+                inner_alpha = np.maximum(
+                    alpha_new - (1.0 - share) * alpha_b
+                    if isolated
+                    else alpha_new
+                    - (1.0 - shape) * alpha_previous
+                    - (shape - share) * alpha_b,
+                    0.0,
+                )
             if isolated:
+                beneath_alpha = alpha_b if window_alpha is None else window_alpha
                 within = utils.divide(
-                    (share - alpha) * alpha_b * backdrop + alpha * blended,
+                    (share - alpha) * beneath_alpha * backdrop + alpha * blended,
                     inner_alpha,
                     fill=0.0,
                 )
@@ -5165,7 +5253,7 @@ class Compositor:
         # document on every path the library builds. Where they could differ, a
         # compositor built by hand, the canvas is this one's and so is the mode
         # that describes it.
-        blend_fn = get_blend_func(layer.blend_mode, self._color_mode)
+        blend_fn = get_blend_func(layer.blend_mode, self._color_mode, layer._psd.depth)
         blended = blend_fn(content, transformed_color)
         # An 8-bit canvas holds whole levels where an adjustment applies.
         levels = layer._psd.depth == 8
@@ -5253,6 +5341,7 @@ class Compositor:
             mixing=self._mixing,
             alpha_only=self._alpha_only,
         )
+        scratch._depth = self._depth
         scratch._apply_source(
             source.color, paint, paint, layer.blend_mode, text_gamma=source.text_gamma
         )
@@ -5532,8 +5621,32 @@ class Compositor:
         memo = self._cache.mixes_isolated
         key = id(layer)
         if key not in memo:
-            memo[key] = _mixes_isolated(layer, self._layer_filter)
+            memo[key] = _mixes_isolated(
+                layer, self._layer_filter, self._drawn_as_pixels
+            )
         return memo[key]
+
+    def _drawn_as_pixels(self, layer: Layer) -> bool:
+        """Whether Photoshop composites the type layer from its stored raster.
+
+        As it does a layer it leaves to that raster
+        (:py:func:`_keeps_stored_raster`) and, in the text space, one this
+        pass mixes straight (:py:meth:`_text_blend`: pinned so, or so read
+        off the reference): its edge mixes straight and its paint blends as
+        a pixel layer's. Photoshop 2023 does so with a layer whose text it
+        would lay out anew, flagged ``textWarningLevel`` 1, such as text a
+        later Photoshop wrote; nothing in the file says which.
+        """
+        if not isinstance(layer, TypeLayer):
+            return False
+        if not _blends_in_text_space(layer, self._color_mode):
+            return _keeps_stored_raster(layer)
+        # The pass's blend, not this compositor's: a scratch or alpha-only
+        # one runs without a text gamma of its own.
+        blend = self._cache.text
+        if layer.layer_id in blend.overrides:
+            return blend.overrides[layer.layer_id] is None
+        return blend.gamma is None or blend.chosen.get(id(layer)) is True
 
     def _covers_beneath(self, layer: Layer) -> bool:
         """:py:func:`_covers_beneath`, for a group that mixes too.
@@ -5582,13 +5695,18 @@ class Compositor:
         share = (1.0 - a) / (2.0 - a)
         return color + share * (isolated.result_isolated() - color)
 
-    def _read_object(self, layer: Layer) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def _read_object(
+        self, layer: Layer, box: tuple[int, int, int, int] | None = None
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
         """The layer's own color and coverage, on ``layer.bbox`` and unpasted.
 
         Split out of :py:meth:`_get_object` so a stroke effect can re-read the
         coverage on the box it draws on rather than on this compositor's
         viewport (#804), without restating which of the two sources -- stored
         pixels or a redrawn fill -- this layer's arrays come from.
+
+        A redrawn fill is drawn on ``box`` (:py:meth:`_fill_box`), laid out on
+        ``layer.bbox``.
         """
         color = layer.numpy("color")
         # The colour array stays live through the shape read, so it is charged
@@ -5597,9 +5715,10 @@ class Compositor:
             numpy_io.check_shape_read(layer, numpy_io._backing_bytes(color))
         shape = layer.numpy("shape")
         if (self._redraws(layer) or not layer.has_pixels()) and utils.has_fill(layer):
-            color, shape = paint.create_fill(layer, layer.bbox)
+            box = layer.bbox if box is None else box
+            color, shape = paint.create_fill(layer, box, layer.bbox)
             if shape is None:
-                shape = np.ones((layer.height, layer.width, 1), dtype=np.float32)
+                shape = np.ones((box[3] - box[1], box[2] - box[0], 1), dtype=np.float32)
         elif color is not None and isinstance(layer, SmartObjectLayer):
             memo = self._cache.unfiltered
             if memo is not None and memo[0] is layer:
@@ -5609,6 +5728,31 @@ class Compositor:
             if color is not stored:
                 self._cache.unfiltered = (layer, color, shape)
         return color, shape
+
+    @staticmethod
+    def _fill_box(
+        layer: Layer, viewport: tuple[int, int, int, int]
+    ) -> tuple[int, int, int, int]:
+        """The box :py:meth:`_read_object` draws a layer's fill on.
+
+        ``layer.bbox``, joined on ``viewport`` by the path's drawn box for a
+        filled layer with a path and no stored pixels: its box is the
+        origination box truncated to whole pixels, which can stop a row short
+        of what the path covers (Align Edges snaps the path outward).
+        """
+        box = layer.bbox
+        if (
+            box[0] >= box[2]
+            or box[1] >= box[3]
+            or layer.has_pixels()
+            or not utils.has_fill(layer)
+            or not layer.has_vector_mask()
+        ):
+            return box
+        mask = layer.vector_mask
+        if mask is None or mask.disabled:
+            return box
+        return utils.union_bbox(box, utils.intersect(_drawn_bbox(layer), viewport))
 
     def _read_rows(
         self, layer: Layer, viewport: tuple[int, int, int, int], color: bool = True
@@ -5829,9 +5973,10 @@ class Compositor:
         if rows is None:
             if alone:
                 color, own_shape = self._read_shape(layer)
+                box = layer.bbox
             else:
-                color, own_shape = self._read_object(layer)
-            box = layer.bbox
+                box = self._fill_box(layer, viewport)
+                color, own_shape = self._read_object(layer, box)
         else:
             color, own_shape, box = rows
             del rows
@@ -6650,22 +6795,25 @@ class Compositor:
     def _knocks_out_window(self, layer: Layer) -> bool:
         """Whether the layer knocks its shadows out as a window to the canvas.
 
-        A Normal layer below full fill shows its paint and its interior
-        effects over the canvas as it stood before its shadows, the window
-        its shape cuts in them, and is then mixed over the shadows by that
-        shape (:py:meth:`_apply_apart`). In a type layer's text space that
-        is not the same as cutting the shadow under the shape. Only a layer
-        whose every shadow knocks out and that has no outer glow takes it.
+        A Normal layer below full fill, or one in another mode, shows its
+        paint and its interior effects over the canvas as it stood before
+        its shadows, the window its shape cuts in them, and is then mixed
+        over the shadows by that shape (:py:meth:`_apply_apart`). In a type
+        layer's text space, or under interior effects that cover the paint,
+        that is not the same as cutting the shadow under the shape. Only a
+        layer whose every shadow knocks out and that has no outer glow takes
+        it.
         """
-        if (
-            layer.is_group()
-            or isinstance(layer, AdjustmentLayer)
-            or layer.blend_mode not in _COVERS_BENEATH
-        ):
+        if layer.is_group() or isinstance(layer, AdjustmentLayer):
             return False
         fill_opacity, opacity = self._get_const(layer)
         knockout = _read_knockout(layer)
-        if knockout or fill_opacity >= 1.0 or opacity <= 0.0:
+        if knockout or opacity <= 0.0:
+            return False
+        if (
+            layer.blend_mode in _COVERS_BENEATH | {BlendMode.PASS_THROUGH}
+            and fill_opacity >= 1.0
+        ):
             return False
         shadows = _readable(layer, "dropshadow")
         if not shadows or _readable(layer, "outerglow"):
@@ -6733,6 +6881,7 @@ class Compositor:
                     geometry.angle,
                     geometry.size,
                     layer._psd._max_alloc_bytes,
+                    geometry.spread,
                 )
                 self._check_effect_growth(bbox, cast_from)
                 bbox = _within_reach(
@@ -6839,9 +6988,12 @@ class Compositor:
                 continue
             if bbox == (0, 0, 0, 0):
                 continue
-            if noise > 0.0 and Key.Gradient in glow.descriptor:
+            # A gradient's noise moves only a fade to clear's coverage.
+            gradient = glow.descriptor.get(Key.Gradient)
+            noisy_paint = gradient is not None and noise > 0.0
+            if noisy_paint and not fades_to_clear(gradient):
                 logger.debug("The noise of a gradient glow of %s is not applied", layer)
-                noise = 0.0
+                noise, noisy_paint = 0.0, False
             if jitter > 0.0:
                 logger.debug("The jitter of an outer glow of %s is not applied", layer)
             silhouette = self._cast_shape(layer, bbox)
@@ -6854,9 +7006,19 @@ class Compositor:
                     range_=range_,
                     contour=contour,
                     anti_aliased=anti_aliased,
-                    noise=noise,
+                    noise=0.0 if noisy_paint else noise,
                     viewport=bbox,
                 )
+                noisy = None
+                if noisy_paint:
+                    noisy = glow_ranged(
+                        matte,
+                        range_=range_,
+                        contour=contour,
+                        anti_aliased=anti_aliased,
+                        noise=noise,
+                        viewport=bbox,
+                    )
                 color, coverage = glow_paint(
                     bbox,
                     layer._psd.color_mode,
@@ -6865,6 +7027,7 @@ class Compositor:
                     falloff,
                     over=0.0 if banded else over,
                     matte=matte,
+                    noisy=noisy,
                 )
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an outer glow of %s: %s", layer, error)
@@ -6918,8 +7081,13 @@ class Compositor:
             if silhouette is None:
                 silhouette = silhouettes[bbox] = self._cast_shape(layer, bbox)
             try:
-                coverage = draw(bbox, silhouette)
-                color = self._solid_color(layer, effect.descriptor)
+                coverage, painted = draw(bbox, silhouette)
+                if painted is None:
+                    color = self._solid_color(layer, effect.descriptor)
+                elif self._alpha_only:
+                    color = painted
+                else:
+                    color = paste(self._viewport, bbox, painted)
             except _UNREADABLE as error:
                 logger.debug("Cannot draw an inner effect of %s: %s", layer, error)
                 continue
@@ -7025,9 +7193,16 @@ class Compositor:
         cast_from: tuple[int, int, int, int],
     ) -> tuple[
         tuple[int, int, int, int],
-        Callable[[tuple[int, int, int, int], np.ndarray], np.ndarray],
+        Callable[
+            [tuple[int, int, int, int], np.ndarray],
+            tuple[np.ndarray, np.ndarray | None],
+        ],
     ]:
-        """An inner effect's box, cut to what reaches the viewport, and its draw."""
+        """An inner effect's box, cut to what reaches the viewport, and its draw.
+
+        The draw gives the coverage, and a gradient glow's colour on the box
+        (``None`` for the effect's solid colour).
+        """
         inner = cast(InnerShadow | InnerGlow, effect)
         desc = inner.descriptor
         what = "Inner shadow" if isinstance(inner, InnerShadow) else "Inner glow"
@@ -7045,7 +7220,7 @@ class Compositor:
 
             def draw_shadow(
                 box: tuple[int, int, int, int], shape: np.ndarray
-            ) -> np.ndarray:
+            ) -> tuple[np.ndarray, None]:
                 return draw_inner_shadow(
                     box,
                     shape,
@@ -7056,30 +7231,40 @@ class Compositor:
                     contour=contour,
                     anti_aliased=anti_aliased,
                     noise=noise,
-                )
+                ), None
 
             return bbox, draw_shadow
         glow = inner
-        if glow.gradient is not None and desc.get(Key.Color) is None:
-            raise ValueError("a gradient glow is not drawn")
+        gradient = glow.gradient is not None and desc.get(Key.Color) is None
+        if gradient:
+            bbox = gradient_inner_glow_bbox(
+                cast_from, size, layer._psd._max_alloc_bytes
+            )
         center = glow.glow_source == GlowSource.CENTER
         precise = glow.glow_type == GlowTechnique.PRECISE_MATTE
         glow_range = float(desc.get(Key.InputRange, 50.0))
         bbox = _within_reach(bbox, self._viewport, glow_reach(size, choke, precise))
+        color_mode = layer._psd.color_mode
+        values: dict[str, Any] = {
+            "size": size,
+            "choke": choke,
+            "center": center,
+            "precise": precise,
+            "glow_range": glow_range,
+            "contour": contour,
+            "anti_aliased": anti_aliased,
+            "noise": noise,
+        }
 
-        def draw_glow(box: tuple[int, int, int, int], shape: np.ndarray) -> np.ndarray:
-            return draw_inner_glow(
-                box,
-                shape,
-                size=size,
-                choke=choke,
-                center=center,
-                precise=precise,
-                glow_range=glow_range,
-                contour=contour,
-                anti_aliased=anti_aliased,
-                noise=noise,
-            )
+        def draw_glow(
+            box: tuple[int, int, int, int], shape: np.ndarray
+        ) -> tuple[np.ndarray, np.ndarray | None]:
+            if gradient:
+                color, coverage = inner_glow_paint(
+                    box, color_mode, desc, shape, **values
+                )
+                return coverage, color
+            return draw_inner_glow(box, shape, **values), None
 
         return bbox, draw_glow
 
@@ -7153,7 +7338,7 @@ class Compositor:
                     )
             texture = None
             if bevel.use_texture:
-                texture = self._bevel_texture(layer, bevel, bbox, size)
+                texture = self._bevel_texture(layer, bevel, bbox)
             silhouette = self._cast_shape(layer, bbox)
             try:
                 amounts = draw_bevel(
@@ -7200,16 +7385,15 @@ class Compositor:
         layer: Layer,
         bevel: BevelEmboss,
         bbox: tuple[int, int, int, int],
-        size: float,
     ) -> np.ndarray | None:
         """A bevel's texture on ``bbox``: its pattern's luminance as a height field.
 
-        The pattern tiles from where a pattern overlay of the layer would
-        (:py:func:`_tiling_origin`), at the texture's scale;
-        :py:func:`texture_height` turns its luminance into height; the
-        pattern's alpha is not read. None, and the bevel goes on untextured,
-        when the pattern is not in the document or cannot be read, or the
-        document or the pattern is neither RGB nor grayscale.
+        The pattern tiles at the texture's scale from
+        :py:func:`_texture_origin`; :py:func:`texture_height` turns its
+        luminance into height; the pattern's alpha is not read. None, and
+        the bevel goes on untextured, when the pattern is not in the document
+        or cannot be read, the document is neither RGB nor grayscale, or the
+        pattern is none of those nor one-plane multichannel.
         """
         if layer._psd.color_mode not in (ColorMode.RGB, ColorMode.GRAYSCALE):
             logger.debug(
@@ -7227,12 +7411,11 @@ class Compositor:
                     layer,
                 )
                 return None
-            _, layout = _overlay_boxes(
-                layer, self._viewport, self._cache.content_bboxes
-            )
-            origin = _tiling_origin(layer, bevel.descriptor, layout)
             fill, _ = paint.draw_pattern_fill(
-                bbox, layer._psd, bevel.descriptor, origin=origin
+                bbox,
+                layer._psd,
+                bevel.descriptor,
+                origin=_texture_origin(layer, bevel.descriptor),
             )
         except _UNREADABLE as error:
             logger.debug("Cannot read the texture of a bevel of %s: %s", layer, error)
@@ -7243,7 +7426,6 @@ class Compositor:
         luminance = fill[:, :, 0] if planes == 1 else fill @ _BT601_LUMINANCE
         return texture_height(
             np.clip(luminance, 0.0, 1.0),
-            size=size,
             depth=bevel.texture_depth,
             inverted=bevel.texture_inverted,
         )

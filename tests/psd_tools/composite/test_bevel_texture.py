@@ -9,6 +9,7 @@ thing that lights the surface, so its bumps can be read off row by row.
 
 import copy
 import functools
+import importlib
 import math
 from typing import Any
 
@@ -18,7 +19,7 @@ from PIL import Image
 
 from psd_tools.api.layers import Layer
 from psd_tools.api.psd_image import PSDImage
-from psd_tools.composite import composite, paint
+from psd_tools.composite import composite, effects, paint
 from psd_tools.constants import BlendMode, ColorMode, Tag
 from psd_tools.psd.descriptor import Bool, Descriptor, Double, String
 from psd_tools.psd.patterns import (
@@ -190,11 +191,11 @@ def test_lit_from_the_right_a_blocks_right_edge_takes_the_light() -> None:
     [
         ((8.0, 8.0), (0.0, 0.0), (8, 8)),
         ((10.4, 5.6), (0.0, 0.0), (10, 6)),
-        ((8.0, 8.0), (3.0, -2.0), (11, 6)),
-        ((-300.0, 75.0), (1.0, 1.0), (-299, 76)),
+        ((8.0, 8.0), (3.0, -2.0), (8, 8)),
+        ((-300.0, 75.0), (1.0, 1.0), (-300, 75)),
     ],
 )
-def test_a_layers_texture_tiles_from_its_reference_point_and_phase(
+def test_a_layers_texture_tiles_from_its_reference_point_not_its_phase(
     point: tuple[float, float], phase: tuple[float, float], origin: tuple[int, int]
 ) -> None:
     psd, layer = _document()
@@ -206,22 +207,32 @@ def test_a_layers_texture_tiles_from_its_reference_point_and_phase(
 
 
 @pytest.mark.parametrize(
-    ("blend_mode", "origin"),
-    [(BlendMode.PASS_THROUGH, (0, 0)), (BlendMode.NORMAL, (13, 11))],
+    ("blend_mode", "point", "linked", "origin"),
+    [
+        (BlendMode.PASS_THROUGH, [5.0, 3.0], True, (5, 3)),
+        (BlendMode.NORMAL, [5.0, 3.0], True, (5, 3)),
+        (BlendMode.NORMAL, None, True, (0, 0)),
+        (BlendMode.NORMAL, [5.0, 3.0], False, (0, 0)),
+    ],
 )
-def test_a_groups_texture_tiles_from_its_layout_box(
+def test_a_groups_texture_tiles_from_its_reference_point(
     blend_mode: BlendMode,
+    point: list[float] | None,
+    linked: bool,
     origin: tuple[int, int],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pass-through group's from the document's origin, another from its box.
+    """As a layer's, whatever its blend mode, not from its box.
 
-    The group's own reference point is not read, as for a pattern overlay.
+    Without a reference point, or not linked with the layer, from the
+    document's origin, as Photoshop 2023 tiles it.
     """
     psd, layer = _document(left=13, top=11)
     group = psd.create_group([layer], blend_mode=blend_mode)
-    group.tagged_blocks.set_data(Tag.REFERENCE_POINT, [5.0, 3.0])
-    bevel = _texture(group)
+    if point is not None:
+        group.tagged_blocks.set_data(Tag.REFERENCE_POINT, point)
+    bevel = _texture(group, phase=(2.0, 1.0))
+    bevel[Key.Alignment] = Bool(linked)
     assert group.bbox == (13, 11, 45, 43)
 
     origins: list[tuple[int, int] | None] = []
@@ -282,6 +293,16 @@ def test_a_grayscale_pattern_textures_as_an_rgb_one_does(mode: str) -> None:
     assert _lit(psd, bevel, layer.bbox, (8, 8), axis=0) == ({7, 0}, {3, 4})
 
 
+def test_a_one_plane_multichannel_pattern_textures_as_a_grey_one() -> None:
+    """As Photoshop's preset textures are stored (MDW Developper's Watercolor)."""
+    psd, layer = _document(pattern_mode=ColorMode.MULTICHANNEL)
+    bevel = _texture(layer)
+    assert _lit(psd, bevel, layer.bbox, (8, 8), axis=0) == ({7, 0}, {3, 4})
+    grey, _ = _document(pattern_mode=ColorMode.GRAYSCALE)
+    _texture(grey[0])
+    assert np.array_equal(_rendered(psd), _rendered(grey))
+
+
 @pytest.mark.parametrize("pattern_mode", [ColorMode.INDEXED, ColorMode.LAB])
 def test_a_pattern_neither_rgb_nor_grey_draws_the_untextured_bevel(
     pattern_mode: ColorMode,
@@ -320,3 +341,62 @@ def test_a_cut_through_a_texture_renders_what_the_whole_does(viewport: Box) -> N
     whole = _rendered(psd)
     left, top, right, bottom = viewport
     assert np.array_equal(_rendered(psd, viewport), whole[top:bottom, left:right])
+
+
+# effects/bevel-texture-laws.psd: six 96 px grey squares, each with a smooth
+# inner bevel (lit from 90 degrees at 30, white Screen and black Multiply at
+# 100%) textured with a forged 64 px tile of dots, blocks, lines, grey and
+# colour blocks and a ramp; the descriptor is the Royal Eradicator Main
+# Cannon's, written by Photoshop. The cells: size 2 at 400% (corners), size 1,
+# depth 30 at 400% (under a pixel of rise), a Normal group linked from its
+# reference point (7, 5), a layer with a phase of (5, 3), and an unlinked one
+# with the same phase. The PNG is Photoshop 2023's PNG copy of it.
+_LAWS = "effects/bevel-texture-laws.psd"
+
+
+def _laws_errors() -> dict[str, int]:
+    """Per cell, the most any channel is off Photoshop's, premultiplied, in levels."""
+    psd = PSDImage.open(full_name(_LAWS))
+    path = full_name(_LAWS.replace(".psd", ".png"))
+    theirs = np.asarray(Image.open(path).convert("RGBA"), dtype=int)
+    ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
+    alpha = theirs[..., 3:] / 255.0
+    color = np.abs(ours[..., :3] * ours[..., 3:] / 255.0 - theirs[..., :3] * alpha)
+    error = np.maximum(np.abs(ours[..., 3] - theirs[..., 3]), color.max(axis=2))
+    errors = {}
+    for cell in psd:
+        left, top, right, bottom = cell.bbox
+        errors[cell.name] = int(np.ceil(error[top:bottom, left:right].max()))
+    return errors
+
+
+def test_textured_bevels_match_photoshop_2023() -> None:
+    errors = _laws_errors()
+    assert len(errors) == 6
+    assert max(errors.values()) <= 3, errors
+
+
+def test_a_sobel_operator_misses_a_textures_corners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(effects, "_SLOPE_ACROSS", (0.25, 0.5, 0.25))
+    assert _laws_errors()["prewitt d400"] > 24
+
+
+def test_a_textures_phase_or_a_groups_box_misplaces_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tiled as a pattern overlay is, from the phase and a group's box."""
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    monkeypatch.setattr(
+        compositing,
+        "_texture_origin",
+        lambda layer, desc: paint.pattern_origin(
+            desc,
+            layer.bbox,
+            None if layer.is_group() else compositing._reference_point(layer),
+        ),
+    )
+    errors = _laws_errors()
+    for cell in ("group ref", "phase", "unlinked phase"):
+        assert errors[cell] > 24, cell

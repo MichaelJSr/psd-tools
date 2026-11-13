@@ -10,6 +10,7 @@ width from the height.
 
 import itertools
 import math
+import struct
 from collections.abc import Callable
 
 import numpy as np
@@ -897,6 +898,65 @@ def test_rgb_stops_in_a_cmyk_document_still_blend_perceptually() -> None:
     assert np.allclose(perceptual[0, 0], classic[0, 0], atol=1e-6)
     assert np.allclose(perceptual[0, 100], classic[0, 100], atol=1e-6)
     assert not np.allclose(perceptual[0, 50], classic[0, 50], atol=0.01)
+
+
+def _matrix_profile(colorants: list[tuple[int, int, int]]) -> bytes:
+    """A version 2 ICC profile holding only ``rXYZ``, ``gXYZ`` and ``bXYZ``.
+
+    Each colorant is three s15Fixed16 integers, as the profile stores it.
+    """
+    header = bytearray(128)
+    header[8] = 2
+    table, data = b"", b""
+    start = 132 + 12 * 3
+    for name, xyz in zip((b"rXYZ", b"gXYZ", b"bXYZ"), colorants, strict=True):
+        tag = b"XYZ " + bytes(4) + struct.pack(">3i", *xyz)
+        table += struct.pack(">4sII", name, start + len(data), len(tag))
+        data += tag
+    return bytes(header) + struct.pack(">I", 3) + table + data
+
+
+# The cards' "Display" profile's colorants, as stored.
+_DISPLAY_COLORANTS = [(29120, 14730, 359), (24867, 47590, 5110), (9202, 3216, 48592)]
+YELLOW = (228.498, 249.0, 0.004)
+BLUE = (51.003, 26.0, 253.996)
+RED, PURE_BLUE = (255.0, 0.0, 0.0), (0.0, 0.0, 255.0)
+
+# Photoshop 2023's perceptual strokes in a "Display" document, smoothness 0:
+# the colour 25%, 50% and 75% along.
+PS_DISPLAY_PERCEPTUAL = [
+    ((YELLOW, BLUE), [(167, 210, 144), (110, 168, 193), (62, 118, 227)]),
+    ((RED, PURE_BLUE), [(195, 75, 107), (135, 85, 161), (73, 72, 209)]),
+]
+
+
+@pytest.mark.parametrize(("ends", "levels"), PS_DISPLAY_PERCEPTUAL)
+def test_perceptual_blends_in_the_documents_profile(
+    ends: tuple[tuple[float, float, float], tuple[float, float, float]],
+    levels: list[tuple[int, int, int]],
+) -> None:
+    """Oklab of the profile's colorants (Bradford to D65); sRGB's is 5-8 levels off."""
+    rgb_lms = paint._profile_lms(_matrix_profile(_DISPLAY_COLORANTS))
+    assert rgb_lms is not None
+    desc = _gradient(
+        stops=[_stop(ends[0], 0), _stop(ends[1], 4096)],
+        method=GradientMethod.PERCEPTUAL.value,
+    )
+    for lms in (rgb_lms, None):
+        color, _ = paint.draw_gradient_fill(
+            (0, 0, 101, 1), ColorMode.RGB, desc, (0, 0, 100, 1), 8, lms
+        )
+        assert color is not None
+        got = np.round(color[0, [25, 50, 75]] * 255)
+        off = np.abs(got - np.array(levels)).max()
+        assert off <= 1 if lms else off >= 5
+
+
+def test_srgb_and_matrixless_profiles_keep_srgbs_oklab() -> None:
+    srgb = [(28578, 14581, 913), (25239, 46981, 6362), (9376, 3972, 46799)]
+    assert paint._profile_lms(_matrix_profile(srgb)) is None
+    assert paint._profile_lms(bytes(132)) is None
+    assert paint._profile_lms(b"short") is None
 
 
 def _grey_stop(black: float, location: int) -> Descriptor:

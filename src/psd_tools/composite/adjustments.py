@@ -675,6 +675,8 @@ def apply_huesaturation(
         return img
 
     if layer.enable_colorization:
+        if _get_lut_size(layer) == 256:
+            return _colorize_8bit(img, *colorization)
         hsl_colorize_tuple = _normalize_hsl(colorization)
         return (
             _huesaturation_colorize(img, hsl_colorize_tuple)
@@ -687,12 +689,48 @@ def apply_huesaturation(
         for hue_range, hsl_tuple in items
         if hsl_tuple != (_0, _0, _0)
     ]
+    hue, saturation, lightness = (int(value) for value in master)
+    if (
+        not color_ranges
+        and hue == 0
+        and saturation in (0, -100)
+        and (saturation or lightness)
+        and colormode == ColorMode.RGB
+        and layer._psd.depth == 8
+    ):
+        return _huesaturation_levels(img, saturation == -100, lightness)
     hsl_master_tuple = _normalize_hsl(master)
     return (
         _huesaturation(img, color_ranges, hsl_master_tuple)
         if color_ranges or hsl_master_tuple != (_0, _0, _0)
         else img
     )
+
+
+def _huesaturation_levels(
+    img: np.ndarray, desaturate: bool, lightness: int
+) -> NDArray[np.float32]:
+    """Photoshop 2023's 8-bit master lightness, then desaturation.
+
+    On each channel's nearest level ``c``, ``K`` a whole level: lightness
+    below 0 scales ``c`` by ``K / 255``, ``K = ceil(255 * (100 + l) / 100)``;
+    above 0 it moves ``c`` that far toward white, ``K = floor(255 * l / 100)``;
+    both rounded. Desaturation then sets every channel to the floored
+    midrange. Exact in float64: ``c * K / 255`` is never within 1/510 of a
+    half, so every CPU agrees.
+    """
+    level = np.floor(np.clip(img, _0, _1) * _255 + np.float32(0.5))
+    level = level.astype(np.float64)
+    if lightness < 0:
+        k = -((-255 * (100 + lightness)) // 100)
+        level = np.floor(level * k / 255.0 + 0.5)
+    elif lightness > 0:
+        k = 255 * lightness // 100
+        level = np.floor(level + (255.0 - level) * k / 255.0 + 0.5)
+    if desaturate:
+        mid = np.floor((level.max(axis=2) + level.min(axis=2)) / 2.0)
+        level = np.repeat(mid[..., None], img.shape[2], axis=2)
+    return level.astype(np.float32) / _255
 
 
 def _normalize_hsl(
@@ -715,6 +753,72 @@ def _huesaturation_colorize(
     hsl[..., 2:3] = _apply_lightness(hsl[..., 2:3], lightness)
 
     return hsl2rgb(hsl)
+
+
+def _colorize_8bit(
+    img: np.ndarray, hue: int, saturation: int, lightness: int
+) -> NDArray[np.float32]:
+    """Photoshop 2023's Colorize in 8-bit documents, exact.
+
+    The pixel's whole levels give its lightness level, ``(max + min) // 2``,
+    and that level reads the setting's table.
+    """
+    nan = np.isnan(img)
+    levels = _level_index(np.where(nan, _0, img), 256)
+    out = _colorize_levels(hue, saturation, lightness)[
+        (levels.max(axis=2) + levels.min(axis=2)) // 2
+    ]
+    out[nan.any(axis=2)] = np.nan
+    return out
+
+
+def _colorize_ramp() -> tuple[int, ...]:
+    # A sector's rising channel at steps of 60/42.5 degrees: the mix of its
+    # two ends at that angle on a circle, not on a hexagon.
+    angles = [math.radians(k * 60 / 42.5) for k in range(42)]
+    return tuple(
+        math.floor(255 * math.sin(a) / math.sin(a + math.pi / 3) + 0.5) for a in angles
+    )
+
+
+_COLORIZE_RAMP = _colorize_ramp()
+
+
+@functools.lru_cache(maxsize=16)
+def _colorize_levels(hue: int, saturation: int, lightness: int) -> NDArray[np.float32]:
+    """Colorize's output (256, 3) by lightness level, in Photoshop's integers.
+
+    Read off Photoshop 2023 (every hue, saturation and lightness): the hue
+    in 256ths of a turn, its channels a third of a turn apart (85 and 170),
+    the saturation in 255ths over 127, the lightness in 255ths. 16-bit
+    documents mix plain HSL instead.
+    """
+    sat = max(0, min(100, saturation)) * 255 // 100
+    light = min(100, abs(lightness)) * 255 // 100
+    level = np.arange(256, dtype=np.int64)
+    if lightness < 0:
+        level = (level * (255 - light) + 127) // 255
+    else:
+        level = (level * (255 - light) + 255 * light + 127) // 255
+    chroma = np.minimum(level, 255 - level) * sat // 127
+    high = np.minimum(255, (2 * level + chroma + 1) // 2)
+
+    index = hue % 360 * 256 // 360
+    shares = []
+    for offset in (85, 0, 170):
+        t = (index + offset) % 256
+        if t < 42:
+            shares.append(_COLORIZE_RAMP[t])
+        elif t <= 128:
+            shares.append(255)
+        elif t <= 170:
+            shares.append(_COLORIZE_RAMP[170 - t])
+        else:
+            shares.append(0)
+    out = (high - chroma)[:, None] + (chroma[:, None] * np.array(shares) + 127) // 255
+    table = (out / _255).astype(np.float32)
+    table.flags.writeable = False
+    return table
 
 
 def _huesaturation(
@@ -1392,13 +1496,6 @@ _VIBRANCE_VALUES = np.r_[np.arange(0.0, 256.0, 4.0), 255.0]
 _VIBRANCE_SATURATIONS = np.r_[
     (1 - np.cos(np.pi * np.linspace(0.0, 1.0, 41))) / 2, 1.1, 1.25, 1.5, 2.0
 ]
-_ICC_D50 = np.array([0.9642, 1.0, 0.8249])
-_ICC_SRGB_COLORANTS = np.array(
-    [[0.4361, 0.3851, 0.1431], [0.2225, 0.7169, 0.0606], [0.0139, 0.0971, 0.7141]]
-)
-_BRADFORD = np.array(
-    [[0.8951, 0.2664, -0.1614], [-0.7502, 1.7135, 0.0367], [0.0389, -0.0685, 1.0296]]
-)
 
 
 def _vibrance_space(layer: Layer) -> NDArray[np.float64] | None:
@@ -1412,46 +1509,27 @@ def _vibrance_space(layer: Layer) -> NDArray[np.float64] | None:
     resources = layer._psd.image_resources
     if Resource.ICC_PROFILE not in resources:
         return None
-    profile = _icc_tags(resources.get_data(Resource.ICC_PROFILE))
+    profile = paint._icc_tags(resources.get_data(Resource.ICC_PROFILE))
     if profile is None:
         return None
     version, tags = profile
     if version != 2 or b"chad" not in tags:
         return None
     try:
-        white = np.array(_icc_xyz(tags[b"wtpt"]))
+        white = np.array(paint._icc_xyz(tags[b"wtpt"]))
         colorants = np.array(
-            [_icc_xyz(tags[key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
+            [paint._icc_xyz(tags[key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
         ).T
     except (KeyError, struct.error):
         return None
-    if np.allclose(white, _ICC_D50, atol=2e-3) or np.allclose(
-        colorants, _ICC_SRGB_COLORANTS, atol=2e-3
+    if np.allclose(white, paint._ICC_D50, atol=2e-3) or np.allclose(
+        colorants, paint._ICC_SRGB_COLORANTS, atol=2e-3
     ):
         return None
-    cone = _BRADFORD @ white / (_BRADFORD @ _ICC_D50)
-    adapt = np.linalg.solve(_BRADFORD, cone[:, None] * _BRADFORD)
-    moved = (_ICC_D50 / white)[:, None] * adapt @ colorants
+    cone = paint._BRADFORD @ white / (paint._BRADFORD @ paint._ICC_D50)
+    adapt = np.linalg.solve(paint._BRADFORD, cone[:, None] * paint._BRADFORD)
+    moved = (paint._ICC_D50 / white)[:, None] * adapt @ colorants
     return np.linalg.solve(colorants, moved)
-
-
-def _icc_tags(data: bytes) -> tuple[int, dict[bytes, bytes]] | None:
-    """An ICC profile's major version and tags by signature, or None."""
-    try:
-        (count,) = struct.unpack_from(">I", data, 128)
-        tags = {}
-        for index in range(count):
-            name, start, size = struct.unpack_from(">4sII", data, 132 + 12 * index)
-            tags[name] = data[start : start + size]
-    except struct.error:
-        return None
-    return data[8], tags
-
-
-def _icc_xyz(tag: bytes) -> tuple[float, float, float]:
-    """The first value of an ICC ``XYZ `` tag."""
-    x, y, z = struct.unpack_from(">3i", tag, 8)
-    return (x / 65536, y / 65536, z / 65536)
 
 
 def _vibrance(linear: np.ndarray, vibrance: float, saturation: float) -> np.ndarray:

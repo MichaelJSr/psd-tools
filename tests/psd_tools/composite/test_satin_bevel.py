@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from psd_tools.api import utils as api_utils
 from psd_tools.api.effects import BevelEmboss
@@ -762,7 +763,7 @@ def test_satin_and_bevel_render_to_photoshops_preview(
 
 # The fitted constants: the gaussian widths per pixel of size of the satin's
 # blur, of the blur that rounds a smooth bevel other than a wide inner one
-# (the emboss's) and of soften, and the slope of a bevel's faces at 100%
+# (the emboss's) and of a chisel bevel's soften, and the slope of a bevel's faces at 100%
 # depth. The cases above hold them to Photoshop's previews.
 _FITTED = {
     "_SATIN_SIGMA_PER_SIZE": 0.45,
@@ -772,12 +773,13 @@ _FITTED = {
 }
 
 # Not fitted to a preview: none carries a chisel soft bevel or a textured
-# bevel. The texture height and the slope's smoothing are fitted to a
-# Photoshop export instead. Pinned so that a change to them is deliberate.
+# bevel. The texture height and the slope's smoothing are read off Photoshop
+# 2023 exports instead (effects/bevel-texture-laws.psd and
+# bevel-contour-range0.psd). Pinned so that a change to them is deliberate.
 _ASSUMED = {
     "_SLOPE_LIMIT_SIGMA_PER_SIZE": 0.125,
     "_TEXTURE_HEIGHT_PER_DEPTH": 1.0,
-    "_SLOPE_ACROSS": (0.25, 0.5, 0.25),
+    "_SLOPE_ACROSS": (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
 }
 
 
@@ -817,25 +819,43 @@ def _flat_layer(size: int = 24) -> np.ndarray:
 
 
 def test_a_textures_dark_pixels_stand_as_high_as_the_bevel() -> None:
-    """At 100% a black texture pixel is ``size`` high and a white one flat.
+    """At 100% a black texture pixel is as high as the surface and a white one flat.
 
     The depth scales that, and ``inverted`` or a negative depth turns it over.
     """
     luminance = np.array([[0.0, 0.5, 1.0]], dtype=np.float32)
-    height = effects.texture_height(luminance, size=2.0, depth=100.0, inverted=False)
-    assert np.allclose(height, [[2.0, 1.0, 0.0]])
+    height = effects.texture_height(luminance, depth=100.0, inverted=False)
+    assert np.allclose(height, [[1.0, 0.5, 0.0]])
     assert np.allclose(
-        effects.texture_height(luminance, size=2.0, depth=400.0, inverted=False),
-        [[8.0, 4.0, 0.0]],
+        effects.texture_height(luminance, depth=400.0, inverted=False),
+        [[4.0, 2.0, 0.0]],
     )
     assert np.allclose(
-        effects.texture_height(luminance, size=2.0, depth=100.0, inverted=True),
-        [[0.0, 1.0, 2.0]],
+        effects.texture_height(luminance, depth=100.0, inverted=True),
+        [[0.0, 0.5, 1.0]],
     )
     assert np.allclose(
-        effects.texture_height(luminance, size=2.0, depth=-100.0, inverted=False),
-        [[-2.0, -1.0, 0.0]],
+        effects.texture_height(luminance, depth=-100.0, inverted=False),
+        [[-1.0, -0.5, 0.0]],
     )
+
+
+def test_a_texture_stands_as_high_as_a_smooth_bevels_surface() -> None:
+    """A size 1 bevel's as a size 2's, and below 100 / size a pixel high.
+
+    Photoshop 2023 raises the texture with the surface: a depth of 30 or 50
+    at size 2, both under a pixel of rise, light it alike.
+    """
+    luminance = np.ones((24, 24), dtype=np.float32)
+    luminance[8:16, 4:20] = 0.0
+    texture = effects.texture_height(luminance, depth=100.0, inverted=False)
+    one = _bevel(_flat_layer(), size=1.0, texture=texture)
+    two = _bevel(_flat_layer(), size=2.0, texture=texture)
+    assert np.array_equal(one[0], two[0]) and np.array_equal(one[1], two[1])
+    shallow = _bevel(_flat_layer(), size=2.0, depth=30.0, texture=texture)
+    half = _bevel(_flat_layer(), size=2.0, depth=50.0, texture=texture)
+    assert np.array_equal(shallow[0], half[0]) and np.array_equal(shallow[1], half[1])
+    assert not np.array_equal(half[0], two[0])
 
 
 def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
@@ -848,7 +868,7 @@ def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
     shape = _flat_layer()
     luminance = np.ones((24, 24), dtype=np.float32)
     luminance[8:16, 4:20] = 0.0
-    texture = effects.texture_height(luminance, size=2.0, depth=400.0, inverted=False)
+    texture = effects.texture_height(luminance, depth=400.0, inverted=False)
     highlight, shadow = _bevel(shape, size=2.0, texture=texture)
     column = 12
     assert highlight[7, column, 0] > 0.9 and highlight[8, column, 0] > 0.9
@@ -864,21 +884,23 @@ def test_a_texture_lights_the_edge_of_a_dark_block_facing_the_light() -> None:
 def test_a_slope_is_smoothed_across_the_step() -> None:
     """A one pixel step lights the two rows astride it equally.
 
-    The step's end columns carry three quarters of the slope and the columns
-    beside them a quarter: a Sobel operator.
+    The step's end columns carry two thirds of the slope and the columns
+    beside them a third: a Prewitt operator, as Photoshop 2023 lights a
+    texture's corners and a pixel-art edge's.
     """
     height = np.zeros((9, 9), dtype=np.float32)
     height[4:, 3:6] = 1.0
     gy, gx = effects._slopes(height)
+    sixth = 1.0 / 6.0
     assert np.allclose(gy[3, 4], 0.5) and np.allclose(gy[4, 4], 0.5)
-    assert np.allclose(gy[3, 3], 0.375) and np.allclose(gy[3, 5], 0.375)
-    assert np.allclose(gy[3, 2], 0.125) and np.allclose(gy[3, 6], 0.125)
+    assert np.allclose(gy[3, 3], 2 * sixth) and np.allclose(gy[3, 5], 2 * sixth)
+    assert np.allclose(gy[3, 2], sixth) and np.allclose(gy[3, 6], sixth)
     assert gy[2, 4] == 0.0 and gy[5, 4] == 0.0 and gy[3, 1] == 0.0
     assert np.allclose(gx[6, 2], 0.5) and np.allclose(gx[6, 3], 0.5)
-    assert np.allclose(gx[4, 2], 0.375) and np.allclose(gx[3, 2], 0.125)
+    assert np.allclose(gx[4, 2], 2 * sixth) and np.allclose(gx[3, 2], sixth)
 
 
-def test_a_bevel_lights_a_step_through_a_sobel_operator() -> None:
+def test_a_bevel_lights_a_step_through_a_prewitt_operator() -> None:
     """A raised block three columns wide, lit from above.
 
     Along its top edge the end columns take less light than the middle one,
@@ -886,7 +908,7 @@ def test_a_bevel_lights_a_step_through_a_sobel_operator() -> None:
     """
     luminance = np.ones((24, 24), dtype=np.float32)
     luminance[8:16, 10:13] = 0.0
-    texture = effects.texture_height(luminance, size=1.0, depth=100.0, inverted=False)
+    texture = effects.texture_height(luminance, depth=50.0, inverted=False)
     highlight, _ = _bevel(_flat_layer(), size=1.0, texture=texture)
     edge = highlight[7, :, 0]
     assert edge[11] > edge[10] > edge[9] > 0.0
@@ -1028,6 +1050,83 @@ def test_a_gaussian_across_an_inner_band_misses_photoshops(
     assert np.abs(missed).max() > 24
 
 
+# Photoshop 2023's softened smooth inner bevels on a 40 px square, lit from 90
+# degrees at 30, a black Normal shadow alone: up the middle column from the
+# bottom row, the shadow in levels, to the first unshaded pixel. Keyed by
+# size, depth and soften.
+_SOFTENED_PROFILES = {
+    (5, 100, 5): [226, 209, 174, 132, 88, 53, 25, 10, 2, 0],
+    (5, 1000, 11): [178, 175, 166, 155, 137, 116, 96, 77, 59, 45, 32, 21, 13, 6, 2, 0],
+    (16, 147, 11): [
+        255,
+        253,
+        252,
+        249,
+        245,
+        237,
+        230,
+        218,
+        207,
+        191,
+        175,
+        158,
+        137,
+        118,
+        97,
+        80,
+        61,
+        45,
+        29,
+        14,
+        0,
+    ],
+    (6, 1000, 1): [255, 255, 255, 255, 255, 191, 64, 0],
+}
+
+
+def _softened_misses() -> int:
+    """The most levels any softened profile is off Photoshop's."""
+    shape = np.zeros((60, 60, 1), dtype=np.float32)
+    shape[10:50, 10:50] = 1.0
+    missed = 0
+    for (size, depth, soften), levels in _SOFTENED_PROFILES.items():
+        _, shadow = _bevel(
+            shape, size=float(size), depth=float(depth), soften=float(soften)
+        )
+        profile = np.round(shadow[49:9:-1, 30, 0] * 255)[: len(levels)]
+        missed = max(missed, int(np.abs(profile - np.array(levels)).max()))
+    return missed
+
+
+def test_a_softened_smooth_bevel_shades_as_photoshop_draws_it() -> None:
+    """Held to unlit, then two box passes.
+
+    A gaussian over the light as it was, unheld, missed by up to 139 levels.
+    """
+    assert _softened_misses() <= 1
+
+
+def test_a_gaussian_soften_misses_photoshops(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    sigma = effects._SOFTEN_SIGMA_PER_SIZE
+    monkeypatch.setattr(
+        effects,
+        "_soften_smooth",
+        lambda light, soften: ndimage.gaussian_filter(
+            light, sigma * soften, mode="nearest", truncate=1.0 / sigma
+        ),
+    )
+    assert _softened_misses() > 24
+
+
+def test_a_soften_of_1_blurs_a_smooth_bevel_as_2_does() -> None:
+    one = _bevel(_square(), size=5.0, depth=300.0, soften=1.0)
+    two = _bevel(_square(), size=5.0, depth=300.0, soften=2.0)
+    assert np.array_equal(one[0], two[0]) and np.array_equal(one[1], two[1])
+    assert not np.array_equal(one[1], _bevel(_square(), size=5.0, depth=300.0)[1])
+
+
 def test_a_smooth_bevel_of_size_0_lights_its_edge_whatever_its_depth() -> None:
     """The silhouette itself, one pixel high: the edge pixels and no others."""
     shallow = _bevel(_square(), size=0.0, depth=1.0)
@@ -1114,6 +1213,33 @@ def test_an_unreadable_shape_range_draws_the_bevel_without_it(
         color, _, _ = composite(psd)
     assert "Cannot read a bevel's shape" in caplog.text
     assert np.array_equal(color, composite(plain)[0])
+
+
+def test_a_range_0_shape_contour_matches_photoshop_2023(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every pixel of ``bevel-contour-range0.psd`` is near Photoshop 2023's PNG.
+
+    A disc, a diamond and a ring, black on white, with a smooth inner bevel
+    of size 2 and a Linear shape contour at range 0 (red highlight, blue
+    shadow): above as Golden Bomb's name has it, anti-aliased and lit from
+    30 degrees, below not anti-aliased and lit from 90. So steep a surface
+    is lit by the direction of its slope alone, which a Sobel operator
+    turns toward the axes: up to 47 levels off on the curves.
+    """
+    psd = PSDImage.open(full_name("effects/bevel-contour-range0.psd"))
+    theirs = np.asarray(
+        Image.open(full_name("effects/bevel-contour-range0.png")), dtype=int
+    )
+
+    def error() -> np.ndarray:
+        ours = np.asarray(psd.composite(force=True).convert("RGBA"), dtype=int)
+        return np.abs(ours - theirs).max(axis=2)
+
+    off = error()
+    assert int(off[:36].max()) <= 10 and int(off.max()) <= 14
+    monkeypatch.setattr(effects, "_SLOPE_ACROSS", (0.25, 0.5, 0.25))
+    assert int(error().max()) > 24
 
 
 # effects/bevel-smooth-outer-emboss.psd: as the fixture above, with smooth

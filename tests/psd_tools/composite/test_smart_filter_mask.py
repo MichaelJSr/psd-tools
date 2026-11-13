@@ -381,9 +381,9 @@ def test_the_mask_is_blended_once_for_the_layer_and_its_effects(
     blends: list[Layer] = []
     read, blend = Compositor._read_object, _blend_unfiltered
 
-    def counted_read(self: Compositor, layer: Layer) -> tuple:
+    def counted_read(self: Compositor, layer: Layer, *box: object) -> tuple:
         reads.append(layer)
-        return read(self, layer)
+        return read(self, layer, *box)  # type: ignore[arg-type]
 
     def counted_blend(layer: SmartObjectLayer, *args: object) -> tuple:
         blends.append(layer)

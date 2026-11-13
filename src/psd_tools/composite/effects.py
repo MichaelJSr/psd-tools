@@ -32,9 +32,9 @@ Currently supported effects:
   - Jitter is read but not applied
 - **Inner shadow** and **inner glow**: the same blur, cast from the outside of
   the silhouette and painted inside the layer
-  - Solid color; honors distance, angle, size, choke, contour, noise,
-    opacity and blend mode, and an inner glow's source, technique and range;
-    a gradient glow is not drawn
+  - Solid color, or for an inner glow a gradient along the falloff;
+    honors distance, angle, size, choke, contour, noise, opacity and blend
+    mode, and an inner glow's source, technique and range
 
 - **Satin**: Two offset, blurred copies of the silhouette and their difference,
   painted inside the layer
@@ -502,20 +502,23 @@ def _chamfer_transform(mask: np.ndarray) -> np.ndarray:
     return _chamfer_relax(np.where(mask, np.inf, 0.0)).astype(np.float32)
 
 
-def _chamfer_relax(field: np.ndarray) -> np.ndarray:
+def _chamfer_relax(
+    field: np.ndarray, diagonal: float = _DIAGONAL, knight: float = _KNIGHT
+) -> np.ndarray:
     """``field`` lowered in place to ``min(field[q] + length(x - q))`` over every ``q``.
 
     The passes :py:func:`_chamfer_transform` runs, from a float64 ``field``
     holding each pixel's own starting value rather than a zero. Unlike
     :py:func:`_nearest_boundary`'s minimum, the cost does not grow with how
-    far a value travels.
+    far a value travels. ``diagonal`` and ``knight`` are those moves' lengths
+    against an axis move's 1.
     """
     if _cdistance is not None and hasattr(_cdistance, "chamfer_relax"):
-        _cdistance.chamfer_relax(field, _DIAGONAL, _KNIGHT)
+        _cdistance.chamfer_relax(field, diagonal, knight)
         return field
     height, width = field.shape
     cols = np.arange(width, dtype=np.float64)
-    moves = ((1, 0, 1.0), (1, 1, _DIAGONAL), (1, 2, _KNIGHT), (2, 1, _KNIGHT))
+    moves = ((1, 0, 1.0), (1, 1, diagonal), (1, 2, knight), (2, 1, knight))
     for order in (range(height), range(height - 1, -1, -1)):
         step = 1 if order.start == 0 else -1
         for row in order:
@@ -1062,12 +1065,17 @@ def draw_stroke_effect_split(
             color = np.ones((height, width, 1))
     elif paint_type == Enum.GradientFill:
         anchor = stroke_gradient_box(viewport, shape, desc, extent)
+        angle = None
+        if anchor is not None and bool(desc.get(Key.Alignment, True)):
+            anchor, angle = paint.ramp_ends_on_pixels(anchor, desc)
         color, _ = paint.draw_gradient_fill(
             viewport,
             psd.color_mode,
             desc,
             paint.gradient_anchor(psd, desc, anchor),
             psd.depth,
+            paint.document_lms(psd),
+            angle,
         )
         if color is None:
             color = np.ones((height, width, 1))
@@ -1200,9 +1208,10 @@ _DEFAULT_GLOW_RANGE = 50.0
 # as a byte, so a 1% range squeezes the falloff by 255 / 3 and not 100.
 _GLOW_RANGE_STEPS = 255
 
-# How much stronger than its matte a gradient glow covers, whatever its range:
-# full out to about half its size from a straight edge.
-_GRADIENT_GLOW_GAIN = 8.0
+# How much stronger than its matte a gradient glow covers, whatever its range,
+# size or technique: full where the matte reaches 12%. Fitted to Photoshop
+# 2023 within half a level.
+_GRADIENT_GLOW_GAIN = 25.0 / 3.0
 
 # What one pixel of a shadow's or glow's canvas costs at the peak of
 # ``draw_drop_shadow()`` or ``glow_falloff()``: the silhouette it is cast
@@ -1273,13 +1282,16 @@ def drop_shadow_bbox(
     angle: float,
     size: float,
     max_alloc_bytes: AllocBudget | None = None,
+    spread: float = 0.0,
 ) -> tuple[int, int, int, int]:
     """The canvas :py:func:`draw_drop_shadow` needs to draw a shadow on.
 
     ``bbox`` grown by the shadow's size on every side and by its offset on
     the side it is cast to. It is the box the silhouette is read on, before
     it is moved, so it has to hold that too. The two pixels added on top are
-    the antialiased fringe spread leaves and a pixel to spare.
+    the antialiased fringe spread leaves and a pixel to spare. A ``spread``
+    that leaves nothing to blur grows it by that matte's reach
+    (:py:func:`_matte_reach`) if that is further.
 
     An empty ``bbox`` is returned untouched, as :py:func:`stroke_bbox` does:
     there is no silhouette to cast.
@@ -1290,7 +1302,8 @@ def drop_shadow_bbox(
     ``max_alloc_bytes``, which the callers read as an unreadable shadow.
     """
     dx, dy = _shadow_offset(distance, angle)
-    return _cast_canvas(bbox, dx, dy, size, max_alloc_bytes, _SHADOW_BYTES)
+    reach = _matte_reach(size, spread) if math.isfinite(spread) else size
+    return _cast_canvas(bbox, dx, dy, reach, max_alloc_bytes, _SHADOW_BYTES)
 
 
 def outer_glow_bbox(
@@ -1302,13 +1315,30 @@ def outer_glow_bbox(
 
     A shadow's canvas for a shadow cast nowhere: ``bbox`` grown by the
     glow's size on every side, with the same fringe, and raising the same
-    way. A gradient glow is checked against what painting its gradient peaks
+    way, and as far as a softer glow's spread reaches (:py:func:`_matte_reach`).
+    A gradient glow is checked against what painting its gradient peaks
     at, which is more than the falloff it is laid along. Raises as
     :py:func:`glow_geometry` does for a size it cannot read.
     """
-    size, _, _ = glow_geometry(desc)
+    size, spread, _ = glow_geometry(desc)
+    if _enum(desc, Key.GlowTechnique) != Enum.PreciseMatte:
+        size = _matte_reach(size, spread)
     per_pixel = _GLOW_GRADIENT_BYTES if Key.Gradient in desc else _SHADOW_BYTES
     return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, per_pixel)
+
+
+def gradient_inner_glow_bbox(
+    bbox: tuple[int, int, int, int],
+    size: float,
+    max_alloc_bytes: AllocBudget | None = None,
+) -> tuple[int, int, int, int]:
+    """The canvas a gradient inner glow is drawn on.
+
+    :py:func:`drop_shadow_bbox`'s for a shadow cast nowhere, checked against
+    what painting the gradient peaks at, as :py:func:`outer_glow_bbox`
+    checks a gradient outer glow's.
+    """
+    return _cast_canvas(bbox, 0.0, 0.0, size, max_alloc_bytes, _GLOW_GRADIENT_BYTES)
 
 
 def _cast_canvas(
@@ -1514,6 +1544,85 @@ def _spread(alpha: np.ndarray, pixels: int) -> np.ndarray:
     return np.where(inside, np.float32(1.0), grown).astype(np.float32)
 
 
+def _hard_steps(pixels: int) -> tuple[int, int, int]:
+    """The axis, diagonal and knight steps of a spread that leaves no blur.
+
+    Photoshop grows such a matte in an 8-bit field that holds ``pixels + 1``
+    pixels: an axis step costs ``255 / (pixels + 1)`` of it and the other
+    two that times their length, each rounded down. Past 254 pixels the step
+    would round to nothing; Photoshop's sizes stop at 250.
+    """
+    unit = 255.0 / (min(pixels, 254) + 1)
+    return math.floor(unit), math.floor(unit * _DIAGONAL), math.floor(unit * _KNIGHT)
+
+
+@functools.cache
+def _hard_starts(pixels: int) -> np.ndarray:
+    """What each 8-bit coverage level starts a hard spread's field at.
+
+    The share of an axis step a pixel's coverage leaves open: Photoshop adds
+    a 255th of the step per level under 255, summing in doubles, and rounds
+    each sum down.
+    """
+    step = 255.0 / (min(pixels, 254) + 1) / 255.0
+    starts = np.empty(256, dtype=np.float64)
+    total = 0.0
+    for level in range(255, -1, -1):
+        starts[level] = math.floor(total)
+        total += step
+    return starts
+
+
+def _hard_reach(pixels: int) -> int:
+    """How far past the silhouette a hard spread of ``pixels`` covers anything."""
+    return 254 // _hard_steps(pixels)[0]
+
+
+def _hard_spread(alpha: np.ndarray, pixels: int, outside: float) -> np.ndarray:
+    """``alpha`` grown by ``pixels`` when nothing of the size is left to blur.
+
+    Photoshop does not grow such a matte as :py:func:`_spread` does but in
+    whole steps of an 8-bit field (:py:func:`_hard_steps`): each pixel
+    :py:func:`_spread` counts as covered starts it at
+    :py:func:`_hard_starts`, every other pixel at the least start plus
+    chamfer path, and the matte is ``255 - field`` stretched by 255 over an
+    axis step, rounded up. The rounded step makes the grown edge reach up to
+    a pixel further than ``pixels``, more for a larger spread, and 254
+    pixels from 127 on. What lies past the canvas is ``outside``.
+    """
+    axis, diagonal, knight = _hard_steps(pixels)
+    alpha = np.clip(alpha, 0.0, 1.0)
+    pad = 1 if outside > 0.0 else 0
+    if pad:
+        alpha = np.pad(alpha, 1, constant_values=outside)
+    inside = alpha >= _SPREAD_FLOOR * (1.0 - 1e-6)
+    grown = np.zeros(alpha.shape, dtype=np.float32)
+    if inside.any():
+        height, width = alpha.shape
+        rows, cols = np.nonzero(inside)
+        span = _hard_reach(pixels) + 1
+        crop = (
+            slice(max(rows.min() - span, 0), min(rows.max() + span + 1, height)),
+            slice(max(cols.min() - span, 0), min(cols.max() + span + 1, width)),
+        )
+        levels = np.rint(alpha[crop] * 255.0).astype(np.intp)
+        field = np.where(inside[crop], _hard_starts(pixels)[levels] / axis, np.inf)
+        field = _chamfer_relax(field, diagonal / axis, knight / axis)
+        # The field holds whole steps; rint undoes the division's rounding.
+        stretched = np.ceil((255.0 - np.rint(field * axis)) * 255.0 / axis)
+        grown[crop] = np.clip(stretched, 0.0, 255.0) / 255.0
+    return grown[1:-1, 1:-1] if pad else grown
+
+
+def _matte_reach(size: float, spread: float) -> float:
+    """How far a shadow's or softer glow's matte reaches past its silhouette."""
+    size = max(float(size), 0.0)
+    pixels = _spread_pixels(size, spread)
+    if pixels > 0 and size <= pixels:
+        return max(size, float(_hard_reach(pixels)))
+    return size
+
+
 def draw_drop_shadow(
     viewport: tuple[int, int, int, int],
     shape: np.ndarray,
@@ -1652,7 +1761,7 @@ def draw_inner_shadow(
 
 
 def _spread_matte(
-    alpha: np.ndarray, size: float, spread: float
+    alpha: np.ndarray, size: float, spread: float, outside: float = 0.0
 ) -> tuple[np.ndarray, float]:
     """``alpha`` grown by the spread, and what is left of the size to blur it by.
 
@@ -1661,14 +1770,19 @@ def _spread_matte(
     whole pixels (:py:func:`_spread_pixels`) *grow* the silhouette's coverage
     before the blur (:py:func:`_spread`), and the blur takes what is left
     of ``size``, so the matte turns hard-edged at 100%, and a feathered
-    edge is hardened by a spread of a pixel.
+    edge is hardened by a spread of a pixel. A spread that leaves nothing
+    to blur grows as :py:func:`_hard_spread` says, ``outside`` past the canvas.
     """
     alpha = alpha.astype(np.float32)
     size = max(float(size), 0.0)
     pixels = _spread_pixels(size, spread)
+    radius = max(size - pixels, 0.0)
     if pixels > 0:
-        alpha = _spread(alpha, pixels)
-    return alpha, max(size - pixels, 0.0)
+        if radius > 0.0:
+            alpha = _spread(alpha, pixels)
+        else:
+            alpha = _hard_spread(alpha, pixels, outside)
+    return alpha, radius
 
 
 def _shadow_matte(
@@ -1682,7 +1796,7 @@ def _shadow_matte(
     (:py:func:`_signed_distance`), so a tail that holds half a level of the
     document's alpha moves the stroke out by up to a pixel.
     """
-    alpha, radius = _spread_matte(alpha, size, spread)
+    alpha, radius = _spread_matte(alpha, size, spread, outside)
     return _tent_blur(alpha, radius, outside)
 
 
@@ -1931,6 +2045,7 @@ def glow_paint(
     falloff: np.ndarray,
     over: float = 0.0,
     matte: np.ndarray | None = None,
+    noisy: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """What an outer glow is painted with, on ``viewport``: its colour and coverage.
 
@@ -1940,13 +2055,17 @@ def glow_paint(
     laid along the falloff instead: its start at the silhouette's edge,
     where the falloff is full, and its end where the falloff dies away, so
     the opaque end of Photoshop's default glow gradient sits against the
-    layer. What it covers does not follow the range: it is the matte held
-    :data:`_GRADIENT_GLOW_GAIN` times as strong, or the falloff when no
-    matte is given, and its transparency stops, read at the same place as
-    its colour stops, hold the coverage under them: the glow is as opaque as
-    that or the transparency there, whichever is less. The gradient's
-    reverse flag turns it around, and its stops blend in the method ``gs99``
-    names, as an overlay's do. Either way the coverage is cut away under the
+    layer. A gradient whose transparency is that default's, two stops fading
+    from opaque to clear, covers the falloff as a solid colour does, wherever
+    the stops sit (:py:func:`fades_to_clear`), or ``noisy``, that falloff with
+    the glow's noise moved in, when given: noise moves its coverage only,
+    never its colour. Any other does not follow the range: it covers the
+    matte held :data:`_GRADIENT_GLOW_GAIN` times as strong, or the falloff
+    when no matte is given, and its transparency stops, read at the same
+    place as its colour stops, hold the coverage under them: the glow is as
+    opaque as that or the transparency there, whichever is less. The
+    gradient's reverse flag turns it around, and its stops blend in the
+    method ``gs99`` names, as an overlay's do. Either way the coverage is cut away under the
     silhouette. ``over`` is how much of the silhouette a Normal layer
     composited on top paints, its fill opacity and opacity together; the
     coverage under it is raised so the glow shows at ``1 - shape`` once the
@@ -1966,11 +2085,34 @@ def glow_paint(
         raise ValueError("Outer glow gradient has no colour stops.")
     color = np.asarray(colors(along), dtype=np.float32)
     coverage = falloff
+    if fades_to_clear(desc[Key.Gradient]):
+        if noisy is not None:
+            coverage = noisy
+        return color, _beside(coverage, shape, over)
     if matte is not None:
         coverage = np.clip(matte * _GRADIENT_GLOW_GAIN, 0.0, 1.0)
     if opacities is not None:
         coverage = np.minimum(coverage, np.asarray(opacities(along), dtype=np.float32))
     return color, _beside(coverage, shape, over)
+
+
+def fades_to_clear(gradient: Descriptor) -> bool:
+    """Whether a glow gradient's transparency is two stops, opaque then clear.
+
+    Photoshop 2023 draws such a glow's coverage as a solid colour's, noise
+    included, ignoring the stops' locations, midpoint and smoothness; one more
+    stop, or any other opacity at either end (80% to clear, opaque to 1%),
+    and it does not. Opacities are read in whole levels, by location.
+    """
+    try:
+        stops = list(gradient.get(Key.Transparency) or [])
+        if len(stops) != 2:
+            return False
+        ordered = sorted(stops, key=lambda stop: float(stop.get(Key.Location)))
+        levels = [round(float(stop.get(Key.Opacity)) * 2.55) for stop in ordered]
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return False
+    return levels == [255, 0]
 
 
 def _glow_range(matte: np.ndarray, glow_range: float) -> np.ndarray:
@@ -1995,8 +2137,9 @@ def draw_inner_glow(
     """The coverage an inner glow puts inside ``shape``, on ``viewport``.
 
     From the edge, the glow is full at the boundary and fades over ``size``
-    inward; from the ``center``, it is the complement, full inside and fading
-    out towards the edge. ``choke`` is a percentage of ``size`` held at full
+    inward; from the ``center``, it is the complement of that, range
+    included, clear at the boundary and full inside, as Photoshop 2023
+    draws it. ``choke`` is a percentage of ``size`` held at full
     strength before the fade. The softer technique fades along the blur
     :py:func:`draw_inner_shadow` uses, the ``precise`` one linearly with the
     distance to the edge, read at each pixel's centre, as a precise outer
@@ -2007,6 +2150,48 @@ def draw_inner_glow(
     inner shadow's. The result is ``(height, width, 1)`` and never exceeds
     ``shape``.
     """
+    glow = _inner_glow(
+        viewport,
+        shape,
+        size=size,
+        choke=choke,
+        center=center,
+        precise=precise,
+        glow_range=glow_range,
+        contour=contour,
+        anti_aliased=anti_aliased,
+        noise=noise,
+    )
+    return (glow.falloff * glow.alpha)[:, :, None]
+
+
+class _InnerGlow(NamedTuple):
+    """An inner glow's steps.
+
+    The layer's alpha, the matte before the range, the contoured falloff,
+    and that falloff with the noise moved in.
+    """
+
+    alpha: np.ndarray
+    matte: np.ndarray
+    clean: np.ndarray
+    falloff: np.ndarray
+
+
+def _inner_glow(
+    viewport: tuple[int, int, int, int],
+    shape: np.ndarray,
+    *,
+    size: float,
+    choke: float,
+    center: bool,
+    precise: bool,
+    glow_range: float,
+    contour: np.ndarray | None,
+    anti_aliased: bool,
+    noise: float,
+) -> _InnerGlow:
+    """:py:func:`draw_inner_glow` before the cut to ``shape``."""
     _require_scipy("Inner glow effects")
     if not all(math.isfinite(value) for value in (size, choke, glow_range)):
         raise ValueError(
@@ -2031,10 +2216,14 @@ def draw_inner_glow(
             what="Inner glow",
         )
     if center:
+        # Photoshop ranges the edge's fade, then turns it around.
+        ranged = falloff = 1.0 - _glow_range(matte, glow_range)
         matte = 1.0 - matte
-    ranged = falloff = _glow_range(matte, glow_range)
+    else:
+        ranged = falloff = _glow_range(matte, glow_range)
     if contour is not None:
         falloff = _contoured(falloff, contour, anti_aliased)
+    clean = falloff
     if noise > 0.0:
         falloff = effect_noise.noisy(
             falloff,
@@ -2044,25 +2233,87 @@ def draw_inner_glow(
             inside=True,
             lit=_contour_lit(ranged, contour),
         )
-    return (falloff * alpha)[:, :, None]
+    return _InnerGlow(alpha, matte, clean, falloff)
+
+
+def inner_glow_paint(
+    viewport: tuple[int, int, int, int],
+    color_mode: ColorMode,
+    desc: Descriptor,
+    shape: np.ndarray,
+    *,
+    size: float,
+    choke: float,
+    center: bool = False,
+    precise: bool = False,
+    glow_range: float = 50.0,
+    contour: np.ndarray | None = None,
+    anti_aliased: bool = False,
+    noise: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """A gradient inner glow on ``viewport``: its colour and coverage.
+
+    The falloff is :py:func:`draw_inner_glow`'s, and the gradient is laid
+    along it as an outer glow's is (:py:func:`glow_paint`): its start where
+    the falloff is full, its end where it dies away. A gradient that fades
+    to clear (:py:func:`fades_to_clear`) covers the falloff, noise included.
+    Any other covers the whole layer, as opaque as its transparency where
+    its colour is read, with the noise moved in wherever that is not clear.
+    Noise never moves the colour. Read off Photoshop 2023. Raises
+    ``ValueError`` for a gradient with no colour stops.
+    """
+    glow = _inner_glow(
+        viewport,
+        shape,
+        size=size,
+        choke=choke,
+        center=center,
+        precise=precise,
+        glow_range=glow_range,
+        contour=contour,
+        anti_aliased=anti_aliased,
+        noise=noise,
+    )
+    gradient = desc[Key.Gradient]
+    along = 1.0 - glow.clean
+    if bool(desc.get(Key.Reverse, False)):
+        along = 1.0 - along
+    colors, opacities = paint._make_gradient_color(
+        color_mode, gradient, paint._gradient_method(desc)
+    )
+    if colors is None:
+        raise ValueError("Inner glow gradient has no colour stops.")
+    color = np.asarray(colors(along), dtype=np.float32)
+    if fades_to_clear(gradient):
+        coverage = glow.falloff
+    else:
+        coverage = np.ones_like(glow.clean)
+        if opacities is not None:
+            coverage = np.asarray(opacities(along), dtype=np.float32)
+        if noise > 0.0:
+            coverage = effect_noise.noisy(
+                coverage, noise, viewport, coverage, inside=True
+            )
+    return color, (coverage * glow.alpha)[:, :, None]
 
 
 # How wide a gaussian stands in for the blur of a satin, and for the blur
 # that rounds a smooth bevel other than a wide inner one, per pixel of the
-# effect's size; how far a bevel's soften blurs its shading per pixel of
-# soften; and how steep a bevel's faces are at a depth of 100%. Fitted
+# effect's size; how far a chisel bevel's soften blurs its shading per pixel
+# of soften (a smooth one's is :py:func:`_soften_smooth`); and how steep a bevel's faces are at a depth of 100%. Fitted
 # against Photoshop's previews, and asserted in the tests.
 _SATIN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SIGMA_PER_SIZE = 0.45
 _SOFTEN_SIGMA_PER_SIZE = 0.45
 _BEVEL_SLOPE_PER_DEPTH = 1.0
 
-# How high a bevel's texture stands at a texture depth of 100%, per pixel of
-# the effect's size, and how a slope along one axis is smoothed along the
-# other (a Sobel operator). Fitted against a Photoshop export of a textured
-# bevel, not a preview fixture.
+# How high a bevel's texture stands at a texture depth of 100%, per pixel the
+# bevel's surface stands, and how a slope along one axis is smoothed along
+# the other: evenly over three pixels, a Prewitt operator. Read off Photoshop
+# 2023 exports of textured and untextured bevels, and of smooth bevels with a
+# shape contour at range 0, which light every slope by its direction.
 _TEXTURE_HEIGHT_PER_DEPTH = 1.0
-_SLOPE_ACROSS = (0.25, 0.5, 0.25)
+_SLOPE_ACROSS = (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
 
 # How wide the gaussian that rounds a chisel soft bevel's faces is, per pixel
 # of size, and how far it reads, in sigmas. Not fitted: no fixture preview
@@ -2409,24 +2660,25 @@ def _bevel_height(
 
 
 def texture_height(
-    luminance: np.ndarray, *, size: float, depth: float, inverted: bool
+    luminance: np.ndarray, *, depth: float, inverted: bool
 ) -> np.ndarray:
-    """A bevel texture's surface, in pixels of height, from the pattern's luminance.
+    """A bevel texture's surface from the pattern's luminance, per pixel of rise.
 
     The pattern's dark pixels stand up and its light ones sink, the other
     way round when ``inverted``; at a texture ``depth`` of 100% the darkest
-    pixel is as high as the bevel's band is wide (``size``), and the depth
-    scales that, negative depths turning the texture over. A depth past what
-    Photoshop writes is held to it.
+    pixel is as high as the bevel's surface stands, which
+    :py:func:`draw_bevel` multiplies in, and the depth scales that, negative
+    depths turning the texture over. A depth past what Photoshop writes is
+    held to it.
     """
     relief = luminance if inverted else 1.0 - luminance
     depth = float(np.clip(depth, -_MAX_BEVEL_DEPTH, _MAX_BEVEL_DEPTH))
-    scale = max(float(size), 0.0) * depth / 100.0 * _TEXTURE_HEIGHT_PER_DEPTH
+    scale = depth / 100.0 * _TEXTURE_HEIGHT_PER_DEPTH
     return (relief * scale).astype(np.float32)
 
 
 def _slopes(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """The surface's slope down and across, as a Sobel operator takes it.
+    """The surface's slope down and across, as a Prewitt operator takes it.
 
     A central difference along each axis, smoothed by ``_SLOPE_ACROSS``
     along the other; the edge pixels repeat past the border.
@@ -2452,6 +2704,28 @@ def _lit(
     nx, ny = -slope * gx, -slope * gy
     norm = np.sqrt(nx * nx + ny * ny + 1.0)
     return ((nx * lx + ny * ly + lz) / norm).astype(np.float32)
+
+
+def _soften_smooth(light: np.ndarray, soften: float) -> np.ndarray:
+    """A smooth bevel's ``light`` (0 to 1) softened as Photoshop 2023 does.
+
+    Two box passes ``soften`` wide along each axis, as :py:func:`_tent_blur`
+    takes them (a soften of 1 blurs as 2 does), the edge pixels repeating
+    past the canvas. Read off its renders at soften 1 to 16 and depths 50%
+    to 1000%, where the gaussian it replaces was up to 6 levels off.
+    """
+    if soften < 1.0:
+        return light
+    soften = max(soften, _MIN_BOX_WIDTH)
+    reach = math.ceil(soften) - 1
+    from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    taps = np.arange(-reach, reach + 1, dtype=np.float64)
+    weights = 1.0 - np.abs(taps) / soften
+    weights /= weights.sum()
+    for axis in range(2):
+        light = ndimage.correlate1d(light, weights, axis=axis, mode="nearest")
+    return light
 
 
 def draw_bevel(
@@ -2480,15 +2754,20 @@ def draw_bevel(
     more than the flat layer is takes the highlight, in proportion to how far
     it is from the flat toward full light, and one lit less the shadow, in
     proportion to how far toward none; the flat layer takes neither.
-    ``soften`` blurs the lighting before that split, and ``contour`` (the
+    ``soften`` blurs the lighting before that split (a smooth bevel's held
+    to unlit first, so a face turned past the light softens as unlit, not
+    darker), and ``contour`` (the
     gloss contour, read as :py:func:`draw_drop_shadow` reads one) maps the
     lighting first, the flat layer's with it, so a flat face takes neither
-    under any contour. The slope is a Sobel operator's, fitted to one
-    Photoshop export: a one pixel step lights the two pixels astride it.
+    under any contour. The slope is a Prewitt operator's, read off
+    Photoshop 2023: a one pixel step lights the two pixels astride it, and
+    a corner a third less.
 
     ``texture`` (from :py:func:`texture_height`, on ``viewport``) is laid on
     the surface before it is lit, so the bevel's faces and the flat layer
-    alike carry its bumps.
+    alike carry its bumps: a smooth bevel's as high as its surface stands
+    (:py:func:`_smooth_rise`, a pixel at least), a chisel one's ``size``
+    pixels, its slope scaled by ``depth`` with the rest.
 
     A smooth bevel's surface is :py:func:`_smooth_surface`'s,
     :py:func:`_smooth_rise` pixels high at its top, and ``depth`` is in that
@@ -2527,7 +2806,7 @@ def draw_bevel(
         surface = _smooth_surface(alpha, style, size)
         rise = _smooth_rise(style, size, depth)
         if bumps is not None:
-            bumps = bumps * slope
+            bumps = bumps * rise
         samples = (0.0,)
         if bevel_shape is not None and bevel_shape.anti_aliased:
             samples = _SHAPE_AA_SAMPLES
@@ -2547,17 +2826,18 @@ def draw_bevel(
                     lit = np.clip(lit, 0.0, 1.0)
                 light += lit
         light /= len(samples) ** 2
+        light = _soften_smooth(np.clip(light, 0.0, 1.0), max(float(soften), 0.0))
     else:
         height = _bevel_height(alpha, style, technique, size)
         if bumps is not None:
-            height = height + bumps
+            height = height + bumps * size
         light = _lit(height, slope if up else -slope, lx, ly, lz)
-    soften = max(float(soften), 0.0)
-    sigma = soften * _SOFTEN_SIGMA_PER_SIZE
-    if sigma > 1e-3 and soften >= 1.0:
-        light = ndimage.gaussian_filter(
-            light, sigma, mode="nearest", truncate=soften / sigma
-        )
+        soften = max(float(soften), 0.0)
+        sigma = soften * _SOFTEN_SIGMA_PER_SIZE
+        if sigma > 1e-3 and soften >= 1.0:
+            light = ndimage.gaussian_filter(
+                light, sigma, mode="nearest", truncate=soften / sigma
+            )
     light = np.clip(light, 0.0, 1.0)
     flat = lz
     if contour is not None:
