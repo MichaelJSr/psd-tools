@@ -551,6 +551,9 @@ def _color_item(
     budget: AllocBudget | None,
 ) -> _Item | None:
     """A colour glyph drawn from its SVG at its origin."""
+    if mode in (_MODES[3], _MODES[4]):
+        # Photoshop 2023 draws colour glyphs in Smooth and Sharp as in Strong.
+        mode = _STRONG
     xx, xy, yx, yy, tx, ty = transform
     upem = g.face.metrics.upem
     sw, sh = g.em_w / upem, g.em_h / upem
@@ -575,9 +578,7 @@ def _color_item(
     if w <= 0 or h <= 0:
         return None
     grid = _samples(mode, options)
-    # Emboldened where a plain glyph would be (_glyph_items), in px.
-    px = max(g.em_w * math.hypot(xx, xy), g.em_h * math.hypot(yx, yy))
-    embolden = 0.0 if px < mode.small_px else mode.embolden / 64
+    embolden = mode.embolden / 64
     _guard("glyph", w, h, svg.peak_bytes(drawing, w, h, grid), options, budget)
     key = ("svg", g.face.key, g.gid, matrix, nudge, g.fill, grid, embolden)
     left, top, rgba = cache.get(

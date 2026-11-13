@@ -37,7 +37,7 @@ from psd_tools.terminology import Enum, Key, Klass
 from ...utils import full_name
 from .conftest import build_font
 
-NONE, STRONG, SHARP = 0, 2, 4
+NONE, STRONG, SMOOTH, SHARP = 0, 2, 3, 4
 IDENTITY: Transform = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 RED: RGB = (1.0, 0.0, 0.0)
 TOP, BOTTOM, STROKE = "#4f86f7", "#2563eb", "#1e3a8a"
@@ -1028,25 +1028,15 @@ def test_color_glyphs_off_is_the_silhouette(color_face: Face) -> None:
     assert skipped.shape == (0, 0, 4)
 
 
-def test_alpha_grid_follows_the_antialias_mode(color_face: Face) -> None:
-    glyphs = [_glyph(color_face, "A", 0.3, 100.0, 50.0)]
-    strong, _ = _render(glyphs, STRONG)
-    sharp, _ = _render(glyphs, SHARP)
-    partial = strong[..., 3][(strong[..., 3] > 0) & (strong[..., 3] < 1)]
-    # Strong: alpha in sixteenths; Sharp keeps the exact coverage.
-    assert np.allclose(partial * 16, np.round(partial * 16), atol=1e-4)
-    sharp_partial = sharp[..., 3][(sharp[..., 3] > 0) & (sharp[..., 3] < 1)]
-    assert not np.allclose(sharp_partial * 16, np.round(sharp_partial * 16), atol=1e-4)
-
-
-def test_smooth_colour_glyphs_are_strong_from_100_px(color_face: Face) -> None:
-    """Smooth emboldens a colour glyph only where it emboldens plain ones."""
-    smooth = 3
-    for em, same in ((50.0, False), (120.0, True)):
+def test_smooth_and_sharp_colour_glyphs_are_strong(color_face: Face) -> None:
+    """Photoshop 2023 draws colour glyphs in Smooth and Sharp as in Strong."""
+    for em in (50.0, 120.0):
         glyphs = [_glyph(color_face, "A", 0.3, 100.0, em)]
-        a, box_a = _render(glyphs, STRONG)
-        b, box_b = _render(glyphs, smooth)
-        assert (box_a == box_b and np.array_equal(a, b)) is same
+        strong, box = _render(glyphs, STRONG)
+        for antialias in (SMOOTH, SHARP):
+            other, other_box = _render(glyphs, antialias)
+            assert other_box == box
+            assert np.array_equal(other, strong)
 
 
 def test_strong_colour_glyphs_keep_the_embolden(
@@ -1073,9 +1063,10 @@ def test_the_glyph_budget_counts_the_alpha_grid(color_face: Face) -> None:
     budget = svg.peak_bytes(drawing, w, h, 0) * 2
     assert budget < svg.peak_bytes(drawing, w, h, 4)
     layout = Layout((glyph,), (), (), {}, ())
-    rasterize(layout, IDENTITY, SHARP, Options(), max_alloc_bytes=budget)
-    with pytest.raises(ValueError, match="over the configured budget"):
-        rasterize(layout, IDENTITY, STRONG, Options(), max_alloc_bytes=budget)
+    rasterize(layout, IDENTITY, NONE, Options(), max_alloc_bytes=budget)
+    for antialias in (STRONG, SHARP):
+        with pytest.raises(ValueError, match="over the configured budget"):
+            rasterize(layout, IDENTITY, antialias, Options(), max_alloc_bytes=budget)
 
 
 def test_area_coverage_keeps_exact_alpha(color_face: Face) -> None:

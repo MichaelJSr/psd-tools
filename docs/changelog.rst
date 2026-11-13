@@ -150,6 +150,13 @@ Changelog
   stored pixels show (bilinear or nearest); Invert is 1 - colour. Plain
   numpy and exactly rounded sums: the same on every CPU. Nothing else
   changes
+- [fix] Colour (SVG) glyphs in Smooth and Sharp text are drawn as in Strong
+  text, as Photoshop 2023 draws them: at their exact origin, from 4x4 point
+  samples and emboldened (Smooth left them thin under 100 px, Sharp put
+  them on whole pixels at exact coverage). Plain glyphs keep their own
+  rules. The badges of the five such Ability layers on the cards came 61%
+  nearer Photoshop 2023's (4,703 -> 1,822 px over 24). **Rendering change**
+  for text the fork draws
 - [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
   of the document's own profile, its colorants adapted to D65 by Bradford,
   as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp
