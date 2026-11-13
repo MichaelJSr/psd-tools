@@ -7,8 +7,10 @@ import hashlib
 import logging
 import math
 import os
+import threading
 import warnings
 import weakref
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple, Protocol, cast
@@ -950,6 +952,54 @@ def _feather_box(mask: Mask, sigma: float) -> tuple[int, int, int, int]:
         return mask.bbox
     reach = math.ceil(_FEATHER_TRUNCATE * sigma)
     return left - reach, top - reach, right + reach, bottom + reach
+
+
+# Blurred feathered masks by content: a bake draws one mask in several passes
+# and copies of a document. Read-only, least recently used out past the cap.
+_FEATHERED: OrderedDict[tuple, np.ndarray] = OrderedDict()
+_FEATHERED_MAX = 64 << 20
+_FEATHERED_LOCK = threading.Lock()
+_FEATHERING: dict[tuple, threading.Lock] = {}  # held while a thread blurs the key
+
+
+def _forget_feathering() -> None:
+    # A forked child has none of the threads that held these.
+    global _FEATHERED_LOCK
+    _FEATHERED_LOCK = threading.Lock()
+    _FEATHERING.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_feathering)
+
+
+def _feathered(key: tuple, blur: Callable[[], np.ndarray]) -> np.ndarray:
+    """``blur()``, kept by ``key``; waits for a thread already blurring it."""
+    with _FEATHERED_LOCK:
+        found = _FEATHERED.get(key)
+        if found is not None:
+            _FEATHERED.move_to_end(key)
+            return found
+        busy = _FEATHERING.setdefault(key, threading.Lock())
+    with busy:
+        try:
+            with _FEATHERED_LOCK:
+                found = _FEATHERED.get(key)
+            if found is not None:
+                return found
+            result = blur()
+            result.flags.writeable = False
+            with _FEATHERED_LOCK:
+                if result.nbytes <= _FEATHERED_MAX:
+                    _FEATHERED[key] = result
+                    total = sum(a.nbytes for a in _FEATHERED.values())
+                    while total > _FEATHERED_MAX:
+                        total -= _FEATHERED.popitem(last=False)[1].nbytes
+            return result
+        finally:
+            with _FEATHERED_LOCK:
+                if _FEATHERING.get(key) is busy:
+                    del _FEATHERING[key]
 
 
 def _style_bbox(layer: Layer) -> tuple[int, int, int, int]:
@@ -6010,7 +6060,8 @@ class Compositor:
 
         A gaussian of ``sigma`` pixels, as Photoshop 2023 draws a Properties
         feather; past the box the mask is its background. Blurred whole, not
-        on the viewport, so every box of a render reads the same values.
+        on the viewport, so every box of a render reads the same values, and
+        once per content (:func:`_feathered`): every pass and copy shares it.
         Without scipy, or on a canvas out of proportion (a forged feather), the
         mask stays as stored.
         """
@@ -6029,15 +6080,28 @@ class Compositor:
             return stored, mask
         from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
-        canvas = paste(box, stored, mask, background)[..., 0].astype(np.float64)
-        blurred = ndimage.gaussian_filter(
-            canvas,
+        mask = np.ascontiguousarray(mask)
+        key = (
+            hashlib.sha256(mask).digest(),
+            mask.shape,
+            mask.dtype.str,
+            stored,
             sigma,
-            mode="constant",
-            cval=background,
-            truncate=_FEATHER_TRUNCATE,
+            background,
         )
-        return box, blurred.astype(np.float32)[..., None]
+
+        def blur() -> np.ndarray:
+            canvas = paste(box, stored, mask, background)[..., 0].astype(np.float64)
+            blurred = ndimage.gaussian_filter(
+                canvas,
+                sigma,
+                mode="constant",
+                cval=background,
+                truncate=_FEATHER_TRUNCATE,
+            )
+            return blurred.astype(np.float32)[..., None]
+
+        return box, _feathered(key, blur)
 
     def _get_const(self, layer: Layer) -> tuple[float, float]:
         """Get constant attributes."""
