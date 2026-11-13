@@ -7,6 +7,7 @@ import gc
 import hashlib
 import io
 import random
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -459,3 +460,43 @@ def test_a_text_decision_is_made_again_in_every_pass(pinned: bool) -> None:
             cached = composite(psd, force=True, layer_text_gamma=gammas)
         assert np.array_equal(np.concatenate(cached, axis=2), plain)
     assert cache.hits["prefix"] == (1 if pinned else 0)
+
+
+def test_a_frozen_document_writes_each_record_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = "effects/group-clips-child-stroke.psd"
+    psd = PSDImage.open(full_name(path))
+    box = (0, 0, psd.width // 2, psd.height // 2)
+    plain = [_render(path, None), _render(path, None, viewport=box)]
+    writes: Counter[int] = Counter()
+    write = rcache._record_bytes
+
+    def counted(record: object, version: int) -> bytes:
+        writes[id(record)] += 1
+        return write(record, version)
+
+    monkeypatch.setattr(rcache, "_record_bytes", counted)
+    cache = RenderCache()
+    with rcache.frozen(psd, verify=True):
+        with rcache.frozen(psd):  # nested
+            assert np.array_equal(_render(psd, cache), plain[0])
+        assert np.array_equal(_render(psd, cache, viewport=box), plain[1])
+        assert writes and max(writes.values()) == 1
+    assert psd._frozen_keys is None
+    writes.clear()
+    _render(psd, cache)  # out of the scope: every pass again
+    _render(psd, cache)
+    assert min(writes.values()) >= 2
+
+
+def test_a_change_in_a_frozen_document_raises_under_verify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PSD_RCACHE_VERIFY", "1")
+    psd = PSDImage.open(full_name("layer_effects.psd"))
+    with pytest.raises(CacheMismatch, match="frozen"):
+        with RenderCache(verify=False), rcache.frozen(psd):
+            composite(psd)
+            psd[len(psd) - 1].opacity = 128
+    assert psd._frozen_keys is None

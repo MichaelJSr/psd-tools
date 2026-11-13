@@ -17,7 +17,7 @@ code works with the classes that implement them.
 """
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from psd_tools.api.layers import Group, Layer, PixelLayer
@@ -440,6 +440,7 @@ class PSDProtocol(GroupMixinProtocol, Protocol):
     _max_alloc_bytes: int | Literal["unlimited"] | None  # See PSDImage.max_alloc_bytes.
     # See PSDImage.__init__.
     _opened_records: dict[int, tuple[LayerRecord, int | None, int, int]]
+    _frozen_keys: Any  # See rcache.frozen().
     repo_path: str | None
 
     @property

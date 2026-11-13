@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [perf] ``rcache.frozen(psd)``: a scope in which the caller promises the
+  document is only read. Its layer keys and document key are worked out
+  once there, instead of each pass writing and hashing every layer record
+  again. Outside a scope nothing changes. Under ``PSD_RCACHE_VERIFY=1`` the
+  scope's end keys the document again and raises ``CacheMismatch`` if
+  anything moved. Renders are unchanged
 - [fix] Vibrance's sRGB transfers no longer use numpy's float32 power,
   whose last bits differ between CPUs (AVX-512): whole 8-bit levels read a
   256-entry table worked in float64, other values take their power in

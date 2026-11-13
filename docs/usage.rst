@@ -427,9 +427,15 @@ A whole-document render that reads its preview for how type layers blend
 (``text_preview``, the default) resumes no higher than the first top-level
 layer holding a type layer that is not pinned in ``layer_text_gamma``.
 
+Each pass writes and hashes every layer record again to key it. A document
+that many passes only read (each edit made on a copy of it) keys its layers
+once inside ``with rcache.frozen(psd):``. Change nothing in it there: a pass
+would reuse what it drew before the change.
+
 ``PSD_RCACHE_VERIFY=1`` renders every cached pass again without the cache and
 raises :py:class:`~psd_tools.composite.rcache.CacheMismatch` if the two
-differ. ``tools/rcache_verify.py`` runs that over a folder of cards.
+differ, and keys a frozen document again when its scope ends.
+``tools/rcache_verify.py`` runs that over a folder of cards.
 
 Exporting data to NumPy
 -----------------------

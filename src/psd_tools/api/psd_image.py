@@ -137,6 +137,9 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             layer_image = layer.composite()
     """
 
+    # rcache.frozen()'s keys while one of its scopes is open.
+    _frozen_keys: Any = None
+
     def __init__(self, data: PSD):
         if not isinstance(data, PSD):
             raise TypeError(f"Expected PSD instance, got {type(data).__name__}")
