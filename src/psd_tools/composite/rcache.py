@@ -16,19 +16,24 @@ cache, and a large one with the bytes of one hashed (another open of the
 file) is compared instead; records are hashed on every pass. Stored arrays
 are read-only. With no cache active a pass pays one ContextVar read.
 
+Inside ``with frozen(psd):``, a promise that ``psd`` is only read, its layer
+and document keys are worked out once for every pass instead.
+
 ``PSD_RCACHE_VERIFY=1`` renders every cached pass a second time without the
-cache and raises :py:class:`CacheMismatch` unless the two are equal.
+cache and raises :py:class:`CacheMismatch` unless the two are equal, and keys
+a frozen document again when its scope ends.
 """
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import hashlib
 import io
 import os
 import weakref
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Iterator
 from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any
 
@@ -315,11 +320,71 @@ def _channel_digest(channel: Any, rc: RenderCache | None) -> bytes:
 
 
 def layer_key(layer: Layer, memo: dict[int, bytes]) -> bytes:
-    """Hash of the layer's subtree as it is now: records, channels, children."""
+    """Hash of the layer's subtree as it is now: records, channels, children.
+
+    In a :py:func:`frozen` document, the one worked out in its scope.
+    """
     known = memo.get(id(layer))
     if known is not None:
         return known
+    psd = layer._psd
+    state = psd._frozen_keys
+    if state is not None and state.owner == id(psd):
+        memo = state.keys
     return _layer_key(layer, memo, _ACTIVE.get())
+
+
+class _Frozen:
+    __slots__ = ("owner", "keys", "doc", "depth", "verify")
+
+    def __init__(self, owner: int) -> None:
+        self.owner = owner  # id() of its document: a copy's is not its own
+        self.keys: dict[int, bytes] = {}
+        self.doc: bytes | None = None
+        self.depth = 0
+        self.verify = False
+
+
+@contextlib.contextmanager
+def frozen(psd: PSDImage, verify: bool | None = None) -> Iterator[PSDImage]:
+    """A scope in which the caller promises ``psd`` is only read.
+
+    Each layer's :py:func:`layer_key` and the :py:func:`doc_key` are worked
+    out once in it and kept for every pass, instead of written and hashed
+    again in each. A change inside the scope is not seen: a pass would reuse
+    what the document drew before it. Scopes nest; open and close those of a
+    document in one thread.
+
+    :param verify: Key the document again at the outermost exit and raise
+        :py:class:`CacheMismatch` if anything moved; by default whether
+        ``PSD_RCACHE_VERIFY`` is ``1``.
+    """
+    state = psd._frozen_keys
+    if state is None or state.owner != id(psd):
+        state = psd._frozen_keys = _Frozen(id(psd))
+    state.depth += 1
+    state.verify |= (
+        os.environ.get("PSD_RCACHE_VERIFY") == "1" if verify is None else verify
+    )
+    try:
+        yield psd
+    finally:
+        state.depth -= 1
+        if not state.depth:
+            psd._frozen_keys = None
+    if not state.depth and state.verify:
+        _check_frozen(psd, state)
+
+
+def _check_frozen(psd: PSDImage, state: _Frozen) -> None:
+    fresh: dict[int, bytes] = {}
+    rc = _ACTIVE.get()
+    for layer in psd.descendants():
+        key = state.keys.get(id(layer))
+        if key is not None and _layer_key(layer, fresh, rc) != key:
+            raise CacheMismatch(f"{layer!r} changed inside rcache.frozen()")
+    if state.doc is not None and _doc_key(psd) != state.doc:
+        raise CacheMismatch("the document changed inside rcache.frozen()")
 
 
 def _layer_key(layer: Layer, memo: dict[int, bytes], rc: RenderCache | None) -> bytes:
@@ -444,8 +509,18 @@ def doc_key(psd: PSDImage) -> bytes | None:
     """What every layer's render may read from the document.
 
     A linked layer draws its stored pixels, never its file, so its ``lnkE``
-    record is hashed like an embedded one.
+    record is hashed like an embedded one. In a :py:func:`frozen` document,
+    the one worked out in its scope.
     """
+    state = psd._frozen_keys
+    if state is None or state.owner != id(psd):
+        return _doc_key(psd)
+    if state.doc is None:
+        state.doc = _doc_key(psd)
+    return state.doc
+
+
+def _doc_key(psd: PSDImage) -> bytes | None:
     blocks = psd.tagged_blocks
     record = psd._record
     version = record.header.version
