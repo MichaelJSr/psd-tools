@@ -4,6 +4,14 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A pattern overlay on a layer without a reference point (``fxrp``)
+  tiles from the document's origin, as Photoshop 2023 reads it; it tiled
+  from the layer's box. An unturned pattern at a scale its reduction does
+  not make whole (75%, 7%, 200%) keeps the fraction of its origin and is
+  placed sub-pixel; turned ones and 100%, 50%, 25% and 12.5% stay rounded.
+  The type icon AC's bake makes for Igor_Robotowski and Igor_Roballtowski
+  (Igor's 7% pattern, no ``fxrp``) was up to 255 levels off (3,948 px over
+  8), now within 1. **Rendering change**
 - [fix] A layer in a mode other than Normal whose drop shadow knocks out
   shows its paint and interior effects through a window, as Photoshop 2023
   draws it, when its interior effects go on apart or it is type: they go on

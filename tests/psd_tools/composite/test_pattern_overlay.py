@@ -4,6 +4,7 @@ import math
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from psd_tools import PSDImage
 from psd_tools.api import numpy_io
@@ -107,20 +108,77 @@ def test_unaligned_the_phase_is_measured_from_the_document_origin() -> None:
     assert np.array_equal(_drawn(layer, desc), _tiling_from(psd, desc, (-23, -9), box))
 
 
-def test_without_a_reference_point_the_tiling_starts_at_the_box() -> None:
+def test_without_a_reference_point_the_tiling_starts_at_the_document_origin() -> None:
     psd, layer, desc = _overlay()
     del layer.tagged_blocks[Tag.REFERENCE_POINT]
     box = _style_bbox(layer)
-    expected = _tiling_from(psd, desc, (box[0], box[1]), box)
-    assert np.array_equal(_drawn(layer, desc), expected)
+    assert np.array_equal(_drawn(layer, desc), _tiling_from(psd, desc, (0, 0), box))
 
 
-def test_pattern_origin_rounds_to_the_nearest_pixel() -> None:
+@pytest.mark.parametrize(
+    ("scale", "angle", "origin"),
+    [
+        (100.0, 0.0, (3, 9)),
+        (50.0, 0.0, (3, 9)),
+        (12.5, 0.0, (3, 9)),
+        (75.0, 90.0, (3, 9)),
+        (75.0, 0.0, (3.4, 8.6)),
+        (7.0, 0.0, (3.4, 8.6)),
+        (200.0, 0.0, (3.4, 8.6)),
+    ],
+)
+def test_pattern_origin_keeps_its_fraction_only_where_photoshop_does(
+    scale: float, angle: float, origin: tuple[float, float]
+) -> None:
     _, _, desc = _overlay()
-    desc[b"phase"][b"Hrzn"] = Double(-15.886954442438153)
-    desc[b"phase"][b"Vrtc"] = Double(-13.962771225790817)
-    point = (32.88695444243815, 22.962771225790817)
-    assert paint.pattern_origin(desc, (0, 0, 1, 1), point) == (17, 9)
+    desc[b"Scl "] = Double(scale)
+    desc[b"Angl"] = Double(angle)
+    desc[b"phase"][b"Hrzn"] = Double(-0.25)
+    desc[b"phase"][b"Vrtc"] = Double(0.75)
+    drawn = paint.pattern_origin(desc, (0, 0, 1, 1), (3.65, 7.85))
+    assert drawn == pytest.approx(origin)
+
+
+# effects/pattern-origin-laws.psd: five 64 px grey squares, each with only a
+# Normal pattern overlay of a 41 px noise tile, written by psd-tools; the
+# descriptor is one Photoshop wrote. The cells: no reference point at 7%
+# (phase -15.887, -13.963) and at 100%, a reference point at (+3.4, +5.6) at
+# 75%, unlinked with a phase of (0.5, 0.5) at 7%, and (+3.4, +5.6) at 50%.
+# The PNG is Photoshop 2023's PNG copy of it.
+_ORIGINS = "effects/pattern-origin-laws.psd"
+
+
+def _origin_errors() -> dict[str, int]:
+    """Per cell, the most any channel is off Photoshop's, in levels."""
+    psd = PSDImage.open(full_name(_ORIGINS))
+    path = full_name(_ORIGINS.replace(".psd", ".png"))
+    theirs = np.asarray(Image.open(path).convert("RGB"), dtype=int)
+    ours = np.asarray(psd.composite(force=True).convert("RGB"), dtype=int)
+    error = np.abs(ours - theirs).max(axis=2)
+    return {
+        cell.name: int(error[cell.top : cell.bottom, cell.left : cell.right].max())
+        for cell in psd
+    }
+
+
+def test_pattern_origins_match_photoshop_2023() -> None:
+    errors = _origin_errors()
+    assert len(errors) == 5
+    assert max(errors.values()) <= 1, errors
+
+
+@pytest.mark.parametrize(
+    ("sub_pixel", "missed"),
+    [(False, ("no fxrp 7", "fraction 75", "half 7")), (True, ("fraction 50",))],
+    ids=["always rounded", "never rounded"],
+)
+def test_a_rounded_or_unrounded_origin_misses(
+    monkeypatch: pytest.MonkeyPatch, sub_pixel: bool, missed: tuple[str, ...]
+) -> None:
+    monkeypatch.setattr(paint, "_sub_pixel_origin", lambda desc: sub_pixel)
+    errors = _origin_errors()
+    for cell in errors:
+        assert (errors[cell] > 4) == (cell in missed), (cell, errors)
 
 
 @pytest.mark.parametrize(

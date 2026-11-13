@@ -702,16 +702,15 @@ def _overlay_boxes(
     return box, layer.bbox
 
 
-def _reference_point(layer: Layer) -> tuple[float, float] | None:
+def _reference_point(layer: Layer) -> tuple[float, float]:
     """The layer's ``fxrp`` reference point, in document coordinates.
 
-    None without the tag, so that :py:func:`paint.pattern_origin` falls back
-    to the layer's box; :py:attr:`~psd_tools.api.layers.Layer.reference_point`
-    reads a missing tag as the document's origin.
+    A missing tag reads as the document's origin, as Photoshop 2023 reads
+    it and as :py:attr:`~psd_tools.api.layers.Layer.reference_point` does.
     """
     point = layer.tagged_blocks.get_data(Tag.REFERENCE_POINT)
     if point is None:
-        return None
+        return 0.0, 0.0
     return float(point[0]), float(point[1])
 
 
@@ -723,7 +722,7 @@ def _draw_color_overlay(
 
 def _tiling_origin(
     layer: Layer, descriptor: Descriptor, layout: _Box
-) -> tuple[int, int]:
+) -> tuple[float, float]:
     """Where a pattern of ``layer``'s style laid out across ``layout`` starts.
 
     A layer's tiling starts at its reference point, a group's at its layout
@@ -738,11 +737,11 @@ def _texture_origin(layer: Layer, descriptor: Descriptor) -> tuple[int, int]:
     """Where a bevel's texture tiles from, in document coordinates.
 
     Linked with the layer, from its reference point (a group's too), rounded
-    to the pixel; unlinked or without one, from the document's origin. The
-    phase is not read: Photoshop 2023 draws none of it.
+    to the pixel; unlinked, from the document's origin. The phase is not
+    read: Photoshop 2023 draws none of it.
     """
     point = _reference_point(layer)
-    if point is None or not bool(descriptor.get(Key.Alignment, True)):
+    if not bool(descriptor.get(Key.Alignment, True)):
         return 0, 0
     return math.floor(point[0] + 0.5), math.floor(point[1] + 0.5)
 

@@ -364,12 +364,15 @@ def pattern_origin(
     desc: Descriptor,
     box: tuple[int, int, int, int],
     reference_point: Sequence[float] | None = None,
-) -> tuple[int, int]:
+) -> tuple[float, float]:
     """Where a pattern's tiling starts, in document coordinates.
 
     Aligned with the layer, it starts at the layer's reference point, or at
     ``box``'s top-left without one, moved by the phase. With ``Algn`` off the
     phase is measured from the document's origin.
+
+    Rounded to the pixel, except where Photoshop 2023 places it sub-pixel:
+    an unturned pattern at a scale its reduction does not make whole.
     """
     phase = desc.get(b"phase")
     shift = (0.0, 0.0)
@@ -385,11 +388,24 @@ def pattern_origin(
             if reference_point is None
             else (float(reference_point[0]), float(reference_point[1]))
         )
-    # Rounded to the pixel grid the tiling is drawn on.
-    return (
-        math.floor(start[0] + shift[0] + 0.5),
-        math.floor(start[1] + shift[1] + 0.5),
-    )
+    x, y = start[0] + shift[0], start[1] + shift[1]
+    if _sub_pixel_origin(desc):
+        return x, y
+    return math.floor(x + 0.5), math.floor(y + 0.5)
+
+
+def _sub_pixel_origin(desc: Descriptor) -> bool:
+    """Whether Photoshop 2023 keeps the fraction of the pattern's origin.
+
+    It does for an unturned pattern whose samples fall between the reduced
+    panel's (75%, 7%, 200%); it rounds a turned one, and one at 100%, 50%,
+    25% or 12.5%, where every sample lands on one.
+    """
+    turns = _finite(desc, Key.Angle, 0.0) / 90.0
+    if turns == round(turns) and round(turns) % 4:
+        return False
+    scale = _pattern_scale(desc)
+    return abs(scale * _reduction_box(scale) - 1.0) > 1e-9
 
 
 def create_fill(
@@ -522,7 +538,7 @@ def _box_peak_bytes(panel: np.ndarray, width: int) -> int:
 def _tile_axis(
     start: int,
     length: int,
-    origin: int,
+    origin: float,
     size: int,
     scale: float,
     step: int = 1,
@@ -550,7 +566,7 @@ def _tile_axis(
 def _sample_tiling(
     panel: np.ndarray,
     viewport: tuple[int, int, int, int],
-    origin: tuple[int, int],
+    origin: tuple[float, float],
     scale: float,
     step: int = 1,
     levels: bool = False,
@@ -560,15 +576,16 @@ def _sample_tiling(
     ``step`` is the reduction box: the samples blended are that far apart.
     With ``levels`` the panel holds whole 8-bit levels, blended as Photoshop
     2023 blends them (weights in 256ths, one rounding half up), and the
-    result is back in [0, 1].
+    result is back in [0, 1]. A fractional ``origin`` places the tiling
+    sub-pixel.
     """
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
-    if scale == 1.0:
+    if _rolls(scale, origin):
         # Every sample lands on a panel pixel: the panel rolled to the
         # viewport's corner and repeated in one copy.
         rolled = np.roll(
             panel,
-            (origin[1] - viewport[1], origin[0] - viewport[0]),
+            (int(origin[1]) - viewport[1], int(origin[0]) - viewport[0]),
             axis=(0, 1),
         )
         rows, columns = -(-height // panel.shape[0]), -(-width // panel.shape[1])
@@ -602,13 +619,21 @@ def _sample_tiling(
     return pixels
 
 
+def _rolls(scale: float, origin: tuple[float, float]) -> bool:
+    """Whether :py:func:`_sample_tiling` rolls the panel: unscaled, from a whole pixel."""
+    return scale == 1.0 and all(float(value).is_integer() for value in origin)
+
+
 def _sample_peak_bytes(
-    panel: np.ndarray, viewport: tuple[int, int, int, int], scale: float
+    panel: np.ndarray,
+    viewport: tuple[int, int, int, int],
+    scale: float,
+    origin: tuple[float, float] = (0, 0),
 ) -> int:
     """What :py:func:`_sample_tiling` holds at its peak."""
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
     plane = panel.shape[2] * panel.dtype.itemsize
-    if scale == 1.0:
+    if _rolls(scale, origin):
         # The panel, its rolled copy and the tiling rounded up to whole panels.
         rows = -(-height // panel.shape[0]) * panel.shape[0]
         columns = -(-width // panel.shape[1]) * panel.shape[1]
@@ -645,14 +670,15 @@ def draw_pattern_fill(
     psd: Any,
     desc: Descriptor,
     anchor: tuple[int, int, int, int] | None = None,
-    origin: tuple[int, int] | None = None,
+    origin: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray | None, np.ndarray | None]:
     r"""
     Create a pattern fill.
 
-    The tiling starts at ``origin``, in document coordinates, or else at the
-    top-left of ``anchor``, which defaults to ``viewport``, so a viewport
-    larger than the anchor continues the same tiling. ``Angl`` turns the
+    The tiling starts at ``origin``, in document coordinates (a fraction
+    places it sub-pixel), or else at the top-left of ``anchor``, which
+    defaults to ``viewport``, so a viewport larger than the anchor
+    continues the same tiling. ``Angl`` turns the
     tiles about that point, in right angles only; ``Scl `` scales them about
     it. A reduction is bilinear between samples of the panel's box average
     one box apart. An 8-bit pattern in an 8-bit document is reduced and
@@ -716,7 +742,7 @@ def draw_pattern_fill(
             height,
             panel.shape[2],
             budget,
-            estimated_bytes=_sample_peak_bytes(panel, viewport, scale),
+            estimated_bytes=_sample_peak_bytes(panel, viewport, scale, origin),
             warn=False,
         )
     # Taken from the pattern's own slot layout rather than from its color mode.
