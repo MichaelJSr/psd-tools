@@ -422,6 +422,21 @@ def _style_draws(layer: Layer) -> bool:
     return False
 
 
+# Effects whose fixed-point colours blend alike either way: other
+# effects' do not (:py:func:`_blends_through`).
+_LAWLESS = ("bevelemboss", "stroke")
+
+
+def _fixed_point(layer: Layer, blend_mode: BlendMode, desc: Any) -> bool:
+    """Whether the effect paints the solid colour its mode blends to itself."""
+    if blend_mode not in _FIXED_POINTS or Key.Gradient in desc or Key.Pattern in desc:
+        return False
+    return all(
+        value == _FIXED_POINTS[blend_mode]
+        for value in paint._get_color(layer._psd.color_mode, desc)
+    )
+
+
 def _blends_through(
     layer: Layer,
     as_pixels: Callable[[Layer], bool] | None = None,
@@ -431,10 +446,11 @@ def _blends_through(
     The pair is (in a mode the isolated render changes, in one it does not):
     a type layer's own paint, a group in a mode of its own and anything in a
     mode Photoshop fades by fill opacity land as they would pass through.
-    Normal and Dissolve blend alike either way. Any other mode does not,
-    even in a colour it blends to itself (white in Screen, black in
-    Multiply): the group's law weighs it against what the group shows so
-    far (:py:meth:`Compositor._mixed_by_law`). A type layer that
+    Normal and Dissolve blend alike either way, and so does a bevel's or
+    stroke's solid colour its mode blends to itself (white in Screen, black
+    in Multiply). Any other paint does not: the group's law weighs it
+    against what the group shows so far (:py:meth:`Compositor._mixed_by_law`).
+    A type layer that
     ``as_pixels`` says Photoshop composites from its stored raster
     (:py:meth:`Compositor._drawn_as_pixels`) blends as the pixel layer it is
     drawn as.
@@ -451,11 +467,13 @@ def _blends_through(
     for name in _EFFECT_KINDS:
         for effect in _readable(layer, name):
             try:
-                for blend_mode, opacity, _ in _effect_paints(name, effect):
+                for blend_mode, opacity, desc in _effect_paints(name, effect):
                     if not opacity > 0.0 or blend_mode in _COVERS_BENEATH:
                         continue
                     if blend_mode in _FILL_FADED:
                         keeps = True
+                    elif name in _LAWLESS and _fixed_point(layer, blend_mode, desc):
+                        continue
                     else:
                         mixes = True
             except _UNREADABLE as error:
@@ -2923,6 +2941,34 @@ def _interior_apart(
     return _has_enabled_effects(layer) and any(
         _readable(layer, name) for name in _INTERIOR_EFFECTS
     )
+
+
+def _fades_apart(layer: Layer, shown: Callable[[Layer], bool] | None) -> bool:
+    """Whether a mixing group holds a layer drawn apart at reduced fill.
+
+    Its law is unknown; the group mixes its two renders instead.
+    """
+    stack = [
+        c
+        for c in cast(GroupMixin, layer)
+        if (shown is None or shown(c)) and not c.clipping
+    ]
+    while stack:
+        child = stack.pop()
+        if child.is_group():
+            if child.blend_mode == BlendMode.PASS_THROUGH:
+                stack.extend(
+                    c
+                    for c in cast(GroupMixin, child)
+                    if (shown is None or shown(c)) and not c.clipping
+                )
+            continue
+        fill = child.tagged_blocks.get_data(Tag.BLEND_FILL_OPACITY, 255) / 255.0
+        if fill < 1.0 and _interior_apart(
+            child, Knockout.NONE, fill, child.opacity / 255.0
+        ):
+            return True
+    return False
 
 
 class _OuterEffect(NamedTuple):
@@ -5653,8 +5699,11 @@ class Compositor:
         # A mixing group's blend-mode sources go on by its law, and so do
         # those of a pass-through group inside it, against its backdrop.
         law: _MixLaw | None = None
+        halves = False
         if self._alpha_only:
             pass
+        elif mixes and _fades_apart(layer, self._layer_filter):
+            halves = True
         elif mixes:
             law = _MixLaw(seed, group_alpha, np.zeros_like(group_alpha))
         elif self._law is not None and is_passthrough and not knockout:
@@ -5709,6 +5758,8 @@ class Compositor:
             color = group_compositor.result_over_backdrop()
         shape = group_compositor.shape
         alpha = group_compositor.alpha
+        if halves:
+            color = self._mix_isolated(layer, viewport, color, alpha, color_b)
         if not same_box:
             color = paste(self._viewport, viewport, color, 1.0)
             shape = paste(self._viewport, viewport, shape)
@@ -5762,6 +5813,44 @@ class Compositor:
         if layer.is_group() and self._mixes_isolated(layer):
             return True
         return _covers_beneath(layer, self._layer_filter)
+
+    def _mix_isolated(
+        self,
+        layer: Layer,
+        viewport: tuple[int, int, int, int],
+        color: np.ndarray,
+        alpha: np.ndarray,
+        color_b: np.ndarray,
+    ) -> np.ndarray:
+        """A styled pass-through group's content, its isolated render mixed in.
+
+        Only for a group :py:func:`_fades_apart` finds, whose law is unread.
+        ``color`` is the group's content with its children blended through
+        to the backdrop. Photoshop lands between that and the group composited
+        on its own, in Normal: where the group's alpha is ``a`` it mixes the
+        two contents by ``(1 - a) / (2 - a)``, so an opaque pixel keeps its
+        pass-through blend and a faint one goes halfway.
+        """
+        h, w = viewport[3] - viewport[1], viewport[2] - viewport[0]
+        isolated = Compositor(
+            viewport,
+            color=paste(viewport, self._viewport, color_b, 1.0),
+            alpha=np.zeros((h, w, 1), dtype=np.float32),
+            layer_filter=self._layer_filter,
+            force=self._force,
+            adjustment_isolated=True,
+            widen=self._widen,
+            color_mode=self._color_mode,
+            cache=self._cache,
+            text_gamma=self._text_gamma,
+            text_isolated=True,
+            mixing=True,
+        )
+        for sublayer in cast(GroupMixin, layer):
+            isolated.apply(sublayer)
+        a = np.clip(alpha, 0.0, 1.0)
+        share = (1.0 - a) / (2.0 - a)
+        return color + share * (isolated.result_isolated() - color)
 
     def _read_object(
         self, layer: Layer, box: tuple[int, int, int, int] | None = None

@@ -118,13 +118,17 @@ Changelog
   group's two renders: where it meets earlier content (a star under another's
   glow, a Screen square over a 50% one) the group was up to 20 levels off,
   now within 3, over opaque and semi-transparent backdrops. A group whose one
-  blending child comes first is unchanged. **Rendering change**
+  blending child comes first is unchanged, and so is one holding a layer
+  whose interior effects are drawn apart at reduced fill (that law is
+  unread; by this one it was up to 35 levels off). **Rendering change**
 - [fix] An effect in a colour its mode blends to itself (a white Screen
   glow, a black Multiply shadow) makes a styled or clipped pass-through group
   mix too, and goes on by its law: where it met another child's translucent
   paint or shadow (The Puppet's Dark glow over its Undead shadow, Royal
   Eradicator Main Cannon's star glows) it was up to 7 levels off on the
-  cards and 29 on probes, now within 2. **Rendering change**
+  cards and 29 on probes, now within 2. A bevel's or stroke's still blends
+  alike either way (by the law it was up to 22 levels off).
+  **Rendering change**
 - [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
   of the document's own profile, its colorants adapted to D65 by Bradford,
   as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp

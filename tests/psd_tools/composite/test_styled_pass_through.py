@@ -408,3 +408,49 @@ def test_fixed_point_effects_follow_a_mixing_groups_law(
 
     monkeypatch.setattr(composite_module, "_mixes_isolated", never)
     assert _law_error(psd, _FIXED) > 20
+
+
+# effects/mixing-faded-apart.psd: over stripes fading out in four bands, a
+# pass-through group a hidden layer clips to: a ramp under a ramp at 0% fill
+# with a 60% Screen colour overlay, which is drawn apart from its layer.
+_APART = "effects/mixing-faded-apart"
+
+
+def test_a_layer_drawn_apart_at_reduced_fill_mixes_the_two_renders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Photoshop's law for it is unread: the group's two renders are mixed.
+
+    By the law it strays by 35 levels; mixed, by 14.
+    """
+    psd = PSDImage.open(full_name(_APART + ".psd"))
+    group = next(layer for layer in psd if layer.is_group())
+    assert composite_module._fades_apart(group, None)
+    assert _law_error(psd, _APART) <= 14
+
+    def never(*args: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(composite_module, "_fades_apart", never)
+    assert _law_error(psd, _APART) > 30
+
+
+# effects/mixing-fixed-point-stroke.psd: over opaque stripes, a pass-through
+# group a hidden layer clips to: a dark disc at 50% under an opaque one with an
+# 8 px white Screen outside stroke.
+_STROKE = "effects/mixing-fixed-point-stroke"
+
+
+def test_a_fixed_point_stroke_does_not_mix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unlike a shadow or glow, white in Screen on a stroke blends through.
+
+    By the group's law it strays by 21 levels; blended through, by 1.
+    """
+    psd = PSDImage.open(full_name(_STROKE + ".psd"))
+    group = next(layer for layer in psd if layer.is_group())
+    assert not composite_module._mixes_isolated(group, None)
+    assert _law_error(psd, _STROKE) <= 1
+
+    monkeypatch.setattr(composite_module, "_LAWLESS", ())
+    assert composite_module._mixes_isolated(group, None)
+    assert _law_error(psd, _STROKE) > 15
