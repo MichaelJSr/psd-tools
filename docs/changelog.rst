@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] Vibrance's sRGB transfers no longer use numpy's float32 power,
+  whose last bits differ between CPUs (AVX-512): whole 8-bit levels read a
+  256-entry table worked in float64, other values take their power in
+  float64, each cast to float32 once, and the result is encoded in float64
+  (saturation alone encoded in float32). The radial gradient squares by
+  multiplying. **Rendering change** for saturation-only vibrance, a level
+  at most (on arm64 2 px of one card, onto Photoshop 2023's value)
 - [refactor] PSB documents opened from bytes keep their layers' tagged
   blocks as bytes until read, as PSD documents do (8-byte lengths
   included), and read their layer records in a few struct reads. An
