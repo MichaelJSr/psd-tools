@@ -4889,8 +4889,9 @@ class Compositor:
                 alpha_b,
                 blend_fn,
                 text_gamma,
-                isolated=self._text_isolated and not knocks_out,
+                isolated=self._text_isolated and (under is not None or not knocks_out),
                 inside=text_inside,
+                window=knockout_alpha_g if under is not None else None,
             )
             if text_key is None or not self._mixes_straight(
                 text_key,
@@ -4941,6 +4942,7 @@ class Compositor:
         text_gamma: float,
         isolated: bool,
         inside: tuple[np.ndarray, np.ndarray] | None = None,
+        window: np.ndarray | None = None,
     ) -> np.ndarray:
         """The colour canvas after a type layer goes on.
 
@@ -4962,6 +4964,10 @@ class Compositor:
         backdrop, so the canvas keeps standing over it for the layers to come.
         The blend mode still sees the canvas: a pass-through group's children
         blend with the backdrop whether or not the group is styled.
+
+        ``window``, where given, is the group alpha of the canvas a knock-out
+        window shows (:py:meth:`_apply_apart`): isolated, the shape uncovers
+        that content, un-mixed from the backdrop the same way.
         """
         rows = np.flatnonzero(shape.any(axis=(1, 2)))
         columns = np.flatnonzero(shape.any(axis=(0, 2)))
@@ -5051,9 +5057,17 @@ class Compositor:
         )
         blended = (1.0 - alpha_b) * color + alpha_b * blend_fn(backdrop, color)
         source = to_text_space(blended, text_gamma)
+        window_alpha: np.ndarray | None = None
         if isolated:
             color_0 = picked(self._color_0).astype(np.float64)
             alpha_0 = picked(self._alpha_0).astype(np.float64)
+            if window is not None:
+                window_alpha = picked(window).astype(np.float64)
+                backdrop = utils.divide(
+                    backdrop * alpha_b - (1.0 - window_alpha) * alpha_0 * color_0,
+                    window_alpha,
+                    fill=0.0,
+                )
             alpha_b = picked(alpha_g_previous).astype(np.float64)
             # The content so far, un-mixed from the backdrop it stands over;
             # where there is none its colour carries no weight below.
@@ -5062,13 +5076,18 @@ class Compositor:
                 alpha_b,
                 fill=0.0,
             )
-            backdrop = previous
+            if window_alpha is None:
+                backdrop = previous
             alpha_new = picked(self._alpha_g)
         # The canvas outside the shape stays, and the shape uncovers the
         # backdrop for what lies beyond the coverage.
         share = alpha if inside is None else picked(inside[0])
         prior = to_text_space(previous, text_gamma)
-        if isolated:
+        if window_alpha is not None:
+            mixed = (1.0 - shape) * alpha_b * prior + (
+                shape - share
+            ) * window_alpha * to_text_space(backdrop, text_gamma)
+        elif isolated:
             mixed = (1.0 - share) * alpha_b * prior
         else:
             beneath = (
@@ -5080,17 +5099,26 @@ class Compositor:
         if inside is None:
             mixed = mixed + alpha * source
         else:
-            inner_alpha = np.maximum(
-                alpha_new - (1.0 - share) * alpha_b
-                if isolated
-                else alpha_new
-                - (1.0 - shape) * alpha_previous
-                - (shape - share) * alpha_b,
-                0.0,
-            )
+            if window_alpha is not None:
+                inner_alpha = np.maximum(
+                    alpha_new
+                    - (1.0 - shape) * alpha_b
+                    - (shape - share) * window_alpha,
+                    0.0,
+                )
+            else:
+                inner_alpha = np.maximum(
+                    alpha_new - (1.0 - share) * alpha_b
+                    if isolated
+                    else alpha_new
+                    - (1.0 - shape) * alpha_previous
+                    - (shape - share) * alpha_b,
+                    0.0,
+                )
             if isolated:
+                beneath_alpha = alpha_b if window_alpha is None else window_alpha
                 within = utils.divide(
-                    (share - alpha) * alpha_b * backdrop + alpha * blended,
+                    (share - alpha) * beneath_alpha * backdrop + alpha * blended,
                     inner_alpha,
                     fill=0.0,
                 )
@@ -6704,22 +6732,25 @@ class Compositor:
     def _knocks_out_window(self, layer: Layer) -> bool:
         """Whether the layer knocks its shadows out as a window to the canvas.
 
-        A Normal layer below full fill shows its paint and its interior
-        effects over the canvas as it stood before its shadows, the window
-        its shape cuts in them, and is then mixed over the shadows by that
-        shape (:py:meth:`_apply_apart`). In a type layer's text space that
-        is not the same as cutting the shadow under the shape. Only a layer
-        whose every shadow knocks out and that has no outer glow takes it.
+        A Normal layer below full fill, or one in another mode, shows its
+        paint and its interior effects over the canvas as it stood before
+        its shadows, the window its shape cuts in them, and is then mixed
+        over the shadows by that shape (:py:meth:`_apply_apart`). In a type
+        layer's text space, or under interior effects that cover the paint,
+        that is not the same as cutting the shadow under the shape. Only a
+        layer whose every shadow knocks out and that has no outer glow takes
+        it.
         """
-        if (
-            layer.is_group()
-            or isinstance(layer, AdjustmentLayer)
-            or layer.blend_mode not in _COVERS_BENEATH
-        ):
+        if layer.is_group() or isinstance(layer, AdjustmentLayer):
             return False
         fill_opacity, opacity = self._get_const(layer)
         knockout = _read_knockout(layer)
-        if knockout or fill_opacity >= 1.0 or opacity <= 0.0:
+        if knockout or opacity <= 0.0:
+            return False
+        if (
+            layer.blend_mode in _COVERS_BENEATH | {BlendMode.PASS_THROUGH}
+            and fill_opacity >= 1.0
+        ):
             return False
         shadows = _readable(layer, "dropshadow")
         if not shadows or _readable(layer, "outerglow"):

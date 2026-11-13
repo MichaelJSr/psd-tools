@@ -665,6 +665,84 @@ def test_a_stroke_beside_the_window_keeps_its_share() -> None:
     assert {name: error for name, error in shadowed.items() if error >= 2.0} == {}
 
 
+# ``effects/text-mode-window.psd``: Photoshop 2023, a row 110 px tall per
+# layer, each in another mode under Bob-Ulk's Name style (a Multiply shadow
+# that knocks out, a Normal gradient overlay) as named, most in a pass-through
+# group with an outside stroke and a shadow of its own: Linear Dodge with and
+# without the overlay, Multiply under it at 50%, Screen, Linear Dodge outside a
+# group, the same with its shadow not knocked out, a pixel layer, and Normal.
+_MODE_WINDOW = "effects/text-mode-window.psd"
+_GROUPED_TYPE = (
+    "linear dodge overlay grouped",
+    "linear dodge grouped",
+    "multiply overlay 50 grouped",
+    "screen grouped",
+)
+
+
+def _mode_row_errors() -> dict[str, float]:
+    """The worst level of each layer's row against Photoshop's composite."""
+    psd = PSDImage.open(full_name(_MODE_WINDOW))
+    error = np.abs(composite(psd)[0] - psd.numpy()[..., :3]).max(axis=-1)
+    return {
+        layer.name: float(error[layer.top - 18 : layer.top + 92].max() * 255)
+        for layer in psd.descendants()
+        if not layer.is_group() and layer.name not in ("Background", "backdrop")
+    }
+
+
+def test_a_layer_in_another_mode_shows_its_window() -> None:
+    """Every row is within 2 levels of Photoshop's composite.
+
+    Its paint and interior effects go on over the canvas as it stood before
+    the shadow, and its shape mixes that over the shadow; in a styled group
+    a type layer's edge mixes against what the group painted.
+    """
+    errors = _mode_row_errors()
+    assert len(errors) == 8
+    assert {name: error for name, error in errors.items() if error >= 2.0} == {}
+
+
+def test_a_cut_shadow_or_an_unisolated_window_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cut under the shape, every row in another mode misses.
+
+    A window mixed against the canvas, not the group, misses on the grouped
+    type rows only.
+    """
+    knocks_out_window = Compositor._knocks_out_window
+    monkeypatch.setattr(
+        Compositor,
+        "_knocks_out_window",
+        lambda self, layer: (
+            layer.blend_mode == BlendMode.NORMAL and knocks_out_window(self, layer)
+        ),
+    )
+    errors = _mode_row_errors()
+    missed = (
+        *_GROUPED_TYPE,
+        "linear dodge overlay",
+        "pixels linear dodge overlay grouped",
+    )
+    assert all(errors[name] > 4.0 for name in missed), errors
+    monkeypatch.undo()
+
+    mix = Compositor._mix_in_text_space
+
+    def against_the_canvas(self: Compositor, *args: Any, **kwargs: Any) -> np.ndarray:
+        if kwargs.pop("window", None) is not None:
+            kwargs["isolated"] = False
+        return mix(self, *args, **kwargs)
+
+    monkeypatch.setattr(Compositor, "_mix_in_text_space", against_the_canvas)
+    errors = _mode_row_errors()
+    assert all(errors[name] > 4.0 for name in _GROUPED_TYPE), errors
+    assert all(
+        error < 2.0 for name, error in errors.items() if name not in _GROUPED_TYPE
+    ), errors
+
+
 # -- Layers Photoshop kept as pixels ---------------------------------------- #
 
 # ``text-kept-raster.psd``: a card's name and Ability, each over its own opaque
