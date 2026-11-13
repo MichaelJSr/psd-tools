@@ -458,6 +458,33 @@ class LayerBlendingRanges(BaseElement):
             [(0, 65535), (0, 65535)],
         ]
     )
+    # The ranges' bytes as open's fast path read them: parsed on first use.
+    _raw: "bytes | None" = field(default=None, init=False, repr=False, eq=False)
+
+    def __getattr__(self, name: str) -> Any:
+        raw = _slot(self, "_raw") if name in _RANGE_FIELDS else None
+        if raw is not None and raw is not _UNSET:
+            self._settle()
+            return object.__getattribute__(self, name)
+        raise AttributeError(name)
+
+    def _settle(self) -> None:
+        """Parse the held bytes into the fields not set since."""
+        raw = self._raw
+        composite: Any = None
+        channel_ranges: Any = None
+        if raw:
+            values = _RANGE.unpack_from(raw)
+            composite = [values[0:2], values[2:4]]
+            channel_ranges = []
+            for offset in range(8, len(raw), 8):
+                values = _RANGE.unpack_from(raw, offset)
+                channel_ranges.append([values[0:2], values[2:4]])
+        set_ = object.__setattr__
+        for name, value in zip(_RANGE_FIELDS, (composite, channel_ranges), strict=True):
+            if _slot(self, name) is _UNSET:
+                set_(self, name, value)
+        set_(self, "_raw", None)
 
     @classmethod
     def read(cls, fp: IO[bytes], **kwargs: Any) -> Self:
@@ -483,6 +510,11 @@ class LayerBlendingRanges(BaseElement):
 
     def write(self, fp: IO[bytes], **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""
+        raw = self._raw
+        if raw is not None:
+            if all(_slot(self, name) is _UNSET for name in _RANGE_FIELDS):
+                return write_fmt(fp, "I", len(raw)) + write_bytes(fp, raw)
+            self._settle()  # a field set since: write the fields
         return write_length_block(fp, self._write_body)
 
     def _write_body(self, fp: IO[bytes]) -> int:
@@ -812,11 +844,21 @@ _RECORD_CHANNEL2 = struct.Struct(">hQ")
 _RECORD_TAIL = struct.Struct(">4s4sBBBxI")
 _EXTRA_HEAD = struct.Struct(">II")
 _RANGE = struct.Struct(">4H")
+_RANGE_FIELDS = ("composite_ranges", "channel_ranges")
+_UNSET = object()
 _CHANNEL_IDS = {channel.value: channel for channel in ChannelID}
 _BLEND_MODES = {mode.value: mode for mode in BlendMode}
 _CLIPPINGS = {clip.value: clip for clip in Clipping}
 _FLAG_NAMES = tuple(item.name for item in fields(LayerFlags))
 _FLAG_VALUES = tuple(_flag_values(flags) for flags in range(256))
+
+
+def _slot(element: Any, name: str) -> Any:
+    """``element``'s field ``name`` as set, else ``_UNSET``: no ``__getattr__``."""
+    try:
+        return object.__getattribute__(element, name)
+    except AttributeError:
+        return _UNSET
 
 
 def _record_head(fp: IO[bytes], version: int = 1) -> tuple[Any, ...] | None:
@@ -887,7 +929,7 @@ def _record_fields(
 def _record_extra(
     data: bytes, encoding: str
 ) -> tuple[LayerBlendingRanges, str, int] | None:
-    """Read the ranges and name of an extra block without a mask.
+    """Read the ranges (held as bytes) and name of an extra block without a mask.
 
     Returns them and where the tagged blocks start; None where the readers
     should run.
@@ -912,18 +954,8 @@ def _record_extra(
         )
     ):
         return None
-    composite: Any = None
-    channel_ranges: Any = None
-    if count:
-        values = _RANGE.unpack_from(data, 8)
-        composite = [values[0:2], values[2:4]]
-        channel_ranges = []
-        for offset in range(16, 8 + 8 * count, 8):
-            values = _RANGE.unpack_from(data, offset)
-            channel_ranges.append([values[0:2], values[2:4]])
     ranges = object.__new__(LayerBlendingRanges)
-    object.__setattr__(ranges, "composite_ranges", composite)
-    object.__setattr__(ranges, "channel_ranges", channel_ranges)
+    object.__setattr__(ranges, "_raw", data[8 : 8 + 8 * count])
     return ranges, data[name_at + 1 : name_end].decode(encoding), end
 
 

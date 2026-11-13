@@ -367,9 +367,10 @@ class TaggedBlock(BaseElement):
     key: bytes = b""
     _data: Any = field(default=b"", repr=True)
     _span: "tuple[Span, int] | None" = field(default=None, init=False)
-    # Bytes as read: (bytes, padding, budget, version).
-    _held: "tuple[bytes, int, Any, int] | None" = field(
-        default=None, init=False, repr=False
+    # Bytes as read, and (padding, budget, version): one tuple per read.
+    _held: "bytes | None" = field(default=None, init=False, repr=False)
+    _how: "tuple[int, Any, int] | None" = field(
+        default=None, init=False, repr=False, eq=False
     )
 
     def _repr_pretty_(self, p: Any, cycle: bool) -> None:
@@ -379,10 +380,10 @@ class TaggedBlock(BaseElement):
 
     def _load(self) -> None:
         if self._held is not None:
-            raw, _, budget, version = self._held
+            _, budget, version = self._how  # type: ignore[misc]
             with resume_budget(budget):
-                self._data = self._parse(self.key, raw, version)
-            self._held = None
+                self._data = self._parse(self.key, self._held, version)
+            self._held = self._how = None
         elif self._span is not None:
             span, version = self._span
             self._data, self._span = self._parse(self.key, span.read(), version), None
@@ -395,7 +396,7 @@ class TaggedBlock(BaseElement):
 
     @data.setter
     def data(self, value: Any) -> None:
-        self._data, self._span, self._held = value, None, None
+        self._data, self._span, self._held, self._how = value, None, None, None
 
     def __eq__(self, other: object) -> bool:
         if other.__class__ is not self.__class__:
@@ -467,7 +468,8 @@ class TaggedBlock(BaseElement):
         set_(self, "key", key)
         set_(self, "_data", b"")
         set_(self, "_span", None)
-        set_(self, "_held", (raw, padding, current_budget(), 1))
+        set_(self, "_held", raw)
+        set_(self, "_how", (padding, current_budget(), 1))
         return self
 
     @classmethod
@@ -545,10 +547,11 @@ class TaggedBlock(BaseElement):
         key = self.key if isinstance(self.key, bytes) else self.key.value
         if version in (1, 2):
             # Bytes as read (held, or an unread span): no seek back for the length.
-            held = self._held
+            held, how = self._held, self._how
             raw: bytes | memoryview | None = None
-            if held is not None and held[1] == padding and held[3] == version:
-                raw = held[0]
+            if held is not None and how is not None:
+                if how[0] == padding and how[2] == version:
+                    raw = held
             elif self._span is not None and self._span[1] == version:
                 raw = self._span[0].view()
             if raw is not None:
@@ -1222,6 +1225,7 @@ def _hold(
     try:
         position, end = fp.tell(), len(data)
         budget = current_budget()
+        how = (padding, budget, version)  # shared by the blocks held here
         if budget is not None:
             max_objects, max_read = budget._max_objects, budget._max_read
             max_total = budget._max_total
@@ -1268,7 +1272,8 @@ def _hold(
             set_(block, "key", tag)
             set_(block, "_data", b"")
             set_(block, "_span", None)
-            set_(block, "_held", (bytes(data[start:stop]), padding, budget, version))
+            set_(block, "_held", bytes(data[start:stop]))
+            set_(block, "_how", how)
             items.append((tag, block))
             position = stop + gap
     finally:

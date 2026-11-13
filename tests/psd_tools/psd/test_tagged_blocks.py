@@ -228,9 +228,11 @@ def test_an_unread_layer_block_is_written_as_read() -> None:
     # A layer id with 4 bytes its parser skips.
     raw = _raw_block(Tag.LAYER_ID.value, struct.pack(">II", 7, 1)).getvalue()
     blocks = TaggedBlocks.frombytes(raw)
-    assert blocks[Tag.LAYER_ID]._held is not None
+    block = blocks[Tag.LAYER_ID]
+    assert block._held is not None and block._how is not None
     assert blocks.tobytes() == raw
     assert blocks.get_data(Tag.LAYER_ID) == 7
+    assert block._held is None and block._how is None  # nothing kept alive
     blocks[Tag.LAYER_ID].data = IntegerElement(9)
     assert blocks.tobytes() == _raw_block(Tag.LAYER_ID.value, b"\0\0\0\x09").getvalue()
 
@@ -270,7 +272,10 @@ def test_psb_blocks_are_held_as_the_readers_read_them(
                 budget = current_budget()
                 assert budget is not None
                 blocks = TaggedBlocks.read(fp, version=2, padding=padding)
-                held = [blocks[key]._held for key in blocks]
+                held = [
+                    None if b._held is None else (b._held, b._how)
+                    for b in map(blocks.__getitem__, blocks)
+                ]
                 written = blocks.tobytes(version=2, padding=padding)
                 loaded = [(key, blocks[key].data) for key in blocks]
                 spent = budget.objects, budget.total_bytes
@@ -280,7 +285,7 @@ def test_psb_blocks_are_held_as_the_readers_read_them(
 
     fast = [outcome(data[:size]) for size in range(len(data) + 1)]
     held = fast[-1][0]
-    assert [item and item[3] for item in held] == [2, None, 2, 2]
+    assert [item and item[1][2] for item in held] == [2, None, 2, 2]
     assert fast[-1][1] == data
     monkeypatch.setattr(tagged_blocks, "_hold", lambda *a: True)
     eager = [outcome(data[:size]) for size in range(len(data) + 1)]

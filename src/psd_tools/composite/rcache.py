@@ -421,7 +421,7 @@ def _block_digest(block: TaggedBlock, version: int, rc: RenderCache | None) -> b
     head = block.signature + key
     held = block._held
     if held is not None:
-        return head + _bytes_digest(rc, held[0], block)
+        return head + _bytes_digest(rc, held, block)
     if block._span is not None and block._span[1] == version:
         span = block._span[0]
         return head + _digest(rc, id(span), span, span.length, span.view, block)

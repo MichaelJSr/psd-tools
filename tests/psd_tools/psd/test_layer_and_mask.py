@@ -187,6 +187,26 @@ def test_layer_record_fast_read_matches_readers(
     assert fast == [outcome(*case) for case in cases]
 
 
+def test_fast_read_ranges_are_parsed_on_first_use() -> None:
+    """Bytes until read; a field set before that is kept and written."""
+    ranges = bytes(range(24))
+    data = _record_bytes(ranges=ranges)
+    eager = LayerBlendingRanges.frombytes(struct.pack(">I", 24) + ranges)
+    held = LayerRecord.read(io.BytesIO(data)).blending_ranges
+    assert held._raw == ranges and held.tobytes() == eager.tobytes()
+    assert held._raw is not None
+    assert held.channel_ranges == eager.channel_ranges and held._raw is None
+    assert held == eager
+    for read_first in (True, False):
+        edited = LayerRecord.read(io.BytesIO(data)).blending_ranges
+        edited.composite_ranges = [(1, 2), (3, 4)]
+        if read_first:
+            assert edited.channel_ranges == eager.channel_ranges
+        again = LayerBlendingRanges.frombytes(edited.tobytes())
+        assert again.composite_ranges == [(1, 2), (3, 4)]
+        assert again.channel_ranges == eager.channel_ranges
+
+
 def test_plain_record_and_held_blocks_set_every_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
