@@ -4,6 +4,15 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] A layer in a mode other than Normal whose drop shadow knocks out
+  shows its paint and interior effects through a window, as Photoshop 2023
+  draws it, when its interior effects go on apart or it is type: they go on
+  over the canvas as it stood before the shadow, and its shape mixes that
+  over the shadow (under a covering overlay the shadow stays whole). It was
+  cut under the whole shape. Type in a styled group mixes its edge in the
+  text gamma against what the group painted, window included. Bob-Ulk's
+  Linear Dodge Name as AC re-lays it was 12 levels off on its glyph edges
+  (279 px over 8), now within 1. **Rendering change**
 - [fix] 8-bit documents: Hue/Saturation with the master alone at hue 0
   and saturation 0 or -100 works in whole levels, as Photoshop 2023 does:
   lightness scales each channel's level by a whole-level ``K / 255``
