@@ -57,7 +57,7 @@ from psd_tools.api.utils import (
 from psd_tools.color_convert import SRGB_CUTOFF, SRGB_GAMMA, SRGB_OFFSET, SRGB_SLOPE
 from psd_tools.composite import paint, rcache, utils, vector
 from psd_tools.composite._compat import HAS_SCIPY
-from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC
+from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC, _dot3
 from psd_tools.composite.blend import (
     _NEUTRAL_SOURCE,
     fade_source,
@@ -7580,7 +7580,8 @@ class Compositor:
         if fill is None or fill.shape[2] != planes:
             logger.debug("Cannot read the texture of a bevel of %s", layer)
             return None
-        luminance = fill[:, :, 0] if planes == 1 else fill @ _BT601_LUMINANCE
+        # In channel order, the same bits on every CPU (BLAS may fuse).
+        luminance = fill[:, :, 0] if planes == 1 else _dot3(fill, _BT601_LUMINANCE)
         return texture_height(
             np.clip(luminance, 0.0, 1.0),
             depth=bevel.texture_depth,

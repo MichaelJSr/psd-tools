@@ -303,6 +303,37 @@ def test_a_one_plane_multichannel_pattern_textures_as_a_grey_one() -> None:
     assert np.array_equal(_rendered(psd), _rendered(grey))
 
 
+def test_an_rgb_textures_luminance_sums_its_channels_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each pixel's sum in channel order, the same bits on any CPU."""
+    compositing = importlib.import_module("psd_tools.composite.composite")
+    fills: list[np.ndarray] = []
+    heights: list[np.ndarray] = []
+
+    def fill(bbox: Box, *args: Any, **kwargs: Any) -> tuple[np.ndarray, None]:
+        left, top, right, bottom = bbox
+        shape = (bottom - top, right - left, 3)
+        fills.append(np.random.default_rng(7).random(shape, dtype=np.float32))
+        return fills[-1], None
+
+    def height(luminance: np.ndarray, **kwargs: Any) -> np.ndarray:
+        heights.append(luminance)
+        return effects.texture_height(luminance, **kwargs)
+
+    monkeypatch.setattr(paint, "draw_pattern_fill", fill)
+    monkeypatch.setattr(compositing, "texture_height", height)
+    psd, layer = _document()
+    _texture(layer)
+    _rendered(psd)
+    assert fills
+    f32 = np.float32
+    for rgb, luminance in zip(fills, heights, strict=True):
+        r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+        expected = r * f32(0.299) + g * f32(0.587) + b * f32(0.114)
+        assert np.array_equal(luminance, np.clip(expected, 0.0, 1.0))
+
+
 @pytest.mark.parametrize("pattern_mode", [ColorMode.INDEXED, ColorMode.LAB])
 def test_a_pattern_neither_rgb_nor_grey_draws_the_untextured_bevel(
     pattern_mode: ColorMode,

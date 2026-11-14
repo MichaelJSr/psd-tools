@@ -129,6 +129,9 @@ Changelog
   cards and 29 on probes, now within 2. A bevel's or stroke's still blends
   alike either way (by the law it was up to 22 levels off).
   **Rendering change**
+- [fix] A bevel texture's luminance is summed per channel in a fixed order,
+  not by BLAS, so it is the same on every CPU. **Rendering change** on
+  AVX-512 hosts only (a level on one pixel of one card); arm64 unchanged
 - [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
   of the document's own profile, its colorants adapted to D65 by Bradford,
   as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp
