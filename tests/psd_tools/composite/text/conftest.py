@@ -74,7 +74,7 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             item.add_marker(pytest.mark.text)
 
 
-def _draw(pen: Any, rect: tuple[int, int, int, int] | None) -> None:
+def _draw(pen: Any, rect: tuple[float, float, float, float] | None) -> None:
     if rect is None:
         return
     x0, y0, x1, y1 = rect
@@ -94,11 +94,13 @@ def build_font(
     programs: Mapping[str, list[str]] | None = None,
     cvt: Sequence[int] = (),
     prep: list[str] | None = None,
+    shift: Mapping[str, float] | None = None,
 ) -> str:
     """Write a fixture font to ``path``; ``omit`` drops glyphs by name.
 
     A TrueType font takes glyph ``programs`` (fontTools assembly), a
-    ``cvt `` table and a ``prep`` program.
+    ``cvt `` table and a ``prep`` program; a CFF font moves glyphs right by
+    their ``shift`` in units, fractions kept.
     """
     fontBuilder = pytest.importorskip("fontTools.fontBuilder")
     feaLib = pytest.importorskip("fontTools.feaLib.builder")
@@ -114,8 +116,10 @@ def build_font(
         charstrings = {}
         for g in names:
             adv, rect = GLYPHS[g]
-            pen = T2CharStringPen(adv, None)
-            _draw(pen, rect)
+            dx = (shift or {}).get(g, 0)
+            pen = T2CharStringPen(adv, None, roundTolerance=0 if dx else 0.5)
+            if rect is not None:
+                _draw(pen, (rect[0] + dx, rect[1], rect[2] + dx, rect[3]))
             charstrings[g] = pen.getCharString()
             metrics[g] = (adv, rect[0] if rect else 0)
         fb.setupCFF(ps_name, {"FullName": ps_name}, charstrings, {})

@@ -736,6 +736,14 @@ def test_cff_matches_truetype(face: Face, cff_face: Face) -> None:
     assert np.abs(cff - tt).max() < 2 * TOL
 
 
+def test_cff_draws_exact_points(cff_face: Face, make_font: Callable[..., str]) -> None:
+    # 0.625 units at 100 px per em are 4/64 px, which FreeType's floor drops.
+    frac = load_face(make_font("frac.otf", cff=True, shift={"d": 0.625}))
+    drawn = render([glyph(frac, "d", 0.0, 100.0, em=100)])
+    assert same(drawn, render([glyph(cff_face, "d", 0.0625, 100.0, em=100)]))
+    assert not same(drawn, render([glyph(cff_face, "d", 0.0, 100.0, em=100)]))
+
+
 def test_real_font(luckiest_guy_path: str) -> None:
     real = load_face(luckiest_guy_path)
     rgba, bbox = render([glyph(real, "A", 0.0, 100.0, em=40)])

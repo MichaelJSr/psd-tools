@@ -176,11 +176,23 @@ def test_instructions_start_afresh(make_font: Callable[..., str]) -> None:
 def test_cff_draws_its_outline(cff_font_path: str, ttf_font_path: str) -> None:
     cff = load_face(cff_font_path)
     assert not cff.metrics.truetype
+    # Whole units: FreeType's own outline, as drawn before exact points.
     assert cff.instructed(gid(cff, "d")) is None
     # A TrueType font without instructions keeps its outline too.
     tt = load_face(ttf_font_path)
     assert tt.metrics.truetype
     assert tt.instructed(gid(tt, "d")) is None
+
+
+def test_cff_exact_points(make_font: Callable[..., str]) -> None:
+    # FreeType floors a CFF point to a whole unit; its exact point is drawn.
+    face = load_face(make_font("frac.otf", cff=True, shift={"d": 0.625}))
+    x0, y0, x1, y1 = GLYPHS["d"][1]  # type: ignore[misc]
+    a, b = x0 + 0.625, x1 + 0.625
+    points = face.instructed(gid(face, "d"))
+    assert points is not None
+    assert points.tolist() == [[a, y0], [a, y1], [b, y1], [b, y0]]
+    assert face.instructed(gid(face, "h")) is None
 
 
 @pytest.mark.parametrize(

@@ -103,13 +103,16 @@ class Face:
 
         A TrueType glyph's ``(n, 2)`` outline points as the font's
         instructions leave them at one pixel per font unit; ``None`` when
-        they move none, the face is not TrueType or the instructions fail.
+        they move none or the instructions fail. Any other glyph's exact
+        charstring points (:func:`_exact`), or ``None``.
         """
-        if not self.metrics.truetype:
-            return None
         with self.lock:
             if gid not in self._instructed:
-                self._instructed[gid] = _moved(self.ft, gid)
+                self._instructed[gid] = (
+                    _moved(self.ft, gid)
+                    if self.metrics.truetype
+                    else _exact(self.ft, self.hb, gid)
+                )
             return self._instructed[gid]
 
 
@@ -245,6 +248,61 @@ def _moved(face: freetype.Face, gid: int) -> np.ndarray | None:
     if points.shape != unscaled.shape or np.array_equal(points, unscaled):
         return None
     return points
+
+
+#: Each contour's points as drawn; HarfBuzz closes a contour on its start.
+_DRAW = hb.DrawFuncs()
+_DRAW.set_move_to_func(lambda x, y, out: out.append([(x, y)]))
+_DRAW.set_line_to_func(lambda x, y, out: out[-1].append((x, y)))
+_DRAW.set_cubic_to_func(
+    lambda x1, y1, x2, y2, x, y, out: out[-1].extend(((x1, y1), (x2, y2), (x, y)))
+)
+_DRAW.set_quadratic_to_func(
+    lambda x1, y1, x, y, out: out[-1].extend(((x1, y1), (x, y)))
+)
+
+
+def _exact(face: freetype.Face, font: hb.Font, gid: int) -> np.ndarray | None:
+    """A CFF glyph's exact charstring points in font units, if any is fractional.
+
+    FreeType floors each point to a whole unit; Photoshop draws the exact
+    ones. They are matched point for point to FreeType's unscaled outline;
+    ``None`` when the shapes differ or a point is more than a unit off.
+    """
+    contours: list[list[tuple[float, float]]] = []
+    font.draw_glyph(gid, _DRAW, contours)
+    try:
+        face.set_transform(_IDENTITY, freetype.FT_Vector(0, 0))
+        face.load_glyph(gid, freetype.FT_LOAD_NO_SCALE)
+    except freetype.FT_Exception:
+        return None
+    slot = face.glyph
+    if slot.format != freetype.FT_GLYPH_FORMAT_OUTLINE or not slot.outline.n_points:
+        return None
+    ends = slot.outline.contours
+    if len(ends) != len(contours):
+        return None
+    points: list[tuple[float, float]] = []
+    start = 0
+    for end, contour in zip(ends, contours, strict=True):
+        n, start = end - start + 1, end + 1
+        # FreeType drops a last point on its (floored) first: HarfBuzz's
+        # closing line and the charstring's own last point within a unit.
+        x0, y0 = contour[0]
+        while len(contour) > n:
+            x, y = contour[-1]
+            if abs(x - x0) >= 1 or abs(y - y0) >= 1:
+                break
+            contour = contour[:-1]
+        if len(contour) != n:
+            return None
+        points += contour
+    exact = np.array(points, np.float64)
+    if np.array_equal(exact, np.floor(exact)):
+        return None
+    if np.abs(exact - outline_points(slot)).max() > 1:
+        return None
+    return exact
 
 
 def sfnt_table(
