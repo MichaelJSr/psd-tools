@@ -141,6 +141,15 @@ Changelog
   FreeType's; a glyph in whole units (most CFF fonts) is drawn as before.
   The 97 such layers on the cards came 91% nearer Photoshop 2023's relayout
   (60,774 -> 5,596 px over 24). **Rendering change** for text the fork draws
+- [api] ``SmartObject.draw_filters(rgba, box, corners)`` draws the smart
+  filters over a new picture of a placed layer (a redraw from its changed
+  file), and ``can_draw_filters()`` says whether it can: none on, or one
+  Puppet Warp or Invert, Normal at 100%, its mask off or white. A Puppet
+  Warp is drawn from its stored mesh moved onto the layer's quad now, its
+  folds by Pin Depth (harmonic over the mesh), sampled as the layer's
+  stored pixels show (bilinear or nearest); Invert is 1 - colour. Plain
+  numpy and exactly rounded sums: the same on every CPU. Nothing else
+  changes
 - [fix] Perceptual gradients (fills, overlays, strokes) blend in the Oklab
   of the document's own profile, its colorants adapted to D65 by Bradford,
   as Photoshop 2023 does: on the cards' "Display" profile a chromatic ramp

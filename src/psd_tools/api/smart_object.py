@@ -782,6 +782,39 @@ class SmartObject:
         bbox = (left + dx, top + dy, right + dx, bottom + dy)
         return bbox, _decode_plane(extra, width, height)
 
+    def can_draw_filters(self) -> bool:
+        """Return whether :py:meth:`draw_filters` draws the smart filters on.
+
+        True with none on, or one Puppet Warp or Invert, Normal at 100%, its
+        mask off or white, in an RGB document.
+        """
+        from psd_tools.composite import smart_filters  # noqa: PLC0415
+
+        return smart_filters.drawable(self)
+
+    def draw_filters(
+        self,
+        rgba: np.ndarray,
+        box: tuple[int, int, int, int],
+        corners: Sequence[float] | None = None,
+        sampling: str | None = None,
+    ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+        """Draw the smart filters over a new picture of the object.
+
+        For a redraw from a changed file: *rgba* (straight float RGBA in 0..1)
+        is the new picture drawn on the quad *corners* (default
+        :py:attr:`transform_box`) over canvas *box*. Call it before the
+        layer's pixels or filter source change. See
+        :py:func:`psd_tools.composite.smart_filters.draw`.
+
+        :return: ``(straight float32 RGBA, canvas box)``
+        :raises ValueError: when :py:meth:`can_draw_filters` is False
+        """
+        from psd_tools.composite import smart_filters  # noqa: PLC0415
+
+        quad = None if corners is None else tuple(float(v) for v in corners)
+        return smart_filters.draw(self, rgba, box, quad, sampling)  # type: ignore[arg-type]
+
     def save(
         self,
         filename: str | os.PathLike | None = None,
