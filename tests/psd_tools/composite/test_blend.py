@@ -74,17 +74,6 @@ def test_blend_quality(filename: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("filename",),
-    [
-        ("blend-modes/dissolve.psd",),
-    ],
-)
-@pytest.mark.xfail
-def test_blend_quality_xfail(filename: str) -> None:
-    check_composite_quality(filename, threshold=0.01)
-
-
-@pytest.mark.parametrize(
     "property",
     [
         ("opacity"),

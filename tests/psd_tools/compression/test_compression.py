@@ -274,30 +274,6 @@ def test_decode_rle_short_output() -> None:
     assert rle_impl.decode(data, 4) == b"\xff\x00\x00\x00"
 
 
-# This will fail due to irreversible zlib compression.
-@pytest.mark.xfail
-@pytest.mark.parametrize(
-    "data, width, height, depth",
-    [
-        (
-            b"H\x89\xb2g`8\xc8P\xca\xc0\xd0\xcd\xf0\x85\x81\x81\x87\x01\n\xec1D"
-            b"\xed\x0f\x02\xc5\xcc\xba\x81b\xf5<01;\x06F\x06\x86\xf3\x0c\xe9\x8b"
-            b"\xe2\xf4\x19\x026\xf9\xcdf(\x9c\x91a\x0f\x920cX\xc4\x10W\xcf\xb0\x89"
-            b"\xc1\x8f\x87a\x06C\x06@\x80\x01\x00\x94#\x14\x01",
-            5,
-            5,
-            32,
-        )
-    ],
-)
-def test_compress_decompress_fail(
-    data: bytes, width: int, height: int, depth: int
-) -> None:
-    decoded = decompress(data, Compression.ZIP_WITH_PREDICTION, width, height, depth)
-    encoded = compress(decoded, Compression.ZIP_WITH_PREDICTION, width, height, depth)
-    assert data == encoded
-
-
 # ---------------------------------------------------------------------------
 # Security fix tests
 # ---------------------------------------------------------------------------

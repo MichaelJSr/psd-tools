@@ -61,11 +61,6 @@ The Cython extensions build in place with ``python setup.py build_ext
 ``test_the_compiled_loops_match_numpy``, ``test_compiled_blend.py`` and
 ``test_the_compiled_8bit_read_is_parse_arrays`` check the two agree bit for bit.
 
-``tests/psd_tools/test_malformed.py`` byte-mutates every fixture up to 500 KB and checks
-that only ``ValueError`` or ``OSError`` escapes (see :doc:`untrusted`). It is
-skipped unless asked for, as in ``uv run pytest tests/psd_tools/test_malformed.py
---mutants 40``.
-
 Things to know when writing compositor tests:
 
 - ``check_composite_quality()`` defaults to ``force=False``. A regression in

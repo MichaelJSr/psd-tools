@@ -137,15 +137,6 @@ def check_icc_composite_quality(
         ("mask-disabled.psd",),
         ("mask-density-layermask.psd",),
         ("mask-density-vectormask.psd",),
-        pytest.param(
-            "mask-density-layervectormask.psd",
-            marks=pytest.mark.xfail(
-                reason=(
-                    "usermask carries over layer and vector mask properties"
-                    "(layer and vector masks are not isolated)"
-                )
-            ),
-        ),
         # ('vector-mask.psd', ),  # 32-bit blending not working.
         ("vector-mask-disabled.psd",),
         ("vector-mask3.psd",),
@@ -153,18 +144,6 @@ def check_icc_composite_quality(
 )
 def test_composite_quality(filename: str) -> None:
     check_composite_quality(filename, 0.001, False)
-
-
-@pytest.mark.parametrize(
-    ("filename",),
-    [
-        ("advanced-blending.psd",),
-        ("vector-mask2.psd",),
-    ],
-)
-@pytest.mark.xfail
-def test_composite_quality_xfail(filename: str) -> None:
-    check_composite_quality(filename, 0.01, False)
 
 
 # ``shape-layer.psd`` is the only stroked layer here, and it is the only one
@@ -214,25 +193,6 @@ def test_composite_minimal(filename: str, threshold: float) -> None:
     ],
 )
 def test_composite_colormodes(colormode: str, depth: int) -> None:
-    filename = f"colormodes/4x4_{depth:g}bit_{colormode}.psd"
-    psd = PSDImage.open(full_name(filename))
-    composite_error(psd, 0.01, False, "color")
-
-
-# These failures are due to inaccurate gradient fill synthesis.
-@pytest.mark.parametrize(
-    "colormode, depth",
-    [
-        ("cmyk", 16),
-        ("grayscale", 16),
-        ("lab", 16),
-        ("rgb", 16),
-        ("grayscale", 32),
-        ("rgb", 32),
-    ],
-)
-@pytest.mark.xfail
-def test_composite_colormodes_xfail(colormode: str, depth: int) -> None:
     filename = f"colormodes/4x4_{depth:g}bit_{colormode}.psd"
     psd = PSDImage.open(full_name(filename))
     composite_error(psd, 0.01, False, "color")

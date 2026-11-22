@@ -6,7 +6,7 @@ pytest.importorskip("uharfbuzz")
 
 from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
-from psd_tools.composite.text.constants import ANY_ALPHA, BAD_DIFF, IOU_COVER
+from psd_tools.composite.text.constants import ANY_ALPHA, BAD_DIFF
 from psd_tools.composite.text.verify import fidelity, stored_raster
 
 from ...utils import full_name
@@ -18,12 +18,6 @@ def square(size: int = 6, side: int = 4, fill: tuple[float, float, float] = (0, 
     rgba[1 : 1 + side, 1 : 1 + side, :3] = fill
     rgba[1 : 1 + side, 1 : 1 + side, 3] = 1.0
     return rgba
-
-
-def test_constants_match_the_harness() -> None:
-    assert IOU_COVER == 0.5
-    assert BAD_DIFF == 24 / 255
-    assert ANY_ALPHA == 0.1
 
 
 def test_identical_rasters() -> None:

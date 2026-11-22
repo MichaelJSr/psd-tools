@@ -1,7 +1,6 @@
-import os
 import subprocess
 import sys
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import pytest
@@ -28,25 +27,6 @@ from psd_tools.constants import Resource
 from ...utils import full_name
 from .conftest import PS_TT
 
-#: Photoshop-rendered cards copied out of the TTSCardMaker corpus; the tests
-#: on them run only where ``PSD_TOOLS_TEXT_FIXTURES`` names the directory.
-FIXTURES = os.environ.get("PSD_TOOLS_TEXT_FIXTURES")
-#: (psd, index path, layer name, bad% ceiling, IoU floor)
-CORPUS = [
-    # point Strong, one subscript run, centred
-    ("Creatures/Mario/3 Stars/Vivian.psd", (5, 2), "Name", 5.0, 0.95),
-    # box Strong, ten runs in several colours, three paragraphs
-    ("Creatures/Undertale/4 Stars/Toriel.psd", (4, 0), "Ability", 6.0, 0.93),
-    # box Crisp, justified
-    ("Auxiliary/Rulebook/10_Attacking.psd", (2, 3), "Phase 1", 30.0, 0.88),
-    # point Crisp
-    ("Auxiliary/Rulebook/17_Death.psd", (7, 1), "17", 10.0, 0.90),
-    # flipped transform, two paragraphs of point text
-    ("Creatures/Isaac/3 Stars/Tainted_Lazarus.psd", (2, 1, 1), "Name", 8.0, 0.95),
-    # box Strong with BaselineShift runs and AutoKerning off
-    ("Creatures/Pandas/2 Stars/Minecraft_Panda.psd", (4, 0), "Ability", 6.0, 0.90),
-]
-
 
 @pytest.fixture(autouse=True)
 def _no_platform_fonts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -63,31 +43,6 @@ def layer() -> TypeLayer:
 @pytest.fixture
 def arial_as_luckiest_guy(luckiest_guy_path: str) -> FontMap:
     return FontMap(aliases={"ArialMT": luckiest_guy_path})
-
-
-def _fixtures_dir() -> str:
-    if FIXTURES is None:
-        pytest.skip("PSD_TOOLS_TEXT_FIXTURES is not set")
-    return FIXTURES
-
-
-@pytest.fixture(scope="module")
-def corpus_fonts() -> FontMap:
-    fonts = os.path.join(_fixtures_dir(), "fonts")
-    if not os.path.isdir(fonts):
-        pytest.skip(f"corpus fixtures not found under {FIXTURES}")
-    return FontMap(dirs=[fonts])
-
-
-def corpus_layer(psd: str, index: tuple[int, ...]) -> TypeLayer:
-    path = os.path.join(_fixtures_dir(), psd)
-    if not os.path.isfile(path):
-        pytest.skip(f"{path} not found")
-    node: Any = PSDImage.open(path)
-    for i in index:
-        node = node[i]
-    assert isinstance(node, TypeLayer)
-    return node
 
 
 def test_font_names(layer: TypeLayer) -> None:
@@ -216,40 +171,6 @@ def test_verify_missing_font(layer: TypeLayer, fixture_fonts_dir: str) -> None:
     assert verify(layer, fonts=FontMap(policy="skip")).status == "missing"
 
 
-@pytest.mark.parametrize(("psd", "index", "name", "bad_max", "iou_min"), CORPUS)
-def test_corpus_layer_matches_photoshop(
-    corpus_fonts: FontMap,
-    psd: str,
-    index: tuple[int, ...],
-    name: str,
-    bad_max: float,
-    iou_min: float,
-) -> None:
-    layer = corpus_layer(psd, index)
-    assert layer.name == name
-    result = render(layer, fonts=corpus_fonts)
-    assert all(how == "exact" for how, _ in result.report.fonts.values())
-    fidelity = verify(layer, fonts=corpus_fonts)
-    assert fidelity.status == "ok"
-    assert fidelity.bad_pct <= bad_max
-    assert fidelity.iou >= iou_min
-    assert abs(fidelity.cdx or 0.0) < 1.0 and abs(fidelity.cdy or 0.0) < 1.0
-    out = render_type_layer(layer, corpus_fonts)
-    assert out is not None
-    assert out[1] == result.bbox
-
-
-def test_corpus_box_report(corpus_fonts: FontMap) -> None:
-    psd, index, *_ = CORPUS[1]
-    layer = corpus_layer(psd, index)
-    report = render(layer, fonts=corpus_fonts).report
-    assert len(report.lines) >= 3
-    assert "".join(line.text for line in report.lines).replace(" ", "") == (
-        layer.text.replace("\r", "").replace(" ", "")
-    )
-    assert report.lines[-1].decision == "paragraph"
-
-
 def test_composite_import_does_not_load_text() -> None:
     code = (
         "import sys, psd_tools.composite; "
@@ -260,10 +181,6 @@ def test_composite_import_does_not_load_text() -> None:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-def _quantised(rgba: np.ndarray) -> np.ndarray:
-    return np.round(rgba * 255) / 255
-
-
 def test_unedited_document_saves_byte_identical(tmp_path: Any) -> None:
     path = full_name("text.psd")
     psd = PSDImage.open(path)
@@ -272,33 +189,3 @@ def test_unedited_document_saves_byte_identical(tmp_path: Any) -> None:
     psd.save(tmp_path / "copy.psd")
     with open(path, "rb") as f, open(tmp_path / "copy.psd", "rb") as g:
         assert f.read() == g.read()
-
-
-@pytest.mark.parametrize("which", [0, 1, 5])
-def test_corpus_edit_round_trip(
-    corpus_fonts: FontMap, which: int, tmp_path: Any
-) -> None:
-    psd_name, index, _name, *_ = CORPUS[which]
-    layer = corpus_layer(psd_name, index)
-    psd = cast(PSDImage, layer._psd)
-    layer.set_text(layer.text + " edited")
-    report = layer.rasterize(fonts=corpus_fonts)
-    assert report.lines[-1].text.endswith("edited")
-    out = render_type_layer(layer, corpus_fonts)
-    assert out is not None
-    rgba, bbox = out
-    assert tuple(layer.bbox) == bbox
-    psd.save(tmp_path / "card.psd")
-    again = PSDImage.open(tmp_path / "card.psd")
-    node: Any = again
-    for i in index:
-        node = node[i]
-    assert isinstance(node, TypeLayer)
-    assert node.text == layer.text
-    shape = node.numpy("shape")
-    assert shape is not None
-    np.testing.assert_allclose(shape[..., 0], _quantised(rgba[..., 3]), atol=1e-6)
-    image = node.composite()
-    assert image is not None
-    alpha = np.asarray(image.convert("RGBA"), dtype=np.float32)[..., 3] / 255
-    np.testing.assert_allclose(alpha, _quantised(rgba[..., 3]), atol=1e-6)

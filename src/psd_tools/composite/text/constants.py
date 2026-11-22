@@ -1,7 +1,4 @@
-"""Numbers the text engine relies on, each named once.
-
-Tests assert these values; a change here is a behaviour change.
-"""
+"""Numbers the text engine relies on, each named once."""
 
 # Photoshop's ResourceDict defaults for the subscript/superscript size and
 # position ratios and the auto-leading ratio; a document's own values win.

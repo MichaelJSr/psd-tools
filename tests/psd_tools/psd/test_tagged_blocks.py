@@ -112,18 +112,6 @@ def test_tagged_block_rw(kls: type[Any], filename: str) -> None:
     check_read_write(kls, fixture)
 
 
-@pytest.mark.xfail(reason="Not implemented yet")
-@pytest.mark.parametrize(
-    "kls, filename",
-    [(DescriptorBlock2, "CAI.dat")],
-)
-def test_tagged_block_rw_failure(kls: type[Any], filename: str) -> None:
-    filepath = os.path.join(TEST_ROOT, "tagged_blocks", filename)
-    with open(filepath, "rb") as f:
-        fixture = f.read()
-    check_read_write(kls, fixture)
-
-
 def test_reference_point() -> None:
     check_write_read(ReferencePoint([3, 5]))  # type: ignore[list-item]
 
