@@ -342,7 +342,7 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             raises :py:class:`~psd_tools.ParseLimitError` before the allocation.
         :param max_alloc_bytes: initial :py:attr:`max_alloc_bytes`, checked
             before the file is read. Caps (bytes) what
-            :py:meth:`composite`/:py:meth:`numpy`/:py:meth:`topil`/:py:meth:`thumbnail`
+            :py:meth:`composite`/:py:meth:`numpy`/:py:meth:`topil`
             allocate; rendering raises :class:`ValueError`, or skips a layer
             effect, if the estimate exceeds it.
             :py:meth:`numpy` and :py:meth:`topil` estimate their allocation *at
@@ -1149,34 +1149,6 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         )
         # TODO: Check when alpha > 1; Photoshop allows multiple alpha channels.
         return pil_io.get_pil_mode(self.color_mode, alpha > 0)
-
-    def has_thumbnail(self) -> bool:
-        """Return True if the PSDImage has a thumbnail resource."""
-        return (
-            Resource.THUMBNAIL_RESOURCE in self.image_resources
-            or Resource.THUMBNAIL_RESOURCE_PS4 in self.image_resources
-        )
-
-    def thumbnail(self) -> Image.Image | None:
-        """
-        Return a thumbnail image in PIL.Image.
-
-        Gives None when the file contains no embedded thumbnail image.
-
-        :raises ValueError: if the thumbnail's dimensions exceed the PSD spec
-            limit, or :py:attr:`max_alloc_bytes`.
-        """
-        if Resource.THUMBNAIL_RESOURCE in self.image_resources:
-            return pil_io.convert_thumbnail_to_pil(
-                self.image_resources.get_data(Resource.THUMBNAIL_RESOURCE),
-                max_alloc_bytes=self._max_alloc_bytes,
-            )
-        elif Resource.THUMBNAIL_RESOURCE_PS4 in self.image_resources:
-            return pil_io.convert_thumbnail_to_pil(
-                self.image_resources.get_data(Resource.THUMBNAIL_RESOURCE_PS4),
-                max_alloc_bytes=self._max_alloc_bytes,
-            )
-        return None
 
     # TODO: Add more editing APIs, such as duplicate_layers, resize_canvas, etc.
 

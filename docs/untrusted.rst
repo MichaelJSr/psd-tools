@@ -96,8 +96,6 @@ What it bounds
   :py:meth:`~psd_tools.api.psd_image.PSDImage.topil`. The estimate is the
   peak of the call, including its intermediates, so it depends on the colour
   mode, depth and compression and is larger than the array returned.
-- :py:meth:`~psd_tools.api.psd_image.PSDImage.thumbnail`, at the size of the
-  decoded image; the JPEG decoder's own intermediates are not counted.
 - Each layer's ``numpy()`` and ``topil()``, at the layer's own size, including
   the reads that :py:meth:`~psd_tools.api.psd_image.PSDImage.composite` makes.
 - The canvas that ``composite()`` builds, each canvas that a layer effect's
@@ -135,8 +133,8 @@ Malformed data in a file raises only :py:class:`ValueError`, including
 :py:class:`~psd_tools.ParseLimitError` and
 :py:class:`~psd_tools.compression.DecompressionLimitError`, or
 :py:class:`OSError`. This holds for every call that reads a document, such as
-:py:meth:`~psd_tools.api.psd_image.PSDImage.open`, ``numpy()``, ``topil()``,
-``composite()`` and ``thumbnail()``. Any other exception type from these calls
+:py:meth:`~psd_tools.api.psd_image.PSDImage.open`, ``numpy()``, ``topil()``
+and ``composite()``. Any other exception type from these calls
 is a bug, so this is enough to guard them::
 
     try:

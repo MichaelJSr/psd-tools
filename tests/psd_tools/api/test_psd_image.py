@@ -159,11 +159,6 @@ def test_has_preview(fixture: PSDImage) -> None:
     assert fixture.has_preview() is True
 
 
-def test_thumnail(fixture: PSDImage) -> None:
-    assert fixture.has_thumbnail() is True
-    assert fixture.thumbnail()
-
-
 def test_repr_pretty(fixture: PSDImage) -> None:
     fixture.__repr__()
     pprint.pprint(fixture)
