@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``SmartObject.keep_filters()`` keeps a Puppet or Perspective Warp's
+  map on the canvas when only the layer's quad moves (a trimmed or padded
+  file, its ink where it was): a Perspective Warp's follow baked into its
+  vertices and ``PuX0``.. the new quad, as Photoshop's Update writes it; a
+  Puppet Warp's ``PuX0``.. its map's preimage of the new quad.
+  ``can_keep_filters()`` refuses quads no follow is proven for
 - [api] ``SmartObject.update_warp()`` puts a custom warp on a new file of
   another pixel size as Photoshop 2023's Update Modified Content does (4
   upright layers of 2 cards, exact): ``Sz`` and the warp's bounds the new
