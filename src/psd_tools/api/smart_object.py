@@ -572,6 +572,26 @@ class SmartObject:
         quad = None if corners is None else tuple(float(v) for v in corners)
         return smart_filters.draw(self, rgba, box, quad, sampling, size)  # type: ignore[arg-type]
 
+    def can_keep_filters(self, corners: Sequence[float]) -> bool:
+        """Return whether :py:meth:`keep_filters` keeps the filters on *corners*."""
+        from psd_tools.composite import smart_filters  # noqa: PLC0415
+
+        return smart_filters.keepable(self, [float(v) for v in corners])
+
+    def keep_filters(self, corners: Sequence[float]) -> None:
+        """Keep the smart filters' map on the canvas as the quad becomes *corners*.
+
+        For a link whose file is trimmed or padded (the ink where it was, the
+        layer's pixels kept): a Puppet or Perspective Warp rewritten so it
+        maps the canvas as before, before :py:meth:`relink` writes the quad.
+        See :py:func:`psd_tools.composite.smart_filters.keep`.
+
+        :raises ValueError: when :py:meth:`can_keep_filters` is False
+        """
+        from psd_tools.composite import smart_filters  # noqa: PLC0415
+
+        smart_filters.keep(self, [float(v) for v in corners])
+
     def place_picture(
         self, rgba: np.ndarray, corners: Sequence[float] | None = None
     ) -> tuple[np.ndarray, tuple[int, int, int, int]]:

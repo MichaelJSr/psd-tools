@@ -17,6 +17,9 @@ filter source through the mask.
 A Perspective Warp on a quad not upright takes the picture as :py:func:`place`
 puts it there (Photoshop's mip resample), at a scale :py:func:`placeable`
 holds.
+
+When a trimmed or padded file moves only the quad, :py:func:`keep` keeps a
+Puppet or Perspective Warp's map on the canvas.
 """
 
 from __future__ import annotations
@@ -340,6 +343,87 @@ def draw(
     mapped = _mapping(so, fltr, corners)
     assert mapped is not None
     return _warp(out, box, mesh, mapped, sampling == "nearest")
+
+
+def keepable(so: SmartObject, corners: Quad | list[float]) -> bool:
+    """Whether :py:func:`keep` keeps the smart filters' map on *corners*."""
+    return _kept(so, corners) is not None
+
+
+def keep(so: SmartObject, corners: Quad | list[float]) -> None:
+    """Keep the smart filters' map on the canvas as the quad becomes *corners*.
+
+    For a quad moved with the layer's pixels kept (a trimmed or padded file,
+    its ink where it was): a Puppet Warp's ``PuX0``.. become its map's
+    preimage of *corners*; a Perspective Warp's follow to the quad now is
+    baked into its vertices and warped vertices, as Photoshop's Update
+    writes it, and ``PuX0``.. become *corners*. Values keep their types;
+    other filters do not follow the quad. Call it before the quad changes.
+
+    :raises ValueError: when :py:func:`keepable` is False
+    """
+    edits = _kept(so, corners)
+    if edits is None:
+        raise ValueError("these smart filters are not kept on that quad")
+    for value, number in edits:
+        value.value = number
+
+
+def _kept(so: SmartObject, corners: Quad | list[float]) -> list[Any] | None:
+    """:py:func:`keep`'s edits ``(value, number)``; ``None`` when it cannot.
+
+    That is a filter item no descriptor, a Puppet Warp's quads no
+    parallelograms, a Perspective Warp's quad now no affine image of the one
+    it ran on, or a quad flat or past the horizon.
+    """
+    quad = so.transform_box
+    new = [float(v) for v in corners]
+    if quad is None or len(new) != 8 or not all(math.isfinite(v) for v in new):
+        return None
+    fx = so.filters
+    if fx is None or not _on(fx):
+        return []
+    edits: list[Any] = []
+    for item in fx.get(b"filterFXList") or []:
+        if not isinstance(item, Descriptor):
+            return None
+        fltr = item.get(b"Fltr")
+        cls = getattr(fltr, "classID", None)
+        cls = cls.encode() if isinstance(cls, str) else cls
+        if not _on(item) or cls not in (_PUPPET, _PERSPECTIVE):
+            continue
+        slots = [fltr.get(k) for k in _PU]
+        if not all(isinstance(getattr(v, "value", None), float) for v in slots):
+            return None
+        ran = [float(v.value) for v in slots]
+        if cls == _PUPPET:
+            m = _affine(ran, list(quad))
+            if m is None or _affine(new, new) is None:
+                return None
+            ox, oy, ax, ay, bx, by = m
+            det = ax * by - bx * ay  # not 0: both quads are not flat
+            back: list[float] = []
+            for x, y in zip(new[0::2], new[1::2], strict=True):
+                dx, dy = x - ox, y - oy
+                back += [(by * dx - bx * dy) / det, (ax * dy - ay * dx) / det]
+            edits += zip(slots, back, strict=True)
+            continue
+        moved = _between(ran, list(quad)) if _affinely(ran, list(quad)) else None
+        if moved is None or _between(new, new) is None:
+            return None
+        for key in (b"vertices", b"warpedVertices"):
+            for point in fltr.get(key) or []:
+                if not isinstance(point, Descriptor):
+                    return None
+                xy = [point.get(b"Hrzn"), point.get(b"Vrtc")]
+                if not all(isinstance(getattr(v, "value", None), float) for v in xy):
+                    return None
+                got = _through(moved, [float(v.value) for v in xy])
+                if got is None:
+                    return None
+                edits += zip(xy, got, strict=True)
+        edits += zip(slots, new, strict=True)
+    return edits
 
 
 def _mapping(
