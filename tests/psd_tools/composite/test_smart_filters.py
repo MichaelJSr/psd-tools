@@ -549,3 +549,51 @@ def test_perspective_warp_on_a_turned_quad_at_a_proven_scale() -> None:
     assert where == box and np.allclose(a, b, atol=1e-6)  # vertices unmoved
     with pytest.raises(ValueError):
         so.draw_filters(picture, box, turned)
+
+
+def test_warps_kept_on_a_trimmed_quad() -> None:
+    """A trim's quad (a padded file, its ink where it was): the warps' maps kept.
+
+    A Perspective Warp's follow (10 px up) baked into its vertices, ``PuX0``..
+    the new quad, the values' types kept; a Puppet Warp's ``PuX0``.. its
+    map's preimage of the new quad. Each draws the canvas as before. A
+    Perspective Warp's quad no affine image of the one it ran on, or a
+    Puppet Warp's new quad no parallelogram, refused, nothing written.
+    """
+    layer, entry = _object()
+    so = layer.smart_object
+    padded = [-2.0, -3.0, 35.0, -3.0, 35.0, 33.0, -2.0, 33.0]
+    rgba = np.random.default_rng(2).random((12, 14, 4), dtype=np.float32)
+    rgba[..., 3] = np.maximum(rgba[..., 3], 0.1)
+    box = (9, 8, 23, 20)
+    square = [(4, 4), (28, 4), (28, 28), (4, 28)]
+    entry[b"Fltr"] = fltr = _perspective(square, [(6, 3), (27, 6), (29, 27), (3, 26)])
+    fltr[b"vertices"][0][b"Hrzn"] = UnitFloat(unit=Unit.Pixels, value=4.0)
+    before, where = so.draw_filters(rgba, box)
+    assert so.can_keep_filters(padded)
+    so.keep_filters(padded)
+    assert [fltr[k].value for k in sf._PU] == padded
+    first = fltr[b"vertices"][0]
+    assert isinstance(first[b"Hrzn"], UnitFloat) and first[b"Hrzn"].unit == Unit.Pixels
+    assert (first[b"Hrzn"].value, first[b"Vrtc"].value) == (4.0, 4.0)
+    after, box2 = so.draw_filters(rgba, box, padded)
+    assert box2 == where and np.allclose(after, before, atol=1e-6)
+    fltr[b"PuX1"] = Double(30.0)
+    assert not so.can_keep_filters(padded)
+    with pytest.raises(ValueError):
+        so.keep_filters(padded)
+    assert fltr[b"PuY0"].value == -3.0
+
+    mesh = [(0, 10), (32, 10), (32, 42), (0, 42)]
+    bent = [(3, 12), (33, 11), (30, 40), (2, 43)]
+    entry[b"Fltr"] = fltr = _puppet(mesh, bent, [(0, 1, 2), (0, 2, 3)], {0: 0.1}, 10)
+    before, where = so.draw_filters(rgba, box, sampling="bilinear")
+    so.keep_filters(padded)
+    assert np.allclose(
+        [fltr[k].value for k in sf._PU],
+        [v + 10 * (i % 2) for i, v in enumerate(padded)],
+    )
+    after, box2 = so.draw_filters(rgba, box, padded, sampling="bilinear")
+    assert box2 == where and np.allclose(after, before, atol=1e-6)
+    trapezoid = [0.0, 0.0, 32.0, 0.0, 40.0, 32.0, -8.0, 32.0]
+    assert not so.can_keep_filters(trapezoid)
