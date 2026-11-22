@@ -470,8 +470,7 @@ def test_duplicate_special_layer_roundtrip(filename: str, tmp_path: Path) -> Non
     if isinstance(source, SmartObjectLayer):
         assert isinstance(copy, SmartObjectLayer)
         assert copy.smart_object.unique_id == source.smart_object.unique_id
-        with source.smart_object.open() as original, copy.smart_object.open() as saved:
-            assert original.read() == saved.read()
+        assert copy.smart_object.data == source.smart_object.data
 
 
 @pytest.mark.parametrize(

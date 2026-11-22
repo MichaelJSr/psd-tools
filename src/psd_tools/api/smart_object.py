@@ -1,13 +1,9 @@
 """Smart object module."""
 
-import contextlib
-import io
 import logging
-import os
 import posixpath
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from copy import deepcopy
-from typing import IO
 
 import numpy as np
 
@@ -18,7 +14,7 @@ from psd_tools.api.protocols import LayerProtocol, PSDProtocol
 from psd_tools.api.utils import check_pixel_size, get_color_channels
 from psd_tools.compression import _decompress, decompress_row_peak_bytes
 from psd_tools.constants import Compression, LinkedLayerType, Tag
-from psd_tools.psd.descriptor import Descriptor, Double, UnitFloat
+from psd_tools.psd.descriptor import Descriptor, Double
 from psd_tools.psd.filter_effects import (
     FilterEffect,
     FilterEffectChannel,
@@ -30,49 +26,10 @@ from psd_tools.psd.tagged_blocks import (
     TaggedBlock,
     TaggedBlocks,
 )
-from psd_tools.terminology import Unit
 
 logger = logging.getLogger(__name__)
 
-# (prefix_bytes, filetype_string) — ordered so longer/more-specific prefixes
-# come first (8BPS+version before bare 8BPS would collide; PSD/PSB checked
-# as 6-byte prefixes including the version field).
-_MAGIC_TABLE: tuple[tuple[bytes, str], ...] = (
-    (b"8BPS\x00\x01", "8bps"),  # PSD  (version 1)
-    (b"8BPS\x00\x02", "8bpb"),  # PSB  (version 2)
-    (b"%PDF-", "pdf"),
-    (b"\x89PNG", "png"),
-    (b"\xff\xd8\xff", "jpg"),
-    (b"GIF8", "gif"),
-    (b"II*\x00", "tiff"),  # TIFF little-endian
-    (b"MM\x00*", "tiff"),  # TIFF big-endian
-    (b"PK\x03\x04", "zip"),  # ZIP / ZIP-based AI
-    (b"BM", "bmp"),
-)
-_MAGIC_PREFIX_LEN = max(len(p) for p, _ in _MAGIC_TABLE)
 _FILTER_TAGS = (Tag.FILTER_EFFECTS1, Tag.FILTER_EFFECTS2, Tag.FILTER_EFFECTS3)
-
-
-def _detect_filetype_from_magic(data: bytes) -> str | None:
-    """Return a filetype string inferred from *data* magic bytes, or ``None``."""
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    prefix = data[:_MAGIC_PREFIX_LEN]
-    for magic, result in _MAGIC_TABLE:
-        if prefix[: len(magic)] == magic:
-            return result
-    return None
-
-
-def _is_inside(parent: str, child: str) -> bool:
-    """Return True if child is inside parent (or equal to it)."""
-    parent = os.path.normcase(parent)
-    child = os.path.normcase(child)
-    try:
-        return os.path.commonpath([parent, child]) == parent
-    except ValueError:
-        # commonpath raises ValueError on Windows when paths span different drives
-        return False
 
 
 class SmartObject:
@@ -129,102 +86,12 @@ class SmartObject:
             raise ValueError("Smart object data not found")
         return self._data.filename.strip("\x00")
 
-    @contextlib.contextmanager
-    def open(
-        self,
-        external_dir: str | os.PathLike | None = None,
-        *,
-        trust_full_path: bool = False,
-    ) -> Iterator[IO[bytes]]:
-        """
-        Open the smart object as binary IO.
-
-        For external smart objects the linked file is read from disk. By default
-        the read is confined to a directory: ``external_dir`` when given,
-        otherwise the current working directory. A ``fullPath`` stored in the PSD
-        is honoured only when it resolves inside that directory; otherwise it is
-        ignored and ``relPath`` (resolved inside the directory) is tried instead.
-        A ``relPath`` that escapes the directory raises :py:exc:`ValueError`. This
-        default prevents a crafted PSD from reading arbitrary files via an
-        absolute ``fullPath``. Note that the confinement directory itself is
-        trusted: a ``relPath`` resolving to a file *inside* it is still read, so
-        point ``external_dir`` at a location that holds only linked assets when
-        processing untrusted files.
-
-        :param external_dir: Directory to resolve and confine external paths
-            against. Defaults to the current working directory. Strongly
-            recommended to set explicitly when processing untrusted PSD files.
-        :param trust_full_path: When ``True``, disable confinement entirely and
-            trust ``fullPath``/``relPath`` from the PSD verbatim (the historical
-            behaviour). Only use this for fully trusted files. Cannot be combined
-            with ``external_dir``.
-        :raises ValueError: If ``trust_full_path`` is combined with
-            ``external_dir``, or a ``relPath`` escapes the confinement directory.
-
-        Example::
-
-            with layer.smart_object.open() as f:
-                data = f.read()
-        """
-        if self._data is None:
-            raise ValueError("Smart object data not found")
-        if trust_full_path and external_dir is not None:
-            raise ValueError(
-                "external_dir cannot be combined with trust_full_path=True; "
-                "trust_full_path disables path confinement entirely"
-            )
-        if self.kind == "data":
-            with io.BytesIO(self._data.data) as f:
-                yield f
-        elif self.kind == "external":
-            # safe_dir is the confinement boundary; None means confinement is
-            # disabled (trust_full_path=True) and paths are used verbatim.
-            safe_dir = (
-                None
-                if trust_full_path
-                else os.path.realpath(
-                    external_dir if external_dir is not None else os.getcwd()
-                )
-            )
-            linked_file = self._data.linked_file
-            filepath = get_scalar(linked_file, b"fullPath", str, "")
-            filepath = filepath.replace("\x00", "").replace("file://", "")
-            if safe_dir is not None and filepath:
-                resolved = os.path.realpath(filepath)
-                if _is_inside(safe_dir, resolved):
-                    # Open the validated, symlink-resolved path rather than the
-                    # raw value, matching the relPath branch below.
-                    filepath = resolved
-                else:
-                    # fullPath escapes safe_dir — fall through to relPath
-                    filepath = ""
-            if not filepath or not os.path.exists(filepath):
-                relpath = get_scalar(linked_file, b"relPath", str, "")
-                relpath = relpath.replace("\x00", "")
-                if not relpath:
-                    raise ValueError("External smart object has no readable path")
-                if safe_dir is not None:
-                    filepath = os.path.realpath(os.path.join(safe_dir, relpath))
-                    if not _is_inside(safe_dir, filepath):
-                        raise ValueError(
-                            f"External smart object path escapes external_dir: {relpath!r}"
-                        )
-                else:
-                    filepath = relpath
-                if not os.path.exists(filepath):
-                    raise FileNotFoundError(f"Smart object file not found: {filepath}")
-            with open(filepath, "rb") as f:
-                yield f
-        else:
-            raise NotImplementedError("alias is not supported.")
-
     @property
     def data(self) -> bytes:
         """Embedded file content as bytes.
 
         For ``kind == 'data'`` this returns the bytes stored in the PSD without
-        any filesystem access. A linked file is never read here: use
-        :py:meth:`read` with a ``resolve`` callable, or :py:meth:`open`.
+        any filesystem access. A linked file is never read.
 
         :raises ValueError: for a linked object, naming the repository path it
             links (see :py:meth:`link_target`).
@@ -233,55 +100,24 @@ class SmartObject:
             raise ValueError("Smart object data not found")
         if self.kind == "data":
             return self._data.data
-        return self.read()
-
-    def read(
-        self,
-        resolve: Callable[[str], bytes] | None = None,
-        psd_path: str | None = None,
-        tree: "links.RepoTree | Iterable[str] | None" = None,
-    ) -> bytes:
-        """Return the object's file content, a linked file's through *resolve*.
-
-        :param resolve: called with the linked file's repository path
-            (:py:meth:`link_target`); returns its bytes.
-        :param psd_path: the PSD's repository path; default the document's
-            ``repo_path``.
-        :param tree: the repository's files, as :py:meth:`link_target` takes.
-        :raises ValueError: for a linked object without *resolve*, or whose
-            link places nowhere.
-        """
-        if self._data is None:
-            raise ValueError("Smart object data not found")
-        if self.kind == "data":
-            return self._data.data
         if self.kind != "external":
             raise NotImplementedError("alias is not supported.")
-        path = self.link_target(psd_path, tree)
+        path = self.link_target()
         if path is None:
             stored = get_scalar(self._data.linked_file, b"relPath", str, "")
             raise ValueError(f"Linked file {stored.strip(chr(0))!r} places nowhere")
-        if resolve is None:
-            raise ValueError(f"Smart object links {path!r}: read it with resolve=")
-        return resolve(path)
+        raise ValueError(f"Smart object links {path!r}")
 
-    def link_target(
-        self,
-        psd_path: str | None = None,
-        tree: "links.RepoTree | Iterable[str] | None" = None,
-    ) -> str | None:
+    def link_target(self, psd_path: str | None = None) -> str | None:
         """Return the repository path of the file this object links.
 
         Read off the record's strings, never the file system: ``relPath`` from
         the PSD's folder (it may not climb above the root), then ``fullPath``
         and ``originalPath``, an absolute path or ``file://`` URL cut after its
-        last ``/TTSCardMaker/``. With *tree*, matched blind to case, as
-        Photoshop's file systems are.
+        last ``/TTSCardMaker/``: the first repository path a string names.
 
         :param psd_path: the PSD's repository path; default the document's
             ``repo_path``.
-        :param tree: the repository's files, a :py:class:`~psd_tools.api.links.RepoTree`
-            or paths; without it, the first repository path a string names.
         :return: the path, or ``None`` when it places nowhere or the object is
             embedded.
         """
@@ -289,7 +125,7 @@ class SmartObject:
             raise ValueError("Smart object data not found")
         if self.kind != "external":
             return None
-        return links.place(self._data.linked_file, self._psd_path(psd_path), tree)
+        return links.place(self._data.linked_file, self._psd_path(psd_path))
 
     @property
     def content_id(self) -> str | None:
@@ -307,11 +143,7 @@ class SmartObject:
         blob: str,
         psd_path: str | None = None,
         pixels: tuple[float, float] | None = None,
-        resolution: float | None = None,
         corners: "Corners | None" = None,
-        date: tuple = links.LINK_DATE,
-        name: str | None = None,
-        root: str = links.LINK_ROOT,
     ) -> None:
         """Make this embedded object a link to repository file *path*.
 
@@ -319,7 +151,7 @@ class SmartObject:
         same uuid, so every layer sharing the object follows: their ``SoLd``
         becomes ``SoLE``, their ``PlLd`` goes and the embedded item is removed.
         The layers keep their pixels. ``relPath`` runs from the PSD's folder,
-        ``fullPath`` and ``originalPath`` are ``root`` + *path*, and the
+        ``fullPath`` and ``originalPath`` are ``LINK_ROOT`` + *path*, and the
         ``contentID`` is :py:func:`~psd_tools.api.links.link_content_id` of
         *blob*, the PSD path and the uuid.
 
@@ -330,14 +162,9 @@ class SmartObject:
             ``repo_path``.
         :param pixels: the file's (width, height) when it is not the embedded
             file's, written as each layer's ``Sz``.
-        :param resolution: the file's ppi, written as each layer's ``Rslt``;
-            default the embedded copy's, which Photoshop's Update Modified
-            Content resizes the layer by when it is not the file's.
         :param corners: the new placement (``Trnf``): 8 numbers, or a callable
             taking a layer's current 8 and returning its new ones, for an
             object several layers share.
-        :param date: the record's date.
-        :param name: the record's file name; default *path*'s.
         :raises ValueError: if the object is not embedded, has no uuid, the
             PSD path is unknown, or a corner sequence is given for an object
             several layers share.
@@ -346,12 +173,11 @@ class SmartObject:
             raise ValueError("Smart object data not found")
         if self.kind != "data":
             raise ValueError("Only an embedded smart object can be linked")
-        _check_resolution(resolution)
         psd_path = self._known_path(psd_path)
         item = self._data
         users = self._users()
         placed = _placements(users, corners)
-        name = name or posixpath.basename(links.normal_path(path))
+        name = posixpath.basename(links.normal_path(path))
         external = LinkedLayer(
             kind=LinkedLayerType.EXTERNAL,
             version=8,
@@ -363,8 +189,8 @@ class SmartObject:
             open_file=deepcopy(item.open_file)
             if item.open_file is not None
             else links.comp_info(),
-            linked_file=links.linked_file(path, psd_path, name, root),
-            timestamp=tuple(date),
+            linked_file=links.linked_file(path, psd_path, name),
+            timestamp=links.LINK_DATE,
             data=b"",
             child_id="\x00",
             mod_time=0.0,
@@ -375,7 +201,7 @@ class SmartObject:
         )
         _swap_item(self._layer._psd, item, external)
         for layer, new in zip(users, placed, strict=True):
-            _set_placement(layer, pixels, new, embedded=False, resolution=resolution)
+            _set_placement(layer, pixels, new, embedded=False)
         self._refresh(users, external)
 
     def relink(
@@ -386,17 +212,13 @@ class SmartObject:
         blob: str | None = None,
         psd_path: str | None = None,
         pixels: tuple[float, float] | None = None,
-        resolution: float | None = None,
         corners: "Corners | None" = None,
-        date: tuple = links.LINK_DATE,
-        name: str | None = None,
-        root: str = links.LINK_ROOT,
     ) -> None:
         """Rewrite this link canonically, as :py:meth:`link` writes one.
 
         The record's paths are rebuilt for *path* (default the file it links
-        now) from the PSD's repository path, with *date*. *size*, *blob*
-        (a new ``contentID``), *pixels*, *resolution* and *corners* are written
+        now) from the PSD's repository path. *size*, *blob* (a new
+        ``contentID``), *pixels* and *corners* are written
         when given; the raster is never changed.
 
         :raises ValueError: if the object is not linked, the PSD path is
@@ -406,7 +228,6 @@ class SmartObject:
             raise ValueError("Smart object data not found")
         if self.kind != "external":
             raise ValueError("Only a linked smart object can be relinked")
-        _check_resolution(resolution)
         psd_path = self._known_path(psd_path)
         item = self._data
         if path is None:
@@ -415,11 +236,11 @@ class SmartObject:
                 raise ValueError("The link places nowhere: give its path")
         users = self._users()
         placed = _placements(users, corners)
-        name = name or posixpath.basename(links.normal_path(path))
+        name = posixpath.basename(links.normal_path(path))
         item.filename = name + "\x00"
         item.filetype = _filetype(path, item.filetype)
-        item.linked_file = links.linked_file(path, psd_path, name, root)
-        item.timestamp = tuple(date)
+        item.linked_file = links.linked_file(path, psd_path, name)
+        item.timestamp = links.LINK_DATE
         if size is not None:
             item.filesize = size
         if blob is not None:
@@ -432,7 +253,7 @@ class SmartObject:
                 links.link_content_id(blob, psd_path, item.uuid)
             )
         for layer, new in zip(users, placed, strict=True):
-            _set_placement(layer, pixels, new, embedded=False, resolution=resolution)
+            _set_placement(layer, pixels, new, embedded=False)
         self._refresh(users, item)
 
     def _psd_path(self, psd_path: str | None) -> str | None:
@@ -490,85 +311,11 @@ class SmartObject:
         return self._data.filesize
 
     @property
-    def filetype(self) -> str | None:
-        """4-byte file-type code stored in the PSD, lowercased and stripped.
-
-        Returns ``None`` when the field is absent or blank (e.g. some
-        Adobe Illustrator smart objects store four spaces instead of a real
-        type code).  Use :py:attr:`detected_filetype` for a best-effort
-        guess that falls back to the filename extension and magic bytes.
-        """
-        if self._data is None:
-            raise ValueError("Smart object data not found")
-        raw = self._data.filetype.strip(b" \x00").lower().decode("ascii")
-        return raw if raw else None
-
-    @property
-    def detected_filetype(self) -> str | None:
-        """Best-effort file type, falling back when :py:attr:`filetype` is ``None``.
-
-        Resolution order:
-
-        1. :py:attr:`filetype` — the value stored in the PSD.
-        2. Extension taken from :py:attr:`filename` (lower-cased, dot stripped).
-        3. Magic-byte sniffing of the first few embedded bytes
-           (only for ``kind == 'data'``; external objects are not read from
-           disk to keep this property side-effect-free).
-
-        .. warning::
-            Steps 2 and 3 are heuristic.  Do not use the result for
-            security-sensitive decisions (e.g. deciding whether to execute
-            content or trust a type boundary).
-        """
-        ft = self.filetype
-        if ft is not None:
-            return ft
-
-        # Extension from the embedded filename (safe: no filesystem access)
-        clean = self._data.filename.replace("\x00", "").strip() if self._data else ""
-        _, ext = os.path.splitext(clean)
-        suffix = ext.lstrip(".").lower()
-        if suffix:
-            return suffix
-
-        # Magic bytes — only for embedded (data-kind) objects
-        if self._data is not None and self.kind == "data":
-            raw_data = self._data.data
-            if raw_data:
-                return _detect_filetype_from_magic(raw_data)
-
-        return None
-
-    def is_psd(self) -> bool:
-        """Return True if the file is embedded PSD/PSB.
-
-        Checks the stored :py:attr:`filetype` first; if that is ``None``
-        (blank field), falls back to inspecting the first four magic bytes of
-        the embedded data.  The filename extension is intentionally *not* used
-        as a fallback to avoid misclassifying non-PSD files named ``*.psd``.
-        """
-        ft = self.filetype
-        if ft in ("8bpb", "8bps"):
-            return True
-        if self._data is not None and self.kind == "data":
-            raw_data = self._data.data
-            if raw_data and len(raw_data) >= 4:
-                return raw_data[:4] == b"8BPS"
-        return False
-
-    @property
     def warp(self) -> object | None:
         """Warp parameters."""
         if self._config is None:
             raise ValueError("Smart object config not found")
         return self._config.data.get(b"warp")
-
-    @property
-    def resolution(self) -> float | None:
-        """Resolution of the object, or `None` if the file does not record one."""
-        if self._config is None:
-            raise ValueError("Smart object config not found")
-        return get_scalar(self._config.data, b"Rslt", float, None)
 
     @property
     def transform_box(
@@ -846,67 +593,8 @@ class SmartObject:
         quad = None if corners is None else tuple(float(v) for v in corners)
         return placed_warp.draw(self, rgba, quad)  # type: ignore[arg-type]
 
-    def save(
-        self,
-        filename: str | os.PathLike | None = None,
-        directory: str | os.PathLike | None = None,
-        external_dir: str | os.PathLike | None = None,
-        *,
-        trust_full_path: bool = False,
-    ) -> None:
-        """
-        Save the smart object to a file.
-
-        :param filename: Explicit destination path. When provided it is used
-            as-is and ``directory`` is ignored.
-        :param directory: Output directory used when ``filename`` is ``None``.
-            Defaults to the current working directory. The embedded basename is
-            written inside this directory; path-traversal sequences in the
-            embedded name are stripped automatically.
-        :param external_dir: Passed to :py:meth:`open` when the smart object
-            kind is ``'external'``. Constrains which paths on disk may be read.
-            Strongly recommended when processing untrusted PSD files.
-        :param trust_full_path: Passed to :py:meth:`open` when the smart object
-            kind is ``'external'``. When ``True``, disable read confinement and
-            trust the PSD paths verbatim. Cannot be combined with
-            ``external_dir``.
-        :raises ValueError: If the embedded name contains no safe basename,
-            resolves outside ``directory``, ``trust_full_path`` is combined with
-            ``external_dir``, or (for external kind) the source path escapes
-            ``external_dir``.
-        """
-        if trust_full_path and external_dir is not None:
-            raise ValueError(
-                "external_dir cannot be combined with trust_full_path=True; "
-                "trust_full_path disables path confinement entirely"
-            )
-        if filename is None:
-            basename = os.path.basename(self.filename)
-            if not basename or basename == ".":
-                raise ValueError(
-                    f"Embedded smart object filename has no safe basename: {self.filename!r}"
-                )
-            outdir = os.path.realpath(
-                directory if directory is not None else os.getcwd()
-            )
-            resolved = os.path.realpath(os.path.join(outdir, basename))
-            if not _is_inside(outdir, resolved):
-                raise ValueError(
-                    f"Embedded filename resolves outside target directory: {self.filename!r}"
-                )
-            filename = resolved
-        if self.kind == "external":
-            with self.open(
-                external_dir=external_dir, trust_full_path=trust_full_path
-            ) as f:
-                content = f.read()
-        else:
-            content = self.data
-        with open(filename, "wb") as f:
-            f.write(content)
-
     def __repr__(self) -> str:
-        return f"SmartObject({self.filename!r} kind={self.kind!r} type={self.filetype!r} detected={self.detected_filetype!r} size={self.filesize})"
+        return f"SmartObject({self.filename!r} kind={self.kind!r} size={self.filesize})"
 
 
 #: A placement: 8 corner numbers, or a layer's current 8 -> its new ones.
@@ -959,17 +647,11 @@ def _config(layer: LayerProtocol) -> SmartObjectLayerData:
     raise ValueError("Smart object config not found")
 
 
-def _check_resolution(resolution: float | None) -> None:
-    if resolution is not None and not float(resolution) > 0:
-        raise ValueError(f"A resolution must be over 0 ppi, not {resolution!r}")
-
-
 def _set_placement(
     layer: LayerProtocol,
     pixels: tuple[float, float] | None,
     corners: tuple[float, ...] | None,
     embedded: bool,
-    resolution: float | None = None,
 ) -> None:
     """``SoLE`` without ``PlLd`` (unless *embedded*), with the values given."""
     blocks = layer.tagged_blocks
@@ -991,8 +673,6 @@ def _set_placement(
             descriptor[b"Sz  "] = size
         size[b"Wdth"] = Double(float(pixels[0]))
         size[b"Hght"] = Double(float(pixels[1]))
-    if resolution is not None:
-        descriptor[b"Rslt"] = UnitFloat(unit=Unit.Density, value=float(resolution))
     if corners is not None:
         for key in (b"Trnf", b"nonAffineTransform"):
             values = descriptor.get(key)

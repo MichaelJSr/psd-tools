@@ -118,18 +118,13 @@ Other layers can also have shape information as a mask::
         print(shape)
 
 :py:class:`~psd_tools.api.layers.SmartObjectLayer` embeds or links an
-external file for non-destructive editing. The file content is accessible
-via `smart_object` property::
+external file for non-destructive editing. An embedded file's content is
+accessible via `smart_object` property::
 
     import io
     so = layer.smart_object
-    if so.detected_filetype in ('jpg', 'png'):
-        # External links are read from the current working directory by
-        # default; pass open(external_dir=...) to point at the directory that
-        # holds the linked files, or open(trust_full_path=True) for fully
-        # trusted PSDs to follow the absolute path stored in the file.
-        with so.open() as f:
-            image = Image.open(io.BytesIO(f.read()))
+    if so.kind == 'data':
+        image = Image.open(io.BytesIO(so.data))
 
 :py:class:`~psd_tools.api.adjustments.SolidColorFill`,
 :py:class:`~psd_tools.api.adjustments.PatternFill`, and

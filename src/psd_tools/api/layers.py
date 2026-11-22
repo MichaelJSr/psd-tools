@@ -3069,10 +3069,8 @@ class SmartObjectLayer(Layer):
 
         import io
         so = layer.smart_object
-        if so.detected_filetype == 'jpg':
-            # Use open(external_dir=...) when processing untrusted PSD files.
-            with so.open() as f:
-                image = Image.open(io.BytesIO(f.read()))
+        if so.kind == 'data':
+            image = Image.open(io.BytesIO(so.data))
     """
 
     @property

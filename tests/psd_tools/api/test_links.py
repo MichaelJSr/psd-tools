@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from psd_tools.api.layers import SmartObjectLayer
-from psd_tools.api.links import LINK_DATE, RepoTree, link_content_id
+from psd_tools.api.links import LINK_DATE, RepoTree, link_content_id, place
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.constants import Tag
 from psd_tools.psd.descriptor import String
@@ -73,11 +73,13 @@ def test_link_target_reads_the_stored_strings(
     assert _external(**paths).smart_object.link_target(CARD) == expected
 
 
-def test_link_target_matches_the_tree_blind_to_case() -> None:
+def test_place_matches_the_tree_blind_to_case() -> None:
     so = _external(relPath="../../../types/STARS/x.PNG").smart_object
+    assert so._data is not None
+    linked = so._data.linked_file
     tree = RepoTree(["Types/Stars/x.png", "Types/y.png"])
-    assert so.link_target(CARD, tree) == "Types/Stars/x.png"
-    assert so.link_target(CARD, ["Types/y.png"]) is None
+    assert place(linked, CARD, tree) == "Types/Stars/x.png"
+    assert place(linked, CARD, ["Types/y.png"]) is None
     assert so.link_target() is None  # a relative path needs the PSD's
 
 
@@ -118,7 +120,6 @@ def test_link_writes_photoshops_record_and_keeps_the_pixels() -> None:
     assert np.array_equal(np.asarray(layer.composite()), before)
     with pytest.raises(ValueError, match="Card - art.png"):
         so.data
-    assert so.read(lambda path: path.encode()) == b"MDW/Linked/Card - art.png"
 
     again = PSDImage.open(io.BytesIO(data))
     again.repo_path = CARD
@@ -128,23 +129,6 @@ def test_link_writes_photoshops_record_and_keeps_the_pixels() -> None:
     repeat = io.BytesIO()
     again.save(repeat, update_preview=False)
     assert repeat.getvalue() == saved.getvalue()
-
-
-def test_link_and_relink_write_the_files_resolution() -> None:
-    psd = PSDImage.open(full_name("placedLayer.psd"))
-    psd.repo_path = CARD
-    so = _layer(psd, "embedded-png").smart_object
-    kept = so.resolution
-    with pytest.raises(ValueError, match="over 0"):
-        so.link("Types/Equip.png", 1, blob="b1", resolution=0)
-    so.link("Types/Equip.png", 1, blob="b1")
-    assert so.resolution == kept  # the embedded copy's, as before
-    so.relink(resolution=90)
-    saved = io.BytesIO()
-    psd.save(saved, update_preview=False)
-    back = PSDImage.open(io.BytesIO(saved.getvalue()))
-    rslt = _layer(back, "embedded-png").smart_object._config.data[b"Rslt"]  # type: ignore[union-attr]
-    assert (rslt.unit.value, rslt.value) == (b"#Rsl", 90.0)
 
 
 def test_relink_rewrites_the_paths_and_needs_the_psd_path() -> None:

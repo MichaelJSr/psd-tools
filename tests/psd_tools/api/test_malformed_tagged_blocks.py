@@ -347,17 +347,6 @@ def test_a_smart_object_with_an_unreadable_id_raises_value_error() -> None:
         smart_object.data
 
 
-def test_an_external_smart_object_without_full_path_falls_back_to_rel_path(
-    tmp_path: Any,
-) -> None:
-    psd = _patched("placedLayer.psd", 85175, 0x00)
-    layer = next(x for x in psd.descendants() if x.name == "linked-png")
-    assert isinstance(layer, SmartObjectLayer)
-    (tmp_path / "linked-layer.png").write_bytes(b"png")
-    with layer.smart_object.open(external_dir=tmp_path) as f:
-        assert f.read() == b"png"
-
-
 def test_an_external_smart_object_without_any_path_raises_value_error() -> None:
     psd = PSDImage.open(full_name("placedLayer.psd"))
     layer = next(x for x in psd.descendants() if x.name == "linked-png")
@@ -368,8 +357,6 @@ def test_an_external_smart_object_without_any_path_raises_value_error() -> None:
         del linked_file[key]
     with pytest.raises(ValueError, match="places nowhere"):
         layer.smart_object.data
-    with pytest.raises(ValueError, match="no readable path"), layer.smart_object.open():
-        pass
 
 
 def test_a_forced_stroke_skips_non_knot_records() -> None:
@@ -438,17 +425,3 @@ def test_a_stroke_with_a_mistyped_dash_offset_defaults() -> None:
     stroke = _strokes(PSDImage.open(full_name("layers/shape-layer.psd")))[0]
     stroke._data[b"strokeStyleLineDashOffset"] = stroke._data
     assert stroke.line_dash_offset == 0.0
-
-
-@pytest.mark.parametrize("damage", ["missing", "mistyped"])
-def test_a_smart_object_with_an_unreadable_resolution_is_none(damage: str) -> None:
-    psd = PSDImage.open(full_name("blend-modes/cmyk-blend-modes.psd"))
-    layer = next(x for x in psd.descendants() if isinstance(x, SmartObjectLayer))
-    smart_object = layer.smart_object
-    assert smart_object.resolution is not None
-    assert smart_object._config is not None
-    if damage == "missing":
-        del smart_object._config.data[b"Rslt"]
-    else:
-        smart_object._config.data[b"Rslt"] = smart_object._config.data
-    assert smart_object.resolution is None
