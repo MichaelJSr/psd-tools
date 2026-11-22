@@ -1,23 +1,6 @@
 Usage
 =====
 
-Command line
-------------
-
-The package provides command line tools to handle a PSD document::
-
-    psd-tools export <input_file> <output_file> [options]
-    psd-tools show <input_file> [options]
-    psd-tools debug <input_file> [options]
-    psd-tools -h | --help
-    psd-tools --version
-
-Example::
-
-    psd-tools show example.psd  # Show the file content
-    psd-tools export example.psd example.png  # Export as PNG
-    psd-tools export example.psd[0] example-0.png  # Export layer as PNG
-
 Working with PSD document
 -------------------------
 

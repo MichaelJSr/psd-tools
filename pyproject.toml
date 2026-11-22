@@ -65,9 +65,6 @@ dev = [
     "fonttools>=4.67",
 ]
 
-[project.scripts]
-psd-tools = "psd_tools.__main__:main"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 
