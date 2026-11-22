@@ -4,6 +4,15 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``SmartObject.place_picture()`` places a new picture on a turned
+  quad as Photoshop 2023 does: a 2 x 2 mip pyramid, premultiplied, sampled
+  bilinearly on the two levels round ``log2(1 / scale) - 1.125``. A
+  Perspective Warp on a quad not upright is drawn only at the scales proven
+  (``smart_filters.placeable``: the stars of 5 cards, 15 layers, 2.5-4x
+  nearer Photoshop's stored placement than a one-step bicubic), and any
+  Perspective Warp only on a quad that is an affine image of the one it ran
+  on (Photoshop's Update follows by the affine of three corners).
+  ``can_draw_filters()`` and ``draw_filters()`` take the file's pixel size
 - [api] ``SmartObject.draw_warp()`` draws a placed layer's custom warp
   (``can_draw_warp()``: 4 x 4 Bezier points over its whole content, no
   split grid or preset) on a new picture of its file at the same size: the
