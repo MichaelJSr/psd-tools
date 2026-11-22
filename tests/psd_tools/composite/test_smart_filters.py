@@ -12,6 +12,7 @@ from psd_tools.psd.descriptor import (
     Bool,
     Descriptor,
     Double,
+    Enumerated,
     Integer,
     List,
     RawData,
@@ -180,3 +181,121 @@ def test_motion_blur_drawn_at_a_proven_distance() -> None:
     assert box == (2, 5, 9, 6)
     assert np.array_equal(np.rint(out[..., 3] * 255), np.full((1, 7), 257 // 7))
     assert np.array_equal(out[..., :3], np.ones((1, 7, 3), np.float32))
+
+
+def _hue(hue: int, *ranges: Descriptor, colorize: bool = False) -> Descriptor:
+    fltr = Descriptor(classID=b"HStr")
+    fltr[b"Clrz"] = Bool(colorize)
+    master = Descriptor(classID=b"Hst2")
+    for key, value in ((b"H   ", hue), (b"Strt", 0), (b"Lght", 0)):
+        master[key] = Integer(value)
+    fltr[b"Adjs"] = _list([master, *ranges])
+    return fltr
+
+
+def _grey(tint: bool = False) -> Descriptor:
+    """Black & White as on Godskin Apostle's fire."""
+    fltr = Descriptor(classID=b"BanW")
+    for key, value in zip(
+        (b"Rd  ", b"Yllw", b"Grn ", b"Cyn ", b"Bl  ", b"Mgnt"),
+        (-68, 87, 40, 60, 20, 55),
+        strict=True,
+    ):
+        fltr[key] = Integer(value)
+    fltr[b"useTint"] = Bool(tint)
+    return fltr
+
+
+def _selective(*hues: tuple, method: bytes = b"Rltv") -> Descriptor:
+    """Selective Color: (hue, cyan, magenta, yellow, black) in %."""
+    fltr = Descriptor(classID=b"SlcC")
+    fltr[b"Mthd"] = Enumerated(b"CrcM", method)
+    items = []
+    for hue, *inks in hues:
+        item = Descriptor(classID=b"ClrC")
+        item[b"Clrs"] = Enumerated(b"Clrs", hue)
+        for key, value in zip((b"Cyn ", b"Mgnt", b"Ylw ", b"Blck"), inks, strict=True):
+            item[key] = UnitFloat(value, Unit.Percent)
+        items.append(item)
+    fltr[b"ClrC"] = _list(items)
+    return fltr
+
+
+_COLORS = [
+    (200, 30, 100),
+    (15, 250, 75),
+    (255, 0, 130),
+    (0, 5, 5),
+    (90, 90, 240),
+    (230, 180, 40),
+    (60, 200, 220),
+    (250, 245, 120),
+]
+
+
+# Photoshop 2023's 8-bit output, read off its all-colour lattice under each
+# as a smart filter.
+@pytest.mark.parametrize(
+    ("fltr", "photoshop"),
+    [
+        (
+            _hue(57),
+            [(200, 121, 30), (15, 201, 250), (255, 112, 0), (0, 0, 5),
+             (232, 90, 240), (99, 230, 40), (72, 60, 220), (132, 250, 120)],
+        ),
+        (
+            _grey(),
+            [(0, 0, 0), (121, 121, 121), (0, 0, 0), (3, 3, 3),
+             (120, 120, 120), (128, 128, 128), (148, 148, 148), (225, 225, 225)],
+        ),
+        (
+            _selective(
+                (b"Ylws", 0, 0, 0, -100), (b"Grns", 0, 0, 0, 40), (b"Rds ", -100, 0, 0, 100)
+            ),
+            [(222, 18, 61), (5, 249, 26), (255, 0, 69), (0, 5, 5),
+             (90, 90, 240), (249, 207, 150), (60, 200, 220), (253, 250, 184)],
+        ),
+        (
+            _selective(
+                (b"Rds ", 10, 25, -35, 0),
+                (b"Ylws", -15, 45, 70, 0),
+                (b"Grns", 5, -5, 33, 20),
+                (b"Cyns", -80, 60, -20, -10),
+                (b"Bls ", 100, 100, -100, 0),
+                (b"Mgnt", 40, -60, 10, 30),
+            ),
+            [(186, 48, 103), (51, 249, 35), (255, 62, 124), (4, 5, 6),
+             (37, 37, 249), (232, 158, 33), (143, 183, 228), (250, 243, 75)],
+        ),
+    ],
+)  # fmt: skip
+def test_colour_filters_drawn_as_photoshop(
+    fltr: Descriptor, photoshop: list[tuple[int, int, int]]
+) -> None:
+    """Within a level of Photoshop's on each colour; alpha and box kept."""
+    layer, entry = _object()
+    entry[b"Fltr"] = fltr
+    so = layer.smart_object
+    assert so.can_draw_filters()
+    rgba = np.full((1, len(_COLORS), 4), 0.5, np.float32)
+    rgba[0, :, :3] = np.array(_COLORS) / 255
+    out, box = so.draw_filters(rgba, (2, 3, 10, 4))
+    assert box == (2, 3, 10, 4)
+    assert np.array_equal(out[..., 3], rgba[..., 3])
+    assert np.abs(np.rint(out[0, :, :3] * 255) - np.array(photoshop)).max() <= 1
+
+
+def test_colour_filters_past_the_proven_settings_refused() -> None:
+    layer, entry = _object()
+    so = layer.smart_object
+    reds = Descriptor(classID=b"Hst2")
+    reds[b"LclR"] = Integer(1)
+    for fltr in (
+        _hue(30, colorize=True),
+        _hue(30, reds),
+        _grey(tint=True),
+        _selective((b"Rds ", 10, 0, 0, 0), method=b"Absl"),
+        _selective((b"Rds ", 10, 0, 0, 0), (b"Whts", 0, 0, 0, 20)),
+    ):
+        entry[b"Fltr"] = fltr
+        assert not so.can_draw_filters()

@@ -785,9 +785,10 @@ class SmartObject:
     def can_draw_filters(self) -> bool:
         """Return whether :py:meth:`draw_filters` draws the smart filters on.
 
-        True with none on, or one Puppet Warp, Invert, Gaussian Blur or proven
-        Motion Blur, Normal at 100%, in an RGB document; a filter mask does not
-        refuse (the composite applies it).
+        True with none on, or one Puppet Warp, Invert, Gaussian Blur, proven
+        Motion Blur, master-only Hue/Saturation, untinted Black & White or
+        Relative Selective Color of the six hues, Normal at 100%, in an RGB
+        document; a filter mask does not refuse (the composite applies it).
         """
         from psd_tools.composite import smart_filters  # noqa: PLC0415
 

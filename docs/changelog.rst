@@ -4,6 +4,15 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``SmartObject.draw_filters()`` draws three colour filters on whole
+  levels, alpha kept: Hue/Saturation of the master alone (Colorize off) and
+  Black & White without tint by the adjustment layers' code, and a Relative
+  Selective Color of the six hues (``clip(((-1 - c) * k - c) * (1 - v), -v,
+  1 - v)`` times each hue's span, every hue from the same input). Within 2
+  levels of Photoshop 2023's own smart filters on its lattice of every
+  colour (8 settings) and within 1 on three cards' pictures relinked in it.
+  Whites, Neutrals, Blacks, Absolute, hue ranges, Colorize and tint stay
+  refused
 - [api] ``SmartObject.draw_filters()`` draws a Gaussian Blur (premultiplied,
   sigma = radius, edges repeated at the canvas's edge and faded inside it)
   and a Motion Blur at angle 0 of a proven distance (6 px), and a filter

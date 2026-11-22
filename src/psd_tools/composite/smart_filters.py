@@ -3,7 +3,9 @@
 A placed layer's pixels are its smart filters' result. When its file changes,
 the caller draws the new picture on the layer's quad and :py:func:`draw` draws
 the filters over it as Photoshop 2023 does: a Puppet Warp from its stored mesh,
-an Invert, a Gaussian Blur, a Motion Blur of a distance :py:data:`MOTION` holds.
+an Invert, a Gaussian Blur, a Motion Blur of a distance :py:data:`MOTION` holds,
+a Hue/Saturation (master only), a Black & White (no tint) and a Relative
+Selective Color of the six hues.
 Plain float64 numpy, element by element in a fixed order, and exactly rounded
 sums (no BLAS), so every CPU gives the same result.
 
@@ -17,11 +19,14 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from decimal import Context, Decimal
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
 from psd_tools.api._descriptor import get_scalar
+from psd_tools.composite import adjustments
+from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.constants import ColorMode
 from psd_tools.psd.descriptor import Descriptor
 
@@ -37,6 +42,19 @@ _INVERT = int.from_bytes(b"Invr", "big")  # Invert's filterID; it has no Fltr
 _PUPPET = b"rigidTransform"
 _GSNB = b"GsnB"  # Gaussian Blur
 _MTNB = b"MtnB"  # Motion Blur
+_HSTR = b"HStr"  # Hue/Saturation
+_BANW = b"BanW"  # Black & White
+_SLCC = b"SlcC"  # Selective Color
+_HUES = (b"Rds ", b"Ylws", b"Grns", b"Cyns", b"Bls ", b"Mgnt")  # Selective Color's
+_INKS = (b"Cyn ", b"Mgnt", b"Ylw ", b"Blck")
+_GREYS = (  # Black & White's sliders and defaults
+    ("red", b"Rd  ", 40),
+    ("yellow", b"Yllw", 60),
+    ("green", b"Grn ", 40),
+    ("cyan", b"Cyn ", 60),
+    ("blue", b"Bl  ", 20),
+    ("magenta", b"Mgnt", 80),
+)
 #: Motion Blur at angle 0 proven on Photoshop 2023's pixels: distance px -> c in
 #: the alpha's ``(S + c) // taps``.
 MOTION = {6: 2}
@@ -62,7 +80,55 @@ def _kind(item: Descriptor) -> str | None:
         return "gaussian"
     if cls == _MTNB and _distance(fltr) is not None:
         return "motion"
+    if cls == _HSTR and HAS_SCIPY and _master(fltr) is not None:
+        return "hue"
+    if cls == _BANW and not get_scalar(fltr, b"useTint", bool, False):
+        return "grey"
+    if cls == _SLCC and _selective(fltr) is not None:
+        return "selective"
     return None
+
+
+def _enum(value: object) -> bytes | None:
+    enum = getattr(value, "enum", None)
+    return enum.encode() if isinstance(enum, str) else enum
+
+
+def _master(fltr: Descriptor) -> tuple[int, int, int] | None:
+    """A Hue/Saturation's master hue, saturation and lightness.
+
+    ``None`` with Colorize on or a hue range set.
+    """
+    adjs = list(fltr.get(b"Adjs") or [])
+    if (
+        get_scalar(fltr, b"Clrz", bool, False)
+        or len(adjs) != 1
+        or not isinstance(adjs[0], Descriptor)
+        or b"LclR" in adjs[0]
+    ):
+        return None
+    hue, saturation, lightness = (
+        get_scalar(adjs[0], k, int, 0) for k in (b"H   ", b"Strt", b"Lght")
+    )
+    return hue, saturation, lightness
+
+
+def _selective(fltr: Descriptor) -> list[tuple[int, list[float]]] | None:
+    """A Relative Selective Color's hues (index in :py:data:`_HUES`) and inks.
+
+    Cyan, magenta, yellow and black in -1..1. ``None`` when Absolute or with
+    Whites, Neutrals or Blacks set.
+    """
+    if _enum(fltr.get(b"Mthd")) != b"Rltv":
+        return None
+    found = []
+    for item in fltr.get(b"ClrC") or []:
+        hue = _enum(item.get(b"Clrs")) if isinstance(item, Descriptor) else None
+        if hue not in _HUES:
+            return None
+        inks = [get_scalar(item, k, float, 0.0) / 100 for k in _INKS]
+        found.append((_HUES.index(hue), inks))
+    return found
 
 
 def _distance(fltr: Descriptor) -> int | None:
@@ -112,9 +178,11 @@ def _items(so: SmartObject) -> list[Descriptor] | None:
 def drawable(so: SmartObject) -> bool:
     """Whether :py:func:`draw` draws the object's smart filters.
 
-    True with none on, or one on, a Puppet Warp, an Invert, a Gaussian Blur or
-    a Motion Blur at angle 0 of a distance :py:data:`MOTION` holds, Normal at
-    100%, in an RGB document. A filter mask does not refuse.
+    True with none on, or one on, a Puppet Warp, an Invert, a Gaussian Blur,
+    a Motion Blur at angle 0 of a distance :py:data:`MOTION` holds, a
+    Hue/Saturation of the master alone, a Black & White without tint or a
+    Relative Selective Color of the six hues, Normal at 100%, in an RGB
+    document. A filter mask does not refuse.
     """
     return _items(so) is not None
 
@@ -155,6 +223,8 @@ def draw(
         out = out.copy()
         out[..., :3] = 1.0 - out[..., :3]
         return out, box
+    if kind in ("hue", "grey", "selective"):
+        return _adjusted(so, kind, item[b"Fltr"], out), box
     if kind == "gaussian":
         psd = so._layer._psd
         radius = get_scalar(item[b"Fltr"], b"Rds ", float, 0.0)
@@ -625,3 +695,77 @@ def _trim(rgba: np.ndarray, box: Box) -> tuple[np.ndarray, Box]:
         return np.zeros((0, 0, 4), np.float32), (0, 0, 0, 0)
     r0, r1, c0, c1 = int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
     return rgba[r0:r1, c0:c1], (box[0] + c0, box[1] + r0, box[0] + c1, box[1] + r1)
+
+
+def _adjusted(
+    so: SmartObject, kind: str, fltr: Descriptor, rgba: np.ndarray
+) -> np.ndarray:
+    """*rgba*'s colours on whole levels under a colour filter; alpha kept.
+
+    Hue/Saturation and Black & White by the adjustment layers' code.
+    """
+    levels = np.rint(np.clip(rgba[..., :3].astype(np.float64), 0.0, 1.0) * 255)
+    out = np.empty(rgba.shape, np.float32)
+    out[..., 3] = rgba[..., 3]
+    if kind == "selective":
+        ranges = _selective(fltr)
+        assert ranges is not None
+        out[..., :3] = _selective_color(levels, ranges)
+        return out
+    rgb = (levels / 255).astype(np.float32)
+    psd = so._layer._psd
+    if kind == "hue":
+        layer = SimpleNamespace(
+            data=[],
+            colorization=(0, 0, 0),
+            master=_master(fltr),
+            enable_colorization=0,
+            _psd=psd,
+        )
+        out[..., :3] = adjustments.apply_huesaturation(
+            rgb, ColorMode.RGB, cast(Any, layer)
+        )
+    else:
+        sliders = {name: get_scalar(fltr, key, int, v) for name, key, v in _GREYS}
+        layer = SimpleNamespace(_data=fltr, use_tint=False, _psd=psd, **sliders)
+        out[..., :3] = cast(
+            np.ndarray,
+            adjustments.apply_blackandwhite(rgb, ColorMode.RGB, cast(Any, layer)),
+        )
+    return out
+
+
+def _selective_color(
+    levels: np.ndarray, ranges: list[tuple[int, list[float]]]
+) -> np.ndarray:
+    """Relative Selective Color on whole *levels* (float64 0..255), 0..1 out.
+
+    A hue's weight is its span: Reds where R is the largest channel, max -
+    mid; Yellows where B is the smallest, mid - min; Greens G largest, Cyans
+    R smallest, Blues B largest, Magentas G smallest. Each hue moves channel
+    ``v`` (R by cyan, G magenta, B yellow; ink ``c``, black ``k``) by weight
+    ``* clip(((-1 - c) * k - c) * (1 - v), -v, 1 - v)``, every hue from the
+    same input, then rounded. Proven on Photoshop 2023's lattice of every
+    colour (5 settings, at most 2 levels off).
+    """
+    high, low = levels.max(2), levels.min(2)
+    mid = levels.sum(2) - high - low
+    r, g, b = levels[..., 0], levels[..., 1], levels[..., 2]
+    spans = (
+        np.where(r == high, high - mid, 0.0),
+        np.where(b == low, mid - low, 0.0),
+        np.where(g == high, high - mid, 0.0),
+        np.where(r == low, mid - low, 0.0),
+        np.where(b == high, high - mid, 0.0),
+        np.where(g == low, mid - low, 0.0),
+    )
+    v = levels / 255
+    out = levels.copy()
+    for hue, (*inks, black) in ranges:
+        for channel, ink in enumerate(inks):
+            amount = (-1.0 - ink) * black - ink
+            if amount:
+                x = v[..., channel]
+                move = np.clip(amount * (1.0 - x), -x, 1.0 - x)
+                out[..., channel] += spans[hue] * move
+    return (np.clip(np.rint(out), 0, 255) / 255).astype(np.float32)
