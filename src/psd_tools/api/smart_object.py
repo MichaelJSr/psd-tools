@@ -817,6 +817,35 @@ class SmartObject:
         quad = None if corners is None else tuple(float(v) for v in corners)
         return smart_filters.draw(self, rgba, box, quad, sampling)  # type: ignore[arg-type]
 
+    def can_draw_warp(self) -> bool:
+        """Return whether :py:meth:`draw_warp` draws the object's warp.
+
+        True for a custom warp of 4 x 4 points over its whole content (no
+        split grid, no preset bend) on a parallelogram quad.
+        """
+        from psd_tools.composite import placed_warp  # noqa: PLC0415
+
+        return placed_warp.drawable(self)
+
+    def draw_warp(
+        self, rgba: np.ndarray, corners: Sequence[float] | None = None
+    ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+        """Draw the object's custom warp on a new picture of its file.
+
+        For a redraw from a changed file of the same size: *rgba* (straight
+        RGBA, uint8 or float in 0..1) is the file's pixels, *corners* the
+        layer's quad (default :py:attr:`transform_box`). See
+        :py:func:`psd_tools.composite.placed_warp.draw`.
+
+        :return: ``(straight float32 RGBA, canvas box)``
+        :raises ValueError: when :py:meth:`can_draw_warp` is False or the
+            picture is another size
+        """
+        from psd_tools.composite import placed_warp  # noqa: PLC0415
+
+        quad = None if corners is None else tuple(float(v) for v in corners)
+        return placed_warp.draw(self, rgba, quad)  # type: ignore[arg-type]
+
     def save(
         self,
         filename: str | os.PathLike | None = None,

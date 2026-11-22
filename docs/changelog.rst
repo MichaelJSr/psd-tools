@@ -4,6 +4,14 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``SmartObject.draw_warp()`` draws a placed layer's custom warp
+  (``can_draw_warp()``: 4 x 4 Bezier points over its whole content, no
+  split grid or preset) on a new picture of its file at the same size: the
+  points' bounding box on the layer's quad, each pixel the file's pixel it
+  comes from, nearest, in one step, as Photoshop 2023 stores it and draws it
+  on its own relink of a new picture (2 cards, 4 layers: Mol D Truffy's
+  card 0.2% of pixels over 24 levels from Photoshop's relink, bilinear 5x
+  more)
 - [api] ``SmartObject.draw_filters()`` draws three colour filters on whole
   levels, alpha kept: Hue/Saturation of the master alone (Colorize off) and
   Black & White without tint by the adjustment layers' code, and a Relative
