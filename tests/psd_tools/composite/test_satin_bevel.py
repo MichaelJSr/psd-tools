@@ -60,8 +60,7 @@ def _satin(shape: np.ndarray, **kwargs: Any) -> np.ndarray:
         "inverted": False,
     }
     params.update(kwargs)
-    height, width = shape.shape[:2]
-    return effects.draw_satin((0, 0, width, height), shape, **params)
+    return effects.draw_satin(shape, **params)
 
 
 def _bevel(shape: np.ndarray, **kwargs: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -76,8 +75,7 @@ def _bevel(shape: np.ndarray, **kwargs: Any) -> tuple[np.ndarray, np.ndarray]:
         "altitude": 30.0,
     }
     params.update(kwargs)
-    height, width = shape.shape[:2]
-    return effects.draw_bevel((0, 0, width, height), shape, **params)
+    return effects.draw_bevel(shape, **params)
 
 
 # -- Satin ------------------------------------------------------------------ #

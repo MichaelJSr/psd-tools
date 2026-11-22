@@ -2415,7 +2415,6 @@ def satin_geometry(desc: Descriptor) -> tuple[float, float]:
 
 
 def draw_satin(
-    viewport: tuple[int, int, int, int],
     shape: np.ndarray,
     *,
     distance: float,
@@ -2425,7 +2424,7 @@ def draw_satin(
     contour: np.ndarray | None = None,
     anti_aliased: bool = False,
 ) -> np.ndarray:
-    """The coverage a satin paints inside ``shape``, on ``viewport``.
+    """The coverage a satin paints inside ``shape``, on ``shape``'s box.
 
     Two copies of the silhouette, moved ``distance`` either way along
     ``angle`` and each blurred by ``size``, and the absolute difference of the
@@ -2710,7 +2709,6 @@ def _soften_smooth(light: np.ndarray, soften: float) -> np.ndarray:
 
 
 def draw_bevel(
-    viewport: tuple[int, int, int, int],
     shape: np.ndarray,
     *,
     style: bytes,
@@ -2726,7 +2724,7 @@ def draw_bevel(
     texture: np.ndarray | None = None,
     bevel_shape: BevelShape | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """How much highlight and how much shadow a bevel paints, on ``viewport``.
+    """How much highlight and how much shadow a bevel paints, on ``shape``'s box.
 
     The surface (a chisel bevel's from :py:func:`_bevel_height`, a smooth
     one's as below), its slope scaled by ``depth`` and turned over when not

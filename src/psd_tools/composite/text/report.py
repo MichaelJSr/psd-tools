@@ -30,7 +30,7 @@ class Splice:
 
 @dataclass(frozen=True)
 class RenderReport:
-    """Fonts, lines, warnings and timing of one render.
+    """Fonts, lines and warnings of one render.
 
     ``lines`` lists every composed line; one an overflowing box did not draw
     has ``drawn`` false. ``splice`` is set by a spliced render.
@@ -39,7 +39,6 @@ class RenderReport:
     fonts: Mapping[str, tuple[How, str | None]]  #: name -> (how, path)
     lines: tuple[LineInfo, ...]
     warnings: tuple[str, ...]
-    ms: float
     splice: Splice | None = None
 
 

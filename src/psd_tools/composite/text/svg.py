@@ -800,13 +800,13 @@ class _Parser:
         if not contours:
             return
         bbox = _bbox(contours)
-        fill = self._paint(style.get("fill", "#000"), bbox)
+        fill = self._paint(style.get("fill", "#000"))
         nonzero = style.get("fill-rule", "nonzero") != "evenodd"
         paint = None
         if stroked:
             if rect is None:
                 raise Unsupported(f"stroked {tag}")
-            paint = self._paint(stroke, bbox)
+            paint = self._paint(stroke)
             if fill is not None and paint is not None and opacity < 1:
                 # The fill and the stroke are composited together first.
                 raise Unsupported("opacity on a filled stroke")
@@ -817,7 +817,7 @@ class _Parser:
                 Shape(_rect_ring(rect, width), m, paint, opacity, True, bbox, True)
             )
 
-    def _paint(self, value: str, bbox: tuple[float, float, float, float]) -> Paint:
+    def _paint(self, value: str) -> Paint:
         v = value.strip()
         ref = re.fullmatch(r"url\(\s*#([^)\s]+)\s*\)(?:\s+(.*))?", v)
         if ref is None:

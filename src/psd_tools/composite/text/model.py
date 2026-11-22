@@ -302,7 +302,7 @@ def _with_kerning(
     return out
 
 
-def _spans(text: str, offsets: Sequence[int], run: Any) -> list[tuple[int, int, Any]]:
+def _spans(offsets: Sequence[int], run: Any) -> list[tuple[int, int, Any]]:
     """``(start, end, run data)`` in ``str`` indices for a ``StyleRun``/``ParagraphRun``."""
     last = len(offsets) - 1
     out: list[tuple[int, int, Any]] = []
@@ -321,7 +321,7 @@ def _runs(
     text: str, offsets: Sequence[int], style_run: Any, normal: Any, font_set: list[str]
 ) -> list[Run]:
     runs: list[Run] = []
-    for start, end, data in _spans(text, offsets, style_run):
+    for start, end, data in _spans(offsets, style_run):
         sheet = _get(_get(data, "StyleSheet", None), "StyleSheetData", None)
         runs.append(Run(start, end, _style(sheet, normal, font_set)))
     # Text the runs do not reach keeps the last style (or the Normal sheet).
@@ -336,7 +336,7 @@ def _paragraphs(
     text: str, offsets: Sequence[int], paragraph_run: Any, pnormal: Any
 ) -> list[Paragraph]:
     """Paragraphs are cut at CR; each takes the ``ParagraphRun`` covering its start."""
-    spans = _spans(text, offsets, paragraph_run)
+    spans = _spans(offsets, paragraph_run)
     starts = [s for s, _, _ in spans]
     default = int(_value(_get(pnormal, "Justification", 0)))
     out: list[Paragraph] = []

@@ -92,7 +92,6 @@ def test_text_psd_report(layer: TypeLayer, arial_as_luckiest_guy: FontMap) -> No
     pitch = model.auto_leading * size
     assert [line.y for line in report.lines] == pytest.approx([0.0, pitch, 2 * pitch])
     assert all(line.decision == "paragraph" for line in report.lines)
-    assert report.ms > 0
 
 
 def test_type_layer_psd_renders(luckiest_guy_path: str) -> None:

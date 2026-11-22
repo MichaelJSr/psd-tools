@@ -84,9 +84,7 @@ def break_lines(
     return out
 
 
-def _break_ops(
-    text: str, a: int, b: int, space_set: frozenset[int]
-) -> list[tuple[int, int]]:
+def _break_ops(a: int, b: int, space_set: frozenset[int]) -> list[tuple[int, int]]:
     """``(end, start)`` per run of spaces.
 
     The line ends before the run and the next starts after it; a run at the
@@ -118,7 +116,7 @@ def _greedy(
     justified: bool,
     final: Decision,
 ) -> list[tuple[int, int, Decision]]:
-    ops = _break_ops(text, a, b, space_set)
+    ops = _break_ops(a, b, space_set)
 
     def fits(p: int, q: int) -> bool:
         return measure(p, q) <= width * (1 + FIT_SLACK) + _FIT_EPS

@@ -7295,7 +7295,6 @@ class Compositor:
             silhouette = self._cast_shape(layer, bbox)
             try:
                 coverage = draw_satin(
-                    bbox,
                     silhouette,
                     distance=distance,
                     angle=angle,
@@ -7467,7 +7466,6 @@ class Compositor:
             silhouette = self._cast_shape(layer, bbox)
             try:
                 amounts = draw_bevel(
-                    bbox,
                     silhouette,
                     style=style,
                     technique=technique,

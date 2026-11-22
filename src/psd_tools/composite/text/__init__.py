@@ -6,8 +6,6 @@ Requires the ``text`` extra (``uharfbuzz``, ``freetype-py``). Importing
 
 from __future__ import annotations
 
-import time
-
 import numpy as np
 
 from psd_tools.api.layers import TypeLayer
@@ -82,9 +80,7 @@ def font_names(layer: TypeLayer) -> list[str]:
     )
 
 
-def _report(
-    lay: Layout, transform: Transform, options: Options, t0: float
-) -> RenderReport:
+def _report(lay: Layout, transform: Transform, options: Options) -> RenderReport:
     warnings = list(lay.warnings)
     for w in raster_warnings(lay, transform, options):
         if w not in warnings:
@@ -93,7 +89,6 @@ def _report(
         fonts={name: (r.how, r.path) for name, r in lay.fonts.items()},
         lines=lay.lines,
         warnings=tuple(warnings),
-        ms=(time.perf_counter() - t0) * 1000,
     )
 
 
@@ -116,7 +111,6 @@ def _render(
     options: Options | None,
 ) -> tuple[RenderResult, Layout, TextModel]:
     """:func:`render`, the layout it drew and the model it read."""
-    t0 = time.perf_counter()
     options = options or Options()
     fonts = fonts or default_font_map()
     model = TextModel.from_layer(layer)
@@ -131,7 +125,7 @@ def _render(
         _GLYPH_CACHE,
         max_alloc_bytes=layer._psd._max_alloc_bytes,
     )
-    return RenderResult(rgba, bbox, _report(lay, transform, options, t0)), lay, model
+    return RenderResult(rgba, bbox, _report(lay, transform, options)), lay, model
 
 
 def render_type_layer(
