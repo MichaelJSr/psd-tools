@@ -1838,30 +1838,18 @@ def composite_pil(
     return pil_io.post_process(image, alpha_as_image, icc)
 
 
-# Env vars that set glibc's malloc policy: the caller's choice stands.
-_MALLOC_ENV = (
-    "MALLOC_MMAP_THRESHOLD_",
-    "MALLOC_TRIM_THRESHOLD_",
-    "MALLOC_MMAP_MAX_",
-    "MALLOC_TOP_PAD_",
-    "GLIBC_TUNABLES",
-)
 _MALLOC_SET = False
 
 
 def _keep_freed_memory() -> None:
     """On glibc, keep freed canvases in the heap for the next render.
 
-    Once a process; off with ``PSD_TOOLS_MALLOC=0`` or any of ``_MALLOC_ENV``.
+    Once a process.
     """
     global _MALLOC_SET
     if _MALLOC_SET:
         return
     _MALLOC_SET = True
-    if os.environ.get("PSD_TOOLS_MALLOC") == "0" or any(
-        name in os.environ for name in _MALLOC_ENV
-    ):
-        return
     try:
         # Not on Windows: the AttributeError below.
         if not (os.confstr("CS_GNU_LIBC_VERSION") or "").startswith("glibc"):  # type: ignore[attr-defined]
