@@ -48,14 +48,11 @@ text = [
 [dependency-groups]
 test = [
     "pytest",
-    "pytest-cov",
 ]
 dev = [
     {include-group = "test"},
-    "ipykernel",
     "ruff",
     "mypy",
-    "pre-commit",
     # Include composite dependencies for full development
     "aggdraw>=1.4.1",
     "scipy>=1.9",
@@ -84,7 +81,6 @@ version = { attr = "psd_tools.version.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=psd_tools"
 filterwarnings = [
     "ignore:Moving a layer into another document:DeprecationWarning",
 ]
