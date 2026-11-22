@@ -37,8 +37,7 @@ requires-python = ">=3.11"
 
 [project.optional-dependencies]
 composite = [
-    "aggdraw>=1.4.1;sys_platform!='win32'",
-    "aggdraw>=1.4.1;sys_platform=='win32'",
+    "aggdraw>=1.4.1",
     "scipy>=1.9",
 ]
 text = [
@@ -58,15 +57,13 @@ dev = [
     "mypy",
     "pre-commit",
     # Include composite dependencies for full development
-    "aggdraw>=1.4.1;sys_platform!='win32'",
-    "aggdraw>=1.4.1;sys_platform=='win32'",
+    "aggdraw>=1.4.1",
     "scipy>=1.9",
     # Text dependencies; fonttools builds the fixture fonts in tests
     "uharfbuzz>=0.56",
     "freetype-py>=2.5",
     "fonttools>=4.67",
 ]
-docs = ["sphinx", "sphinx_rtd_theme"]
 
 [project.scripts]
 psd-tools = "psd_tools.__main__:main"
@@ -142,31 +139,9 @@ ignore = [
 convention = "pep257"
 
 [tool.mypy]
-files = ["src/psd_tools", "tests", "tools", "docs/conf.py"]
+files = ["src/psd_tools", "tests", "tools"]
 
 [[tool.mypy.overrides]]
 # Untyped optional dependencies of the text engine and its test fixtures.
 module = ["freetype", "freetype.*", "uharfbuzz", "fontTools", "fontTools.*"]
 ignore_missing_imports = true
-
-[tool.cibuildwheel]
-archs = "auto64"
-# Skip testing during wheel builds - tests are already run in CI test workflow
-# Testing here would require composite dependencies which aren't available on all platforms
-test-skip = "*"
-# Remove any setup.cfg left by a previous build so it cannot bleed into later builds
-# (e.g. a cp314 abi3 setup.cfg must not carry over into a cp314t free-threaded build)
-before-build = "rm -f setup.cfg"
-
-[[tool.cibuildwheel.overrides]]
-select = "cp3{13,14}-{manylinux,musllinux,macos}*"
-inherit.before-build = "append"
-before-build = "bash tools/configure_abi_tag.sh"
-
-[tool.cibuildwheel.windows]
-repair-wheel-command = ["pipx run delvewheel repair -v -w {dest_dir} {wheel}"]
-
-[[tool.cibuildwheel.overrides]]
-select = "cp3{13,14}-{manylinux,musllinux,macos}*"
-inherit.repair-wheel-command = "append"
-repair-wheel-command = "pipx run abi3audit --strict --report {wheel}"
