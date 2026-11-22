@@ -39,13 +39,19 @@ _ALLOWED = {
     ("composite/adjustments.py", "_get_lut_size", "**"): 1,
     ("composite/adjustments.py", "_levels_gamma", "**"): 3,
     ("composite/adjustments.py", "_colorbalance_midtones", "**"): 3,
+    ("composite/adjustments.py", "_colorbalance_gammas", "**"): 1,
     # float64 tables
     ("composite/adjustments.py", "_brightness_curve", "**"): 1,
     ("composite/adjustments.py", "_brightness_curve", "np.exp"): 2,
     ("composite/paint.py", "_srgb_to_oklab", "np.cbrt"): 1,
+    ("composite/paint.py", "_blend_space.encode", "np.cbrt"): 1,
     # 3 by 3 and 2 by 2 matrices, no pixels
     ("composite/adjustments.py", "_vibrance_space", "@"): 3,
     ("composite/text/raster.py", "_resample", "@"): 2,
+    ("composite/paint.py", "_profile_lms", "@"): 4,
+    # whole levels in int64: exact
+    ("composite/blend.py", "_lightness", "@"): 1,
+    ("composite/blend.py", "_set_lum_levels", "@"): 1,
     # float64 picture resample (BLAS; its sums are owed a fixed order)
     ("composite/text/svg.py", "picture_layer", "np.matmul"): 1,
     ("composite/text/svg.py", "picture_layer", "np.tensordot"): 1,

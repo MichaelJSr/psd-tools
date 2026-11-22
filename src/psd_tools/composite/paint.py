@@ -1317,10 +1317,10 @@ def _blend_space(
     inverse = np.linalg.inv(forward)
 
     def encode(rgb: np.ndarray) -> np.ndarray:
-        return np.cbrt(_srgb_to_linear(rgb) @ forward.T) @ _OKLAB_LAB.T
+        return _dot3(np.cbrt(_dot3(_srgb_to_linear(rgb), forward.T)), _OKLAB_LAB.T)
 
     def decode(lab: np.ndarray) -> np.ndarray:
-        return _linear_to_srgb(((lab @ _OKLAB_LAB_INV.T) ** 3) @ inverse.T)
+        return _linear_to_srgb(_dot3(_dot3(lab, _OKLAB_LAB_INV.T) ** 3, inverse.T))
 
     return encode, decode
 
