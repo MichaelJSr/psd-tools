@@ -209,6 +209,24 @@ def test_motion_blur_rounds_as_photoshop(distance: int, alpha: int) -> None:
         assert box[2] - box[0] == shown * (distance + 1)
 
 
+@pytest.mark.parametrize(
+    "distance, dot, stored",
+    [
+        (6, (227, 78, 49, 33), (204, 51, 51, 5)),
+        (17, (149, 102, 60, 53), (170, 85, 85, 3)),
+    ],
+)
+def test_motion_blur_colours_as_photoshop(
+    distance: int, dot: tuple, stored: tuple
+) -> None:
+    """A faint dot as Photoshop 2023 stores it: 8-bit premultiplied sums."""
+    layer, entry = _object()
+    entry[b"Fltr"] = _blur(b"MtnB", Angl=0, Dstn=distance)
+    pixel = np.array(dot, np.float32).reshape(1, 1, 4) / 255
+    out, _ = layer.smart_object.draw_filters(pixel, (5, 5, 6, 6))
+    assert np.array_equal(np.rint(out * 255), np.full((1, distance + 1, 4), stored))
+
+
 def _hue(hue: int, *ranges: Descriptor, colorize: bool = False) -> Descriptor:
     fltr = Descriptor(classID=b"HStr")
     fltr[b"Clrz"] = Bool(colorize)

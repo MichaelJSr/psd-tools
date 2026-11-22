@@ -658,16 +658,15 @@ def _motion(rgba: np.ndarray, box: Box, distance: int) -> tuple[np.ndarray, Box]
     """*rgba* on canvas *box* under a Motion Blur at angle 0, as stored.
 
     A box of distance + 1 taps over ``x - distance // 2 .. x + distance -
-    distance // 2`` of the 8-bit alpha, alpha ``(S + c) // taps`` with ``c =
-    taps // 2``, less 1 unless taps is a power of 2; colours averaged
-    premultiplied.
+    distance // 2`` of 8-bit alpha and premultiplied colour, each ``(S + c)
+    // taps`` with ``c = taps // 2``, less 1 unless taps is a power of 2.
     """
     taps, lo = distance + 1, distance // 2
     bias = taps // 2 - bool(taps & distance)
     hi = distance - lo
     alpha = np.round(np.clip(rgba[..., 3], 0, 1) * 255).astype(np.int64)
     color = np.round(np.clip(rgba[..., :3], 0, 1) * 255).astype(np.int64)
-    color *= alpha[..., None]
+    color = (color * alpha[..., None] * 2 + 255) // 510  # rounded
     width = alpha.shape[1] + distance
 
     def sums(plane: np.ndarray) -> np.ndarray:
@@ -678,11 +677,10 @@ def _motion(rgba: np.ndarray, box: Box, distance: int) -> tuple[np.ndarray, Box]
             total += padded[:, i : i + width]
         return total
 
-    total, inks = sums(alpha), sums(color)
-    out_alpha = (total + bias) // taps
-    rgb = np.where(
-        total[..., None] > 0, np.round(inks / np.maximum(total, 1)[..., None]), 0
-    )
+    out_alpha = (sums(alpha) + bias) // taps
+    inks = (sums(color) + bias) // taps
+    shown = np.maximum(out_alpha, 1)[..., None]
+    rgb = (inks * 510 + shown) // (shown * 2)  # unpremultiplied, rounded
     out = np.dstack([rgb / 255.0, out_alpha / 255.0]).astype(np.float32)
     return out, (box[0] - hi, box[1], box[2] + lo, box[3])
 
