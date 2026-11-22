@@ -16,7 +16,7 @@ filter source through the mask.
 
 A Perspective Warp on a quad not upright takes the picture as :py:func:`place`
 puts it there (Photoshop's mip resample), at a scale :py:func:`placeable`
-holds.
+holds; a file of another pixel size there after :py:func:`update`.
 
 When a trimmed or padded file moves only the quad, :py:func:`keep` keeps a
 Puppet or Perspective Warp's map on the canvas.
@@ -35,7 +35,7 @@ import numpy as np
 from psd_tools.api._descriptor import get_scalar
 from psd_tools.composite import adjustments
 from psd_tools.constants import ColorMode
-from psd_tools.psd.descriptor import Descriptor
+from psd_tools.psd.descriptor import Descriptor, Double, List, UnitFloat
 
 if TYPE_CHECKING:
     from psd_tools.api.smart_object import SmartObject
@@ -445,8 +445,8 @@ def _perspective(
     Warp's affine on parallelograms); then warped vertices -> vertices, and
     vertices -> warped vertices. ``None`` when the quad now is no affine
     image of that one: Photoshop's Update follows by the affine of three
-    corners (a file of twice the pixels on a turned quad), the projective
-    follow equal only there.
+    corners (a file of twice the pixels on a turned quad: :py:func:`update`),
+    the projective follow equal only there.
     """
     quad = corners if corners is not None else so.transform_box
     found = _corners(fltr)
@@ -479,6 +479,153 @@ def _affinely(src: list[float], dst: list[float]) -> bool:
     px = u0 + a * (u1 - u0) + b * (u3 - u0)
     py = v0 + a * (v1 - v0) + b * (v3 - v0)
     return abs(px - u2) <= _QUAD_TOL and abs(py - v2) <= _QUAD_TOL
+
+
+def updatable(so: SmartObject, width: int, height: int, ppi: float) -> bool:
+    """Whether :py:func:`update` puts the object's Perspective Warp on a new file.
+
+    One Perspective Warp :py:func:`draw` draws on the layer's quad, a quad
+    not upright; at a new size *ppi* the layer's ``Rslt`` and the warp
+    :py:func:`update` writes drawn on its new quad for a file of *width* x
+    *height* pixels.
+    """
+    return _updated(so, width, height, ppi) is not None
+
+
+def update(so: SmartObject, width: int, height: int, ppi: float) -> Quad:
+    """Put the object's Perspective Warp on a new file of *width* x *height*.
+
+    As Photoshop 2023's Update Modified Content writes it on a quad not
+    upright (7 layers of 3 cards at 2x and 0.5x, exact): the new file
+    round the old one's centre ``(TR + BL) / 2`` at its scale along the
+    quad's top and left edges (a parallelogram); ``PuX0``.. that quad, the
+    vertices and warped vertices followed there, projectively from the quad
+    the filter ran on to the layer's (as :py:func:`draw`), then by the
+    affine map of the three corners TL TR BL. ``referenceRect`` is kept
+    (never read). The same size changes nothing.
+
+    :param ppi: the new file's resolution
+    :return: the layer's new quad (TL TR BR BL), for the caller to write
+        with ``Sz``
+    :raises ValueError: when :py:func:`updatable` is False
+    """
+    found = _updated(so, width, height, ppi)
+    if found is None:
+        raise ValueError("this Perspective Warp is not updated")
+    quad, fltr, written = found
+    for key, value in written.items():
+        fltr[key] = value
+    return quad
+
+
+def _updated(
+    so: SmartObject, width: int, height: int, ppi: float
+) -> tuple[Quad, Descriptor, dict[bytes, Any]] | None:
+    """:py:func:`update`'s quad, filter and values to write; ``None`` when not.
+
+    The values are checked as :py:func:`draw` reads them, on a copy.
+    """
+    items = _items(so)
+    quad = so.transform_box
+    own = _size(so)
+    if not items or _kind(items[0]) != "perspective" or quad is None or own is None:
+        return None
+    old = [float(v) for v in quad]
+    fltr = items[0][b"Fltr"]
+    if _upright(old):
+        return None
+    if (float(width), float(height)) == own:
+        return cast(Quad, tuple(old)), fltr, {}
+    config = so._config
+    stored = None if config is None else get_scalar(config.data, b"Rslt", float, None)
+    if width <= 0 or height <= 0 or stored is None or abs(stored - ppi) > _QUAD_TOL:
+        return None
+    new = _update_quad(old, own, (float(width), float(height)))
+    ran = [get_scalar(fltr, k, float, 0.0) for k in _PU]
+    follow = _between(ran, old) if _affinely(ran, old) else None
+    turn = _three(old, list(new))
+    if follow is None or turn is None:
+        return None
+    moved = [
+        turn[3 * r] * follow[c]
+        + turn[3 * r + 1] * follow[3 + c]
+        + turn[3 * r + 2] * follow[6 + c]
+        for r in range(3)
+        for c in range(3)
+    ]
+    written: dict[bytes, Any] = {k: Double(v) for k, v in zip(_PU, new, strict=True)}
+    for key in (b"vertices", b"warpedVertices"):
+        points = List()
+        for point in fltr.get(key) or []:
+            x = get_scalar(point, b"Hrzn", float, math.nan)
+            y = get_scalar(point, b"Vrtc", float, math.nan)
+            got = _through(moved, [x, y]) if math.isfinite(x + y) else None
+            if got is None:
+                return None
+            out = Descriptor(name=point.name, classID=point.classID)
+            for k, v in point.items():
+                out[k] = v
+            out[b"Hrzn"] = _number(point[b"Hrzn"], got[0])
+            out[b"Vrtc"] = _number(point[b"Vrtc"], got[1])
+            points.append(out)
+        written[key] = points
+    trial = Descriptor(name=fltr.name, classID=fltr.classID)
+    for k, v in fltr.items():
+        trial[k] = written.get(k, v)
+    if _perspective(so, trial, new) is None or not placeable((width, height), new):
+        return None
+    return new, fltr, written
+
+
+def _update_quad(
+    quad: list[float], size: tuple[float, float], new: tuple[float, float]
+) -> Quad:
+    """The quad Photoshop's Update gives a file of *new* pixels.
+
+    Round the old quad's ``(TR + BL) / 2`` at the scale of its top and left
+    edges for a file of *size*: a parallelogram.
+    """
+    x0, y0, x1, y1, _, _, x3, y3 = quad
+    ux, uy = (x1 - x0) / size[0], (y1 - y0) / size[0]
+    vx, vy = (x3 - x0) / size[1], (y3 - y0) / size[1]
+    ax, ay = ux * new[0], uy * new[0]
+    bx, by = vx * new[1], vy * new[1]
+    left = (x1 + x3) / 2 - (ax + bx) / 2
+    top = (y1 + y3) / 2 - (ay + by) / 2
+    return (
+        left,
+        top,
+        left + ax,
+        top + ay,
+        left + ax + bx,
+        top + ay + by,
+        left + bx,
+        top + by,
+    )
+
+
+def _three(src: list[float], dst: list[float]) -> list[float] | None:
+    """The affine map of *src*'s corners TL TR BL onto *dst*'s.
+
+    3 x 3 row by row; ``None`` when *src* is flat.
+    """
+    x0, y0, x1, y1, _, _, x3, y3 = src
+    u0, v0, u1, v1, _, _, u3, v3 = dst
+    ax, ay, bx, by = x1 - x0, y1 - y0, x3 - x0, y3 - y0
+    det = ax * by - ay * bx
+    if abs(det) < 1e-12:
+        return None
+    pu, pv, qu, qv = u1 - u0, v1 - v0, u3 - u0, v3 - v0
+    m0, m1 = (pu * by - qu * ay) / det, (qu * ax - pu * bx) / det
+    m3, m4 = (pv * by - qv * ay) / det, (qv * ax - pv * bx) / det
+    return [m0, m1, u0 - m0 * x0 - m1 * y0, m3, m4, v0 - m3 * x0 - m4 * y0, 0, 0, 1]
+
+
+def _number(old: object, value: float) -> Double | UnitFloat:
+    """*value* stored as *old* was (a unit float keeps its unit)."""
+    if isinstance(old, UnitFloat):
+        return UnitFloat(unit=old.unit, value=value)
+    return Double(value)
 
 
 def _square(q: list[float]) -> list[float] | None:

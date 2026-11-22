@@ -613,6 +613,34 @@ class SmartObject:
             raise ValueError("the object has no quad")
         return smart_filters.place(rgba, [float(v) for v in quad])
 
+    def can_update_filters(self, width: int, height: int, ppi: float) -> bool:
+        """Return whether :py:meth:`update_filters` puts the filters on a new file.
+
+        True for one Perspective Warp :py:meth:`can_draw_filters` draws on a
+        quad not upright; for a *width* x *height* file of another size,
+        *ppi* the layer's and the warp so written drawn on the new quad. See
+        :py:func:`psd_tools.composite.smart_filters.updatable`.
+        """
+        from psd_tools.composite import smart_filters  # noqa: PLC0415
+
+        return smart_filters.updatable(self, width, height, ppi)  # type: ignore[arg-type]
+
+    def update_filters(self, width: int, height: int, ppi: float) -> tuple[float, ...]:
+        """Put the object's smart filters on a new file of another pixel size.
+
+        Before :py:meth:`draw_filters` of the new *width* x *height* file at
+        *ppi*, on a quad not upright: a Perspective Warp's ``PuX0``.. and
+        vertices written as Photoshop 2023's Update writes them. Returns the
+        layer's new quad for :py:meth:`link` or :py:meth:`relink` to write
+        (with ``Sz``). See
+        :py:func:`psd_tools.composite.smart_filters.update`.
+
+        :raises ValueError: when :py:meth:`can_update_filters` is False
+        """
+        from psd_tools.composite import smart_filters  # noqa: PLC0415
+
+        return smart_filters.update(self, width, height, ppi)  # type: ignore[arg-type]
+
     def can_draw_warp(self) -> bool:
         """Return whether :py:meth:`draw_warp` draws the object's warp.
 
