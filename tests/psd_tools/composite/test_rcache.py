@@ -234,7 +234,7 @@ def test_a_text_edit_keeps_the_document_key() -> None:
     before, story = doc_key(psd), _story(psd)
     assert before is not None
     text = next(layer for layer in psd.descendants() if isinstance(layer, TypeLayer))
-    text.set_text("Bevel x", keep="runs")
+    text.set_text("Bevel x")
     assert _story(psd) != story
     assert doc_key(psd) == before
 

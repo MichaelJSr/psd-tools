@@ -97,8 +97,7 @@ def text_geometry(layer: TypeLayer, fonts: FontMap) -> dict[str, Any]:
     face's ascent and descent) and its ``ink`` box (``None`` when blank).
     Boxes are ``[x0, y0, x1, y1]``.
 
-    Under the ``skip`` font policy the runs of a font listed in
-    ``missing_fonts`` have no glyphs; under ``raise`` a missing font raises
+    Under the ``raise`` font policy a missing font raises
     :class:`~psd_tools.composite.text.MissingFontError`.
     """
     model = TextModel.from_layer(layer)
@@ -161,6 +160,5 @@ def text_geometry(layer: TypeLayer, fonts: FontMap) -> dict[str, Any]:
         "bbox": list(layer.bbox),
         "lines": lines,
         "glyphs": glyphs,
-        "missing_fonts": [n for n, r in lay.fonts.items() if r.how == "missing"],
         "warnings": list(lay.warnings),
     }

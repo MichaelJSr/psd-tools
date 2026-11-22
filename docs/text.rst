@@ -13,8 +13,7 @@ rasterization)::
 
     pip install 'psd-tools[text]'
 
-Editing needs nothing beyond psd-tools. The ``resample`` setting of
-:py:class:`~psd_tools.composite.text.Options` also needs ``scipy``.
+Editing needs nothing beyond psd-tools.
 
 Reading
 -------
@@ -142,8 +141,8 @@ then ``PSD_TOOLS_FONT_DIRS``, each with its subdirectories (never the
 computer's own fonts); ``aliases`` map a name to a file. A name no file
 matches, or whose file cannot be opened, raises
 :py:class:`~psd_tools.composite.text.MissingFontError`;
-``FontMap(policy="substitute")`` draws it with a fallback face and
-``policy="skip"`` leaves its runs blank, both reported in ``report.fonts``.
+``FontMap(policy="substitute")`` draws it with a fallback face, reported in
+``report.fonts``.
 
 :py:func:`~psd_tools.composite.text.render` returns the pixels without
 touching the layer, and :py:func:`~psd_tools.composite.text.verify`
@@ -177,8 +176,6 @@ word finds its boxes::
 A glyph draws ``text[i:end]``, several characters for a ligature; its
 ``cell`` is its pen advance by the face's ascent and descent and its ``ink``
 the box of its outline. Warped text is laid out unwarped, as it is rendered.
-Under ``FontMap(policy="skip")`` the runs of a font listed in
-``missing_fonts`` have no glyphs.
 
 What is rendered
 ----------------

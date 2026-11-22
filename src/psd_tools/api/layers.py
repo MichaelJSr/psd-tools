@@ -3143,21 +3143,20 @@ class TypeLayer(Layer):
     def text(self, value: str) -> None:
         self.set_text(value)
 
-    def set_text(self, text: str, keep: Literal["runs", "single"] = "runs") -> None:
+    def set_text(self, text: str) -> None:
         r"""
         Replace the text, keeping the character styles.
 
-        ``keep="runs"`` keeps the runs of the unchanged prefix and suffix and
-        gives the replaced middle the style at the edit start; paragraph runs
-        are rebuilt to end at each ``'\r'`` and ``'\x03'``, a new one
-        inheriting the paragraph the edit started in. ``keep="single"``
-        collapses the styles to the first run. The last paragraph's ``'\r'``
-        is added, so a ``text`` that ends in one gains an empty paragraph.
+        The runs of the unchanged prefix and suffix stay and the replaced
+        middle gets the style at the edit start; paragraph runs are rebuilt
+        to end at each ``'\r'`` and ``'\x03'``, a new one inheriting the
+        paragraph the edit started in. The last paragraph's ``'\r'`` is
+        added, so a ``text`` that ends in one gains an empty paragraph.
         The layer's story in the document's Txt2 block, which Photoshop
         reads, gets the same edit. The pixels are untouched until
         :py:meth:`rasterize`.
         """
-        text_edit.set_text(self, text, keep=keep)
+        text_edit.set_text(self, text)
 
     def set_span_style(
         self,

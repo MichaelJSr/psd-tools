@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from psd_tools.composite.text.compose import Decision, Line, break_lines
@@ -171,9 +171,7 @@ def _runs_on(model: TextModel, start: int, end: int) -> list[int]:
     return list(range(first, last + 1))
 
 
-def layout(
-    model: TextModel, fonts: FontMap, breaks: Sequence[int] | None = None
-) -> Layout:
+def layout(model: TextModel, fonts: FontMap) -> Layout:
     """Shape, compose and place ``model``."""
     text = model.text
     names = list(dict.fromkeys(r.style.font for r in model.runs if r.end > r.start))
@@ -236,7 +234,6 @@ def layout(
             sorted(shaped.space_adv),
             width,
             justification,
-            breaks,
         )
         for k, line in enumerate(lines):
             # Trailing spaces hang on the line, so their runs set its metrics.

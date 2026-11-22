@@ -222,10 +222,6 @@ def test_faux_styles_move_ink(luckiest_guy_path: str) -> None:
 
 def test_missing_fonts() -> None:
     layer = type_layer("masks.psd", "text replaced")
-    geometry = text_geometry(layer, FontMap(policy="skip"))
-    assert geometry["missing_fonts"] == ["ProximaNova-Regular"]
-    assert geometry["glyphs"] == []
-    assert [line["box"] for line in geometry["lines"]] == [None]
     with pytest.raises(MissingFontError):
         text_geometry(layer, FontMap())
 

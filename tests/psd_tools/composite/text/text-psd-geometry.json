@@ -36,6 +36,5 @@
   {"i": 27, "end": 28, "ch": "x", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [162.24, 142.01, 169.97, 154.78], "ink": [161.99, 141.92, 170.24, 150.91]},
   {"i": 28, "end": 29, "ch": "t", "line": 2, "run": 0, "font": "LuckiestGuy-Regular", "cell": [169.97, 142.01, 177.05, 154.78], "ink": [170.02, 141.97, 177.02, 150.77]}
  ],
- "missing_fonts": [],
  "warnings": []
 }

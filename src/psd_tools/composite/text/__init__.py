@@ -105,30 +105,25 @@ def render(
     *,
     fonts: FontMap | None = None,
     options: Options | None = None,
-    breaks: list[int] | None = None,
 ) -> RenderResult:
     """Render ``layer`` and report on the render.
 
-    ``breaks`` lists ``str`` indices that start a line and replaces the
-    composer's line breaking. Raises :class:`MissingFontError` under the
-    ``raise`` font policy; under ``skip`` the runs of a missing font draw
-    nothing and the report lists the font as ``"missing"``.
+    Raises :class:`MissingFontError` under the ``raise`` font policy.
     """
-    return _render(layer, fonts, options, breaks)[0]
+    return _render(layer, fonts, options)[0]
 
 
 def _render(
     layer: TypeLayer,
     fonts: FontMap | None,
     options: Options | None,
-    breaks: list[int] | None = None,
 ) -> tuple[RenderResult, Layout, TextModel]:
     """:func:`render`, the layout it drew and the model it read."""
     t0 = time.perf_counter()
     options = options or Options()
-    fonts = fonts or default_font_map(options.missing_font)
+    fonts = fonts or default_font_map()
     model = TextModel.from_layer(layer)
-    lay = _layout.layout(model, fonts, breaks)
+    lay = _layout.layout(model, fonts)
     # FontSize and the transform are in document pixels at any ppi.
     transform = model.transform
     rgba, bbox = rasterize(
@@ -157,8 +152,6 @@ def render_type_layer(
         result = render(layer, fonts=fonts, options=options)
     except MissingFontError:
         return None
-    if any(how == "missing" for how, _ in result.report.fonts.values()):
-        return None
     return result.rgba, result.bbox
 
 
@@ -176,8 +169,6 @@ def verify(
     try:
         result = render(layer, fonts=fonts, options=options)
     except MissingFontError:
-        return fidelity(*stored, None, None, "missing", max_alloc_bytes=budget)
-    if any(how == "missing" for how, _ in result.report.fonts.values()):
         return fidelity(*stored, None, None, "missing", max_alloc_bytes=budget)
     return fidelity(*stored, result.rgba, result.bbox, max_alloc_bytes=budget)
 

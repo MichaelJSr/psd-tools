@@ -33,16 +33,14 @@ def break_lines(
     space_positions: Sequence[int],
     width: float | None,
     justification: int,
-    breaks: Sequence[int] | None = None,
 ) -> list[Line]:
     """Break the piece ``text[a:b]`` into lines.
 
-    ``width`` is ``None`` for point text (one line). ``breaks`` lists ``str``
-    indices that start a line and bypasses the greedy pass.
+    ``width`` is ``None`` for point text (one line).
 
     Decisions: ``fit`` the next word did not fit, ``compress`` a word was
     pulled up by compressing the spaces, ``break`` a break inside a word
-    wider than the line (or one given in ``breaks``), ``forced`` the piece
+    wider than the line, ``forced`` the piece
     ends at a forced line break, ``paragraph`` at a paragraph end.
     """
     forced = b < len(text) and text[b] == "\x03"
@@ -70,23 +68,9 @@ def break_lines(
 
     raw: list[tuple[int, int, Decision]]
     if width is None:
-        # Point text: trailing spaces count, so lines keep them.
-        starts = [a, *sorted(i for i in (breaks or ()) if a < i < b)]
-        ends = [*starts[1:], b]
-        raw = [
-            (s, e, final if e == b else "break")
-            for s, e in zip(starts, ends, strict=True)
-        ]
-        return [Line(s, e, 0.0, d) for s, e, d in raw]
-    if breaks is not None:
-        starts = [a, *sorted(i for i in breaks if a < i < b)]
-        ends = [*starts[1:], b]
-        raw = [
-            (s, strip(s, e), final if e == b else "break")
-            for s, e in zip(starts, ends, strict=True)
-        ]
-    else:
-        raw = _greedy(text, a, b, measure, stretchy, space_set, width, justified, final)
+        # Point text: trailing spaces count, so the line keeps them.
+        return [Line(a, b, 0.0, final)]
+    raw = _greedy(text, a, b, measure, stretchy, space_set, width, justified, final)
 
     out: list[Line] = []
     for k, (s, e, decision) in enumerate(raw):

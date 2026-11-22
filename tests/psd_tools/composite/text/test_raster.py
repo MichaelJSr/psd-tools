@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import dataclasses
 import math
-import sys
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -597,23 +596,6 @@ def test_allocation_budget(face: Face, monkeypatch: pytest.MonkeyPatch) -> None:
         render(rules=[long], max_alloc_bytes="unlimited")
 
 
-def test_resample_without_scipy(
-    luckiest_guy_path: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setitem(sys.modules, "scipy", None)
-    real = load_face(luckiest_guy_path)
-    skew: Transform = (3.0, 0.4, 0.6, 3.0, 20.0, 50.0)
-    g = [glyph(real, "A", 0.0, 0.0, em=12)]
-    with pytest.raises(ImportError, match="scipy"):
-        render(
-            g,
-            STRONG,
-            skew,
-            options=Options(general_transform="resample", coverage="area"),
-        )
-    render(g, STRONG, skew)
-
-
 def test_glyph_cache(face: Face) -> None:
     cache = GlyphCache()
     g = [
@@ -666,40 +648,6 @@ def test_shared_face_renders_from_threads(face: Face) -> None:
         assert all(pool.map(work, range(120)))
 
 
-def test_resample_matches_matrix(luckiest_guy_path: str) -> None:
-    pytest.importorskip("scipy")
-    real = load_face(luckiest_guy_path)
-    skew: Transform = (3.0, 0.4, 0.6, 3.0, 20.0, 50.0)
-    glyphs = [
-        glyph(real, c, x, 0.0, em=12) for c, x in (("A", 0.0), ("V", 9.0), ("d", 18.0))
-    ]
-    assert is_general(skew)
-    matrix, mb = render(glyphs, STRONG, skew)
-    warped, wb = render(
-        glyphs,
-        STRONG,
-        skew,
-        options=Options(general_transform="resample", coverage="area"),
-    )
-    ub = (min(mb[0], wb[0]), min(mb[1], wb[1]), max(mb[2], wb[2]), max(mb[3], wb[3]))
-    place = np.zeros((2, ub[3] - ub[1], ub[2] - ub[0]), np.float32)
-    for k, (im, b) in enumerate(((matrix, mb), (warped, wb))):
-        place[k, b[1] - ub[1] : b[3] - ub[1], b[0] - ub[0] : b[2] - ub[0]] = im[..., 3]
-    either = (place > 0.1).any(axis=0)
-    assert either.any()
-    assert np.abs(place[0] - place[1])[either].mean() < 0.05
-    diagonal: Transform = (3.0, 0.0, 0.0, 3.0, 20.0, 50.0)
-    assert same(
-        render(
-            glyphs,
-            STRONG,
-            diagonal,
-            options=Options(general_transform="resample", coverage="area"),
-        ),
-        render(glyphs, STRONG, diagonal),
-    )
-
-
 def test_emoji_silhouette_option(face: Face) -> None:
     svg = Face(
         face.hb,
@@ -709,8 +657,6 @@ def test_emoji_silhouette_option(face: Face) -> None:
     )
     g = [glyph(svg, "I", 0.25, 100.0)]
     assert same(render(g), render([glyph(face, "I", 0.25, 100.0)]))
-    rgba, _ = render(g, options=Options(monochrome_emoji=False))
-    assert rgba.shape == (0, 0, 4)
     assert raster_warnings(layout(g), IDENTITY) == ("monochrome_emoji",)
 
 

@@ -31,8 +31,8 @@ from psd_tools.composite.text.constants import (
 )
 from psd_tools.composite.text.svg import SvgTable
 
-How = Literal["exact", "loose", "substitute", "missing"]
-Policy = Literal["raise", "skip", "substitute"]
+How = Literal["exact", "loose", "substitute"]
+Policy = Literal["raise", "substitute"]
 
 FONT_DIRS_ENV = "PSD_TOOLS_FONT_DIRS"
 FONT_EXTENSIONS = (".ttf", ".otf", ".ttc", ".otc")
@@ -118,19 +118,15 @@ class Face:
 
 @dataclass(frozen=True, eq=False)
 class Resolved:
-    """One PostScript name's lookup result.
+    """One PostScript name's lookup result."""
 
-    ``face`` is ``None`` only under the ``skip`` policy, with ``how`` set to
-    ``"missing"``.
-    """
-
-    face: Face | None
+    face: Face
     how: How
 
     @property
-    def path(self) -> str | None:
-        """The resolved font file, or ``None`` when missing."""
-        return None if self.face is None else self.face.key[0]
+    def path(self) -> str:
+        """The resolved font file."""
+        return self.face.key[0]
 
 
 def norm(name: str) -> str:
@@ -576,8 +572,7 @@ class FontMap:
     changes; a map keeps the index it first read.
 
     ``policy`` decides a name no face matches: ``"raise"`` raises
-    :class:`MissingFontError`, ``"skip"`` resolves to a faceless
-    :class:`Resolved`, ``"substitute"`` resolves the ``fallback`` name.
+    :class:`MissingFontError`, ``"substitute"`` resolves the ``fallback`` name.
     """
 
     def __init__(
@@ -661,8 +656,6 @@ class FontMap:
         hit = self._open(name)
         if hit is not None:
             return Resolved(*hit)
-        if self.policy == "skip":
-            return Resolved(None, "missing")
         if self.policy == "substitute":
             sub = self._open(self.fallback)
             if sub is not None:

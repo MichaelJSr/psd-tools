@@ -178,23 +178,6 @@ def test_forced_break_line_is_stretched() -> None:
     assert lines == [Line(6, 11, 0.0, "paragraph")]
 
 
-def test_breaks_override() -> None:
-    text = "aaaa bbbb cccc"
-    measure, sp = widths(text)
-    lines = break_lines(text, 0, 14, measure, sp, W, 0, breaks=[5, 10, 99])
-    assert lines == [
-        Line(0, 4, 0.0, "break"),
-        Line(5, 9, 0.0, "break"),
-        Line(10, 14, 0.0, "paragraph"),
-    ]
-    # Point text keeps its trailing spaces.
-    lines = break_lines(text, 0, 14, measure, sp, None, 0, breaks=[5, 10])
-    assert spans(lines) == [(0, 5), (5, 10), (10, 14)]
-    # Justified lines given explicitly are still stretched.
-    lines = break_lines(text, 0, 14, measure, sp, W, 3, breaks=[10])
-    assert lines[0] == Line(0, 9, (W - 90.0) / 1, "break")
-
-
 def test_empty_piece() -> None:
     text = "\r"
     measure, sp = widths(text)

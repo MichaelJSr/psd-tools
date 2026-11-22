@@ -144,15 +144,6 @@ def test_set_text_same_text_changes_nothing() -> None:
     assert after.getvalue() == before.getvalue()
 
 
-def test_set_text_single() -> None:
-    layer = open_layer()
-    layer.set_span_style(0, 4, fill=(1, 0, 0), FauxBold=True)
-    layer.set_text("One\rTwo", keep="single")
-    assert lengths(layer) == [8]
-    assert fills(layer) == [(1.0, 0.0, 0.0)]
-    assert lengths(layer, "ParagraphRun") == [4, 4]
-
-
 def test_span_split_and_merge() -> None:
     layer = open_layer()
     layer.set_span_style(2, 4, fill=(1, 0, 0))

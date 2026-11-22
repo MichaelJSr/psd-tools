@@ -435,22 +435,11 @@ def test_missing_font_policies(
     with pytest.raises(MissingFontError) as info:
         layout(m, FontMap(dirs=[fixture_fonts_dir]))
     assert info.value.names == ("NoSuchFont",)
-    lay = layout(m, FontMap(dirs=[fixture_fonts_dir], policy="skip"))
-    assert len(lay.glyphs) == 1
-    assert lay.fonts["NoSuchFont"].face is None
-    assert lay.lines[0].width == pytest.approx(adv("I"))
     lay = layout(
         m, FontMap(dirs=[fixture_fonts_dir], policy="substitute", fallback=PS_TT)
     )
     assert len(lay.glyphs) == 2
     assert "font_substitute" in lay.warnings
-
-
-def test_breaks_override(fonts: FontMap) -> None:
-    lay = layout(model("IA IA\r", box=(0.0, 0.0, 100.0, 50.0)), fonts, breaks=[3])
-    assert [line.text for line in lay.lines] == ["IA", "IA"]
-    assert [line.y for line in lay.lines] == pytest.approx([7.5, 19.5])
-    assert len(lay.glyphs) == 4
 
 
 def test_empty_text(fonts: FontMap) -> None:

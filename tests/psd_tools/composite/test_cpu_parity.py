@@ -47,7 +47,6 @@ _ALLOWED = {
     ("composite/paint.py", "_blend_space.encode", "np.cbrt"): 1,
     # 3 by 3 and 2 by 2 matrices, no pixels
     ("composite/adjustments.py", "_vibrance_space", "@"): 3,
-    ("composite/text/raster.py", "_resample", "@"): 2,
     ("composite/paint.py", "_profile_lms", "@"): 4,
     # whole levels in int64: exact
     ("composite/blend.py", "_lightness", "@"): 1,

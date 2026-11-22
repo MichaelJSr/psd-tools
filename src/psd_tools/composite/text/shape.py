@@ -154,8 +154,6 @@ def shape_piece(
     for s, e, ri in _segments(text, a, b, runs):
         style = runs[ri].style
         face = fonts.resolve(style.font).face
-        if face is None:
-            continue
         n = e - s
         chars = text[s:e].replace("\t", " ")
         if style.caps == 2:

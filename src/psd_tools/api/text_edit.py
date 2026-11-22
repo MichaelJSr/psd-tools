@@ -21,7 +21,7 @@ import copy
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from psd_tools.constants import Tag
 from psd_tools.psd import engine_data
@@ -45,7 +45,6 @@ __all__ = [
     "utf16_prefix",
 ]
 
-Keep = Literal["runs", "single"]
 #: ``(unit start, unit end, run data)``
 Span = tuple[int, int, Any]
 
@@ -160,19 +159,17 @@ def utf16_prefix(text: str) -> list[int]:
     return out
 
 
-def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
+def set_text(layer: TypeLayer, text: str) -> None:
     r"""Replace the layer's text.
 
-    ``keep="runs"`` keeps the style runs of the unchanged prefix and suffix;
+    The style runs of the unchanged prefix and suffix stay;
     replaced text takes the style of the first character it replaces and
     inserted text continues the run before it. Paragraph runs are rebuilt
     to end at each ``\r`` and each ``\x03`` (a forced line break, which also
     ends one in Photoshop's files), a new one inheriting the paragraph the
-    edit started in.
-    ``keep="single"`` collapses the styles to the first run and the
-    paragraphs to the first paragraph. The last paragraph's ``\r`` is
-    appended, so a ``text`` ending in one gains an empty paragraph. Setting
-    the text the layer already has with ``keep="runs"`` changes nothing.
+    edit started in. The last paragraph's ``\r`` is appended, so a ``text``
+    ending in one gains an empty paragraph. Setting the text the layer
+    already has changes nothing.
 
     The layer's Txt2 story gets the same edit, spliced around what changed
     from its own text; its kern and alternate-glyph marks are not carried
@@ -181,7 +178,7 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
     old = _editor_text(layer)
     new = text + "\r"
     story = _story(layer)
-    same = new == old and keep == "runs"
+    same = new == old
     if same and (story is None or story.text == new):
         return
 
@@ -189,7 +186,7 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
     # the edit cannot handle is left as it was.
     writes: list[Callable[[], None]] = []
     if not same:
-        edit = _Splice(old, new, keep)
+        edit = _Splice(old, new)
         style = _section(layer, "StyleRun")
         paragraphs = _section(layer, "ParagraphRun")
         runs = edit.styles(_spans(style, edit.n_old))
@@ -202,7 +199,7 @@ def set_text(layer: TypeLayer, text: str, keep: Keep = "runs") -> None:
 
         writes.append(write_tysh)
     if story is not None:
-        writes.append(story.respan(layer, new, keep))
+        writes.append(story.respan(layer, new))
     for write in writes:
         write()
     _drop_stale(layer)
@@ -381,7 +378,7 @@ def sync_story(layer: TypeLayer) -> bool:
     text = _editor_text(layer)
     if story is None or story.text == text:
         return False
-    story.respan(layer, text, "runs")()
+    story.respan(layer, text)()
     _drop_stale(layer)
     _touch(layer)
     return True
@@ -390,7 +387,7 @@ def sync_story(layer: TypeLayer) -> bool:
 class _Splice:
     """Where ``old`` and ``new`` differ, in UTF-16 units, and the runs after."""
 
-    def __init__(self, old: str, new: str, keep: Keep) -> None:
+    def __init__(self, old: str, new: str) -> None:
         old_u, new_u = utf16_prefix(old), utf16_prefix(new)
         p = 0
         while p < min(len(old), len(new)) and old[p] == new[p]:
@@ -398,7 +395,7 @@ class _Splice:
         s = 0
         while s < min(len(old), len(new)) - p and old[-1 - s] == new[-1 - s]:
             s += 1
-        self.new, self.new_u, self.keep = new, new_u, keep
+        self.new, self.new_u = new, new_u
         self.n_old, self.n_new = old_u[-1], new_u[-1]
         self.prefix = old_u[p]
         self.suffix = self.n_old - old_u[len(old) - s]
@@ -419,8 +416,6 @@ class _Splice:
         return runs
 
     def styles(self, spans: Sequence[Span]) -> list[Span]:
-        if self.keep == "single":
-            return [(0, self.n_new, spans[0][2])]
         replaced = self.n_old - self.prefix - self.suffix > 0
         prefix = self.prefix
         at = _data_at(spans, prefix if replaced or prefix == 0 else prefix - 1)
@@ -428,8 +423,6 @@ class _Splice:
 
     def marks(self, spans: Sequence[Span], empty: Any) -> list[Span]:
         """Per-character marks (kerns, alternate glyphs): new text has none."""
-        if self.keep == "single":
-            return [(0, self.n_new, empty)]
         return self._around(spans, empty)
 
     def paragraphs(self, spans: Sequence[Span]) -> list[Span]:
@@ -438,12 +431,7 @@ class _Splice:
         for i, c in enumerate(self.new):
             if c in _PARAGRAPH_ENDS:
                 end = self.new_u[i + 1]
-                data = (
-                    spans[0][2]
-                    if self.keep == "single"
-                    else _data_at(spans, self._old_unit(start))
-                )
-                out.append((start, end, data))
+                out.append((start, end, _data_at(spans, self._old_unit(start))))
                 start = end
         return out
 
@@ -509,10 +497,10 @@ class _Story:
             out.append(run)
         section[self.k.runs] = engine_data.List(out)
 
-    def respan(self, layer: TypeLayer, new: str, keep: Keep) -> Callable[[], None]:
+    def respan(self, layer: TypeLayer, new: str) -> Callable[[], None]:
         """Check the story can take ``new``; return the write that sets it."""
         k = self.k
-        edit = _Splice(self.text, new, keep)
+        edit = _Splice(self.text, new)
         plans: list[tuple[engine_data.Dict, list[Span], bool]] = []
         for key, section in self.model.items():
             if not self._is_runs(section):

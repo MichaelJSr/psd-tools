@@ -45,15 +45,8 @@ def test_font_names(layer: TypeLayer) -> None:
 
 def test_missing_font_is_none(layer: TypeLayer, fixture_fonts_dir: str) -> None:
     assert render_type_layer(layer, FontMap(dirs=[fixture_fonts_dir])) is None
-    assert render_type_layer(layer, FontMap(policy="skip")) is None
     with pytest.raises(MissingFontError):
         render(layer, fonts=FontMap(dirs=[fixture_fonts_dir]))
-
-
-def test_skip_policy_reports_missing(layer: TypeLayer) -> None:
-    result = render(layer, fonts=FontMap(policy="skip"))
-    assert result.report.fonts == {"ArialMT": ("missing", None)}
-    assert result.rgba.shape == (0, 0, 4)
 
 
 def test_substitute_policy_renders(layer: TypeLayer, fixture_fonts_dir: str) -> None:
@@ -65,8 +58,8 @@ def test_substitute_policy_renders(layer: TypeLayer, fixture_fonts_dir: str) -> 
 
 
 def test_default_font_map_follows_policy() -> None:
-    assert default_font_map("skip").policy == "skip"
-    assert default_font_map("skip") is default_font_map("skip")
+    assert default_font_map("substitute").policy == "substitute"
+    assert default_font_map("substitute") is default_font_map("substitute")
 
 
 def test_text_psd_renders(layer: TypeLayer, arial_as_luckiest_guy: FontMap) -> None:
@@ -102,15 +95,6 @@ def test_text_psd_report(layer: TypeLayer, arial_as_luckiest_guy: FontMap) -> No
     assert report.ms > 0
 
 
-def test_breaks_override(layer: TypeLayer, arial_as_luckiest_guy: FontMap) -> None:
-    # Break the third paragraph before "text".
-    start = layer.text.index("text")
-    result = render(layer, fonts=arial_as_luckiest_guy, breaks=[start])
-    texts = [line.text for line in result.report.lines]
-    assert texts == ["Line 1", "Line 2", "Line 3 and ", "text"]
-    assert result.report.lines[2].decision == "break"
-
-
 def test_type_layer_psd_renders(luckiest_guy_path: str) -> None:
     psd = PSDImage.open(full_name("layers/type-layer.psd"))
     layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
@@ -138,15 +122,16 @@ def test_resolution_does_not_scale_the_render(luckiest_guy_path: str) -> None:
     np.testing.assert_array_equal(at_72.rgba, at_150.rgba)
 
 
-def test_platform_antialias_falls_back(tmp_path: Any) -> None:
+def test_platform_antialias_falls_back(fixture_fonts_dir: str) -> None:
     # ``antiAliasPlatformLCD`` has no transfer of its own; it renders as the
     # default mode with a warning instead of failing.
     psd = PSDImage.open(full_name("masks.psd"))
     layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
     assert layer._data.text_data[b"AntA"].enum == b"antiAliasPlatformLCD"
-    result = render(layer, fonts=FontMap(policy="skip"))
+    fonts = FontMap(dirs=[fixture_fonts_dir], policy="substitute", fallback=PS_TT)
+    result = render(layer, fonts=fonts)
     assert "antialias_fallback" in result.report.warnings
-    assert verify(layer, fonts=FontMap(policy="skip")).status == "missing"
+    assert verify(layer, fonts=FontMap(dirs=[fixture_fonts_dir])).status == "missing"
 
 
 def test_verify_text_psd(layer: TypeLayer, arial_as_luckiest_guy: FontMap) -> None:
@@ -162,7 +147,6 @@ def test_verify_missing_font(layer: TypeLayer, fixture_fonts_dir: str) -> None:
     fidelity = verify(layer, fonts=FontMap(dirs=[fixture_fonts_dir]))
     assert fidelity.status == "missing"
     assert fidelity.iou == 0.0 and fidelity.bad_pct == 100.0
-    assert verify(layer, fonts=FontMap(policy="skip")).status == "missing"
 
 
 def test_composite_import_does_not_load_text() -> None:
@@ -175,11 +159,13 @@ def test_composite_import_does_not_load_text() -> None:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-def test_unedited_document_saves_byte_identical(tmp_path: Any) -> None:
+def test_unedited_document_saves_byte_identical(
+    tmp_path: Any, fixture_fonts_dir: str
+) -> None:
     path = full_name("text.psd")
     psd = PSDImage.open(path)
     layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
-    render_type_layer(layer, FontMap(policy="skip"))
+    render_type_layer(layer, FontMap(dirs=[fixture_fonts_dir]))
     psd.save(tmp_path / "copy.psd")
     with open(path, "rb") as f, open(tmp_path / "copy.psd", "rb") as g:
         assert f.read() == g.read()

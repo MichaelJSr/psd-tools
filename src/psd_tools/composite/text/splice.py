@@ -41,14 +41,12 @@ class Before:
     rgb: bool  #: an RGB document, whose channels round-trip exactly
 
 
-def capture(
-    layer: TypeLayer, fonts: FontMap | None = None, options: Options | None = None
-) -> Before:
+def capture(layer: TypeLayer, fonts: FontMap | None = None) -> Before:
     """``layer`` as it is now, for :func:`splice` after an edit."""
     if fonts is None:
         from psd_tools.composite.text import default_font_map  # noqa: PLC0415
 
-        fonts = default_font_map((options or Options()).missing_font)
+        fonts = default_font_map()
     model = TextModel.from_layer(layer)
     rgba, bbox = stored_raster(layer)
     rgb = layer._psd.color_mode == ColorMode.RGB
@@ -205,7 +203,7 @@ def splice(
     if fonts is None:
         from psd_tools.composite.text import default_font_map  # noqa: PLC0415
 
-        fonts = default_font_map((options or Options()).missing_font)
+        fonts = default_font_map()
     result, lay, model = _render(layer, fonts, options)
     lines = tuple(range(len(lay.lines)))
 

@@ -263,17 +263,6 @@ def test_piece_range(fonts: FontMap) -> None:
     )
 
 
-def test_faceless_run_is_skipped(
-    monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str
-) -> None:
-    fonts = FontMap(dirs=[fixture_fonts_dir], policy="skip")
-    text = "IA"
-    runs = runs_for(text, style(), style(font="NoSuchFont"), cuts=(1,))
-    shaped = shape_piece(text, 0, 2, runs, fonts)
-    assert [g.cluster for g in shaped.glyphs] == [0]
-    assert shaped.measure(0, 2) == pytest.approx(adv("I"))
-
-
 def test_run_index() -> None:
     runs = runs_for("abcdef", style(), style(), style(), cuts=(2, 4))
     assert [run_index(runs, i) for i in range(7)] == [0, 0, 1, 1, 2, 2, 2]

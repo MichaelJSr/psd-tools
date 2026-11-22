@@ -76,7 +76,7 @@ def check(job: tuple[str, str, str]) -> dict:
             i = max(range(len(words)), key=lambda k: len(words[k]))
             words[i] = words[i][::-1]
             try:
-                layer.set_text(" ".join(words), keep="runs")
+                layer.set_text(" ".join(words))
                 layer.rasterize(fonts=FontMap(dirs=[fonts], aliases=ALIASES))
                 row["edit"] = "ability"
             except Exception as error:  # a card the bake refuses: toggle only

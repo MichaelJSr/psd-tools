@@ -14,7 +14,6 @@ from psd_tools.composite.text.constants import ASCENT_PPEM  # noqa: E402
 from psd_tools.composite.text.fonts import (  # noqa: E402
     FontMap,
     MissingFontError,
-    Resolved,
     font_files,
     load_face,
     norm,
@@ -214,7 +213,7 @@ def test_index_shared_until_a_folder_changes(
     font = shutil.copy(ttf_font_path, sub)
 
     def index() -> object:
-        return FontMap(dirs=[root], policy="skip")._indexes()[0]
+        return FontMap(dirs=[root])._indexes()[0]
 
     # Written just now: maybe within one timestamp tick, so built again.
     assert index() is not index()
@@ -233,7 +232,7 @@ def test_index_shared_until_a_folder_changes(
     first = index()
     assert index() is first
     shutil.copy(cff_font_path, sub)
-    fm = FontMap(dirs=[root], policy="skip")
+    fm = FontMap(dirs=[root])
     assert fm.find(PS_CFF) == (
         os.path.join(sub, os.path.basename(cff_font_path)),
         0,
@@ -275,8 +274,6 @@ def test_alias_to_a_missing_file(
     with pytest.raises(MissingFontError) as info:
         fm.resolve("ArialMT")
     assert info.value.names == ("ArialMT",)
-    skip = FontMap(aliases={"ArialMT": gone}, policy="skip")
-    assert skip.resolve("ArialMT").how == "missing"
     sub = FontMap(
         dirs=[fixture_fonts_dir],
         aliases={"ArialMT": gone},
@@ -290,10 +287,11 @@ def test_indexed_file_removed(
     monkeypatch: pytest.MonkeyPatch, ttf_font_path: str, tmp_path: object
 ) -> None:
     copy = shutil.copy(ttf_font_path, os.path.join(str(tmp_path), "copy.ttf"))
-    fm = FontMap(dirs=[str(tmp_path)], policy="skip")
+    fm = FontMap(dirs=[str(tmp_path)])
     assert fm.find(PS_TT) == (copy, 0, "exact")
     os.remove(copy)
-    assert fm.resolve(PS_TT).how == "missing"
+    with pytest.raises(MissingFontError):
+        fm.resolve(PS_TT)
     with pytest.raises(MissingFontError):
         FontMap(dirs=[str(tmp_path)], aliases={PS_TT: copy}).resolve(PS_TT)
 
@@ -318,14 +316,6 @@ def test_policy_raise(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) -
     with pytest.raises(MissingFontError) as info:
         fm.resolve_all(["NoSuchFont", PS_TT, "Other"])
     assert info.value.names == ("NoSuchFont", "Other")
-
-
-def test_policy_skip(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) -> None:
-    fm = FontMap(dirs=[fixture_fonts_dir], policy="skip")
-    r = fm.resolve("NoSuchFont")
-    assert isinstance(r, Resolved)
-    assert (r.face, r.how, r.path) == (None, "missing", None)
-    assert set(fm.resolve_all(["NoSuchFont", PS_TT])) == {"NoSuchFont", PS_TT}
 
 
 def test_policy_substitute(

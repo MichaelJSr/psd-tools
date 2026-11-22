@@ -1005,27 +1005,15 @@ def test_badge_renders_in_color(color_face: Face) -> None:
 def test_no_warning_when_drawn_in_color(color_face: Face) -> None:
     layout = Layout((_glyph(color_face, "A", 0.0, 100.0, 50.0),), (), (), {}, ())
     assert raster_warnings(layout, IDENTITY) == ()
-    off = Options(color_glyphs=False)
-    assert raster_warnings(layout, IDENTITY, off) == ("monochrome_emoji",)
 
 
 def test_outline_glyphs_of_a_color_font_stay_outlines(color_face: Face) -> None:
     glyphs = [_glyph(color_face, "I", 0.25, 100.0, 40.5)]
     layout = Layout(tuple(glyphs), (), (), {}, ())
     assert raster_warnings(layout, IDENTITY) == ()
-    rgba, _ = _render(glyphs, options=Options(monochrome_emoji=False))
+    rgba, _ = _render(glyphs)
     assert rgba[..., 3].any()
     assert (rgba[..., :3][rgba[..., 3] > 0] == RED).all()
-
-
-def test_color_glyphs_off_is_the_silhouette(color_face: Face) -> None:
-    glyphs = [_glyph(color_face, "A", 0.25, 100.0, 50.0)]
-    rgba, _ = _render(glyphs, options=Options(color_glyphs=False))
-    assert (rgba[..., :3][rgba[..., 3] > 0] == RED).all()
-    skipped, _ = _render(
-        glyphs, options=Options(color_glyphs=False, monochrome_emoji=False)
-    )
-    assert skipped.shape == (0, 0, 4)
 
 
 def test_smooth_and_sharp_colour_glyphs_are_strong(color_face: Face) -> None:

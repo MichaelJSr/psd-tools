@@ -62,10 +62,6 @@ _RULE_BYTES = 4 + 4 + 1
 #: The canvas: uint32 coverage sum, the ink's int64 indices and float32
 #: alpha, uint8 winning coverage, float32 alpha and the float32 RGBA.
 _COMPOSE_BYTES = 4 + 12 + 1 + 4 + 16
-#: A resampled canvas: the warped premultiplied float32 RGBA, its alpha,
-#: the ink mask, the float32 RGB and the float32 RGBA; the axis-aligned
-#: render and its premultiplied copy come on top.
-_RESAMPLE_BYTES = 16 + 4 + 1 + 12 + 16
 
 #: Unhinted outline, bitmap strikes ignored: the outline is box-filtered as is.
 _UNHINTED = (
@@ -75,26 +71,15 @@ _UNHINTED = (
 )
 #: AntA Sharp: FreeType's light hinter.
 _LIGHT = freetype.FT_LOAD_TARGET_LIGHT | freetype.FT_LOAD_NO_BITMAP
-_IDENTITY = (0x10000, 0, 0, 0x10000)
 
 
 @dataclass(frozen=True)
 class Options:
     """Rendering options; the defaults are the measured recipe."""
 
-    #: Applies to the default :class:`FontMap`; an explicit map keeps its own policy.
-    missing_font: Literal["raise", "skip", "substitute"] = "raise"
-    #: Non-diagonal transforms: FreeType matrix, or axis-aligned then resampled.
-    general_transform: Literal["matrix", "resample"] = "matrix"
-    #: A colour glyph not drawn in colour (``color_glyphs`` false, or SVG
-    #: the renderer does not cover) is drawn as its outline's silhouette;
-    #: when false it is skipped.
-    monochrome_emoji: bool = True
     #: Pixels a glyph bitmap or the canvas may not exceed. The document's
     #: allocation budget and the PSD per-axis limit apply as well.
     max_canvas_pixels: int = MAX_CANVAS_PIXELS
-    #: Draw the glyphs of a colour (``SVG ``) font in colour.
-    color_glyphs: bool = True
     #: Coverage of Crisp, Strong and Smooth text: Photoshop's point samples,
     #: or the exact area under the outline.
     coverage: Literal["samples", "area"] = "samples"
@@ -248,8 +233,11 @@ def _is_color(g: PlacedGlyph) -> bool:
 
 
 def _drawing(g: PlacedGlyph, options: Options) -> svg.Drawing | None:
-    """The colour drawing of ``g``, or ``None`` when it is not drawn in colour."""
-    table = g.face.svg if options.color_glyphs else None
+    """The colour drawing of ``g``, or ``None`` when it is not drawn in colour.
+
+    Such a colour glyph is drawn as its outline's silhouette.
+    """
+    table = g.face.svg
     if table is None:
         return None
     return table.drawing(g.gid, (*g.fill, 1.0))
@@ -469,8 +457,6 @@ def _glyph_items(
             item = _color_item(g, drawing, transform, mode, cache, options, budget)
             if item is not None:
                 items.append(item)
-            continue
-        if color and not options.monochrome_emoji:
             continue
         px_w, px_h = g.em_w * cx, g.em_h * cy
         # Point samples come from a render at n times the size.
@@ -718,66 +704,6 @@ def _rasterize_matrix(
     return _compose(items, transform, mode, options, budget)
 
 
-def _resample(
-    layout: Layout,
-    transform: Transform,
-    mode: _Mode,
-    options: Options,
-    cache: GlyphCache,
-    budget: AllocBudget | None,
-) -> tuple[np.ndarray, Bbox]:
-    """Render axis-aligned at the column lengths, then warp to ``transform``."""
-    try:
-        from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
-    except ImportError as e:
-        raise ImportError(
-            "Options(general_transform='resample') requires scipy, which the "
-            "'text' extra does not install:\n    pip install scipy"
-        ) from e
-
-    xx, xy, yx, yy, tx, ty = transform
-    cx, cy = math.hypot(xx, xy), math.hypot(yx, yy)
-    axis: Transform = (cx, 0.0, 0.0, cy, 0.0, 0.0)
-    rgba, (ax0, ay0, ax1, ay1) = _rasterize_matrix(
-        layout, axis, mode, options, cache, budget
-    )
-    if not rgba.size:
-        return _empty(transform)
-    # Axis-aligned (u, v) -> document (X, Y).
-    m = np.array([[xx / cx, yx / cy], [xy / cx, yy / cy]])
-    corners = np.array([[ax0, ay0], [ax1, ay0], [ax0, ay1], [ax1, ay1]], float) @ m.T
-    corners += (tx, ty)
-    bx0, by0 = math.floor(corners[:, 0].min()), math.floor(corners[:, 1].min())
-    bx1, by1 = math.ceil(corners[:, 0].max()), math.ceil(corners[:, 1].max())
-    w, h = bx1 - bx0, by1 - by0
-    _guard("canvas", w, h, w * h * _RESAMPLE_BYTES + 2 * rgba.nbytes, options, budget)
-    # Output index (row, col) -> input index, sampling at pixel centres.
-    inv = np.linalg.inv(m)[::-1, ::-1]
-    offset = inv @ (by0 + 0.5 - ty, bx0 + 0.5 - tx) - (ay0 + 0.5, ax0 + 0.5)
-    pre = rgba.copy()
-    pre[..., :3] *= pre[..., 3:]
-    out = np.zeros((h, w, 4), np.float32)
-    for c in range(4):
-        out[..., c] = ndimage.affine_transform(
-            pre[..., c],
-            inv,
-            offset,
-            output_shape=(h, w),
-            order=1,
-            mode="constant",
-            cval=0.0,
-        )
-    alpha = out[..., 3]
-    if mode.threshold is not None:
-        alpha = (alpha > mode.threshold).astype(np.float32)
-    ink = alpha > 0
-    rgb = np.zeros((h, w, 3), np.float32)
-    rgb[ink] = np.clip(
-        out[..., :3][ink] / np.maximum(out[..., 3][ink], 1e-6)[:, None], 0, 1
-    )
-    return np.concatenate([rgb, alpha[..., None]], axis=-1), (bx0, by0, bx1, by1)
-
-
 def rasterize(
     layout: Layout,
     transform: Transform,
@@ -805,6 +731,4 @@ def rasterize(
     ):
         return _empty(transform)
     cache = cache if cache is not None else GlyphCache()
-    if options.general_transform == "resample" and is_general(transform):
-        return _resample(layout, transform, mode, options, cache, max_alloc_bytes)
     return _rasterize_matrix(layout, transform, mode, options, cache, max_alloc_bytes)
