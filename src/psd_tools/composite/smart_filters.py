@@ -4,8 +4,8 @@ A placed layer's pixels are its smart filters' result. When its file changes,
 the caller draws the new picture on the layer's quad and :py:func:`draw` draws
 the filters over it as Photoshop 2023 does: a Puppet Warp from its stored mesh,
 an Invert, a Gaussian Blur, a Motion Blur at angle 0 of a distance
-:py:data:`MOTION` holds, a Hue/Saturation (master only), a Black & White (no
-tint) and a Relative Selective Color of the six hues.
+:py:data:`MOTION` holds, a Mosaic, a Hue/Saturation (master only), a Black &
+White (no tint) and a Relative Selective Color of the six hues.
 Plain float64 numpy, element by element in a fixed order, and exactly rounded
 sums (no BLAS), so every CPU gives the same result.
 
@@ -39,6 +39,7 @@ Shape = tuple[np.ndarray, np.ndarray, np.ndarray, list[int], list[float]]
 
 _INVERT = int.from_bytes(b"Invr", "big")  # Invert's filterID; it has no Fltr
 _PUPPET = b"rigidTransform"
+_MOSAIC = b"Msc "
 _GSNB = b"GsnB"  # Gaussian Blur
 _MTNB = b"MtnB"  # Motion Blur
 _HSTR = b"HStr"  # Hue/Saturation
@@ -74,6 +75,8 @@ def _kind(item: Descriptor) -> str | None:
     cls = cls.encode() if isinstance(cls, str) else cls
     if cls == _PUPPET:
         return "puppet"
+    if cls == _MOSAIC and _cell(fltr) is not None:
+        return "mosaic"
     if cls == _GSNB and get_scalar(fltr, b"Rds ", float, 0.0) > 0:
         return "gaussian"
     if cls == _MTNB and _distance(fltr) is not None:
@@ -129,6 +132,12 @@ def _selective(fltr: Descriptor) -> list[tuple[int, list[float]]] | None:
     return found
 
 
+def _cell(fltr: Descriptor) -> int | None:
+    """A Mosaic's cell size in px (2 or more)."""
+    size = get_scalar(fltr, b"ClSz", float, 0.0)
+    return int(size) if math.isfinite(size) and size == int(size) >= 2 else None
+
+
 def _distance(fltr: Descriptor) -> int | None:
     """A Motion Blur's distance when at angle 0 and in :py:data:`MOTION`."""
     distance = get_scalar(fltr, b"Dstn", float, 0.0)
@@ -137,11 +146,12 @@ def _distance(fltr: Descriptor) -> int | None:
     return int(distance)
 
 
-def _items(so: SmartObject) -> list[Descriptor] | None:
+def _items(so: SmartObject, corners: Quad | None = None) -> list[Descriptor] | None:
     """The filters on; ``None`` when they are not :py:func:`draw`'s.
 
     That is more than one, another kind, a blend other than Normal at 100%, a
-    mesh that does not decode or a quad no parallelogram.
+    mesh that does not decode, a quad no parallelogram or a Mosaic off its
+    grid; the quad *corners*, by default the layer's.
     """
     fx = so.filters
     if fx is None or not _on(fx):
@@ -167,22 +177,26 @@ def _items(so: SmartObject) -> list[Descriptor] | None:
         return None
     if _kind(found[0]) == "puppet" and (
         _shapes(found[0][b"Fltr"]) is None
-        or _mapping(so, found[0][b"Fltr"], None) is None
+        or _mapping(so, found[0][b"Fltr"], corners) is None
     ):
+        return None
+    if _kind(found[0]) == "mosaic" and not _whole_cells(so, found[0][b"Fltr"], corners):
         return None
     return found
 
 
-def drawable(so: SmartObject) -> bool:
-    """Whether :py:func:`draw` draws the object's smart filters.
+def drawable(so: SmartObject, corners: Quad | None = None) -> bool:
+    """Whether :py:func:`draw` draws the object's smart filters on *corners*.
 
     True with none on, or one on, a Puppet Warp, an Invert, a Gaussian Blur,
-    a Motion Blur at angle 0 of a distance :py:data:`MOTION` holds, a
+    a Motion Blur at angle 0 of a distance :py:data:`MOTION` holds, a Mosaic
+    on a canvas of whole cells and a quad not above or left of it, a
     Hue/Saturation of the master alone, a Black & White without tint or a
     Relative Selective Color of the six hues, Normal at 100%, in an RGB
-    document. A filter mask does not refuse.
+    document. A filter mask does not refuse. *corners*: the quad the new
+    picture is drawn on, by default the layer's.
     """
-    return _items(so) is not None
+    return _items(so, corners) is not None
 
 
 def draw(
@@ -207,9 +221,9 @@ def draw(
         stored filter source closer, else bilinear
     :return: ``(straight float32 RGBA, canvas box)``, the box trimmed to the
         pixels that show; ``(0, 0, 0, 0)`` with an empty array when none do
-    :raises ValueError: when :py:func:`drawable` is False
+    :raises ValueError: when :py:func:`drawable` is False on *corners*
     """
-    items = _items(so)
+    items = _items(so, corners)
     if items is None:
         raise ValueError("these smart filters are not drawn")
     out = np.asarray(rgba, np.float32)
@@ -223,6 +237,10 @@ def draw(
         return out, box
     if kind in ("hue", "grey", "selective"):
         return _adjusted(so, kind, item[b"Fltr"], out), box
+    if kind == "mosaic":
+        cell = _cell(item[b"Fltr"])
+        assert cell is not None
+        return _mosaic(out, box, cell)
     if kind == "gaussian":
         psd = so._layer._psd
         radius = get_scalar(item[b"Fltr"], b"Rds ", float, 0.0)
@@ -239,8 +257,7 @@ def draw(
     if sampling is None:
         sampling = _sampling(so, fltr, mesh)
     mapped = _mapping(so, fltr, corners)
-    if mapped is None:
-        raise ValueError("the filter's quad or the layer's is no parallelogram")
+    assert mapped is not None
     return _warp(out, box, mesh, mapped, sampling == "nearest")
 
 
@@ -552,6 +569,46 @@ def _nearest(pre: np.ndarray, box: Box, sx: np.ndarray, sy: np.ndarray) -> np.nd
     out = np.zeros((len(sx), 4))
     out[ok] = pre[y[ok], x[ok]]
     return out
+
+
+def _whole_cells(so: SmartObject, fltr: Descriptor, corners: Quad | None) -> bool:
+    """A Mosaic's grid is the canvas's (proven).
+
+    Whole cells across it and the quad (*corners* or the layer's) not above or
+    left of it.
+    """
+    quad = corners if corners is not None else so.transform_box
+    cell, psd = _cell(fltr), so._layer._psd
+    return (
+        cell is not None
+        and quad is not None
+        and psd.width % cell == 0
+        and psd.height % cell == 0
+        and min(quad[0::2]) >= 0
+        and min(quad[1::2]) >= 0
+    )
+
+
+def _mosaic(rgba: np.ndarray, box: Box, cell: int) -> tuple[np.ndarray, Box]:
+    """*rgba* on canvas *box* under a Mosaic of *cell* px, as stored.
+
+    Cells on the canvas's grid, each the mean of its pixels, premultiplied;
+    a pixel outside the picture counts clear. Summed in a fixed order.
+    """
+    left, top, right, bottom = (int(v) for v in box)
+    x0, y0 = left - left % cell, top - top % cell
+    x1, y1 = right + (-right) % cell, bottom + (-bottom) % cell
+    pic = rgba.astype(np.float64)
+    pre = np.zeros((y1 - y0, x1 - x0, 4))
+    part = pre[top - y0 : bottom - y0, left - x0 : right - x0]
+    part[..., :3] = pic[..., :3] * pic[..., 3:]
+    part[..., 3] = pic[..., 3]
+    total = np.zeros(((y1 - y0) // cell, (x1 - x0) // cell, 4))
+    for dy in range(cell):
+        for dx in range(cell):
+            total = total + pre[dy::cell, dx::cell]
+    mean = np.repeat(np.repeat(total / (cell * cell), cell, 0), cell, 1)
+    return _straight(mean, (x0, y0, x1, y1))
 
 
 def _straight(pre: np.ndarray, box: Box) -> tuple[np.ndarray, Box]:

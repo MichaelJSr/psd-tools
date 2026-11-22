@@ -525,17 +525,20 @@ class SmartObject:
         bbox = (left + dx, top + dy, right + dx, bottom + dy)
         return bbox, _decode_plane(extra, width, height)
 
-    def can_draw_filters(self) -> bool:
+    def can_draw_filters(self, corners: Sequence[float] | None = None) -> bool:
         """Return whether :py:meth:`draw_filters` draws the smart filters on.
 
         True with none on, or one Puppet Warp, Invert, Gaussian Blur, proven
-        Motion Blur, master-only Hue/Saturation, untinted Black & White or
-        Relative Selective Color of the six hues, Normal at 100%, in an RGB
-        document; a filter mask does not refuse (the composite applies it).
+        Motion Blur, Mosaic on the canvas's grid, master-only Hue/Saturation,
+        untinted Black & White or Relative Selective Color of the six hues,
+        Normal at 100%, in an RGB document; a filter mask does not refuse (the
+        composite applies it). *corners*: the quad a new picture is drawn on
+        (default :py:attr:`transform_box`).
         """
         from psd_tools.composite import smart_filters  # noqa: PLC0415
 
-        return smart_filters.drawable(self)
+        quad = None if corners is None else tuple(float(v) for v in corners)
+        return smart_filters.drawable(self, quad)  # type: ignore[arg-type]
 
     def draw_filters(
         self,
@@ -553,7 +556,7 @@ class SmartObject:
         :py:func:`psd_tools.composite.smart_filters.draw`.
 
         :return: ``(straight float32 RGBA, canvas box)``
-        :raises ValueError: when :py:meth:`can_draw_filters` is False
+        :raises ValueError: when :py:meth:`can_draw_filters` is False on *corners*
         """
         from psd_tools.composite import smart_filters  # noqa: PLC0415
 

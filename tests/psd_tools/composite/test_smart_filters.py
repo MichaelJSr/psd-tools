@@ -343,3 +343,46 @@ def test_colour_filters_past_the_proven_settings_refused() -> None:
     ):
         entry[b"Fltr"] = fltr
         assert not so.can_draw_filters()
+
+
+def _mosaic(cell: float) -> Descriptor:
+    fltr = Descriptor(classID=b"Msc ")
+    fltr[b"ClSz"] = UnitFloat(cell, Unit.Pixels)
+    return fltr
+
+
+def test_mosaic_cells_on_the_canvas_grid() -> None:
+    """Cells of 4 px on the canvas's grid, premultiplied means.
+
+    Each the mean of its 16 pixels (outside the picture clear). Cells across
+    the canvas's edge, or a quad above or left of it (the layer's or a new
+    one), refused.
+    """
+    layer, entry = _object()
+    so = layer.smart_object
+    entry[b"Fltr"] = _mosaic(4)
+    assert so.can_draw_filters()
+    rgba = np.random.default_rng(4).random((5, 8, 4), dtype=np.float32)
+    rgba[..., 3] = np.maximum(rgba[..., 3], 0.1)
+    out, box = so.draw_filters(rgba, (5, 6, 13, 11))
+    assert box == (4, 4, 16, 12)
+    pre = np.zeros((12, 16, 4))
+    pre[6:11, 5:13, :3] = rgba[..., :3] * rgba[..., 3:]
+    pre[6:11, 5:13, 3] = rgba[..., 3]
+    got = np.dstack([out[..., :3] * out[..., 3:], out[..., 3]])
+    for y in range(4, 12):
+        for x in range(4, 16):
+            cell = pre[y - y % 4 : y - y % 4 + 4, x - x % 4 : x - x % 4 + 4]
+            np.testing.assert_allclose(got[y - 4, x - 4], cell.mean((0, 1)), atol=1e-6)
+    above = (2.0, -4.0, 34.0, -4.0, 34.0, 28.0, 2.0, 28.0)
+    assert not so.can_draw_filters(above)
+    assert so.can_draw_filters([v + (4 if i % 2 else 0) for i, v in enumerate(above)])
+    with pytest.raises(ValueError):
+        so.draw_filters(rgba, (5, 6, 13, 11), above)
+    entry[b"Fltr"] = _mosaic(6)  # 32 px: no whole cells
+    assert not so.can_draw_filters()
+    entry[b"Fltr"] = _mosaic(4)
+    placed = so._placed_layer
+    assert placed is not None
+    placed.transform = (-1.0, 0.0, 32.0, 0.0, 32.0, 32.0, -1.0, 32.0)
+    assert not so.can_draw_filters()
