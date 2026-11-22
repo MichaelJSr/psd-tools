@@ -8,6 +8,7 @@ import pytest
 
 from psd_tools import PSDImage
 from psd_tools.api.layers import SmartObjectLayer
+from psd_tools.composite import smart_filters as sf
 from psd_tools.psd.descriptor import (
     Bool,
     Descriptor,
@@ -458,3 +459,93 @@ def test_perspective_warp_redraws_its_stored_pixels() -> None:
     ):
         entry[b"Fltr"] = fltr
         assert not so.can_draw_filters()
+
+
+# Polevaulter Zombie's and Magnet-shroom's star (1983 x 1307 px) on their turned quads
+_STARS = (
+    [894.008, 18.753, 1058.317, 20.92, 1057.308, 128.824, 892.999, 126.947],
+    [973.19, 22.12, 1180.08, 24.643, 1178.714, 160.65, 971.822, 158.587],
+)
+
+
+def _turned(angle: float = 0.3) -> list[float]:
+    """The square a filter of :py:func:`_perspective` ran on, turned round its centre."""
+    c, s = np.cos(angle), np.sin(angle)
+    out = []
+    for x, y in ((0, 0), (32, 0), (32, 32), (0, 32)):
+        out += [16 + c * (x - 16) - s * (y - 16), 26 + s * (x - 16) + c * (y - 16)]
+    return out
+
+
+def test_place_averages_a_big_reduction() -> None:
+    """A 1 px checkerboard placed at 1/12 on a turned quad is its mean grey.
+
+    A mip pyramid, as Photoshop places it; uint8 or float alike, the box
+    round the quad.
+    """
+    h, w = 288, 384
+    board = np.zeros((h, w, 4), np.uint8)
+    board[..., 3] = 255
+    board[np.add.outer(np.arange(h), np.arange(w)) % 2 == 0] = 255
+    quad = [v / 12 + 40 for v in (0, 0, w, 0, w, h, 0, h)]
+    c, s = np.cos(0.4), np.sin(0.4)
+    for i in range(0, 8, 2):
+        x, y = quad[i] - 56, quad[i + 1] - 52
+        quad[i], quad[i + 1] = 56 + c * x - s * y, 52 + s * x + c * y
+    out, box = sf.place(board, quad)
+    again, where = sf.place(board.astype(np.float32) / 255, quad)
+    assert where == box and np.allclose(again, out, atol=1e-6)
+    inside = out[..., 3] > 0.999
+    assert inside.sum() > 500 and np.abs(out[inside, :3] - 0.5).max() < 1e-6
+    for k in (0, 1):  # the quad's bounds, its tips' faint pixels trimmed
+        assert (
+            abs(box[k] - min(quad[k::2])) < 1 and abs(box[k + 2] - max(quad[k::2])) < 1
+        )
+
+
+def test_placeable_at_the_stars_scales_only() -> None:
+    """The proven scales and quads only.
+
+    The stars' quads (levels 2.47, 2.14), not twice or half their size, nor a
+    quad far from a parallelogram.
+    """
+    size = (1983.0, 1307.0)
+    for quad in _STARS:
+        assert sf.placeable(size, quad)
+        cx, cy = sum(quad[0::2]) / 4, sum(quad[1::2]) / 4
+        for k in (2.0, 0.5):
+            scaled = [
+                (cx if i % 2 == 0 else cy) + k * (v - (cx if i % 2 == 0 else cy))
+                for i, v in enumerate(quad)
+            ]
+            assert not sf.placeable(size, scaled)
+        bent = list(quad)
+        bent[4] += 20
+        assert not sf.placeable(size, bent)
+    assert not sf.placeable(size, [0.0] * 8)
+
+
+def test_perspective_warp_on_a_turned_quad_at_a_proven_scale() -> None:
+    """On a turned quad the warp is drawn for a file placed as proven.
+
+    12 times its pixels, not 3 times or the object's own. A quad no affine
+    image of the one it ran on is refused (Photoshop follows by the affine of
+    three corners). Uprights take any size.
+    """
+    layer, entry = _object()
+    so = layer.smart_object
+    square = [(4, 4), (28, 4), (28, 28), (4, 28)]
+    entry[b"Fltr"] = _perspective(square, square)
+    turned = _turned()
+    assert so.can_draw_filters(turned, (384, 384))
+    assert not so.can_draw_filters(turned, (96, 96)) and not so.can_draw_filters(turned)
+    bent = list(turned)
+    bent[4] += 0.5
+    assert not so.can_draw_filters(bent, (384, 384))
+    assert so.can_draw_filters(None, (384, 384)) and so.can_draw_filters()
+    picture, box = so.place_picture(np.full((384, 384, 4), 255, np.uint8), turned)
+    out, where = so.draw_filters(picture, box, turned, size=(384, 384))
+    a, b = (np.dstack([p[..., :3] * p[..., 3:], p[..., 3]]) for p in (out, picture))
+    assert where == box and np.allclose(a, b, atol=1e-6)  # vertices unmoved
+    with pytest.raises(ValueError):
+        so.draw_filters(picture, box, turned)
