@@ -1869,7 +1869,8 @@ def _keep_freed_memory() -> None:
     ):
         return
     try:
-        if not (os.confstr("CS_GNU_LIBC_VERSION") or "").startswith("glibc"):
+        # Not on Windows: the AttributeError below.
+        if not (os.confstr("CS_GNU_LIBC_VERSION") or "").startswith("glibc"):  # type: ignore[attr-defined]
             return
         import ctypes  # noqa: PLC0415
 
@@ -6384,7 +6385,8 @@ class Compositor:
 
         mask = np.ascontiguousarray(mask)
         key = (
-            hashlib.sha256(mask).digest(),
+            # Python 3.11's stubs can't tell an array is a buffer.
+            hashlib.sha256(mask).digest(),  # type: ignore[arg-type]
             mask.shape,
             mask.dtype.str,
             stored,

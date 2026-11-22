@@ -152,7 +152,7 @@ def platform_font_dirs() -> list[str]:
     if os.name == "nt":
         return [os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")]
     home = os.path.expanduser("~")
-    if os.uname().sysname == "Darwin":
+    if os.uname().sysname == "Darwin":  # type: ignore[attr-defined]  # not on Windows
         return [
             "/System/Library/Fonts",
             "/Library/Fonts",

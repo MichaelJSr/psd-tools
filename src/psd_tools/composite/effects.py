@@ -971,10 +971,11 @@ def _runs(line: np.ndarray, span: int) -> list[tuple[int, int]]:
 def _reach_boxes(boundary: np.ndarray, span: int) -> list[tuple[slice, slice]]:
     """Disjoint boxes holding every pixel within ``span`` of ``boundary``."""
     boxes = []
-    for r0, r1 in _runs(boundary.any(axis=1), span):
+    # Before numpy 2.5 its stubs type any(axis=...) as maybe a scalar.
+    for r0, r1 in _runs(boundary.any(axis=1), span):  # type: ignore[arg-type]
         band = boundary[r0:r1]
-        for c0, c1 in _runs(band.any(axis=0), span):
-            for q0, q1 in _runs(band[:, c0:c1].any(axis=1), span):
+        for c0, c1 in _runs(band.any(axis=0), span):  # type: ignore[arg-type]
+            for q0, q1 in _runs(band[:, c0:c1].any(axis=1), span):  # type: ignore[arg-type]
                 boxes.append((slice(r0 + q0, r0 + q1), slice(c0, c1)))
     return boxes
 
