@@ -1173,10 +1173,6 @@ class Layer(LayerProtocol):
             ResourceTransfer(self._psd).add_blocks(source._psd, copies)
         self._replace_effect_blocks(copies)
 
-    def clear_effects(self) -> None:
-        """Remove this layer's effects blocks, as Photoshop's Clear Layer Style."""
-        self._replace_effect_blocks(TaggedBlocks())
-
     def _replace_effect_blocks(self, copies: TaggedBlocks) -> None:
         blocks = self.tagged_blocks
         stale = [tag for tag in _EFFECT_BLOCK_TAGS if tag in blocks]
@@ -3229,30 +3225,6 @@ class TypeLayer(Layer):
         changed.
         """
         return text_edit.sync_story(self)
-
-    def fit_text(
-        self, max_width: float, min_scale: float, fonts: "FontMap | None" = None
-    ) -> float:
-        """
-        Shrink the type until its widest line fits ``max_width`` pixels.
-
-        Requires the ``text`` extra; see
-        :py:func:`psd_tools.composite.text.fit_text`. Every run's font size
-        is scaled by one factor, which is returned, ``1.0`` when the text
-        fits already. Point text only.
-
-        :raises ValueError: if the factor would fall below ``min_scale``;
-            the layer is left as it was.
-        """
-        try:
-            from psd_tools.composite.text import fit_text  # noqa: PLC0415
-        except ImportError as e:
-            raise ImportError(
-                "Measuring type requires: uharfbuzz, freetype-py\n\n"
-                "Install with:\n"
-                "    pip install 'psd-tools[text]'"
-            ) from e
-        return fit_text(self, max_width, min_scale, fonts=fonts)
 
     def rasterize(
         self,

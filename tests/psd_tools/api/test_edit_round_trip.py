@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 
-from psd_tools.api.layers import Group, Layer, TypeLayer
+from psd_tools.api.layers import _EFFECT_BLOCK_TAGS, Group, Layer, TypeLayer
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.constants import Resource, Tag
 
@@ -95,7 +95,12 @@ def _toggle_digit(psd: PSDImage) -> set[int]:
     shown = _find(psd, "Stats Bars/Darks/Hp Dark/1")
     hidden = _find(psd, "Stats Bars/Darks/Hp Dark/2")
     hidden.copy_effects_from(shown)
-    shown.clear_effects()
+    blank = next(
+        x
+        for x in psd.descendants()
+        if not any(tag in x.tagged_blocks for tag in _EFFECT_BLOCK_TAGS)
+    )
+    shown.copy_effects_from(blank)
     shown.visible, hidden.visible = False, True
     return {shown.layer_id, hidden.layer_id}
 

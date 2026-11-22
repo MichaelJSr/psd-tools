@@ -1,4 +1,4 @@
-"""``Layer.copy_effects_from()`` and ``Layer.clear_effects()``."""
+"""``Layer.copy_effects_from()``."""
 
 import io
 from typing import Any
@@ -99,22 +99,11 @@ def test_a_source_without_effects_clears_the_target() -> None:
     assert psd.is_updated()
 
 
-def test_clear_effects() -> None:
-    psd = _card()
-    text = _named(psd, "Text")
-    text.clear_effects()
-    assert _tags(text) == []
-    assert not text.has_effects()
-    assert psd.is_updated()
-
-
-@pytest.mark.parametrize("edit", ["clear", "copy none", "copy self"])
+@pytest.mark.parametrize("edit", ["copy none", "copy self"])
 def test_a_layer_left_as_it_was_keeps_the_preview_current(edit: str) -> None:
     psd = _card()
     hidden, shown = _named(psd, "0"), _named(psd, "1")
-    if edit == "clear":
-        hidden.clear_effects()
-    elif edit == "copy none":
+    if edit == "copy none":
         hidden.copy_effects_from(_named(psd, "2"))
     else:
         shown.copy_effects_from(shown)
@@ -155,7 +144,7 @@ def test_effects_copied_from_another_document_carry_their_pattern() -> None:
 def test_copied_effects_round_trip_through_save() -> None:
     psd = _card()
     _named(psd, "0").copy_effects_from(_named(psd, "1"))
-    _named(psd, "1").clear_effects()
+    _named(psd, "1").copy_effects_from(_named(psd, "2"))
     buffer = io.BytesIO()
     psd.save(buffer, update_preview=False)
     buffer.seek(0)

@@ -256,12 +256,11 @@ A layer can change its order within its group::
     layer.move_down() # Will send the layer downward in the group
 
 Copy a layer's effects onto another layer, replacing its own, as Photoshop's
-Copy and Paste Layer Style do without the blending options, or remove them.
-The source may be in another document; the patterns its effects use come
-with them::
+Copy and Paste Layer Style do without the blending options; a source without
+effects removes them. The source may be in another document; the patterns
+its effects use come with them::
 
     target.copy_effects_from(source)
-    source.clear_effects()
 
 Move a pixel mask, keeping its size and pixels, while the layer stays put. A
 pixel mask combined with a vector mask cannot be moved this way::
