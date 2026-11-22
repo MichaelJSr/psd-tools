@@ -4,6 +4,14 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``SmartObject.update_filters()`` puts a Perspective Warp on a turned
+  quad on a new file of another pixel size as Photoshop 2023's Update
+  Modified Content does (7 layers of 3 cards at 2x and 0.5x, exact): the
+  new file round ``(TR + BL) / 2`` at the old scale on the affine image of
+  the old quad's TL TR BL (a parallelogram), ``PuX0``.. that quad and the
+  vertices followed there; ``can_update_filters()`` checks the warp so
+  written is drawn on the new quad. Upright quads and another ppi are
+  refused; ``referenceRect`` is kept (Photoshop rewrites it, never reads it)
 - [api] ``SmartObject.keep_filters()`` keeps a Puppet or Perspective Warp's
   map on the canvas when only the layer's quad moves (a trimmed or padded
   file, its ink where it was): a Perspective Warp's follow baked into its
