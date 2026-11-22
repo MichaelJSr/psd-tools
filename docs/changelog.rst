@@ -4,6 +4,14 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``SmartObject.draw_filters()`` draws a Gaussian Blur (premultiplied,
+  sigma = radius, edges repeated at the canvas's edge and faded inside it)
+  and a Motion Blur at angle 0 of a proven distance (6 px), and a filter
+  mask no longer refuses: Photoshop 2023 stores the filters' whole result as
+  the layer's pixels (16 of 16 saves, and its own relink of a new picture
+  on two cards) and the composite blends it through the mask, as the fork
+  already does. Fixed-order float64 sums and a decimal exp: the same on
+  every CPU. Nothing else changes
 - [fix] The compositor's float32 powers (sRGB transfers, perceptual
   opacity, the vibrance step, colour balance midtones, Levels gamma,
   hue/saturation ranges, text blending) are worked in float64 and rounded

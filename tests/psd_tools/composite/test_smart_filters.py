@@ -1,15 +1,25 @@
 """Smart filters drawn on a new picture of a placed layer (Card sync's redraw)."""
 
 from collections.abc import Iterable
+from typing import cast
 
 import numpy as np
 import pytest
 
 from psd_tools import PSDImage
 from psd_tools.api.layers import SmartObjectLayer
-from psd_tools.psd.descriptor import Descriptor, Double, Integer, List, RawData
+from psd_tools.psd.descriptor import (
+    Bool,
+    Descriptor,
+    Double,
+    Integer,
+    List,
+    RawData,
+    UnitFloat,
+)
+from psd_tools.terminology import Unit
 
-from ..smart_filters import enable_filters
+from ..smart_filters import enable_filters, feid_item, store_items
 from ..utils import full_name
 
 
@@ -107,3 +117,66 @@ def test_puppet_warp_fold_shows_the_deeper_pins_side(
     out, box = layer.smart_object.draw_filters(rgba, (0, 0, 16, 16), sampling="nearest")
     inside = out[12 - box[1], 14 - box[0]]  # (14, 12): in both triangles
     assert inside[0] == 1 - shown and inside[2] == shown
+
+
+def _blur(cls: bytes, **values: float) -> Descriptor:
+    fltr = Descriptor(classID=cls)
+    for key, value in values.items():
+        fltr[key.ljust(4).encode()] = (
+            Integer(int(value)) if key == "Angl" else UnitFloat(value, Unit.Pixels)
+        )
+    return fltr
+
+
+def test_gaussian_blur_drawn_under_a_painted_mask() -> None:
+    """A Gaussian Blur under a painted mask is drawn: the mask does not refuse.
+
+    Premultiplied, sigma = radius; edge pixels repeat at the canvas's edge
+    (left) and fade inside it.
+    """
+    ndimage = pytest.importorskip("scipy.ndimage")
+    layer, entry = _object()
+    entry[b"Fltr"] = _blur(b"GsnB", Rds=2.0)
+    so = layer.smart_object
+    zeros = np.zeros((32, 32), np.uint8)
+    fx = so.filters
+    assert fx is not None
+    fx[b"filterMaskEnable"] = Bool(True)
+    store_items(
+        cast(PSDImage, layer._psd),
+        [feid_item((0, 0, 32, 32), np.zeros((32, 32, 3), np.uint8), zeros, zeros)],
+    )
+    assert so.can_draw_filters()
+    rng = np.random.default_rng(2)
+    rgba = rng.random((20, 12, 4), dtype=np.float32)
+    out, box = so.draw_filters(rgba, (0, 6, 12, 26))
+    pre = np.dstack([rgba[..., :3] * rgba[..., 3:], rgba[..., 3]])
+    pre = np.pad(pre, ((7, 7), (0, 7), (0, 0)))  # 3 sigma + 1 inside the canvas
+    pre = np.pad(pre, ((0, 0), (7, 0), (0, 0)), mode="edge")  # its left edge
+    planes = [
+        ndimage.gaussian_filter(pre[..., k], 2.0, mode="nearest", truncate=3.0)
+        for k in range(4)
+    ]
+    want = np.dstack(planes)[:, 7:]  # canvas box (0, -1, 19, 33)
+    shown = np.rint(want[..., 3] * 255) > 0
+    rows, cols = np.flatnonzero(shown.any(1)), np.flatnonzero(shown.any(0))
+    assert box == (cols[0], rows[0] - 1, cols[-1] + 1, rows[-1]) and cols[0] == 0
+    want = want[rows[0] : rows[-1] + 1, : cols[-1] + 1]
+    got = np.dstack([out[..., :3] * out[..., 3:], out[..., 3]])
+    np.testing.assert_allclose(got, want, atol=1e-6)
+    assert out[10, 0, 3] > 0.3 and out[0, 4, 3] < 0.01
+
+
+def test_motion_blur_drawn_at_a_proven_distance() -> None:
+    """A 6 px Motion Blur at angle 0: 7 taps, alpha (S + 2) // 7; others refused."""
+    layer, entry = _object()
+    so = layer.smart_object
+    for angle, distance, drawn in ((0, 6, True), (0, 17, False), (90, 6, False)):
+        entry[b"Fltr"] = _blur(b"MtnB", Angl=angle, Dstn=distance)
+        assert so.can_draw_filters() == drawn
+    entry[b"Fltr"] = _blur(b"MtnB", Angl=0, Dstn=6)
+    dot = np.ones((1, 1, 4), np.float32)
+    out, box = so.draw_filters(dot, (5, 5, 6, 6))
+    assert box == (2, 5, 9, 6)
+    assert np.array_equal(np.rint(out[..., 3] * 255), np.full((1, 7), 257 // 7))
+    assert np.array_equal(out[..., :3], np.ones((1, 7, 3), np.float32))

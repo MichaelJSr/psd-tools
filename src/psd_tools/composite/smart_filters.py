@@ -3,14 +3,20 @@
 A placed layer's pixels are its smart filters' result. When its file changes,
 the caller draws the new picture on the layer's quad and :py:func:`draw` draws
 the filters over it as Photoshop 2023 does: a Puppet Warp from its stored mesh,
-an Invert. Plain float64 numpy, element by element in a fixed order, and
-exactly rounded sums (no BLAS), so every CPU gives the same result.
+an Invert, a Gaussian Blur, a Motion Blur of a distance :py:data:`MOTION` holds.
+Plain float64 numpy, element by element in a fixed order, and exactly rounded
+sums (no BLAS), so every CPU gives the same result.
+
+A filter mask does not change what is drawn: Photoshop stores the filters'
+whole result as the layer's pixels, and the composite blends them with the
+filter source through the mask.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from decimal import Context, Decimal
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -29,9 +35,15 @@ Shape = tuple[np.ndarray, np.ndarray, np.ndarray, list[int], list[float]]
 
 _INVERT = int.from_bytes(b"Invr", "big")  # Invert's filterID; it has no Fltr
 _PUPPET = b"rigidTransform"
+_GSNB = b"GsnB"  # Gaussian Blur
+_MTNB = b"MtnB"  # Motion Blur
+#: Motion Blur at angle 0 proven on Photoshop 2023's pixels: distance px -> c in
+#: the alpha's ``(S + c) // taps``.
+MOTION = {6: 2}
 _PU = (b"PuX0", b"PuY0", b"PuX1", b"PuY1", b"PuX2", b"PuY2", b"PuX3", b"PuY3")
 _QUAD_TOL = 0.01  # px: a quad this close to a parallelogram is one
 _EDGE = 1e-9  # barycentric slack: a pixel centre on an edge is inside
+_BAND = 1 << 15  # float64s a blur band holds (256 KiB)
 
 
 def _on(desc: Descriptor | None, key: bytes = b"enab") -> bool:
@@ -41,16 +53,31 @@ def _on(desc: Descriptor | None, key: bytes = b"enab") -> bool:
 def _kind(item: Descriptor) -> str | None:
     if get_scalar(item, b"filterID", int, None) == _INVERT:
         return "invert"
-    if getattr(item.get(b"Fltr"), "classID", None) in (_PUPPET, _PUPPET.decode()):
+    fltr = item.get(b"Fltr")
+    cls = getattr(fltr, "classID", None)
+    cls = cls.encode() if isinstance(cls, str) else cls
+    if cls == _PUPPET:
         return "puppet"
+    if cls == _GSNB and get_scalar(fltr, b"Rds ", float, 0.0) > 0:
+        return "gaussian"
+    if cls == _MTNB and _distance(fltr) is not None:
+        return "motion"
     return None
+
+
+def _distance(fltr: Descriptor) -> int | None:
+    """A Motion Blur's distance when at angle 0 and in :py:data:`MOTION`."""
+    distance = get_scalar(fltr, b"Dstn", float, 0.0)
+    if get_scalar(fltr, b"Angl", float, 0.0) != 0 or distance not in MOTION:
+        return None
+    return int(distance)
 
 
 def _items(so: SmartObject) -> list[Descriptor] | None:
     """The filters on; ``None`` when they are not :py:func:`draw`'s.
 
     That is more than one, another kind, a blend other than Normal at 100%, a
-    painted mask, a mesh that does not decode or a quad no parallelogram.
+    mesh that does not decode or a quad no parallelogram.
     """
     fx = so.filters
     if fx is None or not _on(fx):
@@ -74,15 +101,6 @@ def _items(so: SmartObject) -> list[Descriptor] | None:
         or get_scalar(blend, b"Opct", float, 100.0) < 100
     ):
         return None
-    if so.filter_mask_enabled:
-        try:
-            painted = so.filter_mask()
-        except ValueError:
-            return None
-        if painted is not None and (
-            not so.filter_mask_extends_white or int(painted[1].min()) < 255
-        ):
-            return None
     if _kind(found[0]) == "puppet" and (
         _shapes(found[0][b"Fltr"]) is None
         or _mapping(so, found[0][b"Fltr"], None) is None
@@ -94,8 +112,9 @@ def _items(so: SmartObject) -> list[Descriptor] | None:
 def drawable(so: SmartObject) -> bool:
     """Whether :py:func:`draw` draws the object's smart filters.
 
-    True with none on, or one on, a Puppet Warp or an Invert, Normal at 100%,
-    its mask off or white, in an RGB document.
+    True with none on, or one on, a Puppet Warp, an Invert, a Gaussian Blur or
+    a Motion Blur at angle 0 of a distance :py:data:`MOTION` holds, Normal at
+    100%, in an RGB document. A filter mask does not refuse.
     """
     return _items(so) is not None
 
@@ -131,10 +150,19 @@ def draw(
     if not items or out.size == 0:
         return out, box
     item = items[0]
-    if _kind(item) == "invert":
+    kind = _kind(item)
+    if kind == "invert":
         out = out.copy()
         out[..., :3] = 1.0 - out[..., :3]
         return out, box
+    if kind == "gaussian":
+        psd = so._layer._psd
+        radius = get_scalar(item[b"Fltr"], b"Rds ", float, 0.0)
+        return _trim(*_gaussian(out, box, radius, (psd.width, psd.height)))
+    if kind == "motion":
+        distance = _distance(item[b"Fltr"])
+        assert distance is not None
+        return _trim(*_motion(out, box, distance))
     if sampling not in (None, "bilinear", "nearest"):
         raise ValueError(f"unknown sampling {sampling!r}")
     fltr = item[b"Fltr"]
@@ -473,3 +501,127 @@ def _straight(pre: np.ndarray, box: Box) -> tuple[np.ndarray, Box]:
     out[..., :3] = rgb
     out[..., 3] = alpha
     return out, (box[0] + c0, box[1] + r0, box[0] + c1, box[1] + r1)
+
+
+def _gaussian(
+    rgba: np.ndarray, box: Box, radius: float, size: tuple[int, int]
+) -> tuple[np.ndarray, Box]:
+    """*rgba* on canvas *box* under a Gaussian Blur of *radius*, as stored.
+
+    Premultiplied, sigma = radius, 3 sigma each way. A side at or past the
+    canvas's edge repeats its edge pixels (no halo); a side inside it fades
+    out over the pad it grows by.
+    """
+    pre = np.dstack([rgba[..., :3] * rgba[..., 3:], rgba[..., 3]])
+    pad = math.ceil(3 * radius) + 1
+    x0, y0, x1, y1 = box
+    edge = (x0 <= 0, y0 <= 0, x1 >= size[0], y1 >= size[1])
+    for axis, before, after in ((1, edge[0], edge[2]), (0, edge[1], edge[3])):
+        for side, at_edge in ((0, before), (1, after)):
+            widths = [(0, 0)] * 3
+            widths[axis] = (0, pad) if side else (pad, 0)
+            pre = np.pad(pre, widths, mode="edge" if at_edge else "constant")
+    taps = _taps(radius)
+    pre = np.dstack(
+        [_blur_axis(_blur_axis(pre[..., k], taps, 0), taps, 1) for k in range(4)]
+    )
+    out = (
+        x0 - pad * (not edge[0]),
+        y0 - pad * (not edge[1]),
+        x1 + pad * (not edge[2]),
+        y1 + pad * (not edge[3]),
+    )
+    left, top = pad * edge[0], pad * edge[1]
+    pre = pre[top : top + out[3] - out[1], left : left + out[2] - out[0]]
+    alpha = np.clip(pre[..., 3], 0.0, 1.0)
+    safe = np.maximum(alpha, np.float32(1e-6))[..., None]
+    rgb = np.where(alpha[..., None] > 0, pre[..., :3] / safe, np.float32(0))
+    return np.dstack([np.clip(rgb, 0.0, 1.0), alpha]).astype(np.float32), out
+
+
+def _taps(sigma: float) -> list[float]:
+    """Gaussian weights, the centre's then each distance's, summing to 1.
+
+    Out to ``int(3 * sigma + 0.5)``; exp in decimal and the sum exactly
+    rounded, so they are the same on every CPU.
+    """
+    scale = -0.5 / (sigma * sigma)
+    context = Context(prec=34)
+    raw = [
+        float(context.exp(Decimal(scale * (k * k))))
+        for k in range(int(3.0 * sigma + 0.5) + 1)
+    ]
+    total = math.fsum(raw + raw[1:])
+    return [w / total for w in raw]
+
+
+def _blur_axis(plane: np.ndarray, taps: list[float], axis: int) -> np.ndarray:
+    """One axis of a separable blur, edges repeated, float32 out.
+
+    Float64, the centre tap then each pair from the farthest in, every step
+    rounded (no fused multiply-add): the order scipy's ``correlate1d`` sums
+    a symmetric filter in. In bands of rows that stay in cache.
+    """
+    reach, n = len(taps) - 1, plane.shape[axis]
+    widths = [(0, 0), (0, 0)]
+    widths[axis] = (reach, reach)
+    src = np.pad(plane.astype(np.float64), widths, mode="edge")
+    out = np.empty(plane.shape, np.float32)
+    rows = max(1, _BAND // max(1, src.shape[1]))
+    for r0 in range(0, plane.shape[0], rows):
+        r1 = min(r0 + rows, plane.shape[0])
+        if axis == 0:
+            band = src[r0 : r1 + 2 * reach]
+            at = lambda k: band[reach + k : reach + k + r1 - r0]  # noqa: E731
+        else:
+            band = src[r0:r1]
+            at = lambda k: band[:, reach + k : reach + k + n]  # noqa: E731
+        total = at(0) * taps[0]
+        pair = np.empty_like(total)
+        for k in range(reach, 0, -1):
+            np.add(at(-k), at(k), out=pair)
+            pair *= taps[k]
+            total += pair
+        out[r0:r1] = total
+    return out
+
+
+def _motion(rgba: np.ndarray, box: Box, distance: int) -> tuple[np.ndarray, Box]:
+    """*rgba* on canvas *box* under a Motion Blur at angle 0, as stored.
+
+    A box of distance + 1 taps over ``x - distance // 2 .. x + distance -
+    distance // 2`` of the 8-bit alpha, alpha ``(S + MOTION[distance]) //
+    taps``, colours averaged premultiplied. Integers, so exact.
+    """
+    taps, lo = distance + 1, distance // 2
+    hi = distance - lo
+    alpha = np.round(np.clip(rgba[..., 3], 0, 1) * 255).astype(np.int64)
+    color = np.round(np.clip(rgba[..., :3], 0, 1) * 255).astype(np.int64)
+    color *= alpha[..., None]
+    width = alpha.shape[1] + distance
+
+    def sums(plane: np.ndarray) -> np.ndarray:
+        widths = [(0, 0), (distance, distance)] + [(0, 0)] * (plane.ndim - 2)
+        padded = np.pad(plane, widths)
+        total = padded[:, :width].copy()
+        for i in range(1, taps):
+            total += padded[:, i : i + width]
+        return total
+
+    total, inks = sums(alpha), sums(color)
+    out_alpha = (total + MOTION[distance]) // taps
+    rgb = np.where(
+        total[..., None] > 0, np.round(inks / np.maximum(total, 1)[..., None]), 0
+    )
+    out = np.dstack([rgb / 255.0, out_alpha / 255.0]).astype(np.float32)
+    return out, (box[0] - hi, box[1], box[2] + lo, box[3])
+
+
+def _trim(rgba: np.ndarray, box: Box) -> tuple[np.ndarray, Box]:
+    """Straight *rgba* on *box* trimmed to the pixels that show (8-bit alpha)."""
+    shown = np.rint(np.clip(rgba[..., 3], 0.0, 1.0) * 255) > 0
+    rows, cols = np.flatnonzero(shown.any(1)), np.flatnonzero(shown.any(0))
+    if not len(rows):
+        return np.zeros((0, 0, 4), np.float32), (0, 0, 0, 0)
+    r0, r1, c0, c1 = int(rows[0]), int(rows[-1]) + 1, int(cols[0]), int(cols[-1]) + 1
+    return rgba[r0:r1, c0:c1], (box[0] + c0, box[1] + r0, box[0] + c1, box[1] + r1)
