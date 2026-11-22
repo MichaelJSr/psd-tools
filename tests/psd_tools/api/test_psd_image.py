@@ -1,18 +1,15 @@
-import gc
 import io
 import logging
 import pprint
-import weakref
 from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
 import numpy as np
 import pytest
-from PIL import Image, ImageChops
+from PIL import Image
 
-from psd_tools.api import pil_io
-from psd_tools.api.layers import Group, PixelLayer, SmartObjectLayer
+from psd_tools.api.layers import Group
 from psd_tools.api.psd_image import PSDImage
 from psd_tools.api.utils import get_transparency_index, has_transparency
 from psd_tools.constants import BlendMode, ColorMode, Compression, Tag
@@ -20,7 +17,7 @@ from psd_tools.psd.descriptor import Double
 from psd_tools.psd.layer_and_mask import LayerAndMaskInformation, LayerInfo
 from psd_tools.terminology import Key
 
-from ..utils import full_name
+from ..utils import full_name, store_preview
 
 logger = logging.getLogger(__name__)
 
@@ -93,24 +90,6 @@ def test_save_lazy_over_its_own_file(tmp_path: Path) -> None:
     with open(path, "rb") as f:
         PSDImage.open(f, lazy=True).save(path)
     assert path.read_bytes() == expected.getvalue()
-
-
-@pytest.mark.parametrize("filename", ["masks3.psd", "layers/smartobject-layer.psd"])
-def test_closed_document_is_freed_without_the_collector(filename: str) -> None:
-    gc.disable()
-    try:
-        with PSDImage.open(full_name(filename)) as psd:
-            refs: list[weakref.ref[Any]] = [weakref.ref(psd)]
-            for layer in psd.descendants():
-                layer.mask
-                if isinstance(layer, SmartObjectLayer):
-                    layer.smart_object
-                refs.append(weakref.ref(layer))
-        assert len(refs) > 1
-        del psd, layer
-        assert all(ref() is None for ref in refs)
-    finally:
-        gc.enable()
 
 
 def test_pilio(fixture: PSDImage) -> None:
@@ -911,141 +890,10 @@ def _bands(image: Image.Image) -> np.ndarray:
     return np.stack([np.asarray(band) for band in image.split()], axis=2)
 
 
-def _random_image(mode: str, size: tuple[int, int], seed: int = 0) -> Image.Image:
-    rng = np.random.default_rng(seed)
-    if mode == "1":
-        bits = rng.integers(0, 2, (size[1], size[0]), dtype=np.uint8) * 255
-        return Image.fromarray(bits, "L").convert("1", dither=Image.Dither.NONE)
-    planes = (size[1], size[0])
-    bands = [
-        Image.fromarray(rng.integers(0, 256, planes, dtype=np.uint8), "L")
-        for _ in range(len(Image.new(mode, (1, 1)).getbands()))
-    ]
-    return Image.merge(mode, bands)
-
-
-@pytest.mark.parametrize(
-    "filename, mode",
-    [
-        ("colormodes/4x4_8bit_rgb.psd", "RGB"),
-        ("colormodes/4x4_8bit_grayscale.psd", "L"),
-        ("colormodes/4x4_8bit_cmyk.psd", "CMYK"),
-        ("colormodes/4x4_8bit_lab.psd", "LAB"),
-        ("colormodes/4x4_8bit_duotone.psd", "L"),
-        ("colormodes/4x4_1bit_bitmap.psd", "1"),
-        ("colormodes/100x20_1bit_bitmap_rle.psd", "1"),
-        ("cmyk-spot.psd", "CMYK"),
-    ],
-)
-def test_save_with_preview_stores_it(filename: str, mode: str) -> None:
-    psd = PSDImage.open(full_name(filename))
-    image = _random_image(mode, psd.size)
-    buffer = io.BytesIO()
-    psd.save(buffer, preview=image)
-    buffer.seek(0)
-    stored = PSDImage.open(buffer).topil(apply_icc=False)
-    assert stored is not None
-    assert stored.mode == mode
-    assert np.array_equal(_bands(stored), _bands(image))
-
-
-def test_save_with_preview_stores_its_alpha() -> None:
-    psd = PSDImage.open(full_name("transparency/fill-opacity.psd"))
-    image = _random_image("RGBA", psd.size)
-    # Fully opaque or fully clear: in between, the white matte rounds.
-    alpha = np.where(np.asarray(image.getchannel("A")) >= 128, 255, 0)
-    image.putalpha(Image.fromarray(alpha.astype(np.uint8), "L"))
-    buffer = io.BytesIO()
-    psd.save(buffer, preview=image)
-    buffer.seek(0)
-    stored = PSDImage.open(buffer).topil(apply_icc=False)
-    assert stored is not None
-    assert stored.mode == "RGBA"
-    expected, actual = _bands(image), _bands(stored)
-    assert np.array_equal(actual[:, :, 3], expected[:, :, 3])
-    opaque = expected[:, :, 3] == 255
-    assert opaque.any() and not opaque.all()
-    assert np.array_equal(actual[opaque], expected[opaque])
-
-
 def _planes(psd: PSDImage) -> list[bytes]:
     data = psd._record.image_data.get_data(psd._record.header)
     assert isinstance(data, list)
     return data
-
-
-def test_save_with_indexed_preview() -> None:
-    quantization_step = 1
-    psd = PSDImage.open(full_name("colormodes/4x4_8bit_index_color.psd"))
-    original = psd.topil(apply_icc=False)
-    assert original is not None and original.mode == "P"
-    image = original.transpose(Image.Transpose.ROTATE_90)
-
-    # On the document's own table the indices are stored as they are.
-    buffer = io.BytesIO()
-    psd.save(buffer, preview=image)
-    buffer.seek(0)
-    assert _planes(PSDImage.open(buffer))[0] == np.asarray(image).tobytes()
-
-    for preview in (image.convert("RGB"), image.convert("PA")):
-        buffer = io.BytesIO()
-        psd.save(buffer, preview=preview)
-        buffer.seek(0)
-        stored = PSDImage.open(buffer).topil(apply_icc=False)
-        assert stored is not None
-        # Requantized onto the document's table, which can land a step away.
-        difference = np.abs(
-            np.asarray(stored.convert("RGB"), dtype=np.int16)
-            - np.asarray(image.convert("RGB"), dtype=np.int16)
-        )
-        assert difference.max() <= quantization_step
-
-
-def test_save_with_preview_refuses_a_short_color_table() -> None:
-    psd = PSDImage.open(full_name("colormodes/4x4_8bit_index_color.psd"))
-    psd._record.color_mode_data.value = psd._record.color_mode_data.value[:300]
-    with pytest.raises(ValueError):
-        psd.save(io.BytesIO(), preview=Image.new("RGB", psd.size))
-
-
-@pytest.mark.parametrize("route", ["topil", "composite"])
-def test_save_with_cmyk_preview_keeps_the_transparency_plane(route: str) -> None:
-    psd = PSDImage.open(full_name("blend-modes/cmyk-blend-modes.psd"))
-    transparency = get_transparency_index(psd)
-    stored = _planes(psd)
-    assert min(stored[transparency]) == 0
-    if route == "topil":
-        image = psd.topil(apply_icc=False)
-    else:
-        pytest.importorskip("aggdraw")
-        pytest.importorskip("scipy")
-        image = psd.composite(apply_icc=False)
-    assert image is not None and image.mode == "CMYK"
-    # Another colour, so the readback tells the preview from the stored one.
-    image = ImageChops.invert(image)
-    buffer = io.BytesIO()
-    psd.save(buffer, preview=image)
-    buffer.seek(0)
-    reopened = PSDImage.open(buffer)
-    assert _planes(reopened)[transparency] == stored[transparency]
-    readback = reopened.topil(apply_icc=False)
-    assert readback is not None
-    assert np.array_equal(_bands(readback), _bands(image))
-
-
-def test_save_with_preview_marks_the_composite_present() -> None:
-    psd = PSDImage.open(full_name("layers-minimal/pixel-layer.psd"))
-    assert not psd.has_preview()
-    image = Image.new("RGB", psd.size, (1, 2, 3))
-    buffer = io.BytesIO()
-    psd.save(buffer, preview=image)
-    assert psd.has_preview()
-    buffer.seek(0)
-    reopened = PSDImage.open(buffer)
-    assert reopened.has_preview()
-    stored = reopened.topil(apply_icc=False)
-    assert stored is not None
-    assert np.array_equal(_bands(stored), _bands(image))
 
 
 def test_save_marks_the_regenerated_composite_present() -> None:
@@ -1059,7 +907,7 @@ def test_save_marks_the_regenerated_composite_present() -> None:
     kept.seek(0)
     assert PSDImage.open(kept).is_stripped()
     # A stored red image Photoshop does not count as the composite.
-    psd.save(io.BytesIO(), preview=psd.composite(apply_icc=False))
+    store_preview(psd, psd.composite(apply_icc=False).convert("RGB"))
     version_info = psd.image_resources.get_data(1057)  # VersionInfo
     version_info.has_composite = False
     regenerated = io.BytesIO()
@@ -1068,8 +916,7 @@ def test_save_marks_the_regenerated_composite_present() -> None:
     assert PSDImage.open(regenerated).has_preview()
 
 
-@pytest.mark.parametrize("route", ["regenerated", "supplied"])
-def test_save_leaves_the_flag_where_the_colour_alone_is_stored(route: str) -> None:
+def test_save_leaves_the_flag_where_the_colour_alone_is_stored() -> None:
     pytest.importorskip("aggdraw")
     pytest.importorskip("scipy")
     # Three channels and no opaque pixel: no plane can take the alpha.
@@ -1078,82 +925,25 @@ def test_save_leaves_the_flag_where_the_colour_alone_is_stored(route: str) -> No
     layers = psd.composite()
     assert layers.mode == "RGBA" and np.asarray(layers)[:, :, 3].max() < 255
     buffer = io.BytesIO()
-    if route == "regenerated":
-        psd.mark_updated()
-        psd.save(buffer)
-    else:
-        psd.save(buffer, preview=layers)
-    buffer.seek(0)
-    reopened = PSDImage.open(buffer)
-    assert not reopened.has_preview()
-    assert np.array_equal(_bands(reopened.composite()), _bands(layers))
-
-    opaque = layers.convert("RGB")
-    buffer = io.BytesIO()
-    psd.save(buffer, preview=opaque)
-    buffer.seek(0)
-    reopened = PSDImage.open(buffer)
-    assert reopened.has_preview()
-    assert np.array_equal(_bands(reopened.composite()), _bands(opaque))
-
-
-def _forge_transparent(filename: str) -> PSDImage:
-    """A document with no transparency channel whose layers leave pixels clear."""
-    psd = PSDImage.open(full_name(filename))
-    next(iter(psd)).visible = False
-    buffer = io.BytesIO()
+    psd.mark_updated()
     psd.save(buffer)
     buffer.seek(0)
-    return PSDImage.open(buffer)
-
-
-@pytest.mark.parametrize(
-    "filename",
-    ["adjustments/invert_cmyk.psd", "adjustments/posterize_16bits_cmyk.psd"],
-)
-def test_save_with_cmyk_preview_leaves_the_flag_over_unknown_coverage(
-    filename: str,
-) -> None:
-    pytest.importorskip("aggdraw")
-    pytest.importorskip("scipy")
-    psd = _forge_transparent(filename)
-    assert psd.channels == 4 and not psd.has_preview()
-    layers = psd.composite()
-    assert layers.mode == "RGBA" and np.asarray(layers)[:, :, 3].min() < 255
-    image = psd.composite(apply_icc=False)
-    assert image.mode == "CMYK"
-    buffer = io.BytesIO()
-    psd.save(buffer, preview=image)
-    buffer.seek(0)
     reopened = PSDImage.open(buffer)
     assert not reopened.has_preview()
     assert np.array_equal(_bands(reopened.composite()), _bands(layers))
 
-    # Photoshop's own flag stays: the image carries no coverage to clear it on.
-    _, holds = pil_io.convert_pil_to_image_data(
-        PSDImage.open(full_name(filename)), image
-    )
-    assert holds is None
 
-
-@pytest.mark.parametrize("route", ["regenerated", "supplied"])
-def test_save_clears_the_flag_where_the_colour_alone_is_stored(route: str) -> None:
+def test_save_clears_the_flag_where_the_colour_alone_is_stored() -> None:
     pytest.importorskip("aggdraw")
     pytest.importorskip("scipy")
     psd = PSDImage.open(full_name("colormodes/4x4_8bit_rgb.psd"))
     assert psd.channels == 3 and psd.has_preview()
     buffer = io.BytesIO()
-    if route == "regenerated":
-        for layer in psd:
-            layer.visible = False
-        layers = psd.composite()
-        assert np.asarray(layers)[:, :, 3].max() == 0
-        psd.save(buffer)
-    else:
-        layers = psd.composite(ignore_preview=True)
-        preview = Image.new("RGBA", psd.size, (0, 0, 0, 0))
-        preview.putpixel((0, 0), (200, 10, 10, 255))
-        psd.save(buffer, preview=preview)
+    for layer in psd:
+        layer.visible = False
+    layers = psd.composite()
+    assert np.asarray(layers)[:, :, 3].max() == 0
+    psd.save(buffer)
     buffer.seek(0)
     reopened = PSDImage.open(buffer)
     assert not reopened.has_preview()
@@ -1179,87 +969,6 @@ def test_save_keeps_the_flag_on_a_document_with_no_layers() -> None:
     assert np.array_equal(_bands(readback), _bands(stored))
 
 
-def test_save_with_a_palette_preview_uses_its_transparency() -> None:
-    psd = PSDImage.open(full_name("colormodes/4x4_8bit_index_color.psd"))
-    image = psd.topil(apply_icc=False)
-    assert image is not None and image.mode == "P"
-    _, holds = pil_io.convert_pil_to_image_data(psd, image)
-    assert holds
-    # Marks one index clear; a one-channel document has no plane for that,
-    # which matters only once it has layers to render instead.
-    clear = image.copy()
-    clear.info["transparency"] = int(np.asarray(image)[0, 0])
-    _, holds = pil_io.convert_pil_to_image_data(psd, clear)
-    assert holds
-    psd.append(PixelLayer.frompil(image, psd))
-    _, holds = pil_io.convert_pil_to_image_data(psd, clear)
-    assert not holds
-
-
-def test_save_with_cmyk_preview_writes_an_opaque_plane_over_nothing() -> None:
-    psd = PSDImage.open(full_name("blend-modes/cmyk-blend-modes.psd"))
-    transparency = get_transparency_index(psd)
-    image = psd.topil(apply_icc=False)
-    assert image is not None and image.mode == "CMYK"
-    psd._record.image_data.data = b""
-    buffer = io.BytesIO()
-    psd.save(buffer, preview=image)
-    buffer.seek(0)
-    reopened = PSDImage.open(buffer)
-    assert reopened.has_preview()
-    assert _planes(reopened)[transparency] == b"\xff" * (psd.width * psd.height)
-    readback = reopened.topil(apply_icc=False)
-    assert readback is not None
-    assert np.array_equal(_bands(readback), _bands(image))
-
-
-def test_save_with_preview_refuses_a_multichannel_document() -> None:
-    psd = PSDImage.open(full_name("colormodes/4x4_16bit_multichannel.psd"))
-    image = psd.topil(apply_icc=False)
-    assert image is not None and image.mode == "L"
-    with pytest.raises(ValueError, match="multichannel"):
-        psd.save(io.BytesIO(), preview=image)
-
-
-def test_save_with_preview_respects_the_allocation_budget() -> None:
-    psd = PSDImage.open(full_name("colormodes/4x4_8bit_rgb.psd"))
-    psd.max_alloc_bytes = 1
-    with pytest.raises(ValueError):
-        psd.save(io.BytesIO(), preview=Image.new("RGB", psd.size))
-
-
-@pytest.mark.parametrize(
-    "filename",
-    [
-        "colormodes/4x4_8bit_rgb.psd",
-        "colormodes/4x4_8bit_rgba.psd",
-        "colormodes/4x4_8bit_grayscale.psd",
-        "colormodes/4x4_8bit_cmyk.psd",
-        "colormodes/4x4_8bit_lab.psd",
-        "colormodes/4x4_8bit_duotone.psd",
-        "colormodes/4x4_8bit_index_color.psd",
-        "colormodes/4x4_1bit_bitmap.psd",
-        "cmyk-spot.psd",
-    ],
-)
-def test_save_with_the_regenerated_preview_is_byte_identical(filename: str) -> None:
-    pytest.importorskip("aggdraw")
-    pytest.importorskip("scipy")
-    psd = PSDImage.open(full_name(filename))
-    psd.mark_updated()
-    regenerated = io.BytesIO()
-    psd.save(regenerated)
-    preview = PSDImage.open(io.BytesIO(regenerated.getvalue())).topil(apply_icc=False)
-    assert preview is not None
-
-    psd = PSDImage.open(full_name(filename))
-    psd.mark_updated()
-    supplied = io.BytesIO()
-    with patch("psd_tools.composite.composite", side_effect=AssertionError):
-        psd.save(supplied, preview=preview)
-    assert supplied.getvalue() == regenerated.getvalue()
-
-
 def test_save_keeps_the_stored_preview_unless_asked(tmp_path: Path) -> None:
     psd = PSDImage.open(full_name("layers/pixel-layer.psd"))
     stored = psd._record.image_data.data
@@ -1272,25 +981,3 @@ def test_save_keeps_the_stored_preview_unless_asked(tmp_path: Path) -> None:
 
     for name in ("unedited.psd", "edited.psd"):
         assert PSDImage.open(tmp_path / name)._record.image_data.data == stored
-
-
-@pytest.mark.parametrize(
-    "preview, update_preview, error",
-    [
-        (Image.new("RGB", (4, 5)), True, ValueError),
-        (Image.new("L", (4, 4)), True, ValueError),
-        (Image.new("CMYK", (4, 4)), True, ValueError),
-        (Image.new("RGB", (4, 4)), False, ValueError),
-        (np.zeros((4, 4, 3), dtype=np.uint8), True, TypeError),
-    ],
-)
-def test_save_with_preview_refuses_a_misfit(
-    tmp_path: Path, preview: Any, update_preview: bool, error: type[Exception]
-) -> None:
-    psd = PSDImage.open(full_name("colormodes/4x4_8bit_rgb.psd"))
-    stored = psd._record.image_data.data
-    output = tmp_path / "output.psd"
-    with pytest.raises(error):
-        psd.save(output, preview=preview, update_preview=update_preview)
-    assert not output.exists()
-    assert psd._record.image_data.data == stored

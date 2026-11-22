@@ -14,7 +14,6 @@ from psd_tools.composite.text.constants import ASCENT_PPEM  # noqa: E402
 from psd_tools.composite.text.fonts import (  # noqa: E402
     FontMap,
     MissingFontError,
-    font_files,
     load_face,
     norm,
 )
@@ -255,14 +254,14 @@ def test_nested_directories(ttf_font_path: str, tmp_path: object) -> None:
     top = shutil.copy(ttf_font_path, os.path.join(root, "top.ttf"))
     deep = shutil.copy(ttf_font_path, os.path.join(nested, "deep.ttf"))
     os.mkdir(os.path.join(root, "not-a-font.ttf"))
-    assert font_files(root) == [top, deep]
+    assert [p for _, fs in fonts_module._walk(root) for p in fs] == [top, deep]
     assert FontMap(dirs=[root]).resolve(PS_TT).path == top
     shutil.rmtree(os.path.dirname(nested))
     os.remove(top)
     os.makedirs(nested)
     shutil.copy(ttf_font_path, deep)
     assert FontMap(dirs=[root]).resolve(PS_TT).path == deep
-    assert font_files(os.path.join(root, "missing")) == []
+    assert list(fonts_module._walk(os.path.join(root, "missing"))) == []
 
 
 def test_alias_to_a_missing_file(

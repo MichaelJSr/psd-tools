@@ -8,9 +8,7 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
 from psd_tools.api.text_edit import (
     add_font,
-    composer_gaps,
     drop_strikes,
-    pin_composer,
     set_span_style,
     set_text,
     utf16_prefix,
@@ -320,7 +318,7 @@ def test_name_edit_writes_both_blocks_and_nothing_else() -> None:
 
 
 def test_drop_strikes_rewrites_its_strikes_alone() -> None:
-    # tools/sweep_strikes.py: a card loses one story's strikes, nothing else.
+    # drop_strikes: a card loses one story's strikes, nothing else.
     layer = story_layer("Ability")
     psd = cast(PSDImage, layer._psd)
     old = copy.deepcopy(txt2(layer))
@@ -467,23 +465,6 @@ def test_story_paragraphs_get_the_tysh_composer(edit: str) -> None:
     assert composers(layer) == [False, True]
 
 
-def test_pin_composer_fills_the_gaps_alone() -> None:
-    # tools/sweep_strikes.py: older writes left story paragraphs unflagged.
-    layer = story_layer("Ability")
-    psd = cast(PSDImage, layer._psd)
-    for run in story(layer)["0"]["5"]["0"]:
-        del run["0"]["0"]["5"]["29"]
-    want = copy.deepcopy(story(layer))
-    for run, flag in zip(want["0"]["5"]["0"], (False, True), strict=True):
-        run["0"]["0"]["5"]["29"] = engine_data.Bool(flag)
-    props = layer.engine_dict["ParagraphRun"]["RunArray"][1]["ParagraphSheet"]
-    props["Properties"]["EveryLineComposer"] = engine_data.Bool(True)
-    assert composer_gaps(layer) == 2 and not psd.is_updated()
-    assert pin_composer(layer) == 2
-    assert raw(story(layer)) == raw(want) and psd.is_updated()
-    assert composer_gaps(layer) == pin_composer(layer) == 0
-
-
 def test_story_marks_stay_on_their_characters() -> None:
     layer = story_layer("Ability")
     model = story(layer)["0"]
@@ -624,18 +605,14 @@ def test_add_font_keeps_a_listed_face() -> None:
 
 
 def test_add_font_writes_txt2_entries_as_photoshop_does() -> None:
-    # A Txt2 face is a CoolTypeFont: its name, and Script (1) and
-    # Synthetic (3) only when set; type-layer.psd's KozGoPr6N has Script 1.
+    # A Txt2 face is a CoolTypeFont: its name and type, Script (1) and
+    # Synthetic (3) only when set.
     layer = open_layer("layers/type-layer.psd")
     fonts = txt2_fonts(layer)
-    arial, kozgo = (raw(f) for f in fonts[0:4:3])
+    arial = raw(fonts[0])
     layer.add_font("ArialMT-Copy")
-    layer.add_font("KozGoPr6N-Copy", font_type=2, script=1)
-    assert raw(fonts[-2]) == arial.replace(
+    assert raw(fonts[-1]) == arial.replace(
         "ArialMT".encode("utf-16-be"), "ArialMT-Copy".encode("utf-16-be")
-    )
-    assert raw(fonts[-1]) == kozgo.replace(
-        "KozGoPr6N-Regular".encode("utf-16-be"), "KozGoPr6N-Copy".encode("utf-16-be")
     )
 
 

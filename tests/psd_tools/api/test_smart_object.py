@@ -19,7 +19,7 @@ from psd_tools.psd.descriptor import Bool, String
 from psd_tools.psd.filter_effects import FilterEffect
 from psd_tools.psd.linked_layer import LinkedLayer, LinkedLayers
 
-from ..smart_filters import enable_filters, feid_item, store_items
+from ..smart_filters import enable_filters, feid_item, paired_item, store_items
 from ..utils import full_name
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ def test_smart_filter_accessors_without_filters(
     assert embedded_object.has_enabled_filters is False
     assert embedded_object.filter_mask_enabled is False
     assert embedded_object.filter_mask_extends_white is True
-    assert embedded_object.filter_effect() is None
+    assert embedded_object._paired_effect() is None
     assert embedded_object.filter_source() is None
     assert embedded_object.filter_mask() is None
 
@@ -121,7 +121,7 @@ def test_smart_filter_accessors_read_the_document_block(version: int) -> None:
     assert so.has_enabled_filters is True
     assert so.filter_mask_enabled is True
     assert so.filter_mask_extends_white is False
-    assert so.filter_effect() is filtered.item
+    assert paired_item(so) is filtered.item
     stored = so.filter_source()
     assert stored is not None
     assert stored[0] == layer.bbox
@@ -165,7 +165,7 @@ def test_smart_filter_item_is_named_after_the_placed_id() -> None:
     filtered.item.uuid = so.placed_id
     store_items(filtered.psd, [decoy, filtered.item])
     assert so.filter_item is filtered.item
-    assert so.filter_effect() is filtered.item
+    assert paired_item(so) is filtered.item
     layer.left, layer.top = layer.left + 7, layer.top + 3
     top, left, bottom, right = filtered.item.rectangle
     filtered.item.rectangle = (top + 3, left + 7, bottom + 3, right + 7)

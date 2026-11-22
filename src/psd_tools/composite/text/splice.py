@@ -184,14 +184,13 @@ def splice(
     before: Before,
     fonts: FontMap | None = None,
     options: Options | None = None,
-    pad: int = SPLICE_PAD,
 ) -> RenderResult:
     """Render ``layer`` keeping ``before``'s stored pixels where nothing changed.
 
     A glyph is unchanged when the old layout drew the same glyph of the same
-    face, size, fill and faux styles at the same place. The engine's pixels fill the outline boxes, grown by
-    ``pad``, of the changed glyphs old and new, and the stored ones stay
-    everywhere else. The whole layer is rendered instead (``fallback`` says
+    face, size, fill and faux styles at the same place. The engine's pixels
+    fill the outline boxes, grown by ``SPLICE_PAD``, of the changed glyphs old
+    and new, and the stored ones stay everywhere else. The whole layer is rendered instead (``fallback`` says
     why) when the transform or anti-aliasing changed, the document is not
     RGB, the layer has no stored raster, or stored ink lies outside those
     boxes and the unchanged glyphs' (the layout does not place Photoshop's
@@ -226,18 +225,18 @@ def splice(
     old_rules = {_rule_key(r) for r in before.layout.rules}
     new_rules = {_rule_key(r) for r in lay.rules}
     changed = [
-        _glyph_box(g, t, pad)
+        _glyph_box(g, t, SPLICE_PAD)
         for glyphs, keep in ((before.layout.glyphs, keep_old), (lay.glyphs, keep_new))
         for g, k in zip(glyphs, keep, strict=True)
         if not k
     ]
     changed += [
-        _rule_box(r, t, pad)
+        _rule_box(r, t, SPLICE_PAD)
         for r in before.layout.rules
         if _rule_key(r) not in new_rules
     ]
     changed += [
-        _rule_box(r, t, pad) for r in lay.rules if _rule_key(r) not in old_rules
+        _rule_box(r, t, SPLICE_PAD) for r in lay.rules if _rule_key(r) not in old_rules
     ]
     of = _lines_of(lay)
     moved = {of[n] for n, k in enumerate(keep_new) if not k}
@@ -256,9 +255,13 @@ def splice(
     canvas = _union([before.bbox, result.bbox])
     zone = _mask(boxes, canvas)
     held = [
-        _glyph_box(g, t, pad) for g, k in zip(lay.glyphs, keep_new, strict=True) if k
+        _glyph_box(g, t, SPLICE_PAD)
+        for g, k in zip(lay.glyphs, keep_new, strict=True)
+        if k
     ]
-    held += [_rule_box(r, t, pad) for r in lay.rules if _rule_key(r) in old_rules]
+    held += [
+        _rule_box(r, t, SPLICE_PAD) for r in lay.rules if _rule_key(r) in old_rules
+    ]
     out = _place(before.rgba, before.bbox, canvas)
     stray = (
         (out[..., 3] > 0) & ~zone & ~_mask([b for b in held if b is not None], canvas)

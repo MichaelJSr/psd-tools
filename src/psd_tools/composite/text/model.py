@@ -102,10 +102,6 @@ class TextModel:
     super_size: float = SUPER_SIZE  #: ``ResourceDict`` SuperscriptSize
     super_position: float = SUPER_POSITION  #: ``ResourceDict`` SuperscriptPosition
 
-    def size_ratio(self, style: Style) -> float:
-        """The run's drawn size over its ``FontSize``: 1 unless super/subscript."""
-        return {1: self.super_size, 2: self.sub_size}.get(style.baseline, 1.0)
-
     def position_ratio(self, style: Style) -> float:
         """The super/subscript position ratio of the run's baseline; 0 for normal."""
         return {1: self.super_position, 2: self.sub_position}.get(style.baseline, 0.0)

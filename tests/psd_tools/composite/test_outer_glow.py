@@ -69,11 +69,20 @@ _CANVAS = (0, 0, 81, 81)
 _RADIUS = 12.0
 
 
+def _falloff(shape: np.ndarray, **params: Any) -> np.ndarray:
+    """How a glow falls off: :py:func:`glow_matte`, then :py:func:`glow_ranged`."""
+    keys = ("size", "spread", "precise")
+    matte = effects.glow_matte(shape, **{k: v for k, v in params.items() if k in keys})
+    return effects.glow_ranged(
+        matte, **{k: v for k, v in params.items() if k not in keys}
+    )
+
+
 def _glow(shape: np.ndarray, **params: Any) -> np.ndarray:
     """A solid glow's coverage, with the keyword defaults of a plain one."""
     settings: dict[str, Any] = {"size": 6.0, "spread": 0.0, "range_": 100.0}
     settings.update(params)
-    return effects._beside(effects.glow_falloff(shape, **settings), shape)
+    return effects._beside(_falloff(shape, **settings), shape)
 
 
 def _ring(glow: np.ndarray) -> np.ndarray:
@@ -423,9 +432,9 @@ def test_a_solid_glow_is_painted_in_its_colour_over_its_falloff() -> None:
 
 
 def test_the_falloff_is_not_cut_under_the_silhouette() -> None:
-    """``glow_falloff`` leaves the cut to the paint, which places a gradient by it."""
+    """The falloff leaves the cut to the paint, which places a gradient by it."""
     disc = _disc(81, _RADIUS)
-    falloff = effects.glow_falloff(disc, size=6.0, spread=0.0, range_=100.0)
+    falloff = _falloff(disc, size=6.0, spread=0.0, range_=100.0)
     assert falloff.shape == (81, 81)
     assert float(falloff[disc[:, :, 0] > 0.0].min()) > 0.0
 
@@ -500,7 +509,7 @@ def test_a_gradient_opaque_at_both_ends_paints_what_a_solid_colour_would() -> No
     for stop in desc[Key.Gradient][Key.Transparency]:
         stop[Key.Opacity] = Double(100.0)
     disc = _disc(81, _RADIUS)
-    falloff = effects.glow_falloff(disc, size=6.0, spread=0.0, range_=100.0)
+    falloff = _falloff(disc, size=6.0, spread=0.0, range_=100.0)
     _, painted = _paint(desc, falloff, disc)
     assert np.allclose(painted, _glow(disc), atol=1e-6)
 

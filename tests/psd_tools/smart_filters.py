@@ -4,6 +4,7 @@ import numpy as np
 
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.api.psd_image import PSDImage
+from psd_tools.api.smart_object import SmartObject
 from psd_tools.compression import compress
 from psd_tools.constants import Compression, Tag
 from psd_tools.psd.descriptor import Bool, Descriptor, List
@@ -83,3 +84,9 @@ def store_items(psd: PSDImage, items: list[FilterEffect]) -> None:
     """Set the document's FEid block to *items*."""
     assert psd.tagged_blocks is not None
     psd.tagged_blocks.set_data(Tag.FILTER_EFFECTS2, version=1, items=items)
+
+
+def paired_item(so: SmartObject) -> FilterEffect | None:
+    """The ``FEid`` item ``so``'s layer pairs with, or ``None``."""
+    paired = so._paired_effect()
+    return None if paired is None else paired[0]

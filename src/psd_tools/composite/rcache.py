@@ -184,21 +184,6 @@ class RenderCache:
                 del self._held[id(array)]
                 self._bytes -= array.nbytes
 
-    def clear(self) -> None:
-        """Drop every entry."""
-        self._store.clear()
-        self._held.clear()
-        self._boxes.clear()
-        self._bytes = 0
-        self._digests.clear()
-        self._same.clear()
-        self._pinned = 0
-
-    @property
-    def nbytes(self) -> int:
-        """The bytes stored, an array shared by entries counted once."""
-        return self._bytes
-
 
 def _nbytes(value: Entry) -> int:
     return sum(array.nbytes for array in value)

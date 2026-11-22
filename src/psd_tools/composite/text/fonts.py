@@ -474,15 +474,6 @@ def _walk(directory: str) -> Iterator[tuple[str, list[str]]]:
         )
 
 
-def font_files(directory: str) -> list[str]:
-    """Font files under ``directory`` and its subdirectories, in walk order.
-
-    Files sort before subdirectories at each level; symbolic links to
-    directories are not followed.
-    """
-    return [path for _, files in _walk(directory) for path in files]
-
-
 #: A stamp this close to its index's build may miss a change in the same
 #: timestamp tick (FAT's is 2 s), so that index is not reused.
 _STAMP_SLACK_NS = 2_000_000_000

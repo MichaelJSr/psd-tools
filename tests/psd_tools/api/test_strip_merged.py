@@ -36,9 +36,6 @@ def test_a_stripped_document_saves_stripped_after_an_edit() -> None:
     assert PSDImage.open(io.BytesIO(edited.getvalue())).is_stripped()
     assert len(edited.getvalue()) - len(stripped.getvalue()) < 16
 
-    back.save(io.BytesIO(), preview=back.composite())
-    assert not back.is_stripped()
-
 
 def test_a_lab_document_strips_to_lab_white() -> None:
     psd = PSDImage.new("LAB", (3, 2))

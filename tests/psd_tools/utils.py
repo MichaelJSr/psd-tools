@@ -64,3 +64,20 @@ def check_read_write(cls: type[T], data: bytes, *args: Any, **kwargs: Any) -> No
     element = cls.frombytes(data, *args, **kwargs)
     new_data = element.tobytes(*args, **kwargs)
     assert data == new_data, f"{trimmed_repr(data)} vs {trimmed_repr(new_data)}"
+
+
+def store_preview(psd: Any, image: Any) -> None:
+    """Store an opaque RGB or L ``image`` as ``psd``'s merged preview."""
+    import numpy as np  # noqa: PLC0415
+
+    from psd_tools.api import numpy_io  # noqa: PLC0415
+
+    color = np.asarray(image, dtype=np.float32) / 255.0
+    if color.ndim == 2:
+        color = color[:, :, None]
+    alpha = np.ones((*color.shape[:2], 1), dtype=np.float32)
+    psd._record.image_data.set_data(
+        numpy_io.encode_image_data(psd, color, alpha), psd._record.header
+    )
+    psd._mark_composite(numpy_io.holds_composite(psd, color, alpha))
+    psd._stripped = None

@@ -37,7 +37,7 @@ from psd_tools.constants import BlendMode, ColorMode, Compression, Tag
 from psd_tools.psd.descriptor import Double, Enumerated
 from psd_tools.terminology import Enum, Key
 
-from ..utils import full_name
+from ..utils import full_name, store_preview
 
 # Photoshop's default for the preference, which is what its previews fit.
 _PHOTOSHOP_DEFAULT_GAMMA = 1.45
@@ -285,26 +285,13 @@ def test_only_an_rgb_document_blends_in_the_gamma() -> None:
     assert not _blends_in_text_space(pixels, ColorMode.RGB)
 
 
-def test_text_gamma_reaches_every_composite_method() -> None:
-    """``None`` on the document, a layer and an artboard restores the straight mix."""
+def test_text_gamma_reaches_the_document_composite() -> None:
+    """``None`` on the document restores the straight mix."""
     psd = PSDImage.open(full_name("text.psb"))
     assert not np.array_equal(
         np.asarray(psd.composite(force=True)),
         np.asarray(psd.composite(force=True, text_gamma=None)),
     )
-    # A layer composites over a transparent backdrop, so the difference needs
-    # something of the layer's own under the glyph edge: its stroke band.
-    _, layer = _layer_effects("Stroke")
-    default = layer.composite(force=True)
-    straight = layer.composite(force=True, text_gamma=None)
-    assert default is not None and straight is not None
-    assert not np.array_equal(np.asarray(default), np.asarray(straight))
-
-    artboard = PSDImage.open(full_name("artboard.psd"))[0]
-    default = artboard.composite(force=True)
-    straight = artboard.composite(force=True, text_gamma=None)
-    assert default is not None and straight is not None
-    assert not np.array_equal(np.asarray(default), np.asarray(straight))
 
 
 # -- Effects ---------------------------------------------------------------- #
@@ -811,7 +798,8 @@ def _with_preview(psd: PSDImage, preview: np.ndarray) -> PSDImage:
     """The document saved and reopened with ``preview`` as its stored composite."""
     buffer = io.BytesIO()
     image = Image.fromarray(np.round(preview * 255).astype(np.uint8), "RGB")
-    psd.save(buffer, preview=image)
+    store_preview(psd, image)
+    psd.save(buffer, update_preview=False)
     buffer.seek(0)
     return PSDImage.open(buffer)
 
@@ -971,7 +959,8 @@ def test_the_preview_is_read_once_until_it_changes() -> None:
     first = compositing._text_reference(psd)
     assert compositing._text_reference(psd) is first
     gray = Image.new("RGB", (psd.width, psd.height), (128, 128, 128))
-    psd.save(io.BytesIO(), preview=gray)
+    store_preview(psd, gray)
+    psd.save(io.BytesIO(), update_preview=False)
     second = compositing._text_reference(psd)
     assert second is not first and second is not None
     assert np.all(second == 128)

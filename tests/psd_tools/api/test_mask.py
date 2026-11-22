@@ -123,14 +123,6 @@ def test_mask_offset_moves_the_mask_and_keeps_its_size() -> None:
     assert moved.tobytes() == pixels.tobytes()
 
 
-def test_mask_left_and_top_setters() -> None:
-    _, digit = _digit()
-    digit.mask.left = 0
-    assert digit.mask.bbox == (0, 30, 40, 36)
-    digit.mask.top -= 5
-    assert digit.mask.bbox == (0, 25, 40, 31)
-
-
 def test_an_unmoved_mask_keeps_the_preview_current() -> None:
     psd, digit = _digit()
     digit.mask.offset = digit.mask.offset
@@ -209,6 +201,6 @@ def test_a_mask_drawn_from_a_vector_mask_is_not_moved(name: str) -> None:
     assert mask.data.real_flags is None
     bbox = mask.bbox
     with pytest.raises(ValueError, match="vector mask"):
-        mask.left += 10
+        mask.offset = (mask.left + 10, mask.top)
     assert mask.bbox == bbox
     assert not psd.is_updated()

@@ -32,7 +32,7 @@ from psd_tools.constants import Compression, Tag
 from psd_tools.psd.descriptor import Bool, Descriptor
 from psd_tools.psd.filter_effects import FilterEffectExtra
 
-from ..smart_filters import enable_filters, feid_item, store_items
+from ..smart_filters import enable_filters, feid_item, paired_item, store_items
 from ..utils import full_name
 
 pytest.importorskip("scipy")
@@ -144,7 +144,7 @@ def test_the_filter_effect_survives_a_save(filtered: Filtered) -> None:
     filtered.psd.save(buf)
     buf.seek(0)
     layer = _smart_objects(PSDImage.open(buf))[0]
-    assert layer.smart_object.filter_effect() is not None
+    assert paired_item(layer.smart_object) is not None
     _, right = filtered.halves()
     assert np.abs(_rgba(layer)[..., :3] - filtered.source)[right].max() <= 1
 
@@ -177,7 +177,7 @@ def test_layers_with_disjoint_rects_pair_with_their_own_items(
         items.append(feid_item(layer.bbox, np.zeros((h, w, 3), np.uint8), zeros, zeros))
     store_items(psd, items if in_layer_order else items[::-1])
     for layer, item in zip(layers, items, strict=True):
-        assert layer.smart_object.filter_effect() is item
+        assert paired_item(layer.smart_object) is item
 
 
 def test_an_item_that_does_not_contain_the_bbox_is_not_used() -> None:
@@ -190,7 +190,7 @@ def test_an_item_that_does_not_contain_the_bbox_is_not_used() -> None:
     zeros = np.zeros((h, w), np.uint8)
     item = feid_item((x0 + 1, y0, x1, y1), np.zeros((h, w, 3), np.uint8), zeros, zeros)
     store_items(psd, [item])
-    assert layer.smart_object.filter_effect() is None
+    assert paired_item(layer.smart_object) is None
     assert np.array_equal(_rgba(layer), stored)
 
 
@@ -220,7 +220,7 @@ def test_a_layer_keeps_its_item_after_an_earlier_filtered_layer_is_removed() -> 
     parent = first.parent
     assert isinstance(parent, GroupMixin)
     parent.remove(first)
-    item = second.smart_object.filter_effect()
+    item = paired_item(second.smart_object)
     assert item is not None and item.uuid == "1"
     assert np.array_equal(np.asarray(second.composite(force=True)), stored)
 
@@ -242,8 +242,8 @@ def test_the_mask_and_the_source_move_with_the_layer(filtered: Filtered) -> None
 
 def test_a_duplicate_pairs_as_its_source_does(filtered: Filtered) -> None:
     copy = filtered.layer.duplicate()
-    item = filtered.layer.smart_object.filter_effect()
-    assert item is not None and copy.smart_object.filter_effect() is item
+    item = paired_item(filtered.layer.smart_object)
+    assert item is not None and paired_item(copy.smart_object) is item
     copy.left += 4
     assert np.array_equal(_rgba(copy), _rgba(filtered.layer))
 
@@ -258,7 +258,7 @@ def test_a_layer_from_another_document_keeps_its_stored_pixels(move: bool) -> No
         layer = origin.layer
     else:
         layer = origin.layer.copy_to(target.psd)
-    assert layer.smart_object.filter_effect() is None
+    assert paired_item(layer.smart_object) is None
     out = _rgba(layer)[..., :3]
     assert np.abs(out - origin.stored)[origin.opaque].max() == 0
 
@@ -341,7 +341,7 @@ def test_a_two_byte_row_table_decodes_as_the_four_byte_one() -> None:
 def test_row_counts_that_fit_neither_width_keep_the_stored_pixels(
     filtered: Filtered, caplog: pytest.LogCaptureFixture
 ) -> None:
-    item = filtered.layer.smart_object.filter_effect()
+    item = paired_item(filtered.layer.smart_object)
     assert item is not None and isinstance(item.extra, FilterEffectExtra)
     item.extra.data = item.extra.data[:-1]
     with caplog.at_level(logging.WARNING):
@@ -357,7 +357,7 @@ def test_a_plane_that_does_not_decode_keeps_the_stored_pixels(
     filtered: Filtered, compression: Compression, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Rather than the black plane decompress() puts in its place."""
-    item = filtered.layer.smart_object.filter_effect()
+    item = paired_item(filtered.layer.smart_object)
     assert item is not None and isinstance(item.extra, FilterEffectExtra)
     item.extra.compression = int(compression)
     item.extra.data = b"\x78\x9c" + b"\xff" * 20
@@ -486,7 +486,7 @@ def test_an_all_white_mask_does_not_decode_the_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     filtered = _filtered()
-    item = filtered.layer.smart_object.filter_effect()
+    item = paired_item(filtered.layer.smart_object)
     assert item is not None
     h, w = filtered.stored.shape[:2]
     white = np.full((h, w), 255, np.uint8)
@@ -515,7 +515,7 @@ def _masked(kind: str) -> Filtered:
         mask = np.full((h, w), 255, np.uint8)
         if kind == "top":
             mask[h // 2 :] = 0
-        item = filtered.layer.smart_object.filter_effect()
+        item = paired_item(filtered.layer.smart_object)
         assert item is not None
         item.extra = feid_item(filtered.layer.bbox, mask[..., None], mask, mask).extra
     return filtered

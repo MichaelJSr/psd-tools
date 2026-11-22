@@ -76,7 +76,7 @@ class Mask(MaskProtocol):
 
     @property
     def left(self) -> int:
-        """Left coordinate. Writable: see :py:attr:`offset`."""
+        """Left coordinate."""
         if self.has_real():
             return (
                 self._data.real_left
@@ -84,10 +84,6 @@ class Mask(MaskProtocol):
                 else self._data.left
             )
         return self._data.left
-
-    @left.setter
-    def left(self, value: int) -> None:
-        self.offset = (value, self.top)
 
     @property
     def right(self) -> int:
@@ -102,7 +98,7 @@ class Mask(MaskProtocol):
 
     @property
     def top(self) -> int:
-        """Top coordinate. Writable: see :py:attr:`offset`."""
+        """Top coordinate."""
         if self.has_real():
             return (
                 self._data.real_top
@@ -110,10 +106,6 @@ class Mask(MaskProtocol):
                 else self._data.top
             )
         return self._data.top
-
-    @top.setter
-    def top(self, value: int) -> None:
-        self.offset = (self.left, value)
 
     @property
     def bottom(self) -> int:

@@ -279,11 +279,8 @@ def test_resource_constants(text_layer: TypeLayer) -> None:
     m = TextModel.from_layer(cast(TypeLayer, _Layer(text_layer.engine_dict, resources)))
     assert (m.sub_size, m.sub_position, m.auto_leading) == (0.6, 0.3, 1.5)
     style = m.runs[0].style
-    ratios = [
-        (m.size_ratio(s), m.position_ratio(s))
-        for s in (replace(style, baseline=b) for b in (0, 1, 2))
-    ]
-    assert ratios == [(1.0, 0.0), (0.5, 0.25), (0.6, 0.3)]
+    ratios = [m.position_ratio(replace(style, baseline=b)) for b in (0, 1, 2)]
+    assert ratios == [0.0, 0.25, 0.3]
     assert m.transform == (2.0, 0.0, 0.0, 2.0, 10.0, 20.0)
 
 

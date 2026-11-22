@@ -32,10 +32,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "add_font",
-    "composer_gaps",
     "drop_strikes",
     "kerning_methods",
-    "pin_composer",
     "set_run_style",
     "set_span_style",
     "set_text",
@@ -590,9 +588,7 @@ class _Story:
             )
         return names.index(name)
 
-    def font_adder(
-        self, name: str, font_type: int, script: int, synthetic: int
-    ) -> Callable[[], None] | None:
+    def font_adder(self, name: str, font_type: int) -> Callable[[], None] | None:
         """Return the write that adds face ``name`` to Txt2; None when listed."""
         fonts = _resource_items(self.root, self.k, self.k.font_set)
         if name in _story_font_names(self.root, self.k):
@@ -601,10 +597,8 @@ class _Story:
         item_key, identifier_key, name_key = k.font_name
         identifier = engine_data.Dict()
         identifier[name_key] = engine_data.String(name)
-        # Script and Synthetic are written only when set, as Photoshop does.
-        for key, value in (("1", script), ("2", font_type), ("3", synthetic)):
-            if value or key == "2":
-                identifier[key] = engine_data.Integer(int(value))
+        # Script and Synthetic (keys 1 and 3) are unset, so not written.
+        identifier["2"] = engine_data.Integer(int(font_type))
         resource = engine_data.Dict()
         resource[k.paint[0]] = engine_data.Property("CoolTypeFont")
         resource[identifier_key] = identifier
@@ -957,16 +951,13 @@ def add_font(
     name: str,
     *,
     font_type: int = 1,
-    script: int = 0,
-    synthetic: int = 0,
 ) -> int:
     """Add the face PostScript ``name`` to the layer's ``FontSet``.
 
     Returns the face's index, the value a run's ``Font`` key holds. A face
     already listed keeps its entry. ``font_type`` is Photoshop's outline
-    flag, ``1`` for TrueType and ``0`` for PostScript (CFF or Type 1);
-    ``script`` and ``synthetic`` are stored as given, ``0`` being Roman
-    and none. The face is appended, so no run changes font. The document
+    flag, ``1`` for TrueType and ``0`` for PostScript (CFF or Type 1). The
+    face is appended, so no run changes font. The document
     resources in the layer's EngineData list it too, and so does the
     FontSet of the document's Txt2 block when the layer has a story.
     """
@@ -976,15 +967,13 @@ def add_font(
     if fonts is None:
         raise ValueError("the layer's EngineData has no FontSet")
     story = _story(layer)
-    add_to_story = (
-        story.font_adder(name, font_type, script, synthetic) if story else None
-    )
+    add_to_story = story.font_adder(name, font_type) if story else None
     if add_to_story is not None:
         add_to_story()
     names = _font_names(fonts)
     if name in names:
         return names.index(name)
-    entry = _font_entry(name, font_type, script, synthetic)
+    entry = _font_entry(name, font_type)
     shared = _font_set(layer.document_resources)
     if shared is not None and name not in _font_names(shared):
         shared.append(copy.deepcopy(entry))
@@ -1002,14 +991,12 @@ def _font_names(fonts: engine_data.List | None) -> list[str]:
     return [str(f["Name"].value) for f in fonts or ()]
 
 
-def _font_entry(
-    name: str, font_type: int, script: int, synthetic: int
-) -> engine_data.Dict:
+def _font_entry(name: str, font_type: int) -> engine_data.Dict:
     entry = engine_data.Dict()
     entry["Name"] = engine_data.String(name)
-    entry["Script"] = engine_data.Integer(int(script))
+    entry["Script"] = engine_data.Integer(0)
     entry["FontType"] = engine_data.Integer(int(font_type))
-    entry["Synthetic"] = engine_data.Integer(int(synthetic))
+    entry["Synthetic"] = engine_data.Integer(0)
     return entry
 
 
@@ -1150,7 +1137,7 @@ def drop_strikes(layer: TypeLayer, fonts: Iterable[str]) -> None:
     """Drop the story's frame and glyph strikes: they no longer match it.
 
     The layer was redrawn, its story edited, or its story changed under its
-    raster (``tools/sweep_strikes.py``). Photoshop mixes a raster under stale
+    raster. Photoshop mixes a raster under stale
     strikes straight, and composes a story without strikes at open, in the
     text gamma. ``fonts`` are the faces the story is set in; a story in
     :data:`_KEEP_STRIKES` keeps them. The story's paragraphs also get
@@ -1169,31 +1156,6 @@ def drop_strikes(layer: TypeLayer, fonts: Iterable[str]) -> None:
         del view[story.k.strikes]
         _pin_composer(story, layer)
         _touch(layer)
-
-
-def composer_gaps(layer: TypeLayer) -> int:
-    """Story paragraph runs without a composer flag; 0 without a story of its own."""
-    try:
-        story = _story(layer)
-    except ValueError:
-        return 0
-    return 0 if story is None else len(_composer_gaps(story))
-
-
-def pin_composer(layer: TypeLayer) -> int:
-    """Give the story's paragraph runs TySh's composer flag where unset.
-
-    Older writes left them without one (``tools/sweep_strikes.py``).
-    Returns how many runs got one; a shared story is left alone.
-    """
-    try:
-        story = _story(layer)
-    except ValueError:
-        return 0
-    n = 0 if story is None else _pin_composer(story, layer)
-    if n:
-        _touch(layer)
-    return n
 
 
 def _touch(layer: TypeLayer) -> None:

@@ -53,10 +53,6 @@ def prune_min(
     return result
 
 
-cdef double DIAG = 1.4142135623730951
-cdef double KNIGHT = 2.23606797749979
-
-
 def chamfer_transform(mask, double diag, double knight):
     mask = np.ascontiguousarray(mask, dtype=bool)
     # Unpacking checks the length (ValueError, as the numpy code); shape[1]

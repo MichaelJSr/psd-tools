@@ -1201,7 +1201,7 @@ _GLOW_RANGE_STEPS = 255
 _GRADIENT_GLOW_GAIN = 25.0 / 3.0
 
 # What one pixel of a shadow's or glow's canvas costs at the peak of
-# ``draw_drop_shadow()`` or ``glow_falloff()``: the silhouette it is cast
+# ``draw_drop_shadow()`` or ``glow_matte()`` and ``glow_ranged()``: the silhouette it is cast
 # from, the matte spread grows and the distance transform and masks that grow
 # it, the blurred or ramped matte and the shifted one, with the object read or
 # group composite the silhouette is taken from, and the noise moved over the
@@ -1958,35 +1958,6 @@ def _noise_matte(matte: np.ndarray, ranged: np.ndarray, range_: float) -> np.nda
     return np.where(ranged * 255.0 >= 1.0, matte, 0.0).astype(np.float32)
 
 
-def glow_falloff(
-    shape: np.ndarray,
-    *,
-    size: float,
-    spread: float,
-    range_: float = _DEFAULT_GLOW_RANGE,
-    precise: bool = False,
-    contour: np.ndarray | None = None,
-    anti_aliased: bool = False,
-    noise: float = 0.0,
-    viewport: tuple[int, int, int, int] | None = None,
-) -> np.ndarray:
-    """How an outer glow falls off from ``shape``.
-
-    :py:func:`glow_matte`, then :py:func:`glow_ranged`.
-    """
-    if not math.isfinite(range_):
-        raise ValueError("Outer glow range must be finite: %r" % range_)
-    matte = glow_matte(shape, size=size, spread=spread, precise=precise)
-    return glow_ranged(
-        matte,
-        range_=range_,
-        contour=contour,
-        anti_aliased=anti_aliased,
-        noise=noise,
-        viewport=viewport,
-    )
-
-
 def uncovered(shape: np.ndarray, hidden: np.ndarray) -> np.ndarray:
     """What an effect beneath the layer goes on at, so it shows at ``1 - shape``.
 
@@ -2032,7 +2003,7 @@ def glow_paint(
 ) -> tuple[np.ndarray, np.ndarray]:
     """What an outer glow is painted with, on ``viewport``: its colour and coverage.
 
-    ``shape`` is the silhouette, ``falloff`` what :py:func:`glow_falloff`
+    ``shape`` is the silhouette, ``falloff`` what :py:func:`glow_ranged`
     drew from it and ``matte`` the :py:func:`glow_matte` under that falloff.
     A solid colour is the descriptor's, covering the falloff. A gradient is
     laid along the falloff instead: its start at the silhouette's edge,

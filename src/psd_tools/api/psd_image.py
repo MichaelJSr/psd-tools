@@ -179,37 +179,6 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         self._init()
         self._stash_links()
 
-    def close(self) -> None:
-        """
-        Unlink the layer tree, so the document is freed once it is dropped.
-
-        Layers point back at their group and their document, and a layer's
-        mask and smart object at the layer, so a dropped document otherwise
-        waits for the cyclic garbage collector, its bytes with it. The
-        document and its layers are not usable afterwards.
-        ``with PSDImage.open(...) as psd:`` closes it on exit.
-        """
-        stack: list[Any] = list(self._layers)
-        while stack:
-            layer = stack.pop()
-            children = getattr(layer, "_layers", None)
-            if children:
-                stack.extend(children)
-                layer._layers = []
-            layer._parent = None
-            layer._psd = None
-            held = vars(layer)
-            held.pop("_mask", None)
-            held.pop("_smart_object", None)
-        self._layers = []
-        self._psd = None  # type: ignore[assignment]
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
     @classmethod
     def new(
         cls,
@@ -388,7 +357,6 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         fp: IO[bytes] | str | bytes | os.PathLike,
         mode: str = "wb",
         *,
-        preview: Image.Image | None = None,
         update_preview: bool = True,
         **kwargs: Any,
     ) -> None:
@@ -408,40 +376,11 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
         :param encoding: charset encoding of the pascal string within the file,
             default 'macroman'.
         :param mode: file open mode, default 'wb'.
-        :param preview: flattened image to store as the preview instead of
-            compositing one, edited or not. It holds the document's own color
-            values, as :py:meth:`composite` returns them with
-            ``apply_icc=False``: the document's size, and the PIL mode of its
-            color mode with or without alpha (``"P"`` or ``"RGB"`` for an
-            indexed one). An ``"L"`` or ``"RGB"`` image stores an opaque
-            preview; a mode with no alpha band (``"CMYK"``, ``"LAB"``,
-            ``"P"``, ``"1"``) keeps the stored transparency plane. A document
-            with no transparency channel stores the colour alone.
-            Regenerated or supplied, the stored preview sets
-            :py:meth:`has_preview` to whether the stored planes hold the whole
-            image: ``True`` on a document with no layers and where the alpha
-            is kept or is opaque everywhere, ``False`` otherwise, even if it
-            was ``True``. A ``"CMYK"`` or ``"LAB"`` image on a layered
-            document with no transparency channel carries no coverage and
-            leaves it as it was. A document without a VersionInfo resource
-            always reports ``True``.
         :param update_preview: ``False`` writes the stored preview unchanged,
             even after an edit. A document without its merged image
-            (:py:meth:`strip_merged`) is saved without one either way, unless
-            ``preview`` is given.
-        :raises TypeError: if ``preview`` is not a PIL image.
-        :raises ValueError: if ``preview`` does not fit the document, is given
-            for a multichannel document, which PIL has no mode for, or is
-            given with ``update_preview=False``.
+            (:py:meth:`strip_merged`) is saved without one either way.
         """
-        if preview is not None:
-            if not update_preview:
-                raise ValueError("preview cannot be given with update_preview=False")
-            planes, holds = pil_io.convert_pil_to_image_data(self, preview)
-            self._record.image_data.set_data(planes, self._record.header)
-            self._mark_composite(holds)
-            self._stripped = None
-        elif update_preview and self.is_updated() and not self.is_stripped():
+        if update_preview and self.is_updated() and not self.is_stripped():
             try:
                 self._update_preview()
             except ImportError as e:

@@ -401,7 +401,7 @@ class SmartObject:
             None,
         )
 
-    def filter_effect(self) -> FilterEffect | None:
+    def _paired_effect(self) -> tuple[FilterEffect, int, int] | None:
         """Return the document's stored filter input and mask for this layer.
 
         Photoshop keeps, for each smart object carrying smart filters, the
@@ -413,13 +413,9 @@ class SmartObject:
         the layer's bbox as the document was opened: the item at the layer's
         position among the filtered layers then if it does, else the first one
         that does. A duplicate pairs as its source does; a layer the document
-        was not opened with has none.
+        was not opened with has none. With the item, how far the layer has
+        moved since.
         """
-        paired = self._paired_effect()
-        return None if paired is None else paired[0]
-
-    def _paired_effect(self) -> tuple[FilterEffect, int, int] | None:
-        """:py:meth:`filter_effect`, and how far the layer has moved since."""
         if self.filters is None:
             return None
         own = self.filter_item

@@ -24,7 +24,7 @@ from psd_tools.constants import BlendMode, Tag
 from psd_tools.psd.lazy import load
 
 from ..smart_filters import feid_item, store_items
-from ..utils import full_name
+from ..utils import full_name, store_preview
 
 pytest.importorskip("scipy")
 
@@ -164,9 +164,6 @@ def test_a_boxed_entry_serves_boxes_inside_it_until_evicted() -> None:
     cache.put(("prefix", 1), (np.zeros(400, np.float32),))  # evicts it
     assert cache.get_around(key, (2, 2, 3, 3)) is None
     assert not cache._boxes[key]
-    cache.put_boxed(key, (0, 0, 1, 1), (alpha,))
-    cache.clear()
-    assert not cache._boxes
     nothing = RenderCache(max_bytes=0)
     nothing.put_boxed(key, (0, 0, 10, 10), (alpha,))
     assert nothing.get_around(key, (0, 0, 1, 1)) is None and not nothing._boxes
@@ -196,7 +193,7 @@ def test_the_cache_stays_within_its_size() -> None:
     cache = RenderCache(max_bytes=64 << 10)
     for path in _FILES:
         _render(path, cache)
-        assert cache.nbytes <= cache.max_bytes
+        assert cache._bytes <= cache.max_bytes
 
 
 def test_an_array_shared_by_entries_is_counted_once() -> None:
@@ -204,11 +201,11 @@ def test_an_array_shared_by_entries_is_counted_once() -> None:
     a, b = np.zeros(250, np.float32), np.ones(250, np.float32)
     cache.put(("prefix", 1), (a, b))
     cache.put(("prefix", 2), (a, a))
-    assert cache.nbytes == 2000
+    assert cache._bytes == 2000
     cache.put(("prefix", 3), (np.zeros(250, np.float32),))
     cache.put(("prefix", 4), (np.zeros(250, np.float32),))  # evicts 1 only
     assert ("prefix", 1) not in cache and ("prefix", 2) in cache
-    assert cache.nbytes == 3000
+    assert cache._bytes == 3000
 
 
 def test_a_checkpoint_holds_equal_planes_once() -> None:
@@ -434,7 +431,8 @@ def _veiled_kept_raster() -> PSDImage:
     )
     image = Image.fromarray(np.round(straight[..., :3] * 255).astype(np.uint8), "RGB")
     buffer = io.BytesIO()
-    psd.save(buffer, preview=image)
+    store_preview(psd, image)
+    psd.save(buffer, update_preview=False)
     buffer.seek(0)
     return PSDImage.open(buffer)
 

@@ -132,7 +132,7 @@ def _template_row(psd: PSDImage) -> set[int]:
     row = _find(template, "Stats Bars/Darks/Hp Dark").copy_to(darks, index=0)
     row.name = "Def Dark"
     for digit in row:
-        digit.mask.top += 10
+        digit.mask.offset = (digit.mask.left, digit.mask.top + 10)
     return set()
 
 
