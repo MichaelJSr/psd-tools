@@ -386,3 +386,74 @@ def test_mosaic_cells_on_the_canvas_grid() -> None:
     assert placed is not None
     placed.transform = (-1.0, 0.0, 32.0, 0.0, 32.0, 32.0, -1.0, 32.0)
     assert not so.can_draw_filters()
+
+
+def _perspective(
+    vertices: list, warped: list, quads: int = 1, mode: bytes = b"warp"
+) -> Descriptor:
+    """A Perspective Warp run on the canvas quad 10 px lower than the layer's."""
+    fltr = Descriptor(classID=b"perspectiveWarpTransform")
+    fltr[b"Md  "] = Enumerated(b"perspectiveWarpMode", mode)
+    for key, points in ((b"vertices", vertices), (b"warpedVertices", warped)):
+        found = []
+        for x, y in points:
+            point = Descriptor(classID=b"Pnt ")
+            point[b"Hrzn"], point[b"Vrtc"] = Double(x), Double(y + 10)
+            found.append(point)
+        fltr[key] = _list(found)
+    quad = Descriptor(classID=b"perspectiveWarpQuad")
+    quad[b"indices"] = _list(Integer(i) for i in range(4))
+    fltr[b"quads"] = _list([quad] * quads)
+    for i, (x, y) in enumerate(((0, 0), (32, 0), (32, 32), (0, 32))):
+        fltr[b"PuX%d" % i], fltr[b"PuY%d" % i] = Double(x), Double(y + 10)
+    return fltr
+
+
+def test_perspective_warp_redraws_its_stored_pixels() -> None:
+    """A one-quad warp draws its stored FEid source onto its stored pixels.
+
+    A move by (3, 2); on a quad twice the size round its centre (a file of
+    twice the pixels) the vertices follow it, a move of (6, 4). A trapezoid
+    projects the square's centre where its diagonals cross. Layout mode or
+    two quads refused.
+    """
+    layer, entry = _object()
+    so = layer.smart_object
+    square = [(4, 4), (28, 4), (28, 28), (4, 28)]
+    entry[b"Fltr"] = _perspective(square, [(x + 3, y + 2) for x, y in square])
+    assert so.can_draw_filters()
+    stored = np.rint(np.asarray(layer.numpy(), np.float64) * 255).astype(np.uint8)
+    x0, y0, x1, y1 = layer.bbox
+    h, w = stored.shape[:2]
+    source = (x0 - 3, y0 - 2, x1, y1)  # holds the layer's box: it pairs
+    plane = np.zeros((h + 2, w + 3, 4), np.uint8)
+    plane[:h, :w] = stored
+    zeros = np.zeros((h + 2, w + 3), np.uint8)
+    store_items(layer._psd, [feid_item(source, plane[..., :3], plane[..., 3], zeros)])
+    found = so.filter_source()
+    assert found is not None and found[0] == source and found[2] is not None
+    picture = np.dstack([found[1], found[2]]).astype(np.float32) / 255
+    out, box = so.draw_filters(picture, source)
+    assert box == (x0, y0, x1, y1)
+    ink = stored[..., 3] > 0
+    assert np.array_equal(np.rint(out[..., 3] * 255), stored[..., 3])
+    assert np.array_equal(np.rint(out[ink, :3] * 255), stored[ink, :3])
+    double = (-16.0, -16.0, 48.0, -16.0, 48.0, 48.0, -16.0, 48.0)
+    assert so.can_draw_filters(double)
+    moved, where = so.draw_filters(picture, source, double)
+    assert where == (x0 + 3, y0 + 2, x1 + 3, y1 + 2)
+    np.testing.assert_allclose(moved, out, atol=1e-6)
+    trapezoid = [(10, 4), (22, 4), (30, 28), (2, 28)]
+    entry[b"Fltr"] = _perspective(square, trapezoid)
+    dot = np.ones((2, 2, 4), np.float32)
+    out, box = so.draw_filters(dot, (15, 15, 17, 17))  # the square's centre
+    ys, xs = np.mgrid[box[1] : box[3], box[0] : box[2]] + 0.5
+    weight = out[..., 3] / out[..., 3].sum()
+    # the diagonals cross at (16, 11.2); the corners' mean is (16, 16)
+    assert abs((xs * weight).sum() - 16) < 0.1 and abs((ys * weight).sum() - 11.2) < 0.1
+    for fltr in (
+        _perspective(square, trapezoid, quads=2),
+        _perspective(square, trapezoid, mode=b"layout"),
+    ):
+        entry[b"Fltr"] = fltr
+        assert not so.can_draw_filters()

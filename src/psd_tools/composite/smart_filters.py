@@ -3,9 +3,10 @@
 A placed layer's pixels are its smart filters' result. When its file changes,
 the caller draws the new picture on the layer's quad and :py:func:`draw` draws
 the filters over it as Photoshop 2023 does: a Puppet Warp from its stored mesh,
-an Invert, a Gaussian Blur, a Motion Blur at angle 0 of a distance
-:py:data:`MOTION` holds, a Mosaic, a Hue/Saturation (master only), a Black &
-White (no tint) and a Relative Selective Color of the six hues.
+a Perspective Warp of one quad, an Invert, a Gaussian Blur, a Motion Blur at
+angle 0 of a distance :py:data:`MOTION` holds, a Mosaic, a Hue/Saturation
+(master only), a Black & White (no tint) and a Relative Selective Color of the
+six hues.
 Plain float64 numpy, element by element in a fixed order, and exactly rounded
 sums (no BLAS), so every CPU gives the same result.
 
@@ -39,6 +40,7 @@ Shape = tuple[np.ndarray, np.ndarray, np.ndarray, list[int], list[float]]
 
 _INVERT = int.from_bytes(b"Invr", "big")  # Invert's filterID; it has no Fltr
 _PUPPET = b"rigidTransform"
+_PERSPECTIVE = b"perspectiveWarpTransform"
 _MOSAIC = b"Msc "
 _GSNB = b"GsnB"  # Gaussian Blur
 _MTNB = b"MtnB"  # Motion Blur
@@ -75,6 +77,8 @@ def _kind(item: Descriptor) -> str | None:
     cls = cls.encode() if isinstance(cls, str) else cls
     if cls == _PUPPET:
         return "puppet"
+    if cls == _PERSPECTIVE and _corners(fltr) is not None:
+        return "perspective"
     if cls == _MOSAIC and _cell(fltr) is not None:
         return "mosaic"
     if cls == _GSNB and get_scalar(fltr, b"Rds ", float, 0.0) > 0:
@@ -138,6 +142,42 @@ def _cell(fltr: Descriptor) -> int | None:
     return int(size) if math.isfinite(size) and size == int(size) >= 2 else None
 
 
+def _corners(fltr: Descriptor) -> tuple[list[float], list[float]] | None:
+    """A Perspective Warp's one quad: its vertices and warped vertices.
+
+    Each ``[x0, y0, ..., x3, y3]`` (canvas px as the filter ran) in the quad's
+    order, both convex. ``None`` in Layout mode or with more quads.
+    """
+    if _enum(fltr.get(b"Md  ")) != b"warp" or len(fltr.get(b"quads") or []) != 1:
+        return None
+    order = [int(v) for v in fltr[b"quads"][0].get(b"indices") or []]
+    if sorted(order) != [0, 1, 2, 3]:
+        return None
+    found = []
+    for key in (b"vertices", b"warpedVertices"):
+        points = list(fltr.get(key) or [])
+        if len(points) != 4:
+            return None
+        xy = []
+        for i in order:
+            x = get_scalar(points[i], b"Hrzn", float, math.nan)
+            y = get_scalar(points[i], b"Vrtc", float, math.nan)
+            xy += [x, y]
+        if not all(math.isfinite(v) for v in xy) or not _convex(xy):
+            return None
+        found.append(xy)
+    return found[0], found[1]
+
+
+def _convex(q: list[float]) -> bool:
+    """Quad *q* is convex, its corners turning one way."""
+    turns = []
+    for i in range(4):
+        x0, y0, x1, y1, x2, y2 = (q[(2 * i + k) % 8] for k in range(6))
+        turns.append((x1 - x0) * (y2 - y1) - (y1 - y0) * (x2 - x1))
+    return all(t > 1e-9 for t in turns) or all(t < -1e-9 for t in turns)
+
+
 def _distance(fltr: Descriptor) -> int | None:
     """A Motion Blur's distance when at angle 0 and in :py:data:`MOTION`."""
     distance = get_scalar(fltr, b"Dstn", float, 0.0)
@@ -150,8 +190,9 @@ def _items(so: SmartObject, corners: Quad | None = None) -> list[Descriptor] | N
     """The filters on; ``None`` when they are not :py:func:`draw`'s.
 
     That is more than one, another kind, a blend other than Normal at 100%, a
-    mesh that does not decode, a quad no parallelogram or a Mosaic off its
-    grid; the quad *corners*, by default the layer's.
+    mesh that does not decode, a quad no parallelogram, a Perspective Warp's
+    quad flat or a Mosaic off its grid; the quad *corners*, by default the
+    layer's.
     """
     fx = so.filters
     if fx is None or not _on(fx):
@@ -180,6 +221,11 @@ def _items(so: SmartObject, corners: Quad | None = None) -> list[Descriptor] | N
         or _mapping(so, found[0][b"Fltr"], corners) is None
     ):
         return None
+    if (
+        _kind(found[0]) == "perspective"
+        and _perspective(so, found[0][b"Fltr"], corners) is None
+    ):
+        return None
     if _kind(found[0]) == "mosaic" and not _whole_cells(so, found[0][b"Fltr"], corners):
         return None
     return found
@@ -188,12 +234,12 @@ def _items(so: SmartObject, corners: Quad | None = None) -> list[Descriptor] | N
 def drawable(so: SmartObject, corners: Quad | None = None) -> bool:
     """Whether :py:func:`draw` draws the object's smart filters on *corners*.
 
-    True with none on, or one on, a Puppet Warp, an Invert, a Gaussian Blur,
-    a Motion Blur at angle 0 of a distance :py:data:`MOTION` holds, a Mosaic
-    on a canvas of whole cells and a quad not above or left of it, a
-    Hue/Saturation of the master alone, a Black & White without tint or a
-    Relative Selective Color of the six hues, Normal at 100%, in an RGB
-    document. A filter mask does not refuse. *corners*: the quad the new
+    True with none on, or one on, a Puppet Warp, a Perspective Warp of one
+    quad, an Invert, a Gaussian Blur, a Motion Blur at angle 0 of a distance
+    :py:data:`MOTION` holds, a Mosaic on a canvas of whole cells and a quad
+    not above or left of it, a Hue/Saturation of the master alone, a Black &
+    White without tint or a Relative Selective Color of the six hues, Normal
+    at 100%, in an RGB document. A filter mask does not refuse. *corners*: the quad the new
     picture is drawn on, by default the layer's.
     """
     return _items(so, corners) is not None
@@ -241,6 +287,12 @@ def draw(
         cell = _cell(item[b"Fltr"])
         assert cell is not None
         return _mosaic(out, box, cell)
+    if kind == "perspective":
+        maps = _perspective(so, item[b"Fltr"], corners)
+        if maps is None:
+            raise ValueError("the filter's quad or the layer's is flat")
+        psd = so._layer._psd
+        return _project(out, box, maps, (psd.width, psd.height))
     if kind == "gaussian":
         psd = so._layer._psd
         radius = get_scalar(item[b"Fltr"], b"Rds ", float, 0.0)
@@ -268,6 +320,98 @@ def _mapping(
     if quad is None:
         return None
     return _affine([get_scalar(fltr, k, float, 0.0) for k in _PU], quad)
+
+
+def _perspective(
+    so: SmartObject, fltr: Descriptor, corners: Quad | None
+) -> tuple[list[float], list[float]] | None:
+    """A Perspective Warp's maps: the layer's canvas back to its picture, and on.
+
+    The quad's vertices and warped vertices follow the layer from the quad
+    the filter ran on (``PuX0``..) to its quad now, projectively (the Puppet
+    Warp's affine on parallelograms); then warped vertices -> vertices, and
+    vertices -> warped vertices.
+    """
+    quad = corners if corners is not None else so.transform_box
+    found = _corners(fltr)
+    if quad is None or found is None:
+        return None
+    moved = _between([get_scalar(fltr, k, float, 0.0) for k in _PU], list(quad))
+    if moved is None:
+        return None
+    vertices, warped = (_through(moved, q) for q in found)
+    if vertices is None or warped is None:
+        return None
+    back, ahead = _between(warped, vertices), _between(vertices, warped)
+    return None if back is None or ahead is None else (back, ahead)
+
+
+def _square(q: list[float]) -> list[float] | None:
+    """The homography of the unit square onto quad *q* (TL TR BR BL).
+
+    3 x 3 row by row; ``None`` when flat.
+    """
+    x0, y0, x1, y1, x2, y2, x3, y3 = q
+    sx, sy = x0 - x1 + x2 - x3, y0 - y1 + y2 - y3
+    dx1, dx2, dy1, dy2 = x1 - x2, x3 - x2, y1 - y2, y3 - y2
+    den = dx1 * dy2 - dx2 * dy1
+    if abs(den) < 1e-12:
+        return None
+    g = (sx * dy2 - dx2 * sy) / den
+    h = (dx1 * sy - sx * dy1) / den
+    m = [x1 - x0 + g * x1, x3 - x0 + h * x3, x0, y1 - y0 + g * y1, y3 - y0 + h * y3]
+    return [*m, y0, g, h, 1.0]
+
+
+def _between(src: list[float], dst: list[float]) -> list[float] | None:
+    """The homography of quad *src* onto quad *dst*, w = 1 at *src*'s centre.
+
+    ``None`` when either is flat or *src* crosses its horizon. Plain floats
+    in a fixed order (no BLAS).
+    """
+    a, b = _square(src), _square(dst)
+    if a is None or b is None:
+        return None
+    inverse = [  # adjugate: a's inverse up to scale
+        a[4] * a[8] - a[5] * a[7],
+        a[2] * a[7] - a[1] * a[8],
+        a[1] * a[5] - a[2] * a[4],
+        a[5] * a[6] - a[3] * a[8],
+        a[0] * a[8] - a[2] * a[6],
+        a[2] * a[3] - a[0] * a[5],
+        a[3] * a[7] - a[4] * a[6],
+        a[1] * a[6] - a[0] * a[7],
+        a[0] * a[4] - a[1] * a[3],
+    ]
+    m = [
+        b[3 * r] * inverse[c]
+        + b[3 * r + 1] * inverse[3 + c]
+        + b[3 * r + 2] * inverse[6 + c]
+        for r in range(3)
+        for c in range(3)
+    ]
+    cx, cy = sum(src[0::2]) / 4, sum(src[1::2]) / 4
+    w = m[6] * cx + m[7] * cy + m[8]
+    if not math.isfinite(w) or abs(w) < 1e-300:
+        return None
+    m = [v / w for v in m]
+    if not all(math.isfinite(v) for v in m) or _through(m, src) is None:
+        return None
+    return m
+
+
+def _through(m: list[float], q: list[float]) -> list[float] | None:
+    """Points ``[x0, y0, ..]`` through homography *m*.
+
+    ``None`` when one is past its horizon.
+    """
+    out = []
+    for x, y in zip(q[0::2], q[1::2], strict=True):
+        w = m[6] * x + m[7] * y + m[8]
+        if w <= 1e-12:
+            return None
+        out += [(m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w]
+    return out
 
 
 def _sampling(so: SmartObject, fltr: Descriptor, mesh: Mesh) -> str:
@@ -569,6 +713,50 @@ def _nearest(pre: np.ndarray, box: Box, sx: np.ndarray, sy: np.ndarray) -> np.nd
     out = np.zeros((len(sx), 4))
     out[ok] = pre[y[ok], x[ok]]
     return out
+
+
+def _project(
+    rgba: np.ndarray,
+    box: Box,
+    maps: tuple[list[float], list[float]],
+    size: tuple[int, int],
+) -> tuple[np.ndarray, Box]:
+    """*rgba* on canvas *box* under a Perspective Warp, as stored.
+
+    Each pixel centre takes the picture at its point through the map back
+    (canvas -> picture), bilinear, premultiplied, clear outside the picture.
+    Over the picture's box and the canvas, cut to where the picture lands.
+    """
+    back, ahead = maps
+    x0, y0 = min(box[0], 0), min(box[1], 0)
+    x1, y1 = max(box[2], size[0]), max(box[3], size[1])
+    left, top, right, bottom = box[0] - 1, box[1] - 1, box[2] + 1, box[3] + 1
+    lands = _through(ahead, [left, top, right, top, right, bottom, left, bottom])
+    if lands is not None:  # the picture's box short of the horizon
+        x0 = max(x0, math.floor(min(lands[0::2])) - 1)
+        y0 = max(y0, math.floor(min(lands[1::2])) - 1)
+        x1 = min(x1, math.ceil(max(lands[0::2])) + 1)
+        y1 = min(y1, math.ceil(max(lands[1::2])) + 1)
+    if x1 <= x0 or y1 <= y0:
+        return np.zeros((0, 0, 4), np.float32), (0, 0, 0, 0)
+    pic = rgba.astype(np.float64)
+    pre = np.empty(pic.shape)
+    pre[..., :3] = pic[..., :3] * pic[..., 3:]
+    pre[..., 3] = pic[..., 3]
+    out = np.empty((y1 - y0, x1 - x0, 4))
+    xs = np.arange(x0, x1) + 0.5
+    rows = max(1, _BAND // (x1 - x0))
+    for r0 in range(0, y1 - y0, rows):
+        r1 = min(r0 + rows, y1 - y0)
+        ys = np.arange(y0 + r0, y0 + r1)[:, None] + 0.5
+        w = back[6] * xs + back[7] * ys + back[8]
+        ok = w > 1e-12
+        w = np.where(ok, w, 1.0)
+        sx = np.where(ok, (back[0] * xs + back[1] * ys + back[2]) / w, -1e9)
+        sy = np.where(ok, (back[3] * xs + back[4] * ys + back[5]) / w, -1e9)
+        band = _bilinear(pre, box, sx.ravel(), sy.ravel())
+        out[r0:r1] = band.reshape(r1 - r0, x1 - x0, 4)
+    return _straight(out, (x0, y0, x1, y1))
 
 
 def _whole_cells(so: SmartObject, fltr: Descriptor, corners: Quad | None) -> bool:

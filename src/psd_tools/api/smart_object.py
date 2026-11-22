@@ -528,12 +528,12 @@ class SmartObject:
     def can_draw_filters(self, corners: Sequence[float] | None = None) -> bool:
         """Return whether :py:meth:`draw_filters` draws the smart filters on.
 
-        True with none on, or one Puppet Warp, Invert, Gaussian Blur, proven
-        Motion Blur, Mosaic on the canvas's grid, master-only Hue/Saturation,
-        untinted Black & White or Relative Selective Color of the six hues,
-        Normal at 100%, in an RGB document; a filter mask does not refuse (the
-        composite applies it). *corners*: the quad a new picture is drawn on
-        (default :py:attr:`transform_box`).
+        True with none on, or one Puppet Warp, one-quad Perspective Warp,
+        Invert, Gaussian Blur, proven Motion Blur, Mosaic on the canvas's grid,
+        master-only Hue/Saturation, untinted Black & White or Relative
+        Selective Color of the six hues, Normal at 100%, in an RGB document; a
+        filter mask does not refuse (the composite applies it). *corners*: the
+        quad a new picture is drawn on (default :py:attr:`transform_box`).
         """
         from psd_tools.composite import smart_filters  # noqa: PLC0415
 
