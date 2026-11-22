@@ -23,9 +23,9 @@ Changelog
   refused
 - [api] ``SmartObject.draw_filters()`` draws a Gaussian Blur (premultiplied,
   sigma = radius, edges repeated at the canvas's edge and faded inside it)
-  and a Motion Blur at angle 0 of a proven distance (6 px), and a filter
-  mask no longer refuses: Photoshop 2023 stores the filters' whole result as
-  the layer's pixels (16 of 16 saves, and its own relink of a new picture
+  and a Motion Blur at angle 0 of 1-256 px (alpha exact on Photoshop 2023's
+  pixels at 48 distances), and a filter mask no longer refuses: Photoshop
+  2023 stores the filters' whole result as the layer's pixels (16 of 16 saves, and its own relink of a new picture
   on two cards) and the composite blends it through the mask, as the fork
   already does. Fixed-order float64 sums and a decimal exp: the same on
   every CPU. Nothing else changes

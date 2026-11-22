@@ -172,7 +172,14 @@ def test_motion_blur_drawn_at_a_proven_distance() -> None:
     """A 6 px Motion Blur at angle 0: 7 taps, alpha (S + 2) // 7; others refused."""
     layer, entry = _object()
     so = layer.smart_object
-    for angle, distance, drawn in ((0, 6, True), (0, 17, False), (90, 6, False)):
+    for angle, distance, drawn in (
+        (0, 6, True),
+        (0, 17, True),
+        (0, 256, True),
+        (0, 257, False),
+        (0, 6.5, False),
+        (90, 6, False),
+    ):
         entry[b"Fltr"] = _blur(b"MtnB", Angl=angle, Dstn=distance)
         assert so.can_draw_filters() == drawn
     entry[b"Fltr"] = _blur(b"MtnB", Angl=0, Dstn=6)
@@ -181,6 +188,25 @@ def test_motion_blur_drawn_at_a_proven_distance() -> None:
     assert box == (2, 5, 9, 6)
     assert np.array_equal(np.rint(out[..., 3] * 255), np.full((1, 7), 257 // 7))
     assert np.array_equal(out[..., :3], np.ones((1, 7, 3), np.float32))
+
+
+_DOTS = [(1, 1), (2, 3), (3, 2), (6, 5), (15, 8), (17, 10), (31, 16), (255, 128)]
+
+
+@pytest.mark.parametrize("distance, alpha", [*_DOTS, (256, 130)])
+def test_motion_blur_rounds_as_photoshop(distance: int, alpha: int) -> None:
+    """*alpha* is the least a dot shows with: (a + c) // taps.
+
+    c = taps // 2, less 1 unless taps is a power of 2 (Photoshop 2023 on 48
+    distances, 1-256 px).
+    """
+    layer, entry = _object()
+    entry[b"Fltr"] = _blur(b"MtnB", Angl=0, Dstn=distance)
+    for a, shown in ((alpha, 1), (alpha - 1, 0)):
+        dot = np.full((1, 1, 4), a / 255, np.float32)
+        out, box = layer.smart_object.draw_filters(dot, (300, 5, 301, 6))
+        assert np.rint(out[..., 3] * 255).max(initial=0) == shown
+        assert box[2] - box[0] == shown * (distance + 1)
 
 
 def _hue(hue: int, *ranges: Descriptor, colorize: bool = False) -> Descriptor:

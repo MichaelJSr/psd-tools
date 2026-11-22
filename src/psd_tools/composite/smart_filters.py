@@ -3,9 +3,9 @@
 A placed layer's pixels are its smart filters' result. When its file changes,
 the caller draws the new picture on the layer's quad and :py:func:`draw` draws
 the filters over it as Photoshop 2023 does: a Puppet Warp from its stored mesh,
-an Invert, a Gaussian Blur, a Motion Blur of a distance :py:data:`MOTION` holds,
-a Hue/Saturation (master only), a Black & White (no tint) and a Relative
-Selective Color of the six hues.
+an Invert, a Gaussian Blur, a Motion Blur at angle 0 of a distance
+:py:data:`MOTION` holds, a Hue/Saturation (master only), a Black & White (no
+tint) and a Relative Selective Color of the six hues.
 Plain float64 numpy, element by element in a fixed order, and exactly rounded
 sums (no BLAS), so every CPU gives the same result.
 
@@ -54,9 +54,8 @@ _GREYS = (  # Black & White's sliders and defaults
     ("blue", b"Bl  ", 20),
     ("magenta", b"Mgnt", 80),
 )
-#: Motion Blur at angle 0 proven on Photoshop 2023's pixels: distance px -> c in
-#: the alpha's ``(S + c) // taps``.
-MOTION = {6: 2}
+#: Motion Blur distances (px) at angle 0 proven on Photoshop 2023's pixels.
+MOTION = range(1, 257)
 _PU = (b"PuX0", b"PuY0", b"PuX1", b"PuY1", b"PuX2", b"PuY2", b"PuX3", b"PuY3")
 _QUAD_TOL = 0.01  # px: a quad this close to a parallelogram is one
 _EDGE = 1e-9  # barycentric slack: a pixel centre on an edge is inside
@@ -659,10 +658,12 @@ def _motion(rgba: np.ndarray, box: Box, distance: int) -> tuple[np.ndarray, Box]
     """*rgba* on canvas *box* under a Motion Blur at angle 0, as stored.
 
     A box of distance + 1 taps over ``x - distance // 2 .. x + distance -
-    distance // 2`` of the 8-bit alpha, alpha ``(S + MOTION[distance]) //
-    taps``, colours averaged premultiplied. Integers, so exact.
+    distance // 2`` of the 8-bit alpha, alpha ``(S + c) // taps`` with ``c =
+    taps // 2``, less 1 unless taps is a power of 2; colours averaged
+    premultiplied.
     """
     taps, lo = distance + 1, distance // 2
+    bias = taps // 2 - bool(taps & distance)
     hi = distance - lo
     alpha = np.round(np.clip(rgba[..., 3], 0, 1) * 255).astype(np.int64)
     color = np.round(np.clip(rgba[..., :3], 0, 1) * 255).astype(np.int64)
@@ -678,7 +679,7 @@ def _motion(rgba: np.ndarray, box: Box, distance: int) -> tuple[np.ndarray, Box]
         return total
 
     total, inks = sums(alpha), sums(color)
-    out_alpha = (total + MOTION[distance]) // taps
+    out_alpha = (total + bias) // taps
     rgb = np.where(
         total[..., None] > 0, np.round(inks / np.maximum(total, 1)[..., None]), 0
     )
