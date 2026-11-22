@@ -26,7 +26,6 @@ import numpy as np
 
 from psd_tools.api._descriptor import get_scalar
 from psd_tools.composite import adjustments
-from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.constants import ColorMode
 from psd_tools.psd.descriptor import Descriptor
 
@@ -80,7 +79,7 @@ def _kind(item: Descriptor) -> str | None:
         return "gaussian"
     if cls == _MTNB and _distance(fltr) is not None:
         return "motion"
-    if cls == _HSTR and HAS_SCIPY and _master(fltr) is not None:
+    if cls == _HSTR and _master(fltr) is not None:
         return "hue"
     if cls == _BANW and not get_scalar(fltr, b"useTint", bool, False):
         return "grey"
