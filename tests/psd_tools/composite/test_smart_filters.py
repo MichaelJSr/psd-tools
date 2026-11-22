@@ -429,7 +429,8 @@ def test_perspective_warp_redraws_its_stored_pixels() -> None:
     plane = np.zeros((h + 2, w + 3, 4), np.uint8)
     plane[:h, :w] = stored
     zeros = np.zeros((h + 2, w + 3), np.uint8)
-    store_items(layer._psd, [feid_item(source, plane[..., :3], plane[..., 3], zeros)])
+    item = feid_item(source, plane[..., :3], plane[..., 3], zeros)
+    store_items(cast(PSDImage, layer._psd), [item])
     found = so.filter_source()
     assert found is not None and found[0] == source and found[2] is not None
     picture = np.dstack([found[1], found[2]]).astype(np.float32) / 255
