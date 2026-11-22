@@ -339,15 +339,6 @@ def test_a_contour_maps_the_glow_before_it_is_cut_under_the_silhouette() -> None
     assert np.all(glow[disc > 0.0] == 0.0)
 
 
-def test_an_outer_glow_asks_for_scipy_by_name_when_it_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A glow needs scipy the way a shadow does, and says so the same way."""
-    monkeypatch.setattr(effects, "HAS_SCIPY", False)
-    with pytest.raises(ImportError, match="Outer glow effects require: scipy"):
-        _glow(_disc(81, _RADIUS))
-
-
 def _sized(size: float) -> Descriptor:
     desc = Descriptor(classID=Klass.OuterGlow.value)
     desc[Key.Blur] = Double(size)

@@ -1,6 +1,5 @@
 import logging
 import math
-import sys
 from typing import Any, cast
 
 import numpy as np
@@ -1089,9 +1088,7 @@ def test_a_component_thinner_than_a_pixel_keeps_its_boundary(
     assert near is not None and near[40, 80 - 2 : 80 + 3].all()
 
 
-def test_the_silhouette_gate_is_charged_to_the_allocation_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_silhouette_gate_is_charged_to_the_allocation_budget() -> None:
     """The padded distance fields of a gated stroke are budgeted (#889)."""
     psd = PSDImage.open(full_name("path-operations/combine.psd"))
     assert vector.can_bury_arcs(psd[0])
@@ -1100,11 +1097,6 @@ def test_the_silhouette_gate_is_charged_to_the_allocation_budget(
         psd.composite(force=True, ignore_preview=True)
     psd._max_alloc_bytes = psd.width * psd.height * 400
     assert psd.composite(force=True, ignore_preview=True) is not None
-
-    # Without scipy nothing is allocated, so nothing is charged.
-    monkeypatch.setitem(sys.modules, "scipy.ndimage", None)
-    psd._max_alloc_bytes = psd.width * psd.height * 16
-    assert vector._near_silhouette(psd[0], 2.0, None) is None
 
 
 def test_an_open_subpath_is_stroked_wherever_the_silhouette_is() -> None:

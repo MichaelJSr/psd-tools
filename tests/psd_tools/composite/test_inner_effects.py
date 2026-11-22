@@ -8,8 +8,6 @@ from ``layer_effects.psd`` and editing it, so what is drawn has a closed form.
 """
 
 import copy
-import logging
-import sys
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -357,21 +355,6 @@ def test_shadow_geometry_names_the_effect_whose_value_is_not_finite(
             effects.shadow_geometry(desc, 0.0, what)
 
 
-@pytest.mark.parametrize(
-    ("draw", "name"),
-    [(_shadow, "Inner shadow"), (_glow, "Inner glow")],
-    ids=["shadow", "glow"],
-)
-def test_an_inner_effect_asks_for_scipy_by_name_when_it_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
-    draw: Callable[[np.ndarray], np.ndarray],
-    name: str,
-) -> None:
-    monkeypatch.setattr(effects, "HAS_SCIPY", False)
-    with pytest.raises(ImportError, match="%s effects require: scipy" % name):
-        draw(_disc(81, 20.0))
-
-
 def test_the_inner_effects_blur_as_the_drop_shadow_does() -> None:
     """The blur is shared with the drop shadow, so a change to it moves both.
 
@@ -662,26 +645,6 @@ def test_an_inner_effect_over_the_documents_budget_is_dropped_not_drawn(
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1
     assert np.array_equal(_render(psd)[0], disabled)
-
-
-@pytest.mark.parametrize("klass", [Klass.InnerShadow, Klass.InnerGlow])
-def test_without_scipy_an_inner_effect_is_skipped_and_the_document_renders(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, klass: Klass
-) -> None:
-    """A missing scipy costs the effect, with a warning, not the render."""
-    psd, layer = _square()
-    desc = _forge(layer, klass, Distance=4.0, Blur=4.0)
-    desc[Key.Enabled] = False
-    disabled, _ = _render(psd)
-    desc[Key.Enabled] = True
-    monkeypatch.setattr(
-        sys.modules["psd_tools.composite.composite"], "HAS_SCIPY", False
-    )
-    monkeypatch.setattr(effects, "HAS_SCIPY", False)
-    with caplog.at_level(logging.WARNING, logger="psd_tools.composite.composite"):
-        rendered, _ = _render(psd)
-    assert np.array_equal(rendered, disabled)
-    assert "install scipy" in caplog.text
 
 
 @pytest.mark.parametrize("force", [False, True])

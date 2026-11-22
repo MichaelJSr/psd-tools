@@ -8,7 +8,6 @@ from PIL import Image
 
 from psd_tools.api.utils import check_pixel_size
 from psd_tools.composite import scanline
-from psd_tools.composite._compat import require_aggdraw
 from psd_tools.constants import StrokeAlignment, Tag
 from psd_tools.psd.vector import Knot
 
@@ -70,7 +69,6 @@ _RIDGE_DROP = 0.5
 _ALIGN_SLACK = 0.025
 
 
-@require_aggdraw
 def draw_stroke(
     layer: "Layer",
     viewport: tuple[int, int, int, int] | None = None,
@@ -268,8 +266,8 @@ def _near_silhouette(
     Pixels within ``radius`` of the boundary of the shape the paths combine to.
 
     Keeping the pen to this neighbourhood drops the arcs one path buries inside
-    another (#889). ``None`` when there is nothing to bury or no scipy, which
-    leaves every arc stroked.
+    another (#889). ``None`` when there is nothing to bury, which leaves every
+    arc stroked.
     """
     if not can_bury_arcs(layer):
         return None
@@ -360,8 +358,8 @@ def _silhouette_distance(
 
     Photoshop strokes that silhouette, but a pen follows each input path, so an
     arc one path buries inside another would be stroked too (#889). Only
-    distances within ``radius`` are reliable. ``None`` when the shape is empty
-    or there is no scipy; ``inf`` throughout when the shape covers the viewport.
+    distances within ``radius`` are reliable. ``None`` when the shape is empty;
+    ``inf`` throughout when the shape covers the viewport.
     ``held_bytes`` is what the caller holds meanwhile, by default the colour of
     each viewport pixel. ``closed_only`` leaves out the open subpaths, whose
     implicit closing edge the fill would otherwise take for a boundary.
@@ -369,12 +367,9 @@ def _silhouette_distance(
     A pixel is inside at any coverage, so a component thinner than a pixel still
     has a boundary; the margin on ``radius`` absorbs the fringe it adds.
     """
-    try:
-        from scipy.ndimage import (  # type: ignore[import-untyped]  # noqa: PLC0415
-            distance_transform_edt,
-        )
-    except ImportError:
-        return None
+    from scipy.ndimage import (  # type: ignore[import-untyped]  # noqa: PLC0415
+        distance_transform_edt,
+    )
 
     if viewport is None:
         viewport = layer._psd.viewbox
@@ -630,7 +625,6 @@ def _flatten_subpath(
     return np.concatenate([polyline, points[-1:, 0]])
 
 
-@require_aggdraw
 def _stroke_subpath(
     subpath_list: list,
     viewport: tuple[int, int, int, int],

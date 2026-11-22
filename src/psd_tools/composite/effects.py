@@ -93,7 +93,6 @@ import numpy as np
 
 from psd_tools.api.utils import AllocBudget, check_pixel_size
 from psd_tools.composite import effect_noise, paint
-from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.utils import divide, intersect
 from psd_tools.constants import BevelStyle, BevelTechnique, ColorMode
 from psd_tools.psd.descriptor import Descriptor
@@ -177,18 +176,6 @@ def _enum(desc: Descriptor, key: bytes) -> bytes:
     enum collides with it, being four bytes.
     """
     return getattr(desc.get(key), "enum", b"")
-
-
-def _require_scipy(what: str) -> None:
-    """Raise :class:`ImportError` naming ``what`` and the package it needs."""
-    if not HAS_SCIPY:
-        raise ImportError(
-            "%s require: scipy\n\n"
-            "Install with:\n"
-            "    pip install 'psd-tools[composite]'\n"
-            "Or:\n"
-            "    pip install scipy" % what
-        )
 
 
 def _stroke_size(desc: Descriptor) -> float:
@@ -854,7 +841,6 @@ def _signed_distance(alpha: np.ndarray, reach: float | None = None) -> np.ndarra
     if reach is None:
         # No band named, so no bound: far enough that nothing is out of range.
         reach = float(math.hypot(*alpha.shape))
-    _require_scipy("Stroke effects")
     if (
         _cdistance is not None
         and hasattr(_cdistance, "distance_box")
@@ -1437,7 +1423,6 @@ def contour_table(desc: Descriptor | None) -> np.ndarray | None:
     table = np.interp(grid, xs, ys)
     curved = [(a, b) for a, b in _contour_runs(xs, smooth) if b - a >= 2]
     if curved:
-        _require_scipy("Layer effect contours")
         from scipy.interpolate import PchipInterpolator  # type: ignore[import-untyped]  # noqa: PLC0415
 
         for a, b in curved:
@@ -1659,7 +1644,6 @@ def draw_drop_shadow(
     A parameter that is not finite raises ``ValueError``; the file's values
     are checked once in :py:func:`shadow_geometry` before they get here.
     """
-    _require_scipy("Drop shadow effects")
     alpha = _cast_matte(
         shape[:, :, 0].astype(np.float32),
         distance=distance,
@@ -1741,7 +1725,6 @@ def draw_inner_shadow(
     effect inside the layer. The result is
     ``(height, width, 1)`` and never exceeds ``shape``.
     """
-    _require_scipy("Inner shadow effects")
     alpha = shape[:, :, 0].astype(np.float32)
     matte = _cast_matte(
         1.0 - alpha,
@@ -1913,7 +1896,6 @@ def glow_matte(
     A parameter that is not finite raises ``ValueError``, for the reason
     :py:func:`draw_drop_shadow` gives.
     """
-    _require_scipy("Outer glow effects")
     if not all(math.isfinite(value) for value in (size, spread)):
         raise ValueError(
             "Outer glow parameters must be finite: size=%r spread=%r" % (size, spread)
@@ -2193,7 +2175,6 @@ def _inner_glow(
     noise: float,
 ) -> _InnerGlow:
     """:py:func:`draw_inner_glow` before the cut to ``shape``."""
-    _require_scipy("Inner glow effects")
     if not all(math.isfinite(value) for value in (size, choke, glow_range)):
         raise ValueError(
             "Inner glow parameters must be finite: size=%r choke=%r range=%r"
@@ -2457,7 +2438,6 @@ def draw_satin(
     keeps the edges the blur and the offsets bring in from past it away from
     the layer.
     """
-    _require_scipy("Satin effects")
     from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
     _finite("Satin", distance=distance, angle=angle, size=size)
@@ -2780,7 +2760,6 @@ def draw_bevel(
     keeps the parts the style paints, inside the silhouette and beside it,
     which :py:func:`bevel_inside` and :py:func:`bevel_beside` say.
     """
-    _require_scipy("Bevel effects")
     from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
     _finite(

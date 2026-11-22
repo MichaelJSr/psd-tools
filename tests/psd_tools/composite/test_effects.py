@@ -1765,20 +1765,6 @@ def test_every_stroke_position_draws() -> None:
         assert mask.sum() > 0, "an unrecognised position drew nothing"
 
 
-def test_a_stroke_asks_for_scipy_by_name_when_it_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The one package a stroke still needs has to say so itself.
-
-    Asserted because the obvious way to guard the band is ``@require_scipy``,
-    whose message tells the reader to install scipy for *gradient fills* --
-    accurate about the package and misleading about why.
-    """
-    monkeypatch.setattr(effects, "HAS_SCIPY", False)
-    with pytest.raises(ImportError, match="Stroke effects require: scipy"):
-        check_composite_quality("effects/outside-stroke.psd", threshold=1.0)
-
-
 def _rendered(
     filename: str,
     kind: str = "stroke",

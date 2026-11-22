@@ -28,7 +28,6 @@ from psd_tools.color_convert import (
     rgb_to_grayscale,
     rgb_to_lab,
 )
-from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.utils import is_fill_disabled
 from psd_tools.constants import (
     GRADIENT_METHOD_KEY,
@@ -769,7 +768,6 @@ def _find_pattern(psd: Any, desc: Descriptor) -> Any | None:
     return pattern
 
 
-@require_scipy
 def draw_gradient_fill(
     viewport: tuple[int, int, int, int],
     color_mode: ColorMode,

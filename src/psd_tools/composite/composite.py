@@ -8,7 +8,6 @@ import logging
 import math
 import os
 import threading
-import warnings
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -56,7 +55,6 @@ from psd_tools.api.utils import (
 )
 from psd_tools.color_convert import SRGB_CUTOFF, SRGB_GAMMA, SRGB_OFFSET, SRGB_SLOPE
 from psd_tools.composite import paint, rcache, utils, vector
-from psd_tools.composite._compat import HAS_SCIPY
 from psd_tools.composite.adjustments import _BT601_LUMINANCE, ADJUSTMENT_FUNC, _dot3
 from psd_tools.composite.blend import (
     _NEUTRAL_SOURCE,
@@ -1380,9 +1378,6 @@ class _PassCache:
     the retention is the part that grows. A group's shadows and glows read the
     same memo, on their own boxes.
 
-    ``scipy_warned`` is set once a pass has logged that its effects are left
-    out for want of scipy, so a document with many of them says it once.
-
     ``unfiltered`` is the last smart object whose filter mask
     :py:func:`_unfilter_under_mask` blended, with the result: each effect cast
     from the layer reads it again, and the blend decodes the document's
@@ -1403,7 +1398,6 @@ class _PassCache:
 
     content_bboxes: _ContentBBoxes = field(default_factory=dict)
     group_alphas: _GroupAlphas = field(default_factory=dict)
-    scipy_warned: bool = False
     unfiltered: tuple[Layer, np.ndarray, np.ndarray | None] | None = None
     unfilter_plans: dict[int, _UnfilterPlan | None] = field(default_factory=dict)
     text: _TextBlend = field(default_factory=_TextBlend)
@@ -6365,7 +6359,7 @@ class Compositor:
         feather; past the box the mask is its background. Blurred whole, not
         on the viewport, so every box of a render reads the same values, and
         once per content (:func:`_feathered`): every pass and copy shares it.
-        Without scipy, or on a canvas out of proportion (a forged feather), the
+        On a canvas out of proportion (a forged feather), the
         mask stays as stored.
         """
         stored = cast(Mask, layer.mask).bbox
@@ -6378,8 +6372,6 @@ class Compositor:
             )
         except ValueError as error:
             logger.warning("Mask feather of %s left out: %s", layer, error)
-            return stored, mask
-        if not self._has_scipy("Mask feathers"):
             return stored, mask
         from scipy import ndimage  # type: ignore[import-untyped]  # noqa: PLC0415
 
@@ -6915,31 +6907,6 @@ class Compositor:
             hidden = hidden + painted
         return 1.0 - np.clip(uncovered(shape, hidden * opacity), 0.0, 1.0)
 
-    def _has_scipy(self, what: str) -> bool:
-        """Whether scipy is there to draw the layer's ``what``, warning when it is not.
-
-        A shadow, glow, satin or bevel is common enough that a document
-        carrying one composites without it, as it did before they were drawn
-        at all, rather than failing for a missing package: each kind of effect
-        warns, and the pass logs the loss once. That is not the per-effect
-        guard: a missing package is a property of the environment, not of the
-        file, which is why ``ImportError`` stays out of ``_UNREADABLE``.
-        """
-        if HAS_SCIPY:
-            return True
-        warnings.warn(
-            "%s are not drawn without scipy. Install with: "
-            "pip install 'psd-tools[composite]'" % what,
-            stacklevel=2,
-        )
-        if not self._cache.scipy_warned:
-            self._cache.scipy_warned = True
-            logger.warning(
-                "Layer effects that need scipy are not drawn; install scipy to "
-                "draw them: pip install 'psd-tools[composite]'"
-            )
-        return False
-
     def _apply_beneath_effects(self, layer: Layer, window: bool = False) -> None:
         """Composite what lies beneath the layer: its drop shadows, then its glows.
 
@@ -7007,13 +6974,12 @@ class Compositor:
 
         Each effect is guarded as the strokes are, with the silhouette read
         outside both guards so that a fault compositing a group's contents is
-        not taken for an unreadable effect. Without scipy the shadows are left
-        out (:py:meth:`_has_scipy`). Under a ``window`` the silhouette cuts
+        not taken for an unreadable effect. Under a ``window`` the silhouette cuts
         nothing, as the layer knocks the shadow out as it goes on; the stroke
         bands cut as they do without one.
         """
         shadows = _readable(layer, "dropshadow")
-        if not shadows or not self._has_scipy("Drop shadows"):
+        if not shadows:
             return
         _, opacity = self._get_const(layer)
         if opacity <= 0.0:
@@ -7113,7 +7079,7 @@ class Compositor:
         covers nothing the colour pasted there is never read.
         """
         glows = _readable(layer, "outerglow")
-        if not glows or not self._has_scipy("Outer glows"):
+        if not glows:
             return
         fill_opacity, opacity = self._get_const(layer)
         if opacity <= 0.0:
@@ -7215,7 +7181,7 @@ class Compositor:
         """
         glows = _readable(layer, "innerglow")
         shadows = _readable(layer, "innershadow")
-        if not (glows or shadows) or not self._has_scipy("Inner shadows and glows"):
+        if not (glows or shadows):
             return
         cast_from = _cast_bbox(layer, self._cache.content_bboxes)
         silhouettes: dict[tuple[int, int, int, int], np.ndarray] = {}
@@ -7306,7 +7272,7 @@ class Compositor:
         reach, and guarded as the drop shadows are.
         """
         satins = _readable(layer, "satin")
-        if not satins or not self._has_scipy("Satins"):
+        if not satins:
             return
         for effect in satins:
             satin = cast(Satin, effect)
@@ -7441,7 +7407,7 @@ class Compositor:
         bevel's; a texture is (:py:meth:`_bevel_texture`).
         """
         bevels = _readable(layer, "bevelemboss")
-        if not bevels or not self._has_scipy("Bevels"):
+        if not bevels:
             return
         for effect in bevels:
             bevel = cast(BevelEmboss, effect)

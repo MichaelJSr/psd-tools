@@ -230,22 +230,6 @@ def test_a_drop_shadow_blur_treats_the_canvas_edge_as_empty() -> None:
     assert 0.5 < float(shadow[20, 0, 0]) < 0.6
 
 
-def test_a_drop_shadow_asks_for_scipy_by_name_when_it_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A shadow needs scipy the way a stroke does, and says so the same way."""
-    monkeypatch.setattr(effects, "HAS_SCIPY", False)
-    with pytest.raises(ImportError, match="Drop shadow effects require: scipy"):
-        effects.draw_drop_shadow(
-            (0, 0, 8, 8),
-            np.ones((8, 8, 1), dtype=np.float32),
-            distance=1.0,
-            angle=90.0,
-            size=2.0,
-            spread=0.0,
-        )
-
-
 def test_shadow_geometry_is_where_the_files_values_are_checked() -> None:
     """One value that is not finite, the angle included, is an unreadable shadow."""
     _, card = _masks_card()
@@ -2036,26 +2020,6 @@ def test_an_unreadable_drop_shadow_is_dropped_and_the_document_renders(
     assert np.array_equal(rendered, disabled)
 
 
-def test_without_scipy_a_drop_shadow_is_skipped_and_the_document_renders(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A missing scipy costs the shadow, with a warning, not the render."""
-    _psd, layer = _masks_card()
-    viewport = _around(layer)
-    shadow = _shadow_descriptor(layer)
-    shadow[Key.Enabled] = False
-    disabled = _alone(layer, viewport)
-    shadow[Key.Enabled] = True
-    monkeypatch.setattr(
-        sys.modules["psd_tools.composite.composite"], "HAS_SCIPY", False
-    )
-    monkeypatch.setattr(effects, "HAS_SCIPY", False)
-    with caplog.at_level(logging.WARNING, logger="psd_tools.composite.composite"):
-        rendered = _alone(layer, viewport)
-    assert np.array_equal(rendered, disabled)
-    assert "install scipy" in caplog.text
-
-
 def _over_grey(layer: Layer, viewport: tuple[int, int, int, int]) -> np.ndarray:
     """The layer's colour, composited alone over an opaque mid grey."""
     height, width = viewport[3] - viewport[1], viewport[2] - viewport[0]
@@ -2267,14 +2231,8 @@ def test_a_contour_table_passes_through_its_points_in_order() -> None:
     assert np.all(np.diff(table) >= 0.0)
 
 
-def test_a_curved_contour_asks_for_scipy_by_name_when_it_is_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The spline through three or more points needs scipy, and says so."""
-    monkeypatch.setattr(effects, "HAS_SCIPY", False)
-    with pytest.raises(ImportError, match="Layer effect contours require: scipy"):
-        effects.contour_table(_contour([(0.0, 0.0), (128.0, 64.0), (255.0, 255.0)]))
-    # Two points need no spline.
+def test_a_two_point_contour_needs_no_spline() -> None:
+    """Two points need no spline."""
     assert effects.contour_table(_contour([(0.0, 51.0), (255.0, 255.0)])) is not None
 
 
@@ -2511,35 +2469,3 @@ def test_a_drop_shadow_over_the_documents_budget_is_dropped_not_drawn() -> None:
     width, height = grown[2] - grown[0], grown[3] - grown[1]
     psd.max_alloc_bytes = width * height * effects._SHADOW_BYTES - 1
     assert np.array_equal(_alone(layer, viewport), disabled)
-
-
-def test_without_scipy_the_shadows_are_left_out_and_the_document_renders(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A document with drop shadows still composites where scipy is missing.
-
-    The shadows are left out, as they were before they were drawn at all,
-    and the pass says so once, not once per layer: ``masks.psb`` carries
-    three.
-    """
-    psd = PSDImage.open(full_name("masks.psb"))
-    shadows = [
-        effect
-        for layer in psd.descendants()
-        for effect in layer.effects.find("dropshadow")
-    ]
-    assert len(shadows) == 3
-    for effect in shadows:
-        effect.descriptor[Key.Enabled] = False
-    color, _, alpha = composite(psd)
-    for effect in shadows:
-        effect.descriptor[Key.Enabled] = True
-
-    module = sys.modules["psd_tools.composite.composite"]
-    monkeypatch.setattr(module, "HAS_SCIPY", False)
-    with caplog.at_level(logging.WARNING, logger="psd_tools.composite.composite"):
-        without_color, _, without_alpha = composite(psd)
-    assert np.array_equal(without_color, color)
-    assert np.array_equal(without_alpha, alpha)
-    warned = [record for record in caplog.records if "scipy" in record.getMessage()]
-    assert len(warned) == 1 and warned[0].levelno == logging.WARNING

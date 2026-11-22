@@ -669,49 +669,6 @@ def test_a_bevelled_group_over_the_budget_is_drawn_on_its_cut_box(
     assert np.array_equal(_rendered(psd, viewport), expected)
 
 
-def test_without_scipy_the_effects_are_left_out_with_a_warning(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A document with the effects that need scipy still composites.
-
-    Each kind warns on its own: the shadows, satins and bevels this module
-    draws, and the glows and inner effects beside them.
-    """
-    kinds = (
-        "dropshadow",
-        "satin",
-        "bevelemboss",
-        "outerglow",
-        "innershadow",
-        "innerglow",
-    )
-
-    def rendered(enabled: bool) -> np.ndarray:
-        psd = PSDImage.open(full_name("layer_effects.psd"))
-        for layer in psd.descendants():
-            for kind in kinds:
-                for effect in layer.effects.find(kind):
-                    effect.descriptor[Key.Enabled] = enabled
-        return _rendered(psd)
-
-    plain = rendered(False)
-    compositing = importlib.import_module("psd_tools.composite.composite")
-    monkeypatch.setattr(compositing, "HAS_SCIPY", False)
-    with pytest.warns(UserWarning, match="without scipy") as record:
-        result = rendered(True)
-    # The type layer below full fill still goes on apart from its inner glow:
-    # its paint and its coverage mix in the text space in two steps, which
-    # are the one mix it takes with the glow off up to rounding.
-    assert np.allclose(result, plain, rtol=0.0, atol=1e-6)
-    assert {str(warning.message).split(" are ")[0] for warning in record} == {
-        "Drop shadows",
-        "Satins",
-        "Bevels",
-        "Outer glows",
-        "Inner shadows and glows",
-    }
-
-
 # -- Fidelity against Photoshop's own render ------------------------------- #
 
 # Each case is a document, the region around one effect, the effect's kind,

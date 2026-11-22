@@ -29,7 +29,6 @@ from psd_tools.api.adjustments import (
 from psd_tools.api.layers import Layer
 from psd_tools.color_convert import SRGB_CUTOFF, SRGB_GAMMA, SRGB_OFFSET, SRGB_SLOPE
 from psd_tools.composite import paint
-from psd_tools.composite._compat import require_scipy
 from psd_tools.composite.blend import (
     _lum,
     hsl2hsv,
@@ -276,7 +275,6 @@ def _get_luminance(
         return img
 
 
-@require_scipy
 @_preserve_alpha
 def apply_brightnesscontrast(
     img: np.ndarray,
@@ -644,7 +642,6 @@ def apply_exposure(
     return _apply_luts({channel_id: lut}, img, colormode)
 
 
-@require_scipy
 @_preserve_alpha
 def apply_huesaturation(
     img: np.ndarray,
