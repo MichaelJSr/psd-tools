@@ -11,6 +11,10 @@ Changelog
   order instead of BLAS: no render hangs on the last bit of a CPU's libm.
   ``tools/ulp_nudge.py`` checks that on macOS. Renders are unchanged on
   arm64
+- [fix] ``Group.new()`` makes a pass-through group, as ``create_group()``
+  and Photoshop do; it made a Normal (isolated) one, so wrapping a layer
+  in it could change the picture (Leshy's Health 1,503 px by up to 32
+  levels). Its saved bytes now match ``create_group()``'s
 - [perf] ``rcache.frozen(psd)``: a scope in which the caller promises the
   document is only read. Its layer keys and document key are worked out
   once there, instead of each pass writing and hashing every layer record

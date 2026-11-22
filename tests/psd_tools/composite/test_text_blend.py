@@ -347,7 +347,6 @@ def test_a_styled_group_blends_its_text_straight() -> None:
     layer = next(_type_layers(psd))
     rows, columns, edges = _edges(psd, layer)
     group = Group.new(psd, "forged")
-    group.blend_mode = BlendMode.PASS_THROUGH
     layer.move_to_group(group)
 
     through = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
@@ -378,7 +377,6 @@ def test_text_in_a_styled_group_still_meets_its_own_style() -> None:
     straight = _render(psd, None)[rows, columns][edges]
 
     group = Group.new(psd, "forged")
-    group.blend_mode = BlendMode.PASS_THROUGH
     layer.move_to_group(group)
     group.tagged_blocks.set_data(
         Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, _style_from("Drop Shadow")
@@ -386,6 +384,23 @@ def test_text_in_a_styled_group_still_meets_its_own_style() -> None:
     grouped = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
     assert grouped == pytest.approx(alone, abs=1 / 255)
     assert np.abs(grouped - straight).mean() > 4 / 255
+
+
+def test_group_new_is_the_pass_through_group_create_group_makes() -> None:
+    """Wrapping text in either leaves it as it was; a Normal group would not."""
+    alone = _render(PSDImage.open(full_name("text.psb")), TEXT_BLEND_GAMMA)
+    modes = []
+    for make in (lambda doc: Group.new(doc, "Group"), lambda doc: doc.create_group()):
+        psd = PSDImage.open(full_name("text.psb"))
+        layer = next(_type_layers(psd))
+        index = psd.index(layer)
+        group = make(psd)
+        group.move_to(psd, index=index)
+        layer.move_to(group)
+        assert psd.index(group) == index
+        modes.append((group._record.blend_mode, group.blend_mode))
+        np.testing.assert_array_equal(_render(psd, TEXT_BLEND_GAMMA), alone)
+    assert modes == [(BlendMode.NORMAL, BlendMode.PASS_THROUGH)] * 2
 
 
 def _rings(layer: Layer, *rings: tuple[float, float, float]) -> None:

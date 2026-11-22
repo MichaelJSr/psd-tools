@@ -2552,7 +2552,7 @@ class Group(GroupMixin, Layer):
         Create a new Group object.
 
         Builds the minimal records, data channels and metadata needed to
-        include the group in the PSD file.
+        include the group in the PSD file. The group is pass-through.
 
         :param name: The display name of the group. Default to "Group".
         :param open_folder: Boolean defining whether the folder will be open or closed
@@ -2571,7 +2571,10 @@ class Group(GroupMixin, Layer):
         kind = (
             SectionDivider.OPEN_FOLDER if open_folder else SectionDivider.CLOSED_FOLDER
         )
-        record.tagged_blocks.set_data(Tag.SECTION_DIVIDER_SETTING, kind=kind)
+        # Pass-through, as ``create_group()`` and Photoshop make a group.
+        record.tagged_blocks.set_data(
+            Tag.SECTION_DIVIDER_SETTING, kind=kind, blend_mode=BlendMode.PASS_THROUGH
+        )
         record.tagged_blocks.set_data(Tag.UNICODE_LAYER_NAME, name)
         # TODO: Check the number of channels needed
         record.channel_info = [ChannelInfo(id=i - 1, length=2) for i in range(4)]
