@@ -4,6 +4,13 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [fix] The compositor's float32 powers (sRGB transfers, perceptual
+  opacity, the vibrance step, colour balance midtones, Levels gamma,
+  hue/saturation ranges, text blending) are worked in float64 and rounded
+  once, angle gradients' atan2 too, and three-channel sums run in channel
+  order instead of BLAS: no render hangs on the last bit of a CPU's libm.
+  ``tools/ulp_nudge.py`` checks that on macOS. Renders are unchanged on
+  arm64
 - [perf] ``rcache.frozen(psd)``: a scope in which the caller promises the
   document is only read. Its layer keys and document key are worked out
   once there, instead of each pass writing and hashing every layer record
