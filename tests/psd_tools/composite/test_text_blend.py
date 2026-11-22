@@ -347,7 +347,7 @@ def test_a_styled_group_blends_its_text_straight() -> None:
     layer = next(_type_layers(psd))
     rows, columns, edges = _edges(psd, layer)
     group = Group.new(psd, "forged")
-    layer.move_to_group(group)
+    layer.move_to(group)
 
     through = _render(psd, TEXT_BLEND_GAMMA)[rows, columns][edges]
     straight = _render(psd, None)[rows, columns][edges]
@@ -377,7 +377,7 @@ def test_text_in_a_styled_group_still_meets_its_own_style() -> None:
     straight = _render(psd, None)[rows, columns][edges]
 
     group = Group.new(psd, "forged")
-    layer.move_to_group(group)
+    layer.move_to(group)
     group.tagged_blocks.set_data(
         Tag.OBJECT_BASED_EFFECTS_LAYER_INFO, _style_from("Drop Shadow")
     )

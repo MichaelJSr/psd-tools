@@ -228,9 +228,6 @@ class Resource(IntEnum):
         return value >= 4000 and value <= 4999
 
 
-ImageResourceID = Resource  # For backward compatibility.
-
-
 class LinkedLayerType(bytes, Enum):
     """Linked layer types."""
 
@@ -419,9 +416,6 @@ class Tag(bytes, Enum):
     CAI = b"CAI "
     GENI = b"GenI"
     OCIO = b"OCIO"
-
-
-TaggedBlockID = Tag  # For backward compatibility.
 
 
 class PrintScaleStyle(IntEnum):

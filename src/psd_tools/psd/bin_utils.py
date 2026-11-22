@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import IO, Any, cast
 
-from psd_tools.psd.parse_limits import consume_bytes, consume_objects, current_budget
+from psd_tools.psd.parse_limits import consume_objects, current_budget
 
 logger = logging.getLogger(__name__)
 
@@ -523,15 +523,6 @@ def fix_byteorder(arr: array.array) -> array.array:
     return arr
 
 
-def be_array_from_bytes(fmt: str, data: bytes) -> array.array:
-    """Read an array from bytestring with big-endian data."""
-    itemsize = array.array(str(fmt)).itemsize
-    consume_objects(len(data) // itemsize)
-    consume_bytes(len(data))
-    arr = array.array(str(fmt), data)
-    return fix_byteorder(arr)
-
-
 def be_array_to_bytes(arr: array.array) -> bytes:
     """Write an array to bytestring with big-endian data without modifying it."""
     data = fix_byteorder(arr[:])
@@ -546,10 +537,3 @@ def trimmed_repr(data: Any, trim_length: int = 16) -> str:
     if isinstance(data, bytes) and len(data) > trim_length:
         return repr(data[:trim_length] + b" ... =" + str(len(data)).encode("ascii"))
     return repr(data)
-
-
-def decode_fixed_point_32bit(data: bytes) -> float:
-    """Decode ``data`` as an unsigned 4-byte fixed-point number."""
-    lo, hi = unpack("2H", data)
-    # XXX: shouldn't denominator be 2**16 ?
-    return lo + hi / (2**16 - 1)

@@ -1112,22 +1112,6 @@ class Layer(LayerProtocol):
         self._record.clipping = clipping
         self._invalidate_bbox()
 
-    @property
-    def clipping_layer(self) -> bool:
-        """Deprecated. Use clipping property instead."""
-        logger.warning(
-            "clipping_layer property is deprecated. Use clipping property instead."
-        )
-        return self.clipping
-
-    @clipping_layer.setter
-    def clipping_layer(self, value: bool) -> None:
-        """Use ``clipping`` instead (deprecated)."""
-        logger.warning(
-            "clipping_layer property is deprecated. Use clipping property instead."
-        )
-        self.clipping = value
-
     def has_effects(self, enabled: bool = True, name: str | None = None) -> bool:
         """
         Return True if the layer has effects.
@@ -1520,16 +1504,6 @@ class Layer(LayerProtocol):
             duplicate._layers = [child._duplicate(duplicate) for child in self]
         return duplicate
 
-    def delete_layer(self) -> Self:
-        """
-        Use ``layer.parent.remove(layer)`` instead (deprecated).
-
-        :raises ValueError: If the layer is not attached to a document
-        """
-        self._require_attached()
-        self.parent.remove(self)  # type: ignore[union-attr]
-        return self
-
     def _resolve_placement(self, parent: "GroupMixin", index: int | None) -> int:
         """Validate placing this layer in ``parent`` and return its final index.
 
@@ -1586,15 +1560,6 @@ class Layer(LayerProtocol):
         if self.parent is parent and parent.index(self) == target:
             return self
         parent.insert(target, self)
-        return self
-
-    def move_to_group(self, group: "GroupMixin") -> Self:
-        """
-        Use ``layer.move_to(group)`` instead (deprecated).
-
-        :param group: The group the current layer will be moved into.
-        """
-        group._extend([self])
         return self
 
     def move_up(self, offset: int = 1) -> Self:
@@ -2600,33 +2565,6 @@ class Group(GroupMixin, Layer):
         group = cls(parent, record, channels)
         group._set_bounding_records(bounding_record, bounding_channels)
         parent.append(group)
-        return group
-
-    @classmethod
-    def group_layers(
-        cls,
-        parent: GroupMixin,
-        layers: Sequence[Layer],
-        name: str = "Group",
-        open_folder: bool = True,
-    ) -> Self:
-        """
-        Use ``parent.create_group(layer_list, name)`` instead (deprecated).
-
-        :param parent: The parent group to add the newly created Group object into.
-        :param layers: The layers to group. Can by any subclass of
-            :py:class:`~psd_tools.api.layers.Layer`
-        :param name: The display name of the group. Default to "Group".
-        :param open_folder: Boolean defining whether the folder will be open or closed in
-            photoshop. Default to True.
-
-        :return: A :py:class:`~psd_tools.api.layers.Group`
-        :raises ValueError: If layers is empty
-        """
-        if len(layers) == 0:
-            raise ValueError("Cannot create a group from an empty list of layers")
-        group = cls.new(parent, name, open_folder)
-        group._extend(layers)
         return group
 
 

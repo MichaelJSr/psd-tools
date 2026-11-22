@@ -275,8 +275,8 @@ pixel mask combined with a vector mask cannot be moved this way::
     layer.mask.top += 10
 
 A layer removed from its document keeps its properties and pixels, can be
-composited, and can be added back. ``move_up()``, ``move_down()`` and
-``delete_layer()`` raise ``ValueError`` on it, and on any layer inside a removed
+composited, and can be added back. ``move_up()`` and ``move_down()`` raise
+``ValueError`` on it, and on any layer inside a removed
 group, because they act on the document's layer tree.
 
 Every edit above marks the document as edited, so ``save()`` regenerates the

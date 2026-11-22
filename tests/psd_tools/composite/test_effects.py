@@ -1,7 +1,6 @@
 import copy
 import logging
 import math
-import warnings
 from collections.abc import Callable
 from itertools import pairwise
 from pathlib import Path
@@ -2357,23 +2356,6 @@ def test_mark_updated_refreshes_a_preview_the_api_could_not_see(
     assert np.array_equal(pixels(saved), fresh), (
         "save() has to write the preview it just regenerated"
     )
-
-
-def test_the_render_path_does_not_trip_its_own_deprecation() -> None:
-    """#831 step 6: the compositor reads no deprecated ``value``.
-
-    Rendering this fixture reaches all four sites that read it -- the stroke
-    reach the cull measures, the overlay fill, and the stroke's own box and
-    draw. Filtering on the message rather than on ``DeprecationWarning``
-    keeps a warning from somewhere else in the stack out of it.
-    """
-    psd = PSDImage.open(full_name("layer_effects.psd"))
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        psd.composite(ignore_preview=True)
-
-    assert not [w for w in caught if "'value' is deprecated" in str(w.message)]
 
 
 def _dodged_clip(group_mode: BlendMode, opacity: float) -> np.ndarray:

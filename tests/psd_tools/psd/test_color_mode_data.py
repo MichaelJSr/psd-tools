@@ -1,7 +1,7 @@
 import pytest
 
+from psd_tools.psd.bin_utils import pack
 from psd_tools.psd.color_mode_data import ColorModeData
-from psd_tools.utils import pack
 
 from ..utils import check_read_write
 
