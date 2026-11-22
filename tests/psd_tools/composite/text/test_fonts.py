@@ -1,8 +1,10 @@
 import os
+import posixpath
 import shutil
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
 
@@ -320,8 +322,14 @@ def test_nested_directories(ttf_font_path: str, tmp_path: object) -> None:
 
 
 def test_platform_dirs_linux(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(os, "name", "posix")
-    monkeypatch.setattr(os, "uname", lambda: os.uname_result(("Linux",) * 5))
+    # Linux as the fonts module sees it, on any system: the real os stays.
+    linux = SimpleNamespace(
+        name="posix",
+        uname=lambda: SimpleNamespace(sysname="Linux"),
+        path=posixpath,
+        environ=os.environ,
+    )
+    monkeypatch.setattr(fonts_module, "os", linux)
     monkeypatch.setenv("HOME", "/home/u")
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     assert platform_font_dirs() == [

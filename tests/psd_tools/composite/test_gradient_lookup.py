@@ -11,6 +11,12 @@ from psd_tools.composite.paint import _LOOKUP_CHUNK, _RAMP_SAMPLES, _Lookup
 from ..utils import full_name
 
 interpolate = pytest.importorskip("scipy.interpolate")
+scipy = pytest.importorskip("scipy")
+
+# scipy 1.18 weighs the two rows (de Boor), as the lookup does, bit for bit.
+# Older scipy (1.17 is the last for Python 3.11) steps along a slope taken
+# from a float32 difference: at most half a float32 step off.
+DE_BOOR = np.lib.NumpyVersion(scipy.__version__) >= "1.18.0"
 
 
 @pytest.mark.parametrize("samples", [2, 3, 17, _RAMP_SAMPLES])
@@ -42,7 +48,10 @@ def test_the_lookup_is_interp1ds(samples: int, columns: int | None) -> None:
         want, got = expected(at), lookup(at)
         assert got.dtype == want.dtype
         assert got.shape == want.shape
-        assert got.tobytes() == want.tobytes()
+        if DE_BOOR:
+            assert got.tobytes() == want.tobytes()
+        else:
+            np.testing.assert_allclose(got, want, rtol=0, atol=2.0**-24)
 
 
 def test_a_gradient_render_leaves_scipy_interpolate_unimported() -> None:
