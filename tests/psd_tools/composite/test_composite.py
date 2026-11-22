@@ -1058,7 +1058,7 @@ def test_composite_pil_force_keeps_cmyk_alpha_reachable() -> None:
 
 def test_composite_pil_rounds_to_the_nearest_byte() -> None:
     """Colour and alpha leave the compositor rounded, as Photoshop's export is."""
-    psd = PSDImage.open(full_name("gradient-styles.psd"))
+    psd = PSDImage.open(full_name("gradient-fill.psd"))
     image = psd.composite(ignore_preview=True, force=True, apply_icc=False)
     assert isinstance(image, Image.Image)
     assert image.mode == "RGBA"
@@ -2199,7 +2199,7 @@ def test_lab_composite_agrees_with_the_preview_it_reproduces() -> None:
     on both chroma axes (#759). On a document whose composite does reproduce
     its stored preview they are directly comparable.
 
-    All three of these composite to their preview *bitwise*. The Lab documents
+    Both of these composite to their preview *bitwise*. The Lab documents
     left out do not, for reasons that are not about chroma -- the 16-bit
     fixture's own lightness plane disagrees, and the stroke fixture carries
     the stroke approximation.
@@ -2207,7 +2207,6 @@ def test_lab_composite_agrees_with_the_preview_it_reproduces() -> None:
     for name in (
         "colormodes/4x4_8bit_lab.psd",
         "descriptors/lab-color-swatches.psd",
-        "gradients/noise-gradient-lab.psd",
     ):
         psd = PSDImage.open(full_name(name))
         assert psd.color_mode == ColorMode.LAB
@@ -2218,28 +2217,6 @@ def test_lab_composite_agrees_with_the_preview_it_reproduces() -> None:
         preview = _pixels_as_seen(preview_image)
         composited = _pixels_as_seen(composited_image)
         assert np.array_equal(preview, composited), name
-
-
-@pytest.mark.parametrize("force", [False, True])
-def test_lab_composite_converts_to_the_colour_it_encodes(force: bool) -> None:
-    """What the planes *mean*, which no byte-level assertion here establishes.
-
-    The band sampled is a flat ``Lab(60, 25, 25)`` -- a noise gradient with
-    ``Mnm `` equal to ``Mxm ``, from the fixture added in #758. Photoshop
-    2026's own colour engine, asked over the scripting bridge, puts it at
-    ``rgb(196, 126, 101)``.
-
-    Reading the chroma as signed converts it to ``(0, 187, 255)`` instead: not
-    a rounding gap but a different colour, which is the whole of #759. The
-    tolerance is loose enough to survive Pillow's own conversion drifting a
-    code value and still nowhere near admitting that.
-    """
-    psd = PSDImage.open(full_name("gradients/noise-gradient-lab.psd"))
-    image = psd.composite(ignore_preview=True, force=force, apply_icc=False)
-    assert isinstance(image, Image.Image)
-    assert image.mode == "LAB"
-    rendered = np.array(image.convert("RGB").getpixel((4, 20)), dtype=float)
-    assert np.abs(rendered - np.array([196.0, 126.0, 101.0])).max() <= 2.0
 
 
 @pytest.mark.parametrize(

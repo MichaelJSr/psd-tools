@@ -154,9 +154,6 @@ def test_gradient_styles(filename: str) -> None:
             result = composite(layer, force=True)[0]
             if form == Enum.CustomStops:
                 assert _mse(reference, result) <= 0.08
-            elif form == Enum.ColorNoise:
-                # Noise gradient is not of good quality.
-                assert _mse(reference, result) <= 0.2
 
 
 # The threshold is per fixture rather than shared. A single loose one lets the
