@@ -143,20 +143,20 @@ def test_compressed_documents(tmp_path: pytest.TempPathFactory) -> None:
 
 
 def test_colors() -> None:
-    ctx = (0.1, 0.2, 0.3, 1.0)
-    assert svg.parse_color("#fff", ctx) == (1.0, 1.0, 1.0, 1.0)
-    assert svg.parse_color("#ff000080", ctx) == pytest.approx((1, 0, 0, 128 / 255))
-    assert svg.parse_color("rgb(255, 0, 51)", ctx) == pytest.approx((1, 0, 0.2, 1))
-    assert svg.parse_color("navy", ctx) == pytest.approx((0, 0, 128 / 255, 1))
-    assert svg.parse_color("none", ctx) is None
-    assert svg.parse_color("currentColor", ctx) == ctx
-    with pytest.raises(svg.Unsupported):
-        svg.parse_color("hsl(0, 100%, 50%)", ctx)
+    assert svg.parse_color("#fff") == (1.0, 1.0, 1.0, 1.0)
+    assert svg.parse_color("#ff0033") == pytest.approx((1, 0, 0.2, 1))
+    assert svg.parse_color("none") is None
+    assert svg.parse_color("currentColor") == (0.0, 0.0, 0.0, 1.0)
+    for value in ("#ff000080", "rgb(255, 0, 51)", "navy", "hsl(0, 100%, 50%)"):
+        with pytest.raises(svg.Unsupported):
+            svg.parse_color(value)
 
 
 def test_transforms() -> None:
-    m = svg.parse_transform("translate(10 20) scale(2)")
+    m = svg.parse_transform("matrix(1 0 0 1 10 20) scale(2)")
     assert m == pytest.approx((2, 0, 0, 2, 10, 20))
+    with pytest.raises(svg.Unsupported):
+        svg.parse_transform("translate(10 20)")
     r = svg.parse_transform("rotate(90 5 5)")
     x, y = r[0] * 10 + r[2] * 5 + r[4], r[1] * 10 + r[3] * 5 + r[5]
     assert (x, y) == pytest.approx((5, 10))
@@ -183,9 +183,8 @@ def test_path_data_square(d: str) -> None:
 
 
 def test_smooth_curves_reflect_the_last_control_point() -> None:
-    (quad,) = svg.parse_path("M0 0 Q5 5 10 0 T20 0")
-    # T's control is (15, -5); as a cubic its first handle is 2/3 of the way.
-    assert quad[1, 1] == pytest.approx((10 + 2 / 3 * 5, -2 / 3 * 5))
+    with pytest.raises(svg.Unsupported):
+        svg.parse_path("M0 0 Q5 5 10 0 T20 0")
     (cubic,) = svg.parse_path("M0 0 C0 5 5 5 10 0 S20 -5 20 0")
     assert cubic[1, 1] == pytest.approx((15, -5))
 
@@ -331,7 +330,7 @@ def _glyph_doc(outer: str, inner: str, body: str) -> str:
 
 def test_ancestors_pass_on_transform_and_opacity() -> None:
     rect = _square("#ff0000", 0, 0, 2)
-    doc = _glyph_doc(' opacity="0.5"', ' transform="translate(3 1)"', rect)
+    doc = _glyph_doc(' opacity="0.5"', ' transform="matrix(1 0 0 1 3 1)"', rect)
     drawing = _table({1: doc}).drawing(1)
     assert drawing is not None
     left, top, rgba = svg.rasterize(drawing, svg.IDENTITY)
@@ -348,9 +347,9 @@ def test_ancestors_of_a_group_glyph(outer: str, inner: str) -> None:
     assert _table({1: _glyph_doc(outer, inner, two)}).drawing(1) is None
 
 
-def test_a_hidden_ancestor_draws_nothing() -> None:
+def test_a_hidden_ancestor_is_unsupported() -> None:
     doc = _glyph_doc("", ' display="none"', _square("#ff0000", 0, 0, 2))
-    assert _table({1: doc}).drawing(1) == svg.Drawing(())
+    assert _table({1: doc}).drawing(1) is None
 
 
 def test_arc_flags_may_run_together() -> None:
@@ -1045,7 +1044,7 @@ def test_strong_colour_glyphs_keep_the_embolden(
 
 def test_the_glyph_budget_counts_the_alpha_grid(color_face: Face) -> None:
     glyph = _glyph(color_face, "A", 0.0, 100.0, 100.0)
-    drawing = color_face.svg.drawing(glyph.gid, (*RED, 1.0)) if color_face.svg else None
+    drawing = color_face.svg.drawing(glyph.gid) if color_face.svg else None
     assert drawing is not None
     w, h = 202, 102  # the badge's device box: 2 x 1 em and its stroke
     budget = svg.peak_bytes(drawing, w, h, 0) * 2

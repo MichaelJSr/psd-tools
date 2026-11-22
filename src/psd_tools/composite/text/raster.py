@@ -240,7 +240,7 @@ def _drawing(g: PlacedGlyph, options: Options) -> svg.Drawing | None:
     table = g.face.svg
     if table is None:
         return None
-    return table.drawing(g.gid, (*g.fill, 1.0))
+    return table.drawing(g.gid)
 
 
 def raster_warnings(

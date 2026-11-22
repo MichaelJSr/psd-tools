@@ -1,11 +1,14 @@
 """OpenType ``SVG `` colour glyphs, drawn with numpy.
 
 Covers static SVG: ``path``, ``rect``, ``circle``, ``ellipse``, ``line``,
-``polyline`` and ``polygon`` in groups with ``transform`` and ``opacity``,
-filled with a solid colour or a linear or radial gradient, rectangles also
-stroked, and embedded PNG or JPEG ``image`` elements. A glyph whose document
-uses anything else (``use``, clipping, masks, filters, text, style sheets, a
-stroke on another shape) or that cannot be read is unsupported:
+``polyline`` and ``polygon`` in groups with ``transform`` (``matrix``,
+``scale``, ``rotate``) and ``opacity``, filled with a ``#rgb``/``#rrggbb``
+colour or a linear or radial ``pad`` gradient, rectangles also stroked, and
+embedded PNG or JPEG ``image`` elements; lengths are plain numbers. A glyph
+whose document uses anything else (``use``, clipping, masks, filters, text,
+style sheets, a stroke on another shape, named or ``rgb()`` colours,
+``fill-opacity``, hidden elements, links) or that cannot be read is
+unsupported:
 :meth:`SvgTable.drawing` returns ``None`` and the caller draws its outline
 instead.
 
@@ -52,38 +55,11 @@ _XLINK = "{http://www.w3.org/1999/xlink}href"
 _SHAPES = ("path", "rect", "circle", "ellipse", "line", "polyline", "polygon")
 #: Elements that draw nothing themselves and need no support.
 _INERT = ("title", "desc", "metadata")
-_PAINT_KEYS = (
-    "fill",
-    "fill-opacity",
-    "fill-rule",
-    "stroke",
-    "stroke-width",
-    "stroke-opacity",
-)
+_PAINT_KEYS = ("fill", "fill-rule", "stroke", "stroke-width")
+#: Attributes this renderer does not draw, present at all.
+_UNDRAWN = ("display", "visibility", "fill-opacity", "stroke-opacity")
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 _COMMAND = re.compile(r"([MmLlHhVvCcSsQqTtAaZz])|" + _NUMBER.pattern)
-_NAMED = {
-    "black": (0, 0, 0),
-    "white": (255, 255, 255),
-    "red": (255, 0, 0),
-    "lime": (0, 255, 0),
-    "green": (0, 128, 0),
-    "blue": (0, 0, 255),
-    "yellow": (255, 255, 0),
-    "cyan": (0, 255, 255),
-    "aqua": (0, 255, 255),
-    "magenta": (255, 0, 255),
-    "fuchsia": (255, 0, 255),
-    "gray": (128, 128, 128),
-    "grey": (128, 128, 128),
-    "silver": (192, 192, 192),
-    "maroon": (128, 0, 0),
-    "olive": (128, 128, 0),
-    "navy": (0, 0, 128),
-    "purple": (128, 0, 128),
-    "teal": (0, 128, 128),
-    "orange": (255, 165, 0),
-}
 
 
 class Unsupported(Exception):
@@ -142,7 +118,6 @@ class Gradient:
     radius: float | None
     offsets: tuple[float, ...]
     colors: tuple[RGBA, ...]
-    spread: str
     bbox_units: bool
     transform: Affine
 
@@ -198,7 +173,7 @@ class SvgTable:
         self._index: list[tuple[int, int, int, int]] = []
         self._firsts: list[int] = []
         self._docs: OrderedDict[tuple[int, int], ET.Element | None] = OrderedDict()
-        self._drawings: OrderedDict[tuple[int, RGBA], Drawing | None] = OrderedDict()
+        self._drawings: OrderedDict[int, Drawing | None] = OrderedDict()
         self._lock = threading.Lock()
         if len(data) < 10:
             return
@@ -265,13 +240,9 @@ class SvgTable:
                 self._docs.popitem(last=False)
         return root
 
-    def drawing(self, gid: int, context: RGBA = (0.0, 0.0, 0.0, 1.0)) -> Drawing | None:
-        """What glyph ``gid`` paints, or ``None`` when it has no supported document.
-
-        ``context`` stands in for ``currentColor``, ``context-fill`` and
-        ``context-stroke``: the run's fill.
-        """
-        key = (gid, context)
+    def drawing(self, gid: int) -> Drawing | None:
+        """What glyph ``gid`` paints, or ``None`` when it has no supported document."""
+        key = gid
         with self._lock:
             if key in self._drawings:
                 self._drawings.move_to_end(key)
@@ -280,7 +251,7 @@ class SvgTable:
         drawing = None
         if root is not None:
             try:
-                drawing = _Parser(root, gid, context, self.upem).drawing()
+                drawing = _Parser(root, gid, self.upem).drawing()
             except (Unsupported, ValueError, KeyError, IndexError, OSError):
                 drawing = None
         with self._lock:
@@ -319,55 +290,29 @@ def _length(value: str | None, default: float = 0.0) -> float:
     if value is None or not value.strip():
         return default
     v = value.strip()
-    if v.endswith("px"):
-        v = v[:-2]
     if not _NUMBER.fullmatch(v):
         raise Unsupported(f"length {value!r}")
     return _number(v)
 
 
-def _fraction(value: str | None, default: float) -> float:
-    """A gradient coordinate or offset: a number or a percentage."""
-    if value is None or not value.strip():
-        return default
-    v = value.strip()
-    if v.endswith("%"):
-        return _number(v[:-1]) / 100
-    return _length(v)
+def parse_color(value: str) -> RGBA | None:
+    """An SVG colour as straight RGBA in 0..1; ``None`` for ``none``.
 
-
-def parse_color(value: str, context: RGBA) -> RGBA | None:
-    """An SVG colour as straight RGBA in 0..1; ``None`` for ``none``."""
+    ``currentColor``, ``context-fill`` and ``context-stroke`` are black, as
+    Photoshop draws them.
+    """
     v = value.strip().lower()
     if v in ("none", "transparent"):
         return None
     if v in ("currentcolor", "context-fill", "context-stroke"):
-        return context
+        return (0.0, 0.0, 0.0, 1.0)
     if v.startswith("#"):
         h = v[1:]
-        if len(h) in (3, 4):
+        if len(h) == 3:
             h = "".join(ch * 2 for ch in h)
-        if len(h) not in (6, 8) or not re.fullmatch(r"[0-9a-f]+", h):
-            raise Unsupported(f"colour {value!r}")
-        channels = [int(h[i : i + 2], 16) / 255 for i in range(0, len(h), 2)]
-        return (
-            channels[0],
-            channels[1],
-            channels[2],
-            channels[3] if len(h) == 8 else 1.0,
-        )
-    m = re.fullmatch(r"rgba?\(([^)]*)\)", v)
-    if m:
-        parts = [p.strip() for p in m.group(1).split(",")]
-        rgb = [
-            _number(p[:-1]) / 100 if p.endswith("%") else _number(p) / 255
-            for p in parts[:3]
-        ]
-        alpha = _number(parts[3]) if len(parts) > 3 else 1.0
-        return (rgb[0], rgb[1], rgb[2], alpha)
-    if v in _NAMED:
-        r, g, b = _NAMED[v]
-        return (r / 255, g / 255, b / 255, 1.0)
+        if len(h) == 6 and re.fullmatch(r"[0-9a-f]+", h):
+            r, g, b = (int(h[i : i + 2], 16) / 255 for i in range(0, 6, 2))
+            return (r, g, b, 1.0)
     raise Unsupported(f"colour {value!r}")
 
 
@@ -380,8 +325,6 @@ def parse_transform(value: str | None) -> Affine:
         a = [_number(x) for x in _NUMBER.findall(args)]
         if name == "matrix" and len(a) == 6:
             t: Affine = (a[0], a[1], a[2], a[3], a[4], a[5])
-        elif name == "translate" and a:
-            t = (1.0, 0.0, 0.0, 1.0, a[0], a[1] if len(a) > 1 else 0.0)
         elif name == "scale" and a:
             t = (a[0], 0.0, 0.0, a[1] if len(a) > 1 else a[0], 0.0, 0.0)
         elif name == "rotate" and a:
@@ -393,10 +336,6 @@ def parse_transform(value: str | None) -> Affine:
                     (1.0, 0.0, 0.0, 1.0, a[1], a[2]),
                     compose(t, (1.0, 0.0, 0.0, 1.0, -a[1], -a[2])),
                 )
-        elif name == "skewX" and a:
-            t = (1.0, 0.0, math.tan(math.radians(a[0])), 1.0, 0.0, 0.0)
-        elif name == "skewY" and a:
-            t = (1.0, math.tan(math.radians(a[0])), 0.0, 1.0, 0.0, 0.0)
         else:
             raise Unsupported(f"transform {name}")
         m = compose(m, t)
@@ -511,7 +450,6 @@ def parse_path(d: str) -> list[np.ndarray]:
     segs: list[list[float]] = []
     cur = start = (0.0, 0.0)
     last_c: tuple[float, float] | None = None
-    last_q: tuple[float, float] | None = None
     cmd = ""
 
     def num() -> float:
@@ -550,7 +488,6 @@ def parse_path(d: str) -> list[np.ndarray]:
         rel = cmd.islower()
         c = cmd.upper()
         ox, oy = cur if rel else (0.0, 0.0)
-        qc: tuple[float, float] | None = None
         cc: tuple[float, float] | None = None
         if c == "Z":
             close()
@@ -578,21 +515,20 @@ def parse_path(d: str) -> list[np.ndarray]:
             p = (ox + num(), oy + num())
             segs.append([cur[0], cur[1], c1[0], c1[1], c2[0], c2[1], p[0], p[1]])
             cc, cur = c2, p
-        elif c in "QT":
-            if c == "Q":
-                q1 = (ox + num(), oy + num())
-            else:
-                q1 = (2 * cur[0] - last_q[0], 2 * cur[1] - last_q[1]) if last_q else cur
+        elif c == "Q":
+            q1 = (ox + num(), oy + num())
             p = (ox + num(), oy + num())
             segs.append(_quad(cur, q1, p))
-            qc, cur = q1, p
+            cur = p
         elif c == "A":
             rx, ry, phi = num(), num(), num()
             large, sweep = flag(), flag()
             p = (ox + num(), oy + num())
             segs.extend(_arc(cur, rx, ry, phi, large, sweep, p))
             cur = p
-        last_c, last_q = cc, qc
+        else:
+            raise Unsupported(f"path command {cmd}")
+        last_c = cc
     close()
     return contours
 
@@ -692,8 +628,7 @@ def _bbox(contours: list[np.ndarray]) -> tuple[float, float, float, float]:
 
 
 class _Parser:
-    def __init__(self, root: ET.Element, gid: int, context: RGBA, upem: int = 1000):
-        self.context = context
+    def __init__(self, root: ET.Element, gid: int, upem: int = 1000):
         self.upem = upem
         self.ids = {el.get("id"): el for el in root.iter() if el.get("id")}
         target = self.ids.get(f"glyph{gid}")
@@ -711,12 +646,9 @@ class _Parser:
         m, opacity = self._viewbox(), 1.0
         style: dict[str, str] = {}
         for el in chain[:-1]:
-            if _local(el.tag) not in ("svg", "g", "a"):
+            if _local(el.tag) not in ("svg", "g"):
                 raise Unsupported(f"glyph inside {_local(el.tag)}")
-            entered = self._enter(el, self.target, m, style, opacity)
-            if entered is None:
-                return Drawing(())
-            m, style, opacity = entered
+            m, style, opacity = self._enter(el, self.target, m, style, opacity)
         self._walk(self.target, m, style, opacity, len(chain))
         drawing = Drawing(tuple(self.items))
         reach = _MAX_EXTENT * self.upem
@@ -772,17 +704,18 @@ class _Parser:
         m: Affine,
         style: dict[str, str],
         opacity: float,
-    ) -> tuple[Affine, dict[str, str], float] | None:
-        """``el``'s transform, paint and opacity on its parent's; ``None`` if hidden.
+    ) -> tuple[Affine, dict[str, str], float]:
+        """``el``'s transform, paint and opacity on its parent's.
 
         ``drawn`` is what ``el``'s opacity applies to: ``el`` itself, or the
         glyph element below it.
         """
         own = _style(el)
-        if own.get("display") == "none" or own.get("visibility") == "hidden":
-            return None
         for k in ("clip-path", "mask", "filter"):
             if own.get(k, "none") != "none":
+                raise Unsupported(k)
+        for k in _UNDRAWN:
+            if k in own:
                 raise Unsupported(k)
         if _local(el.tag) == "svg" and el is not self.root:
             raise Unsupported("nested svg")
@@ -810,11 +743,8 @@ class _Parser:
             if (el.text or "").strip():
                 raise Unsupported("style sheet")
             return
-        entered = self._enter(el, el, m, style, opacity)
-        if entered is None:
-            return
-        m, style, opacity = entered
-        if tag in ("svg", "g", "a"):
+        m, style, opacity = self._enter(el, el, m, style, opacity)
+        if tag in ("svg", "g"):
             for child in el:
                 self._walk(child, m, style, opacity, depth + 1)
         elif tag in _SHAPES:
@@ -870,23 +800,18 @@ class _Parser:
         if not contours:
             return
         bbox = _bbox(contours)
-        fill = self._paint(style.get("fill", "black"), bbox)
-        fill_opacity = _length(style.get("fill-opacity"), 1.0)
+        fill = self._paint(style.get("fill", "#000"), bbox)
         nonzero = style.get("fill-rule", "nonzero") != "evenodd"
         paint = None
         if stroked:
             if rect is None:
                 raise Unsupported(f"stroked {tag}")
-            if _length(style.get("stroke-opacity"), 1.0) != 1.0:
-                raise Unsupported("stroke-opacity")
             paint = self._paint(stroke, bbox)
             if fill is not None and paint is not None and opacity < 1:
                 # The fill and the stroke are composited together first.
                 raise Unsupported("opacity on a filled stroke")
         if fill is not None:
-            self.items.append(
-                Shape(tuple(contours), m, fill, opacity * fill_opacity, nonzero, bbox)
-            )
+            self.items.append(Shape(tuple(contours), m, fill, opacity, nonzero, bbox))
         if rect is not None and paint is not None:
             self.items.append(
                 Shape(_rect_ring(rect, width), m, paint, opacity, True, bbox, True)
@@ -896,10 +821,10 @@ class _Parser:
         v = value.strip()
         ref = re.fullmatch(r"url\(\s*#([^)\s]+)\s*\)(?:\s+(.*))?", v)
         if ref is None:
-            return parse_color(v, self.context)
+            return parse_color(v)
         el = self.ids.get(ref.group(1))
         if el is None:
-            return parse_color(ref.group(2), self.context) if ref.group(2) else None
+            return parse_color(ref.group(2)) if ref.group(2) else None
         return self._gradient(el)
 
     def _gradient(self, el: ET.Element) -> Gradient:
@@ -932,10 +857,10 @@ class _Parser:
             if _local(s.tag) != "stop":
                 continue
             st = _style(s)
-            off = min(max(_fraction(st.get("offset"), 0.0), 0.0), 1.0)
+            off = min(max(_length(st.get("offset"), 0.0), 0.0), 1.0)
             if offsets:
                 off = max(off, offsets[-1])
-            c = parse_color(st.get("stop-color", "black"), self.context) or (
+            c = parse_color(st.get("stop-color", "#000")) or (
                 0.0,
                 0.0,
                 0.0,
@@ -947,29 +872,28 @@ class _Parser:
         if not offsets:
             raise Unsupported("gradient without stops")
         bbox_units = attr("gradientUnits") != "userSpaceOnUse"
-        spread = attr("spreadMethod") or "pad"
+        if (attr("spreadMethod") or "pad") != "pad":
+            raise Unsupported("spreadMethod")
         transform = parse_transform(attr("gradientTransform"))
         if tag == "linearGradient":
             return Gradient(
-                (_fraction(attr("x1"), 0.0), _fraction(attr("y1"), 0.0)),
-                (_fraction(attr("x2"), 1.0), _fraction(attr("y2"), 0.0)),
+                (_length(attr("x1"), 0.0), _length(attr("y1"), 0.0)),
+                (_length(attr("x2"), 1.0), _length(attr("y2"), 0.0)),
                 None,
                 tuple(offsets),
                 tuple(colors),
-                spread,
                 bbox_units,
                 transform,
             )
-        cx, cy = _fraction(attr("cx"), 0.5), _fraction(attr("cy"), 0.5)
-        fx, fy = _fraction(attr("fx"), cx), _fraction(attr("fy"), cy)
-        r = _fraction(attr("r"), 0.5)
+        cx, cy = _length(attr("cx"), 0.5), _length(attr("cy"), 0.5)
+        fx, fy = _length(attr("fx"), cx), _length(attr("fy"), cy)
+        r = _length(attr("r"), 0.5)
         return Gradient(
             (fx, fy),
             (cx, cy),
             r,
             tuple(offsets),
             tuple(colors),
-            spread,
             bbox_units,
             transform,
         )
@@ -1055,15 +979,6 @@ def _gradient_t(g: Gradient, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return (b - disc) / a if a < 0 else c / np.maximum(b + disc, 1e-12)
 
 
-def _spread(t: np.ndarray, how: str) -> np.ndarray:
-    if how == "repeat":
-        return t - np.floor(t)
-    if how == "reflect":
-        u = np.mod(t, 2.0)
-        return np.where(u > 1, 2 - u, u)
-    return np.clip(t, 0.0, 1.0)
-
-
 def _paint_rgba(
     paint: Paint, shape: Shape, m: Affine, x0: int, y0: int, w: int, h: int
 ) -> np.ndarray:
@@ -1090,7 +1005,7 @@ def _paint_rgba(
     px, py = xs + x0, ys + y0
     a, b, c, d, e, f = inv
     gx, gy = a * px + c * py + e, b * px + d * py + f
-    t = _spread(_gradient_t(g, gx, gy), g.spread)
+    t = np.clip(_gradient_t(g, gx, gy), 0.0, 1.0)
     t = np.rint(t * 255) / 255
     offs = np.array(g.offsets)
     cols = np.array(g.colors, np.float64)
