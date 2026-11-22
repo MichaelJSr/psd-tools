@@ -10,17 +10,11 @@ pytest.importorskip("uharfbuzz")
 from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
 from psd_tools.composite.text import FontMap, capture, render
-from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.composite.text.verify import stored_raster
 
 from ...utils import full_name
 
 RED = (1.0, 0.0, 0.0)
-
-
-@pytest.fixture(autouse=True)
-def _no_platform_fonts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
 
 
 @pytest.fixture

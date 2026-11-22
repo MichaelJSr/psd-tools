@@ -7,7 +7,6 @@ import pytest
 pytest.importorskip("freetype")
 pytest.importorskip("uharfbuzz")
 
-from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.composite.text.constants import FAUX_BOLD_EM
 from psd_tools.composite.text.fonts import FontMap, MissingFontError
 from psd_tools.composite.text.layout import Layout, frame, layout, pieces
@@ -432,7 +431,6 @@ def test_ascent_fallback_warning(make_font: Callable[..., str]) -> None:
 def test_missing_font_policies(
     monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str
 ) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     m = model("IA\r", style(), style(font="NoSuchFont"), cuts=(1,), box=(0, 0, 100, 50))
     with pytest.raises(MissingFontError) as info:
         layout(m, FontMap(dirs=[fixture_fonts_dir]))

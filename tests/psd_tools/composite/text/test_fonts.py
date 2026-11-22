@@ -1,10 +1,8 @@
 import os
-import posixpath
 import shutil
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +18,6 @@ from psd_tools.composite.text.fonts import (  # noqa: E402
     font_files,
     load_face,
     norm,
-    platform_font_dirs,
 )
 
 from .conftest import (  # noqa: E402
@@ -35,19 +32,6 @@ from .conftest import (  # noqa: E402
     UNDERLINE_THICKNESS,
     UPEM,
 )
-
-
-def _platform_face() -> tuple[str, int, str] | None:
-    """``(path, index, postscript_name)`` of some installed face, or ``None``."""
-    for d in platform_font_dirs():
-        for path in font_files(d):
-            try:
-                face = freetype.Face(path)
-            except freetype.FT_Exception:
-                continue
-            if face.postscript_name:
-                return path, 0, face.postscript_name.decode("latin-1")
-    return None
 
 
 def test_norm() -> None:
@@ -217,32 +201,12 @@ def test_first_directory_wins(
     assert FontMap(dirs=[fixture_fonts_dir, other]).resolve(PS_TT).path == ttf_font_path
 
 
-def test_platform_index_waits_for_a_miss(
-    monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str
-) -> None:
-    built: list[tuple[str, ...]] = []
-    index = fonts_module._Index
-
-    def spy(dirs: tuple[str, ...]) -> object:
-        built.append(dirs)
-        return index(dirs)
-
-    monkeypatch.setattr(fonts_module, "_Index", spy)
-    monkeypatch.setattr(fonts_module, "_INDEXES", OrderedDict())
-    fm = FontMap(dirs=[fixture_fonts_dir], policy="skip")
-    assert fm.resolve(PS_TT).how == "exact"
-    assert built == [fm.dirs]
-    fm.resolve("NoSuchFont")
-    assert built == [fm.dirs, fm.platform_dirs]
-
-
 def test_index_shared_until_a_folder_changes(
     monkeypatch: pytest.MonkeyPatch,
     ttf_font_path: str,
     cff_font_path: str,
     tmp_path: object,
 ) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     monkeypatch.setattr(fonts_module, "_INDEXES", OrderedDict())
     root = os.path.join(str(tmp_path), "fonts")
     sub = os.path.join(root, "sub")
@@ -285,34 +249,6 @@ def test_env_dirs(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) -> No
     assert fm.resolve(PS_TT).how == "exact"
 
 
-def test_system() -> None:
-    hit = _platform_face()
-    if hit is None:
-        pytest.skip("no platform font found")
-    path, index, name = hit
-    fm = FontMap()
-    assert fm.find(name) == (path, index, "system")
-    assert fm.resolve(name).how == "system"
-
-
-def test_ttc_indexing() -> None:
-    ttcs = [
-        path
-        for d in platform_font_dirs()
-        for path in font_files(d)
-        if path.lower().endswith(".ttc") and freetype.Face(path).num_faces > 1
-    ]
-    if not ttcs:
-        pytest.skip("no font collection installed")
-    path = ttcs[0]
-    name = freetype.Face(path, 1).postscript_name.decode("latin-1")
-    found = FontMap().find(name)
-    assert found is not None
-    assert found[0].lower().endswith(".ttc")
-    face = load_face(found[0], found[1])
-    assert face.ft.postscript_name.decode("latin-1") == name
-
-
 def test_nested_directories(ttf_font_path: str, tmp_path: object) -> None:
     root = os.path.join(str(tmp_path), "fonts")
     nested = os.path.join(root, "truetype", "fixture")
@@ -330,31 +266,9 @@ def test_nested_directories(ttf_font_path: str, tmp_path: object) -> None:
     assert font_files(os.path.join(root, "missing")) == []
 
 
-def test_platform_dirs_linux(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Linux as the fonts module sees it, on any system: the real os stays.
-    linux = SimpleNamespace(
-        name="posix",
-        uname=lambda: SimpleNamespace(sysname="Linux"),
-        path=posixpath,
-        environ=os.environ,
-    )
-    monkeypatch.setattr(fonts_module, "os", linux)
-    monkeypatch.setenv("HOME", "/home/u")
-    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    assert platform_font_dirs() == [
-        "/usr/share/fonts",
-        "/usr/local/share/fonts",
-        "/home/u/.local/share/fonts",
-        "/home/u/.fonts",
-    ]
-    monkeypatch.setenv("XDG_DATA_HOME", "/data")
-    assert platform_font_dirs()[2] == "/data/fonts"
-
-
 def test_alias_to_a_missing_file(
     monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str, tmp_path: object
 ) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     gone = os.path.join(str(tmp_path), "gone.ttf")
     fm = FontMap(dirs=[fixture_fonts_dir], aliases={"ArialMT": gone})
     assert fm.find("ArialMT") is None
@@ -375,7 +289,6 @@ def test_alias_to_a_missing_file(
 def test_indexed_file_removed(
     monkeypatch: pytest.MonkeyPatch, ttf_font_path: str, tmp_path: object
 ) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     copy = shutil.copy(ttf_font_path, os.path.join(str(tmp_path), "copy.ttf"))
     fm = FontMap(dirs=[str(tmp_path)], policy="skip")
     assert fm.find(PS_TT) == (copy, 0, "exact")
@@ -388,7 +301,6 @@ def test_indexed_file_removed(
 def test_aliases(
     monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str, ttf_font_path: str
 ) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     fm = FontMap(aliases={"ArialMT": ttf_font_path})
     r = fm.resolve("ArialMT")
     assert (r.how, r.path) == ("exact", ttf_font_path)
@@ -399,7 +311,6 @@ def test_aliases(
 
 
 def test_policy_raise(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     fm = FontMap(dirs=[fixture_fonts_dir])
     with pytest.raises(MissingFontError) as info:
         fm.resolve("NoSuchFont")
@@ -410,7 +321,6 @@ def test_policy_raise(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) -
 
 
 def test_policy_skip(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     fm = FontMap(dirs=[fixture_fonts_dir], policy="skip")
     r = fm.resolve("NoSuchFont")
     assert isinstance(r, Resolved)
@@ -421,7 +331,6 @@ def test_policy_skip(monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str) ->
 def test_policy_substitute(
     monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str, ttf_font_path: str
 ) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     fm = FontMap(dirs=[fixture_fonts_dir], policy="substitute", fallback=PS_TT)
     r = fm.resolve("NoSuchFont")
     assert (r.how, r.path) == ("substitute", ttf_font_path)

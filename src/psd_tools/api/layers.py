@@ -3284,7 +3284,7 @@ class TypeLayer(Layer):
         :py:func:`~psd_tools.api.text_edit.drop_strikes`.
 
         :param fonts: :py:class:`~psd_tools.composite.text.FontMap`; the
-            default scans ``PSD_TOOLS_FONT_DIRS`` and the platform fonts.
+            default scans ``PSD_TOOLS_FONT_DIRS``.
         :param options: :py:class:`~psd_tools.composite.text.Options`.
         :param keep: :py:class:`~psd_tools.composite.text.Before`.
         :return: :py:class:`~psd_tools.composite.text.RenderReport`.

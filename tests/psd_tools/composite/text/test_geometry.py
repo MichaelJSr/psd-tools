@@ -17,7 +17,6 @@ from psd_tools.composite.text import (
     render,
     text_geometry,
 )
-from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.composite.text.constants import FAUX_BOLD_EM, FAUX_ITALIC_SHEAR
 from psd_tools.composite.text.layout import layout
 from psd_tools.composite.text.model import TextModel
@@ -29,11 +28,6 @@ from .conftest import CVT_TOP, D_TO_CVT, GLYPHS, UPEM
 #: per row; rewrite it from ``text_geometry`` after a deliberate layout change.
 GOLDEN = os.path.join(os.path.dirname(__file__), "text-psd-geometry.json")
 BREAKS = "\r\x03 "
-
-
-@pytest.fixture(autouse=True)
-def _no_platform_fonts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
 
 
 def type_layer(psd: str, name: str | None = None, index: int = 0) -> TypeLayer:

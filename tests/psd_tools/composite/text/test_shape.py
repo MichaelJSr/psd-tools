@@ -7,7 +7,6 @@ import pytest
 pytest.importorskip("freetype")
 pytest.importorskip("uharfbuzz")
 
-from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.composite.text.constants import FAUX_BOLD_EM
 from psd_tools.composite.text.fonts import FontMap
 from psd_tools.composite.text.model import Run, Style
@@ -267,7 +266,6 @@ def test_piece_range(fonts: FontMap) -> None:
 def test_faceless_run_is_skipped(
     monkeypatch: pytest.MonkeyPatch, fixture_fonts_dir: str
 ) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
     fonts = FontMap(dirs=[fixture_fonts_dir], policy="skip")
     text = "IA"
     runs = runs_for(text, style(), style(font="NoSuchFont"), cuts=(1,))

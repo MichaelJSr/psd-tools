@@ -17,7 +17,6 @@ from psd_tools import PSDImage
 from psd_tools.api import text_edit
 from psd_tools.api.layers import TypeLayer
 from psd_tools.composite.text import FontMap, capture, render_type_layer
-from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.constants import ChannelID
 
 from ..utils import full_name
@@ -32,9 +31,8 @@ LUCKIEST_GUY = os.path.join(
 
 
 @pytest.fixture(autouse=True)
-def _no_platform_fonts(monkeypatch: pytest.MonkeyPatch) -> None:
+def _no_env_fonts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PSD_TOOLS_FONT_DIRS", raising=False)
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
 
 
 @pytest.fixture

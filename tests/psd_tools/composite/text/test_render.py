@@ -20,17 +20,11 @@ from psd_tools.composite.text import (
     render_type_layer,
     verify,
 )
-from psd_tools.composite.text import fonts as fonts_module
 from psd_tools.composite.text.model import TextModel
 from psd_tools.constants import Resource
 
 from ...utils import full_name
 from .conftest import PS_TT
-
-
-@pytest.fixture(autouse=True)
-def _no_platform_fonts(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fonts_module, "platform_font_dirs", lambda: [])
 
 
 @pytest.fixture

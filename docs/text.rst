@@ -138,8 +138,8 @@ The render is stored at the document's depth for RGB documents and
 converted through PIL, at 8 bits, for the other colour modes.
 
 Fonts are looked up by PostScript name in the ``FontMap``'s directories,
-then ``PSD_TOOLS_FONT_DIRS`` and the platform font directories, each with
-its subdirectories; ``aliases`` map a name to a file. A name no file
+then ``PSD_TOOLS_FONT_DIRS``, each with its subdirectories (never the
+computer's own fonts); ``aliases`` map a name to a file. A name no file
 matches, or whose file cannot be opened, raises
 :py:class:`~psd_tools.composite.text.MissingFontError`;
 ``FontMap(policy="substitute")`` draws it with a fallback face and

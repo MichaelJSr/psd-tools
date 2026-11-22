@@ -31,7 +31,7 @@ from psd_tools.composite.text.constants import (
 )
 from psd_tools.composite.text.svg import SvgTable
 
-How = Literal["exact", "loose", "system", "substitute", "missing"]
+How = Literal["exact", "loose", "substitute", "missing"]
 Policy = Literal["raise", "skip", "substitute"]
 
 FONT_DIRS_ENV = "PSD_TOOLS_FONT_DIRS"
@@ -142,29 +142,6 @@ def _loose_keys(name: str) -> tuple[str, ...]:
     base = re.sub(r"-?Regular$", "", name)
     keys = (norm(name), norm(base))
     return keys if keys[1] != keys[0] else keys[:1]
-
-
-def platform_font_dirs() -> list[str]:
-    """The operating system's font directories, in search order.
-
-    Each is indexed with its subdirectories.
-    """
-    if os.name == "nt":
-        return [os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")]
-    home = os.path.expanduser("~")
-    if os.uname().sysname == "Darwin":  # type: ignore[attr-defined]  # not on Windows
-        return [
-            "/System/Library/Fonts",
-            "/Library/Fonts",
-            os.path.join(home, "Library", "Fonts"),
-        ]
-    data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
-    return [
-        "/usr/share/fonts",
-        "/usr/local/share/fonts",
-        os.path.join(data_home, "fonts"),
-        os.path.join(home, ".fonts"),
-    ]
 
 
 def _env_dirs() -> list[str]:
@@ -591,10 +568,9 @@ def _index(dirs: tuple[str, ...]) -> _Index:
 class FontMap:
     """Resolves PostScript names to faces.
 
-    Search order: ``dirs``, then ``PSD_TOOLS_FONT_DIRS``, then the platform
-    directories. An exact PostScript name is tried before a loose match in
-    the user directories, then both again in the platform directories;
-    the first face in directory order wins. ``aliases`` map a name to a font
+    Search order: ``dirs``, then ``PSD_TOOLS_FONT_DIRS``; the computer's own
+    fonts are not searched. An exact PostScript name is tried before a loose
+    match; the first face in directory order wins. ``aliases`` map a name to a font
     file path or to another name and override everything. Each folder list
     is indexed once per process and again when a folder or font file in it
     changes; a map keeps the index it first read.
@@ -613,31 +589,22 @@ class FontMap:
         fallback: str = DEFAULT_FALLBACK,
     ):
         self.dirs = tuple(os.fspath(d) for d in dirs or ()) + tuple(_env_dirs())
-        self.platform_dirs = tuple(platform_font_dirs())
         self.aliases = {k: os.fspath(v) for k, v in (aliases or {}).items()}
         self.policy: Policy = policy
         self.fallback = fallback
         self._user: _Index | None = None
-        self._platform: _Index | None = None
         self._faces: OrderedDict[tuple[str, int], Face] = OrderedDict()
         self._lock = threading.Lock()
 
-    def _indexes(self) -> tuple[_Index, _Index]:
+    def _indexes(self) -> tuple[_Index]:
         # AutoCroissant reads these.
-        return self._user_index(), self._platform_index()
+        return (self._user_index(),)
 
     def _user_index(self) -> _Index:
         with self._lock:
             if self._user is None:
                 self._user = _index(self.dirs)
             return self._user
-
-    def _platform_index(self) -> _Index:
-        # Built on the first name the given folders miss.
-        with self._lock:
-            if self._platform is None:
-                self._platform = _index(self.platform_dirs)
-            return self._platform
 
     def _face(self, key: tuple[str, int]) -> Face:
         with self._lock:
@@ -664,12 +631,6 @@ class FontMap:
         for key in _loose_keys(name):
             if key in user.loose:
                 return user.loose[key], "loose"
-        platform = self._platform_index()
-        if name in platform.exact:
-            return platform.exact[name], "system"
-        for key in _loose_keys(name):
-            if key in platform.loose:
-                return platform.loose[key], "loose"
         return None
 
     def find(self, name: str) -> tuple[str, int, How] | None:
