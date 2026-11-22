@@ -430,7 +430,7 @@ def read(bytes data, Py_ssize_t position, long cap):
 
 
 # ------------------------------ writer ------------------------------
-# ``descriptor._body_bytes`` for the exact classes and values it packs itself;
+# A descriptor body, for the exact classes and values it packs itself;
 # any other value is written by its own ``write`` after the buffer is flushed,
 # and odd numbers go through the same ``struct`` packers, as there.
 
@@ -534,7 +534,7 @@ cdef class _WOut:
         return 0
 
     cdef int delegate(self, object v) except -1:
-        """``write_joined(fp, out) + v.write(fp)``."""
+        """Flush the buffer, then ``v.write(fp)``."""
         self.flush()
         self.written += v.write(self.fp)
         return 0
@@ -550,7 +550,7 @@ cdef int _w_len(_WOut out, Py_ssize_t n) except -1:
 
 
 cdef int _w_key(_WOut out, object value) except -1:
-    """``_key_bytes``."""
+    """A key, as ``write_length_and_key`` writes it."""
     if value in _terms or isinstance(value, _ZeroLengthKey):
         out.u32(0)
     else:
@@ -644,7 +644,7 @@ cdef int _w_value(_WOut out, object v, long depth) except -1:
 
 
 def write_body(d, fp):
-    """``_body_bytes(d, out, fp) + write_joined(fp, out)``: the bytes written to ``fp``."""
+    """Write descriptor ``d``'s body to ``fp``; return the bytes written."""
     cdef _WOut out = _WOut()
     out.fp = fp
     out.written = 0

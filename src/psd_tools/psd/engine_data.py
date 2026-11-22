@@ -50,7 +50,7 @@ from psd_tools.psd.base import (
     ValueElement,
     plain_init,
 )
-from psd_tools.psd.bin_utils import read_remaining, write_bytes, write_joined
+from psd_tools.psd.bin_utils import read_remaining, write_bytes
 from psd_tools.psd.parse_limits import (
     ParseLimits,
     charge,
@@ -263,14 +263,10 @@ class Dict(DictElement):
         **kwargs: Any,
     ) -> int:
         """Write the structure to a file-like object and return the bytes written."""
-        if type(self) in _FAST_WRITERS:
-            if _WRITER:
-                data = _engine.dumps(self, indent, write_container)
-                if data is not None:
-                    return write_bytes(fp, data)
-            out: list[bytes] = []
-            written = _dict_bytes(self, indent, write_container, out, fp)
-            return written + write_joined(fp, out)
+        if type(self) in _FAST_WRITERS and _WRITER:
+            data = _engine.dumps(self, indent, write_container)
+            if data is not None:
+                return write_bytes(fp, data)
         inner_indent = indent if indent is None else indent + 1
         written = 0
         if write_container:
@@ -412,14 +408,10 @@ class List(ListElement):
 
     def write(self, fp: Any, indent: int | None = None, **kwargs: Any) -> int:
         """Write the structure to a file-like object and return the bytes written."""
-        if type(self) in _FAST_WRITERS:
-            if _WRITER:
-                data = _engine.dumps(self, indent, True)
-                if data is not None:
-                    return write_bytes(fp, data)
-            out: list[bytes] = []
-            written = _list_bytes(self, indent, out, fp)
-            return written + write_joined(fp, out)
+        if type(self) in _FAST_WRITERS and _WRITER:
+            data = _engine.dumps(self, indent, True)
+            if data is not None:
+                return write_bytes(fp, data)
         written = write_bytes(fp, b"[")
         if indent is None:
             for item in self:
@@ -612,7 +604,7 @@ class Tag(ValueElement):
         return write_bytes(fp, self.value)  # type: ignore[arg-type]
 
 
-# The fast writer below takes these exact classes; others write themselves.
+# The compiled writer takes these exact classes; others write themselves.
 _FAST_WRITERS = frozenset({Dict, EngineData, EngineData2, List})
 
 
@@ -632,108 +624,6 @@ def _float_bytes(value: float) -> bytes:
     if abs(value) > 0.0 and abs(value) < 1.0:
         data = data.replace(b"0.", b".")
     return data
-
-
-def _scalar_bytes(v: Any, out: list[bytes], fp: Any) -> int:
-    """Write ``v`` into ``out`` if its class is exact; others flush and write."""
-    t = type(v)
-    if t is Integer:
-        out.append(b"%d" % (v.value))
-    elif t is Float:
-        out.append(_float_bytes(v.value))
-    elif t is Bool:
-        out.append(b"true" if v.value else b"false")
-    elif t is String and type(v.value) is str:
-        out.append(_string_bytes(v.value))
-    elif t is Property and type(v.value) is str:
-        out.append(b"/" + v.value.encode("macroman"))
-    elif t is Tag and type(v.value) is bytes:
-        out.append(v.value)
-    else:
-        written = write_joined(fp, out)
-        return written + v.write(fp)  # type: ignore[no-any-return]
-    return 0
-
-
-def _dict_bytes(
-    d: Dict, indent: int | None, write_container: bool, out: list[bytes], fp: Any
-) -> int:
-    """Write ``Dict.write``'s bytes into ``out``; return what others wrote to ``fp``."""
-    inner_indent = indent if indent is None else indent + 1
-    if write_container:
-        if indent is None:
-            out.append(b" <<")
-        else:
-            if indent == 0:
-                out.append(b"\n")
-            out.append(b"\n" + b"\t" * (indent) + b"<<\n")
-    key_indent = b" " if inner_indent is None else b"\t" * (inner_indent)
-    written = 0
-    for key, value in d._items.items():
-        out.append(key_indent)
-        if type(key) is Property and type(key.value) is str:
-            out.append(b"/" + key.value.encode("macroman"))
-        else:
-            written += write_joined(fp, out) + key.write(fp)
-        if isinstance(value, Dict):
-            t = type(value)
-            if t is Dict or t is EngineData:
-                written += _dict_bytes(value, inner_indent, True, out, fp)
-            else:
-                written += write_joined(fp, out)
-                written += value.write(fp, indent=inner_indent)
-        else:
-            out.append(b" ")
-            if isinstance(value, List):
-                nested = len(value) > 0 and isinstance(value[0], Dict)
-                list_indent = inner_indent if nested else None
-                if type(value) is List:
-                    written += _list_bytes(value, list_indent, out, fp)
-                else:
-                    written += write_joined(fp, out)
-                    written += value.write(fp, indent=list_indent)
-            else:
-                written += _scalar_bytes(value, out, fp)
-        if indent is not None:
-            out.append(b"\n")
-    if write_container:
-        out.append(b" >>" if indent is None else b"\t" * (indent) + b">>")
-    return written
-
-
-def _list_bytes(lst: List, indent: int | None, out: list[bytes], fp: Any) -> int:
-    """Write ``List.write``'s bytes into ``out``; return what others wrote to ``fp``."""
-    out.append(b"[")
-    written = 0
-    if indent is None:
-        for item in lst._items:
-            if isinstance(item, Dict):
-                t = type(item)
-                if t is Dict or t is EngineData:
-                    written += _dict_bytes(item, None, True, out, fp)
-                else:
-                    written += write_joined(fp, out)
-                    written += item.write(fp, indent=None)
-            else:
-                out.append(b" ")
-                if type(item) is List:
-                    written += _list_bytes(item, None, out, fp)
-                else:
-                    written += _scalar_bytes(item, out, fp)
-        out.append(b" ")
-    else:
-        for item in lst._items:
-            t = type(item)
-            if t is Dict or t is EngineData:
-                written += _dict_bytes(item, indent, True, out, fp)
-            elif t is List:
-                written += _list_bytes(item, indent, out, fp)
-            else:
-                written += write_joined(fp, out)
-                written += item.write(fp, indent=indent)
-        out.append(b"\n" + b"\t" * (indent))
-    out.append(b"]")
-    return written
 
 
 def _compiled(cls: type[Dict], data: bytes) -> Dict | None:
