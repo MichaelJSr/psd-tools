@@ -622,6 +622,23 @@ class SmartObject:
         quad = None if corners is None else tuple(float(v) for v in corners)
         return placed_warp.draw(self, rgba, quad)  # type: ignore[arg-type]
 
+    def update_warp(self, width: int, height: int, ppi: float) -> tuple[float, ...]:
+        """Put the object's custom warp on a new file of another pixel size.
+
+        Before :py:meth:`draw_warp` of the new *width* x *height* file at
+        *ppi*: ``Sz`` and the warp's bounds written as Photoshop 2023's
+        Update writes them, the mesh kept. Returns the layer's new quad for
+        :py:meth:`link` or :py:meth:`relink` to write. See
+        :py:func:`psd_tools.composite.placed_warp.update`.
+
+        :raises ValueError: when :py:meth:`can_draw_warp` is False or, at a
+            new size, the quad is no upright rectangle or *ppi* is not the
+            layer's
+        """
+        from psd_tools.composite import placed_warp  # noqa: PLC0415
+
+        return placed_warp.update(self, width, height, ppi)  # type: ignore[arg-type]
+
     def __repr__(self) -> str:
         return f"SmartObject({self.filename!r} kind={self.kind!r} size={self.filesize})"
 

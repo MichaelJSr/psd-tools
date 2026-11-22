@@ -18,7 +18,7 @@ import numpy as np
 
 from psd_tools.api._descriptor import get_scalar
 from psd_tools.composite.smart_filters import Box, Quad, _affine, _map, _warp
-from psd_tools.psd.descriptor import Descriptor, ObjectArray
+from psd_tools.psd.descriptor import Descriptor, Double, ObjectArray
 
 if TYPE_CHECKING:
     from psd_tools.api.smart_object import SmartObject
@@ -103,6 +103,57 @@ def drawable(so: SmartObject) -> bool:
     return (
         parts is not None and _mapping(parts[1], parts[2], so.transform_box) is not None
     )
+
+
+def update(so: SmartObject, width: int, height: int, ppi: float) -> Quad:
+    """Put the object's warp on a new picture of *width* x *height* pixels.
+
+    As Photoshop 2023's Update Modified Content writes it (4 upright layers
+    of 2 cards at 72 ppi, exact): ``Sz`` and every copy of the warp's
+    ``bounds`` the new size, the mesh kept; the quad's corner and size each
+    rounded to whole pixels, so the new picture fills the same box. The same
+    size changes nothing.
+
+    :param ppi: the new file's resolution
+    :return: the layer's quad (TL TR BR BL), for the caller to write
+    :raises ValueError: when :py:func:`drawable` is False or, at a new size,
+        the quad is no upright rectangle or *ppi* is not the layer's
+        ``Rslt`` (unproven)
+    """
+    parts = _parts(so)
+    quad = so.transform_box
+    if parts is None or _mapping(parts[1], parts[2], quad) is None:
+        raise ValueError("this warp is not drawn")
+    assert quad is not None and so._config is not None
+    if (width, height) == parts[0]:
+        return tuple(float(v) for v in quad)  # type: ignore[return-value]
+    if width <= 0 or height <= 0:
+        raise ValueError("a file has pixels")
+    x0, y0, x1, y1, x2, y2, x3, y3 = (float(v) for v in quad)
+    if not (
+        abs(y0 - y1) < _TOL
+        and abs(y2 - y3) < _TOL
+        and abs(x0 - x3) < _TOL
+        and abs(x1 - x2) < _TOL
+        and x1 > x0
+        and y3 > y0
+    ):
+        raise ValueError("the layer's quad is no upright rectangle")
+    stored = get_scalar(so._config.data, b"Rslt", float, None)
+    if stored is None or abs(stored - ppi) > _TOL:
+        raise ValueError("the file's ppi is not the layer's")
+    left, top = np.floor(x0 + 0.5), np.floor(y0 + 0.5)
+    right = left + np.floor(x1 - x0 + 0.5)
+    bottom = top + np.floor(y3 - y0 + 0.5)
+    size = so._config.data[b"Sz  "]
+    size[b"Wdth"], size[b"Hght"] = Double(float(width)), Double(float(height))
+    for warp in (so.warp, getattr(so._placed_layer, "warp", None)):
+        bounds = warp.get(b"bounds") if isinstance(warp, Descriptor) else None
+        if isinstance(bounds, Descriptor):  # an old copy shows on the next update
+            for key, value in zip(_BOUNDS, (0, 0, width, height), strict=True):
+                bounds[key] = Double(float(value))
+    out = (left, top, right, top, right, bottom, left, bottom)
+    return tuple(float(v) for v in out)  # type: ignore[return-value]
 
 
 def _bernstein(t: np.ndarray) -> list[np.ndarray]:

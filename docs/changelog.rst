@@ -4,6 +4,12 @@ Changelog
 1.26.0+cards (unreleased)
 -------------------------
 
+- [api] ``SmartObject.update_warp()`` puts a custom warp on a new file of
+  another pixel size as Photoshop 2023's Update Modified Content does (4
+  upright layers of 2 cards, exact): ``Sz`` and the warp's bounds the new
+  size, the mesh kept, the quad's corner and size rounded; ``draw_warp()``
+  then draws the new file in the same box. Turned quads and another ppi are
+  refused
 - [api] ``SmartObject.place_picture()`` places a new picture on a turned
   quad as Photoshop 2023 does: a 2 x 2 mip pyramid, premultiplied, sampled
   bilinearly on the two levels round ``log2(1 / scale) - 1.125``. A

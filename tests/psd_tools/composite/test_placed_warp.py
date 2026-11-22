@@ -94,3 +94,48 @@ def test_other_warps_and_pictures_refused() -> None:
     assert so.draw_warp(clear)[1] == (0, 0, 0, 0)
     with pytest.raises(ValueError):
         so.draw_warp(clear, (0, 0, 32, 0, 40, 32, 0, 32))  # no parallelogram
+
+
+def _place(so: SmartObject, quad: tuple[float, ...]) -> None:
+    so._config.data[b"Trnf"] = [Double(v) for v in quad]  # type: ignore[union-attr]
+    so._placed_layer.transform = quad  # type: ignore[union-attr]
+
+
+def test_update_puts_the_warp_on_a_new_size() -> None:
+    """Photoshop's Update: Sz and bounds the new size, the mesh kept.
+
+    The new picture fills the same box: twice the size draws as the file.
+    The quad's corner and size are rounded; the same size changes nothing.
+    """
+    xs, ys = _grid(32, 32)
+    so = _warped(xs, ys)
+    rgba = np.random.default_rng(1).integers(1, 256, (32, 32, 4), dtype=np.uint8)
+    quad = so.update_warp(64, 64, 72.0)
+    assert quad == (0.0, 0.0, 32.0, 0.0, 32.0, 32.0, 0.0, 32.0)
+    out, box = so.draw_warp(np.repeat(np.repeat(rgba, 2, 0), 2, 1), quad)
+    assert box == (0, 0, 32, 32) and np.abs(out * 255 - rgba).max() < 0.5
+    warp = so.warp
+    assert isinstance(warp, Descriptor)
+    bounds = [float(warp[b"bounds"][k]) for k in (b"Left", b"Top ", b"Rght", b"Btom")]
+    assert bounds == [0.0, 0.0, 64.0, 64.0]
+    size = so._config.data[b"Sz  "]  # type: ignore[union-attr]
+    assert (float(size[b"Wdth"]), float(size[b"Hght"])) == (64.0, 64.0)
+    mesh = warp[b"customEnvelopeWarp"][b"meshPoints"]
+    assert list(mesh[b"Hrzn"].values) == xs and list(mesh[b"Vrtc"].values) == ys
+    so = _warped(xs, ys)
+    _place(so, (0.4, 0.6, 32.3, 0.6, 32.3, 31.2, 0.4, 31.2))
+    assert so.update_warp(32, 32, 72.0) == so.transform_box  # same size: kept
+    assert so.update_warp(48, 40, 72.0) == (0, 1, 32, 1, 32, 32, 0, 32)
+
+
+def test_update_refuses_a_turned_quad_or_another_ppi() -> None:
+    """Unproven: nothing is written."""
+    so = _warped(*_grid(32, 32))
+    with pytest.raises(ValueError):
+        so.update_warp(64, 64, 300.0)
+    _place(so, (0.0, 0.0, 32.0, 2.0, 30.0, 34.0, -2.0, 32.0))
+    with pytest.raises(ValueError):
+        so.update_warp(64, 64, 72.0)
+    size = so._config.data[b"Sz  "]  # type: ignore[union-attr]
+    assert (float(size[b"Wdth"]), float(size[b"Hght"])) == (32.0, 32.0)
+    assert so.can_draw_warp()
