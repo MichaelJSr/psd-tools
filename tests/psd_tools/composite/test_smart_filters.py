@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from psd_tools import PSDImage
+from psd_tools.api._descriptor import get_scalar
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.composite import smart_filters as sf
 from psd_tools.psd.descriptor import (
@@ -597,3 +598,81 @@ def test_warps_kept_on_a_trimmed_quad() -> None:
     assert box2 == where and np.allclose(after, before, atol=1e-6)
     trapezoid = [0.0, 0.0, 32.0, 0.0, 40.0, 32.0, -8.0, 32.0]
     assert not so.can_keep_filters(trapezoid)
+
+
+def _homography(src: list[float], dst: list[float]) -> np.ndarray:
+    """The 3 x 3 map of four points *src* onto *dst* (DLT, h33 = 1)."""
+    rows, rhs = [], []
+    pairs = zip(np.reshape(src, (4, 2)), np.reshape(dst, (4, 2)), strict=True)
+    for (x, y), (u, v) in pairs:
+        rows += [[x, y, 1, 0, 0, 0, -u * x, -u * y], [0, 0, 0, x, y, 1, -v * x, -v * y]]
+        rhs += [u, v]
+    return np.append(np.linalg.solve(rows, rhs), 1.0).reshape(3, 3)
+
+
+def _pairs(points: list[float], m: np.ndarray) -> np.ndarray:
+    p = np.c_[np.reshape(points, (-1, 2)), np.ones(len(points) // 2)] @ m.T
+    return (p[:, :2] / p[:, 2:]).ravel()
+
+
+def test_update_puts_a_turned_perspective_warp_on_a_new_size() -> None:
+    """Photoshop's Update of a file of another size on a turned quad.
+
+    The new file round ``(TR + BL) / 2`` at the old scale (a parallelogram:
+    the quad here is none), ``PuX`` that quad and the vertices followed from
+    the quad the warp ran on to the layer's, then by the affine map of three
+    corners: drawn there, not before. The same size changes nothing; an
+    upright quad or another ppi is refused, nothing written.
+    """
+    layer, entry = _object()
+    so = layer.smart_object
+    config, placed = so._config, so._placed_layer
+    assert config is not None and placed is not None
+    quad = _turned()
+    quad[5] += 0.1  # BR: no parallelogram, as the stars' quads
+    ran = [v + (7, 4)[i % 2] for i, v in enumerate(quad)]  # the warp ran 7, 4 px off
+    config.data[b"Trnf"] = [Double(v) for v in quad]
+    placed.transform = tuple(quad)
+    size = config.data[b"Sz  "]
+    size[b"Wdth"], size[b"Hght"] = Double(384.0), Double(384.0)
+    square = [(10, 12), (26, 8), (24, 26), (8, 22)]
+    fltr = _perspective(square, [(x + 1, y - 1) for x, y in square])
+    for key, value in zip(sf._PU, ran, strict=True):
+        fltr[key] = Double(value)
+    entry[b"Fltr"] = fltr
+    before = sf._corners(fltr)
+    assert before is not None
+    assert so.can_draw_filters() and so.update_filters(384, 384, 72.0) == tuple(quad)
+    q = np.reshape(quad, (4, 2))
+    ex, ey = (q[1] - q[0]) * 2, (q[3] - q[0]) * 2
+    tl = (q[1] + q[3]) / 2 - (ex + ey) / 2
+    want = np.concatenate([tl, tl + ex, tl + ex + ey, tl + ey])
+    assert not so.can_draw_filters(tuple(want), (768, 768))
+    assert so.can_update_filters(768, 768, 72.0)
+    assert so.can_update_filters(192, 192, 72.0)
+    assert not so.can_update_filters(768, 768, 300.0)
+    new = so.update_filters(768, 768, 72.0)
+    np.testing.assert_allclose(new, want, atol=1e-9)
+    assert [get_scalar(fltr, k, float, 0.0) for k in sf._PU] == list(new)
+
+    def corners3(c: list[float]) -> list[float]:  # TL TR BL, BR their parallelogram's
+        return [*c[:4], c[2] + c[6] - c[0], c[3] + c[7] - c[1], *c[6:]]
+
+    three = _homography(corners3(quad), corners3(list(new)))  # the affine of three
+    follow = three @ _homography(ran, quad)
+    after = sf._corners(fltr)
+    assert after is not None
+    for old, now in zip(before, after, strict=True):
+        np.testing.assert_allclose(now, _pairs(old, follow), atol=1e-9)
+    assert so.can_draw_filters(new, (768, 768))
+    picture, box = so.place_picture(np.full((768, 768, 4), 255, np.uint8), new)
+    out, _ = so.draw_filters(picture, box, new, size=(768, 768))
+    assert out.size and out[..., 3].max() > 0.99
+
+    layer, entry = _object()
+    so = layer.smart_object
+    entry[b"Fltr"] = _perspective(square, square)
+    assert so.can_draw_filters() and not so.can_update_filters(64, 64, 72.0)  # upright
+    with pytest.raises(ValueError):
+        so.update_filters(64, 64, 72.0)
+    assert get_scalar(entry[b"Fltr"], b"PuY0", float, 0.0) == 10.0
