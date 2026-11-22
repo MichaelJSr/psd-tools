@@ -23,7 +23,7 @@ from ..utils import full_name
 TEXT = "Line 1\rLine 2\rLine 3 and text"
 
 
-def open_layer(name: str = "text.psd") -> TypeLayer:
+def open_layer(name: str = "text.psb") -> TypeLayer:
     psd = PSDImage.open(full_name(name))
     return next(x for x in psd.descendants() if isinstance(x, TypeLayer))
 
@@ -62,7 +62,7 @@ def test_text_setter() -> None:
     assert lengths(layer, "ParagraphRun") == [6]
     assert layer._psd.is_updated()
     assert layer.typesetting.text == "Hello"
-    assert layer.story_text == "Hello\r"  # the named-key Txt2 story follows
+    assert layer.story_text == "Hello\r"  # the Txt2 story follows
 
 
 def test_set_text_without_paragraph_runs_changes_nothing() -> None:
@@ -570,32 +570,11 @@ def test_edits_keep_the_text_index() -> None:
     assert cast(TypeLayer, name).story_text == "B.F.B.\r"
 
 
-def test_named_story_takes_span_styles() -> None:
-    # text.psd's Txt2 names its keys (pre-CC): features by name, the paint
-    # as StreamTag/Color/Type/Values.
-    layer = open_layer()
-    layer.set_span_style(0, 4, fill=(1, 0, 0), FontSize=20.0, Font="AdobeInvisFont")
-    model = text2_named(layer)
-    runs = model["StyleRun"]["RunArray"]
-    assert [int(r["Length"].value) for r in runs] == lengths(layer) == [4, 26]
-    features = runs[0]["RunData"]["StyleSheet"]["Features"]
-    assert float(features["FontSize"].value) == 20.0
-    assert int(features["Font"].value) == 2  # the story's FontSet: AdobeInvisFont
-    paint = features["FillColor"]
-    assert str(paint["StreamTag"].value) == "SimplePaint"
-    assert int(paint["Color"]["Type"].value) == 1
-    assert [float(v.value) for v in paint["Color"]["Values"]] == [1.0, 1.0, 0.0, 0.0]
-    rest = runs[1]["RunData"]["StyleSheet"]["Features"]
-    assert float(rest["FontSize"].value) == 13.0
-    again = cast(
-        TypeLayer, next(x for x in saved(layer).descendants() if x.kind == "type")
-    )
-    assert raw(text2_named(again)) == raw(model)
-
-
-def text2_named(layer: TypeLayer) -> Any:
-    index = int(layer._data.text_data[b"TextIndex"])
-    return txt2(layer)["DocumentObjects"]["TextObjects"][index]["Model"]
+def test_a_pre_cc_story_refuses_edits() -> None:
+    layer = open_layer("text.psd")  # named (pre-CC) Txt2 keys
+    with pytest.raises(ValueError, match="Photoshop CC"):
+        layer.set_text("Hello")
+    assert layer.story_text is None
 
 
 def font_set(layer: TypeLayer, section: str = "ResourceDict") -> list[tuple[str, int]]:
@@ -604,18 +583,14 @@ def font_set(layer: TypeLayer, section: str = "ResourceDict") -> list[tuple[str,
 
 
 def txt2_fonts(layer: TypeLayer) -> Any:
-    """The Txt2 FontSet entries: numbered (CC) or named keys."""
-    root = txt2(layer)
-    if "0" in root:
-        return root["0"]["1"]["0"]
-    return root["DocumentResources"]["FontSet"]["Resources"]
+    """The Txt2 FontSet entries."""
+    return txt2(layer)["0"]["1"]["0"]
 
 
 def txt2_font_names(layer: TypeLayer) -> list[str]:
     names = []
     for font in txt2_fonts(layer):
-        node = font["0"]["0"]["0"] if "0" in font else font["Resource"]["Identifier"]
-        names.append(str(node.value if "0" in font else node["Name"].value))
+        names.append(str(font["0"]["0"]["0"].value))
     return names
 
 
@@ -673,7 +648,7 @@ def test_add_font_writes_txt2_entries_as_photoshop_does() -> None:
     )
 
 
-@pytest.mark.parametrize("path", [STORY, "text.psd"])
+@pytest.mark.parametrize("path", [STORY, "text.psb"])
 def test_add_font_round_trips_in_both_font_sets(path: str) -> None:
     layer = next(
         x
@@ -689,16 +664,8 @@ def test_add_font_round_trips_in_both_font_sets(path: str) -> None:
     story_fonts = txt2_font_names(again)
     assert story_fonts[-1] == "stoogedings-Regular"
     assert again.font_names[:2] == [layer.font_names[0], "stoogedings-Regular"]
-    runs = (
-        story(again)["0"]["6"]["0"]
-        if "0" in txt2(again)
-        else text2_named(again)["StyleRun"]["RunArray"]
-    )
-    first = (
-        runs[0]["0"]["0"]["6"]["0"]
-        if "0" in txt2(again)
-        else (runs[0]["RunData"]["StyleSheet"]["Features"]["Font"])
-    )
+    runs = story(again)["0"]["6"]["0"]
+    first = runs[0]["0"]["0"]["6"]["0"]
     assert story_fonts[int(first.value)] == "stoogedings-Regular"
     assert_story_in_step(again)
 

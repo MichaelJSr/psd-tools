@@ -83,7 +83,7 @@ def assert_close(actual: Any, expected: Any, path: str = "") -> None:
 
 
 def test_ligature_resolves_to_its_characters(ttf_font_path: str) -> None:
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     layer.set_text("fid AI")
     geometry = text_geometry(layer, as_fixture_font(ttf_font_path, "ArialMT"))
     text = geometry["text"]
@@ -105,7 +105,7 @@ def test_ink_of_an_instructed_glyph(make_font: Callable[..., str]) -> None:
     # The ink is the outline the font's instructions leave, as it is drawn.
     path = make_font("cvt.ttf", programs={"d": D_TO_CVT}, cvt=[CVT_TOP])
     fonts = as_fixture_font(path, "ArialMT")
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     layer.set_text("dI")
     geometry = text_geometry(layer, fonts)
     size = TextModel.from_layer(layer).runs[0].style.size
@@ -196,7 +196,7 @@ def assert_ink_covers_render(
     ids=["plain", "bold", "italic"],
 )
 def test_ink_covers_render(luckiest_guy_path: str, style: dict[str, Any]) -> None:
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     if style:
         layer.set_span_style(0, len(layer.text), **style)
     fonts = as_fixture_font(luckiest_guy_path, "ArialMT")
@@ -205,7 +205,7 @@ def test_ink_covers_render(luckiest_guy_path: str, style: dict[str, Any]) -> Non
 
 def test_faux_styles_move_ink(luckiest_guy_path: str) -> None:
     fonts = as_fixture_font(luckiest_guy_path, "ArialMT")
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     x0, y0, x1, y1 = text_geometry(layer, fonts)["glyphs"][0]["ink"]
     layer.set_span_style(0, 1, FauxBold=True)
     bold = text_geometry(layer, fonts)["glyphs"][0]["ink"]

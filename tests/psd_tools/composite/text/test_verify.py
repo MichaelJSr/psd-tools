@@ -104,7 +104,7 @@ def test_any_alpha_mask_excludes_faint_pixels() -> None:
 
 @pytest.mark.parametrize("mode", ["CMYK", "LAB", "L"])
 def test_stored_raster_in_other_colour_modes(mode: str) -> None:
-    psd = PSDImage.open(full_name("text.psd"))
+    psd = PSDImage.open(full_name("text.psb"))
     layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
     rgb, bbox = stored_raster(layer)
     copied = layer.copy_to(PSDImage.new(mode, psd.size))

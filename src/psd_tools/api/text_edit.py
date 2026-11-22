@@ -52,7 +52,7 @@ Span = tuple[int, int, Any]
 
 @dataclass(frozen=True)
 class _Spelling:
-    """Txt2 key names: Photoshop CC numbers them, older versions name them."""
+    """Txt2 key names, as Photoshop CC numbers them."""
 
     objects: str
     stories: str
@@ -70,7 +70,6 @@ class _Spelling:
     font_set: str
     font_name: tuple[str, ...]
     paint: tuple[str, str, str, str]
-    numbered: bool
     # Document resources and the story's references into them.
     resources: str
     items: str
@@ -102,7 +101,6 @@ _NUMBERED = _Spelling(
     font_set="1",
     font_name=("0", "0", "0"),
     paint=("99", "0", "0", "1"),
-    numbered=True,
     resources="0",
     items="0",
     item="0",
@@ -115,37 +113,6 @@ _NUMBERED = _Spelling(
     strikes="2",
     frame_strike=("99", "F", "10"),
 )
-_NAMED = _Spelling(
-    objects="DocumentObjects",
-    stories="TextObjects",
-    model="Model",
-    view="View",
-    text="Text",
-    paragraphs="ParagraphRun",
-    styles="StyleRun",
-    runs="RunArray",
-    data="RunData",
-    length="Length",
-    sheet="StyleSheet",
-    features="Features",
-    rendered="RenderedData",
-    font_set="FontSet",
-    font_name=("Resource", "Identifier", "Name"),
-    paint=("StreamTag", "Color", "Type", "Values"),
-    numbered=False,
-    resources="DocumentResources",
-    items="Resources",
-    item="Resource",
-    display="DisplayList",
-    name="Name",
-    style_sheets=("StyleSheetSet", "StyleSheet", "Parent", "Features"),
-    paragraph_sheets=("ParagraphSheetSet", "ParagraphSheet", "Parent", "Features"),
-    frame_set="TextFrameSet",
-    frames="Frames",
-    strikes="Strikes",
-    frame_strike=("StreamTag", "FrameStrike", "Frame"),
-)
-
 #: Photoshop refuses a document where it must compose these (embedded bitmaps).
 _KEEP_STRIKES = frozenset({"EarthboundZero"})
 #: What ends a paragraph run: Photoshop ends one at a forced line break too.
@@ -312,8 +279,14 @@ def set_run_style(
 
 
 def story_text(layer: TypeLayer) -> str | None:
-    r"""Return the text of the layer's Txt2 story, final ``\r`` included, or None."""
-    story = _story(layer)
+    r"""Return the text of the layer's Txt2 story, final ``\r`` included, or None.
+
+    None too for a story this module cannot read, such as a pre-CC one.
+    """
+    try:
+        story = _story(layer)
+    except (ValueError, IndexError, KeyError, TypeError):
+        return None
     return None if story is None else story.text
 
 
@@ -333,7 +306,7 @@ def stylistic_alternates(layer: TypeLayer) -> tuple[tuple[int, int], ...] | None
     except (ValueError, IndexError, KeyError, TypeError):
         return None
     k = story.k
-    key = str(_FEATURES["StylisticAlternates"]) if k.numbered else "StylisticAlternates"
+    key = str(_FEATURES["StylisticAlternates"])
     out: list[tuple[int, int]] = []
     for u0, u1, data in spans:
         sheet = data.get(k.sheet) if isinstance(data, engine_data.Dict) else None
@@ -353,13 +326,12 @@ def kerning_methods(layer: TypeLayer) -> tuple[tuple[int, int, int], ...] | None
     Photoshop lays text out by the Txt2 story's method: 0 kerns no pair
     (``0`` in the Character panel) even where TySh says ``AutoKerning``,
     1 is Metrics, 2 Optical. A run without its own takes its style sheet's.
-    None without a story, when the story holds other text than the layer,
-    or for a story with named (pre-CC) keys.
+    None without a story, or when the story holds other text than the layer.
     """
     try:
         story = _story(layer)
         text = None if story is None else _editor_text(layer)
-        if story is None or story.text != text or not story.k.numbered:
+        if story is None or story.text != text:
             return None
         k = story.k
         units = utf16_prefix(text)
@@ -593,11 +565,9 @@ class _Story:
                 raise ValueError(f"{key} has no Txt2 story feature")
             if key == "Font":
                 value = self._font_index(layer, value)
-            values[str(number) if k.numbered else key] = _element(value)
+            values[str(number)] = _element(value)
         if fill is not None:
-            values[str(_FEATURES["FillColor"]) if k.numbered else "FillColor"] = (
-                self._paint(fill)
-            )
+            values[str(_FEATURES["FillColor"])] = self._paint(fill)
         section = self.model[k.styles]
         spans = self._spans(section, utf16_prefix(text)[-1])
 
@@ -643,13 +613,10 @@ class _Story:
         item_key, identifier_key, name_key = k.font_name
         identifier = engine_data.Dict()
         identifier[name_key] = engine_data.String(name)
-        if k.numbered:
-            # Script and Synthetic are written only when set, as Photoshop does.
-            for key, value in (("1", script), ("2", font_type), ("3", synthetic)):
-                if value or key == "2":
-                    identifier[key] = engine_data.Integer(int(value))
-        else:
-            identifier["Type"] = engine_data.Integer(int(font_type))
+        # Script and Synthetic are written only when set, as Photoshop does.
+        for key, value in (("1", script), ("2", font_type), ("3", synthetic)):
+            if value or key == "2":
+                identifier[key] = engine_data.Integer(int(value))
         resource = engine_data.Dict()
         resource[k.paint[0]] = engine_data.Property("CoolTypeFont")
         resource[identifier_key] = identifier
@@ -671,13 +638,10 @@ class _Story:
 
 
 def _composer_gaps(story: _Story) -> list[tuple[int, engine_data.Dict]]:
-    """Each paragraph run's first unit and features, where the flag is unset.
-
-    Named-key stories have none.
-    """
+    """Each paragraph run's first unit and features, where the flag is unset."""
     k = story.k
     section = story.model.get(k.paragraphs)
-    if not (k.numbered and story._is_runs(section)):
+    if not story._is_runs(section):
         return []
     _, sheet_key, _, features_key = k.paragraph_sheets
     out = []
@@ -745,14 +709,16 @@ def _txt2(psd: Any) -> tuple[engine_data.Dict, _Spelling, engine_data.List] | No
     if blocks is None or Tag.TEXT_ENGINE_DATA not in blocks:
         return None
     root = blocks.get_data(Tag.TEXT_ENGINE_DATA)
-    for keys in (_NUMBERED, _NAMED):
-        objects = root.get(keys.objects) if isinstance(root, engine_data.Dict) else None
-        stories = (
-            objects.get(keys.stories) if isinstance(objects, engine_data.Dict) else None
-        )
-        if isinstance(stories, engine_data.List):
-            return root, keys, stories
-    raise ValueError("the document's Txt2 block has no text objects")
+    keys = _NUMBERED
+    objects = root.get(keys.objects) if isinstance(root, engine_data.Dict) else None
+    stories = (
+        objects.get(keys.stories) if isinstance(objects, engine_data.Dict) else None
+    )
+    if isinstance(stories, engine_data.List):
+        return root, keys, stories
+    raise ValueError(
+        "the document's Txt2 block has no text objects (Photoshop CC's keys)"
+    )
 
 
 def _document_blocks(psd: Any) -> Any:
@@ -811,12 +777,6 @@ def carry_story(layer: TypeLayer, source: Any, dest: Any) -> Callable[[], None] 
         return lambda: layer._data.text_data.pop(b"TextIndex", None)
     root, keys, stories = src
     story = _nth_story(stories, int(getattr(index, "value", index)), keys)
-    dst = _txt2(dest)
-    if dst is not None and dst[1] is not keys:
-        raise ValueError(
-            "cannot copy a Txt2 story between Photoshop CC's numbered keys and "
-            "an older version's named ones"
-        )
     frames = _resource_items(root, keys, keys.frame_set)
     refs = _frame_refs(story, keys)
     if any(not 0 <= i < len(frames) for i in refs):
@@ -930,7 +890,7 @@ class _Remap:
                 self.resource(set_key, int(parent.value), kind)
             )
         features = sheet.get(features_key)
-        font_key = str(_FEATURES["Font"]) if self.k.numbered else "Font"
+        font_key = str(_FEATURES["Font"])
         font = (
             features.get(font_key)
             if kind is self.k.style_sheets and isinstance(features, engine_data.Dict)

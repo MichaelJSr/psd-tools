@@ -44,7 +44,7 @@ def luckiest_guy_path() -> str:
 
 @pytest.fixture
 def layer() -> TypeLayer:
-    psd = PSDImage.open(full_name("text.psd"))
+    psd = PSDImage.open(full_name("text.psb"))
     return next(x for x in psd.descendants() if isinstance(x, TypeLayer))
 
 
@@ -184,7 +184,7 @@ def test_rasterize_without_the_extra(
 
 
 def test_rasterize_keeps_float_precision_in_a_32_bit_document(tmp_path: Any) -> None:
-    psd = PSDImage.open(full_name("pen-text.psd"))
+    psd = PSDImage.open(full_name("pen-text.psb"))
     layer = next(x for x in psd.descendants() if isinstance(x, TypeLayer))
     fonts = FontMap(aliases={name: LUCKIEST_GUY for name in _font_names(layer)})
     layer.rasterize(fonts=fonts)

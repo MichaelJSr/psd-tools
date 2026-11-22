@@ -84,7 +84,7 @@ def canvas_of(*boxes: tuple[int, ...]) -> tuple[int, int, int, int]:
 
 def test_unchanged_text_keeps_the_stored_channels(fonts: FontMap) -> None:
     # Photoshop's raster, which the fixture font does not reproduce.
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     before_channels, rect = channels(layer), tuple(layer.bbox)
     report = layer.rasterize(fonts=fonts, keep=capture(layer, fonts))
     assert report.splice is not None
@@ -95,7 +95,7 @@ def test_unchanged_text_keeps_the_stored_channels(fonts: FontMap) -> None:
 
 
 def test_unchanged_empty_layer_stays_empty(fonts: FontMap) -> None:
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     layer.set_text("")
     layer.rasterize(fonts=fonts)
     assert not layer.has_pixels()
@@ -107,7 +107,7 @@ def test_unchanged_empty_layer_stays_empty(fonts: FontMap) -> None:
 
 
 def test_one_line_edit_keeps_the_other_lines(fonts: FontMap) -> None:
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     layer.rasterize(fonts=fonts)
     tint(layer)
     before = capture(layer, fonts)
@@ -139,10 +139,10 @@ def test_one_line_edit_keeps_the_other_lines(fonts: FontMap) -> None:
 
 
 EDITS = [
-    ("text.psd", "Line 1\rLine 7\rLine 3 and text"),
-    ("text.psd", "Line 1\rLine 2\rLine 3 and more text"),
-    ("text.psd", "Line 1\rLine 3 and text"),
-    ("text.psd", "Line 0\rLine 1\rLine 2\rLine 3 and text"),
+    ("text.psb", "Line 1\rLine 7\rLine 3 and text"),
+    ("text.psb", "Line 1\rLine 2\rLine 3 and more text"),
+    ("text.psb", "Line 1\rLine 3 and text"),
+    ("text.psb", "Line 0\rLine 1\rLine 2\rLine 3 and text"),
     ("text-story.psd", "(1CD) Attacks inflict 1T Frozen.\rLine 2."),
     ("text-story.psd", "(1CD) Attacks always inflict 1T Frozen.\rLine two."),
 ]
@@ -193,7 +193,7 @@ def test_reflow_redraws_every_line_it_moves(fonts: FontMap) -> None:
 
 def test_glyph_unit_redraws_only_the_changed_glyphs(ttf_font_path: str) -> None:
     fonts = FontMap(aliases={"ArialMT": ttf_font_path})
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     layer.set_text("IAI IAI")
     layer.rasterize(fonts=fonts)
     zones = {}
@@ -215,7 +215,7 @@ def test_glyph_unit_redraws_only_the_changed_glyphs(ttf_font_path: str) -> None:
 
 
 def test_stray_stored_ink_renders_the_whole_layer(fonts: FontMap) -> None:
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     layer.rasterize(fonts=fonts)
     rgba, bbox = stored_raster(layer)
     assert rgba is not None and bbox is not None
@@ -234,7 +234,7 @@ def test_stray_stored_ink_renders_the_whole_layer(fonts: FontMap) -> None:
 
 
 def test_a_moved_layer_renders_the_whole_layer(fonts: FontMap) -> None:
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     before = capture(layer, fonts)
     moved = replace(before.model, transform=(*before.model.transform[:4], 0.0, 0.0))
     layer.set_text("Line 1\rLine 7\rLine 3 and text")
@@ -245,7 +245,7 @@ def test_a_moved_layer_renders_the_whole_layer(fonts: FontMap) -> None:
 
 def test_a_document_not_in_rgb_renders_the_whole_layer(fonts: FontMap) -> None:
     # A CMYK raster read as RGB and stored again would not round-trip.
-    source = type_layer("text.psd")
+    source = type_layer("text.psb")
     layers = [source.copy_to(PSDImage.new("CMYK", source._psd.size)) for _ in "ab"]
     before = capture(layers[0], fonts)
     assert not before.rgb
@@ -263,7 +263,7 @@ def test_a_document_not_in_rgb_renders_the_whole_layer(fonts: FontMap) -> None:
 def test_a_change_to_a_layer_without_stored_pixels_renders_it_whole(
     fonts: FontMap,
 ) -> None:
-    layer = type_layer("text.psd")
+    layer = type_layer("text.psb")
     layer.set_text("")
     layer.rasterize(fonts=fonts)
     before = capture(layer, fonts)
