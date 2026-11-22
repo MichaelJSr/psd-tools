@@ -247,7 +247,7 @@ def test_index_shared_until_a_folder_changes(
     root = os.path.join(str(tmp_path), "fonts")
     sub = os.path.join(root, "sub")
     os.makedirs(sub)
-    shutil.copy(ttf_font_path, sub)
+    font = shutil.copy(ttf_font_path, sub)
 
     def index() -> object:
         return FontMap(dirs=[root], policy="skip")._indexes()[0]
@@ -257,6 +257,15 @@ def test_index_shared_until_a_folder_changes(
     monkeypatch.setattr(fonts_module, "_STAMP_SLACK_NS", 0)
     old = time.time() - 60
     os.utime(sub, (old, old))
+    # A coarse clock (Windows before Python 3.13) can stamp these in the
+    # build's own tick, which is racy even without slack: build after it.
+    newest = max(
+        max(os.stat(p).st_mtime_ns, os.stat(p).st_ctime_ns) for p in (root, sub, font)
+    )
+    for _ in range(1000):
+        if time.time_ns() > newest:
+            break
+        time.sleep(0.001)
     first = index()
     assert index() is first
     shutil.copy(cff_font_path, sub)
