@@ -3260,7 +3260,6 @@ class TypeLayer(Layer):
         fonts: "FontMap | None" = None,
         options: "Options | None" = None,
         keep: "Before | None" = None,
-        unit: Literal["line", "glyph"] = "line",
     ) -> "RenderReport":
         """
         Render the text into the layer's pixels.
@@ -3275,8 +3274,8 @@ class TypeLayer(Layer):
         through PIL at 8 bits.
 
         With ``keep``, :py:func:`~psd_tools.composite.text.capture` of the
-        layer before the edit, only the changed lines (``unit="line"``) or
-        glyphs (``"glyph"``) are drawn and the stored pixels stay elsewhere.
+        layer before the edit, only the changed glyphs are drawn and the
+        stored pixels stay elsewhere.
         When no inked glyph changed (a trailing space, say) the channels and
         the TySh bounds are left as they are. ``report.splice`` says what was
         kept.
@@ -3288,7 +3287,6 @@ class TypeLayer(Layer):
             default scans ``PSD_TOOLS_FONT_DIRS`` and the platform fonts.
         :param options: :py:class:`~psd_tools.composite.text.Options`.
         :param keep: :py:class:`~psd_tools.composite.text.Before`.
-        :param unit: what a change redraws with ``keep``.
         :return: :py:class:`~psd_tools.composite.text.RenderReport`.
         """
         try:
@@ -3303,7 +3301,7 @@ class TypeLayer(Layer):
         if keep is None:
             result = render(self, fonts=fonts, options=options)
         else:
-            result = splice(self, keep, fonts=fonts, options=options, unit=unit)
+            result = splice(self, keep, fonts=fonts, options=options)
             info = result.report.splice
             if info is not None and info.zone is None and info.fallback is None:
                 return result.report

@@ -118,8 +118,8 @@ has ``drawn`` false.
 
 An edit can keep Photoshop's raster where the text did not change.
 :py:func:`~psd_tools.composite.text.capture` the layer before editing it and
-pass that to ``rasterize``; only the lines whose glyphs, styles or positions
-changed are drawn, and a reflow redraws every line it moves::
+pass that to ``rasterize``; only the glyphs whose face, styles or positions
+changed are drawn::
 
     from psd_tools.composite.text import capture
 
@@ -128,8 +128,7 @@ changed are drawn, and a reflow redraws every line it moves::
     report = layer.rasterize(fonts=fonts, keep=before)
     print(report.splice.kept, report.splice.redrawn, report.splice.zone)
 
-``unit="glyph"`` draws only the changed glyphs of a changed line. When no
-inked glyph changed (a trailing space, say) the stored channels stay byte
+When no inked glyph changed (a trailing space, say) the stored channels stay byte
 for byte and the TySh bounds as Photoshop wrote them. The whole layer is
 drawn instead, with ``report.splice.fallback`` saying why, when the stored
 ink falls outside the layout's glyph boxes, the transform or anti-aliasing

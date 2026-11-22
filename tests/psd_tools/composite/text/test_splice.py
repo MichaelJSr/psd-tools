@@ -11,7 +11,6 @@ from psd_tools import PSDImage
 from psd_tools.api.layers import TypeLayer
 from psd_tools.composite.text import FontMap, capture, render
 from psd_tools.composite.text import fonts as fonts_module
-from psd_tools.composite.text.splice import Unit
 from psd_tools.composite.text.verify import stored_raster
 
 from ...utils import full_name
@@ -148,10 +147,9 @@ EDITS = [
 ]
 
 
-@pytest.mark.parametrize("unit", ["line", "glyph"])
 @pytest.mark.parametrize(("psd", "text"), EDITS)
 def test_splice_of_an_own_raster_is_the_full_render(
-    fonts: FontMap, psd: str, text: str, unit: Unit
+    fonts: FontMap, psd: str, text: str
 ) -> None:
     # Over the engine's own raster a splice must give its full render: the
     # zone holds every pixel the edit changes.
@@ -160,7 +158,7 @@ def test_splice_of_an_own_raster_is_the_full_render(
     old = tuple(layer.bbox)
     before = capture(layer, fonts)
     layer.set_text(text)
-    report = layer.rasterize(fonts=fonts, keep=before, unit=unit)
+    report = layer.rasterize(fonts=fonts, keep=before)
     assert report.splice is not None and report.splice.fallback is None
     assert report.splice.redrawn
     canvas = canvas_of(old, tuple(layer.bbox), render(layer, fonts=fonts).bbox)
@@ -191,27 +189,22 @@ def test_reflow_redraws_every_line_it_moves(fonts: FontMap) -> None:
     assert report.splice.redrawn == (3,)
 
 
-def test_glyph_unit_redraws_only_the_changed_glyphs(ttf_font_path: str) -> None:
+def test_a_splice_redraws_only_the_changed_glyphs(ttf_font_path: str) -> None:
     fonts = FontMap(aliases={"ArialMT": ttf_font_path})
     layer = type_layer("text.psb")
     layer.set_text("IAI IAI")
     layer.rasterize(fonts=fonts)
-    zones = {}
-    for unit in ("line", "glyph"):
-        layer.set_text("IAI IAI")
-        layer.rasterize(fonts=fonts)
-        before = capture(layer, fonts)
-        # A and V share an advance: nothing else moves.
-        layer.set_text("IAI IVI")
-        report = layer.rasterize(fonts=fonts, keep=before, unit=unit)
-        assert report.splice is not None and report.splice.fallback is None
-        zones[unit] = report.splice.zone
-    line, glyph = zones["line"], zones["glyph"]
-    assert line is not None and glyph is not None
+    before = capture(layer, fonts)
+    # A and V share an advance: nothing else moves.
+    layer.set_text("IAI IVI")
+    report = layer.rasterize(fonts=fonts, keep=before)
+    assert report.splice is not None and report.splice.fallback is None
+    glyph = report.splice.zone
+    assert glyph is not None
     size = layer.engine_dict["StyleRun"]["RunArray"][0]["StyleSheet"]["StyleSheetData"][
         "FontSize"
     ]
-    assert glyph[2] - glyph[0] < 0.7 * float(size) + 6 < line[2] - line[0]
+    assert glyph[2] - glyph[0] < 0.7 * float(size) + 6
 
 
 def test_stray_stored_ink_renders_the_whole_layer(fonts: FontMap) -> None:

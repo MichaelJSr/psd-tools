@@ -12,7 +12,7 @@ import math
 from bisect import bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -28,10 +28,6 @@ from psd_tools.constants import ColorMode
 if TYPE_CHECKING:
     from psd_tools.api.layers import TypeLayer
     from psd_tools.composite.text.fonts import FontMap
-
-#: ``"line"`` redraws every glyph of a changed line, ``"glyph"`` only the
-#: glyphs that changed.
-Unit = Literal["line", "glyph"]
 
 
 @dataclass(frozen=True, eq=False)
@@ -91,25 +87,12 @@ def _lines_of(lay: Layout) -> list[int]:
     return [max(bisect_right(starts, g.cluster) - 1, 0) for g in lay.glyphs]
 
 
-def _kept(old: Layout, new: Layout, unit: Unit) -> tuple[list[bool], list[bool]]:
+def _kept(old: Layout, new: Layout) -> tuple[list[bool], list[bool]]:
     """Per glyph of ``old`` and of ``new``: whether the other layout draws it alike."""
     old_keys = [_glyph_key(g) for g in old.glyphs]
     new_keys = [_glyph_key(g) for g in new.glyphs]
-    if unit == "glyph":
-        old_set, new_set = set(old_keys), set(new_keys)
-        return [k in new_set for k in old_keys], [k in old_set for k in new_keys]
-    groups = []
-    for lay, keys in ((old, old_keys), (new, new_keys)):
-        lines: list[list[tuple]] = [[] for _ in lay.lines]
-        of = _lines_of(lay)
-        for j, key in zip(of, keys, strict=True):
-            lines[j].append(key)
-        groups.append((of, [tuple(line) for line in lines]))
-    (old_of, old_lines), (new_of, new_lines) = groups
-    old_set, new_set = set(old_lines), set(new_lines)
-    return [old_lines[j] in new_set for j in old_of], [
-        new_lines[j] in old_set for j in new_of
-    ]
+    old_set, new_set = set(old_keys), set(new_keys)
+    return [k in new_set for k in old_keys], [k in old_set for k in new_keys]
 
 
 def _glyph_box(g: PlacedGlyph, transform: Transform, pad: int) -> Bbox | None:
@@ -203,15 +186,12 @@ def splice(
     before: Before,
     fonts: FontMap | None = None,
     options: Options | None = None,
-    unit: Unit = "line",
     pad: int = SPLICE_PAD,
 ) -> RenderResult:
     """Render ``layer`` keeping ``before``'s stored pixels where nothing changed.
 
     A glyph is unchanged when the old layout drew the same glyph of the same
-    face, size, fill and faux styles at the same place; under ``unit="line"``
-    a line is unchanged when all of its glyphs are, so a reflow redraws every
-    line it moves. The engine's pixels fill the outline boxes, grown by
+    face, size, fill and faux styles at the same place. The engine's pixels fill the outline boxes, grown by
     ``pad``, of the changed glyphs old and new, and the stored ones stay
     everywhere else. The whole layer is rendered instead (``fallback`` says
     why) when the transform or anti-aliasing changed, the document is not
@@ -244,7 +224,7 @@ def splice(
     if why is not None:
         return done((), result.bbox, why)
     t = model.transform
-    keep_old, keep_new = _kept(before.layout, lay, unit)
+    keep_old, keep_new = _kept(before.layout, lay)
     old_rules = {_rule_key(r) for r in before.layout.rules}
     new_rules = {_rule_key(r) for r in lay.rules}
     changed = [
