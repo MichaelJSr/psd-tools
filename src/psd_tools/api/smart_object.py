@@ -525,20 +525,26 @@ class SmartObject:
         bbox = (left + dx, top + dy, right + dx, bottom + dy)
         return bbox, _decode_plane(extra, width, height)
 
-    def can_draw_filters(self, corners: Sequence[float] | None = None) -> bool:
+    def can_draw_filters(
+        self,
+        corners: Sequence[float] | None = None,
+        size: tuple[float, float] | None = None,
+    ) -> bool:
         """Return whether :py:meth:`draw_filters` draws the smart filters on.
 
-        True with none on, or one Puppet Warp, one-quad Perspective Warp,
+        True with none on, or one Puppet Warp, one-quad Perspective Warp (on a
+        quad not upright: a file :py:meth:`place_picture` places there),
         Invert, Gaussian Blur, proven Motion Blur, Mosaic on the canvas's grid,
         master-only Hue/Saturation, untinted Black & White or Relative
         Selective Color of the six hues, Normal at 100%, in an RGB document; a
         filter mask does not refuse (the composite applies it). *corners*: the
-        quad a new picture is drawn on (default :py:attr:`transform_box`).
+        quad a new picture is drawn on (default :py:attr:`transform_box`);
+        *size*: its file's pixels ``(width, height)`` (default the object's).
         """
         from psd_tools.composite import smart_filters  # noqa: PLC0415
 
         quad = None if corners is None else tuple(float(v) for v in corners)
-        return smart_filters.drawable(self, quad)  # type: ignore[arg-type]
+        return smart_filters.drawable(self, quad, size)  # type: ignore[arg-type]
 
     def draw_filters(
         self,
@@ -546,22 +552,46 @@ class SmartObject:
         box: tuple[int, int, int, int],
         corners: Sequence[float] | None = None,
         sampling: str | None = None,
+        size: tuple[float, float] | None = None,
     ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
         """Draw the smart filters over a new picture of the object.
 
-        For a redraw from a changed file: *rgba* (straight float RGBA in 0..1)
-        is the new picture drawn on the quad *corners* (default
-        :py:attr:`transform_box`) over canvas *box*. Call it before the
-        layer's pixels or filter source change. See
-        :py:func:`psd_tools.composite.smart_filters.draw`.
+        For a redraw from a changed file (of *size* pixels, default the
+        object's): *rgba* (straight float RGBA in 0..1) is the new picture
+        drawn on the quad *corners* (default :py:attr:`transform_box`) over
+        canvas *box*; under a Perspective Warp on a quad not upright, drawn by
+        :py:meth:`place_picture`. Call it before the layer's pixels or filter
+        source change. See :py:func:`psd_tools.composite.smart_filters.draw`.
 
         :return: ``(straight float32 RGBA, canvas box)``
-        :raises ValueError: when :py:meth:`can_draw_filters` is False on *corners*
+        :raises ValueError: when :py:meth:`can_draw_filters` is False on
+            *corners*, *size*
         """
         from psd_tools.composite import smart_filters  # noqa: PLC0415
 
         quad = None if corners is None else tuple(float(v) for v in corners)
-        return smart_filters.draw(self, rgba, box, quad, sampling)  # type: ignore[arg-type]
+        return smart_filters.draw(self, rgba, box, quad, sampling, size)  # type: ignore[arg-type]
+
+    def place_picture(
+        self, rgba: np.ndarray, corners: Sequence[float] | None = None
+    ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+        """Place a new picture of the object's file on its quad, as Photoshop.
+
+        For a Perspective Warp's redraw on a quad not upright: *rgba* (straight
+        RGBA, uint8 or float in 0..1) on *corners* (default
+        :py:attr:`transform_box`) by Photoshop 2023's mip resample, proven
+        where :py:meth:`can_draw_filters` holds. See
+        :py:func:`psd_tools.composite.smart_filters.place`.
+
+        :return: ``(straight float32 RGBA, canvas box)``
+        :raises ValueError: when the quad is missing or flat
+        """
+        from psd_tools.composite import smart_filters  # noqa: PLC0415
+
+        quad = self.transform_box if corners is None else corners
+        if quad is None:
+            raise ValueError("the object has no quad")
+        return smart_filters.place(rgba, [float(v) for v in quad])
 
     def can_draw_warp(self) -> bool:
         """Return whether :py:meth:`draw_warp` draws the object's warp.

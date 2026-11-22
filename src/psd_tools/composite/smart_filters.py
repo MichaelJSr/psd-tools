@@ -13,6 +13,10 @@ sums (no BLAS), so every CPU gives the same result.
 A filter mask does not change what is drawn: Photoshop stores the filters'
 whole result as the layer's pixels, and the composite blends them with the
 filter source through the mask.
+
+A Perspective Warp on a quad not upright takes the picture as :py:func:`place`
+puts it there (Photoshop's mip resample), at a scale :py:func:`placeable`
+holds.
 """
 
 from __future__ import annotations
@@ -63,6 +67,11 @@ _PU = (b"PuX0", b"PuY0", b"PuX1", b"PuY1", b"PuX2", b"PuY2", b"PuX3", b"PuY3")
 _QUAD_TOL = 0.01  # px: a quad this close to a parallelogram is one
 _EDGE = 1e-9  # barycentric slack: a pixel centre on an edge is inside
 _BAND = 1 << 15  # float64s a blur band holds (256 KiB)
+#: Mip levels :py:func:`place` is proven at (Photoshop 2023's stars, 15 layers
+#: of 5 cards at levels 2.14-2.47: scale 0.057-0.115).
+PLACED = (2.0, 3.0)
+_LOD_BIAS = 1.125  # level = log2(1 / scale) - this (fitted, the stars)
+_SPREAD = 1 / 32  # levels the quad's corners may differ by (near a parallelogram)
 
 
 def _on(desc: Descriptor | None, key: bytes = b"enab") -> bool:
@@ -186,13 +195,18 @@ def _distance(fltr: Descriptor) -> int | None:
     return int(distance)
 
 
-def _items(so: SmartObject, corners: Quad | None = None) -> list[Descriptor] | None:
+def _items(
+    so: SmartObject,
+    corners: Quad | None = None,
+    size: tuple[float, float] | None = None,
+) -> list[Descriptor] | None:
     """The filters on; ``None`` when they are not :py:func:`draw`'s.
 
     That is more than one, another kind, a blend other than Normal at 100%, a
     mesh that does not decode, a quad no parallelogram, a Perspective Warp's
-    quad flat or a Mosaic off its grid; the quad *corners*, by default the
-    layer's.
+    quad flat, no affine image of the one it ran on or, not upright, past
+    :py:func:`placeable` for a picture of *size* (default the object's), or a
+    Mosaic off its grid; the quad *corners*, by default the layer's.
     """
     fx = so.filters
     if fx is None or not _on(fx):
@@ -221,28 +235,39 @@ def _items(so: SmartObject, corners: Quad | None = None) -> list[Descriptor] | N
         or _mapping(so, found[0][b"Fltr"], corners) is None
     ):
         return None
-    if (
-        _kind(found[0]) == "perspective"
-        and _perspective(so, found[0][b"Fltr"], corners) is None
-    ):
-        return None
+    if _kind(found[0]) == "perspective":
+        quad = corners if corners is not None else so.transform_box
+        own = size if size is not None else _size(so)
+        if _perspective(so, found[0][b"Fltr"], corners) is None or (
+            quad is not None
+            and not _upright(quad)
+            and (own is None or not placeable(own, quad))
+        ):
+            return None
     if _kind(found[0]) == "mosaic" and not _whole_cells(so, found[0][b"Fltr"], corners):
         return None
     return found
 
 
-def drawable(so: SmartObject, corners: Quad | None = None) -> bool:
+def drawable(
+    so: SmartObject,
+    corners: Quad | None = None,
+    size: tuple[float, float] | None = None,
+) -> bool:
     """Whether :py:func:`draw` draws the object's smart filters on *corners*.
 
     True with none on, or one on, a Puppet Warp, a Perspective Warp of one
-    quad, an Invert, a Gaussian Blur, a Motion Blur at angle 0 of a distance
-    :py:data:`MOTION` holds, a Mosaic on a canvas of whole cells and a quad
-    not above or left of it, a Hue/Saturation of the master alone, a Black &
-    White without tint or a Relative Selective Color of the six hues, Normal
-    at 100%, in an RGB document. A filter mask does not refuse. *corners*: the quad the new
-    picture is drawn on, by default the layer's.
+    quad (an affine image of the one it ran on; not upright, a picture of
+    *size* :py:func:`placeable` there), an Invert, a Gaussian Blur, a Motion
+    Blur at angle 0 of a distance :py:data:`MOTION` holds, a Mosaic on a
+    canvas of whole cells and a quad not above or left of it, a
+    Hue/Saturation of the master alone, a Black & White without tint or a
+    Relative Selective Color of the six hues, Normal at 100%, in an RGB
+    document. A filter mask does not refuse. *corners*: the quad the new
+    picture is drawn on, by default the layer's; *size*: its file's pixels
+    ``(width, height)``, by default the object's.
     """
-    return _items(so, corners) is not None
+    return _items(so, corners, size) is not None
 
 
 def draw(
@@ -251,6 +276,7 @@ def draw(
     box: Box,
     corners: Quad | None = None,
     sampling: str | None = None,
+    size: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, Box]:
     """Draw the object's smart filters over a new picture of it.
 
@@ -265,11 +291,14 @@ def draw(
     :param sampling: a Puppet Warp's ``"bilinear"`` or ``"nearest"``; by
         default the one that redraws the layer's stored pixels from its
         stored filter source closer, else bilinear
+    :param size: the file's pixels ``(width, height)`` the picture is of; by
+        default the object's. A Perspective Warp on a quad not upright takes
+        the picture as :py:func:`place` puts it there.
     :return: ``(straight float32 RGBA, canvas box)``, the box trimmed to the
         pixels that show; ``(0, 0, 0, 0)`` with an empty array when none do
-    :raises ValueError: when :py:func:`drawable` is False on *corners*
+    :raises ValueError: when :py:func:`drawable` is False on *corners*, *size*
     """
-    items = _items(so, corners)
+    items = _items(so, corners, size)
     if items is None:
         raise ValueError("these smart filters are not drawn")
     out = np.asarray(rgba, np.float32)
@@ -330,13 +359,17 @@ def _perspective(
     The quad's vertices and warped vertices follow the layer from the quad
     the filter ran on (``PuX0``..) to its quad now, projectively (the Puppet
     Warp's affine on parallelograms); then warped vertices -> vertices, and
-    vertices -> warped vertices.
+    vertices -> warped vertices. ``None`` when the quad now is no affine
+    image of that one: Photoshop's Update follows by the affine of three
+    corners (a file of twice the pixels on a turned quad), the projective
+    follow equal only there.
     """
     quad = corners if corners is not None else so.transform_box
     found = _corners(fltr)
     if quad is None or found is None:
         return None
-    moved = _between([get_scalar(fltr, k, float, 0.0) for k in _PU], list(quad))
+    ran = [get_scalar(fltr, k, float, 0.0) for k in _PU]
+    moved = _between(ran, list(quad)) if _affinely(ran, list(quad)) else None
     if moved is None:
         return None
     vertices, warped = (_through(moved, q) for q in found)
@@ -344,6 +377,24 @@ def _perspective(
         return None
     back, ahead = _between(warped, vertices), _between(vertices, warped)
     return None if back is None or ahead is None else (back, ahead)
+
+
+def _affinely(src: list[float], dst: list[float]) -> bool:
+    """Quad *dst* is an affine image of *src* (within :py:data:`_QUAD_TOL`).
+
+    The affine map of three corners (TL TR BL) takes the fourth there.
+    """
+    x0, y0, x1, y1, x2, y2, x3, y3 = src
+    u0, v0, u1, v1, u2, v2, u3, v3 = dst
+    ax, ay, bx, by = x1 - x0, y1 - y0, x3 - x0, y3 - y0
+    det = ax * by - ay * bx
+    if abs(det) < 1e-12:
+        return False
+    a = ((x2 - x0) * by - (y2 - y0) * bx) / det
+    b = (ax * (y2 - y0) - ay * (x2 - x0)) / det
+    px = u0 + a * (u1 - u0) + b * (u3 - u0)
+    py = v0 + a * (v1 - v0) + b * (v3 - v0)
+    return abs(px - u2) <= _QUAD_TOL and abs(py - v2) <= _QUAD_TOL
 
 
 def _square(q: list[float]) -> list[float] | None:
@@ -412,6 +463,162 @@ def _through(m: list[float], q: list[float]) -> list[float] | None:
             return None
         out += [(m[0] * x + m[1] * y + m[2]) / w, (m[3] * x + m[4] * y + m[5]) / w]
     return out
+
+
+def _upright(q: Quad | list[float]) -> bool:
+    """Quad *q* is an upright rectangle (no turn, skew or perspective)."""
+    x0, y0, x1, y1, x2, y2, x3, y3 = (float(v) for v in q)
+    return (
+        abs(y0 - y1) < _QUAD_TOL
+        and abs(y2 - y3) < _QUAD_TOL
+        and abs(x0 - x3) < _QUAD_TOL
+        and abs(x1 - x2) < _QUAD_TOL
+        and x1 > x0
+        and y3 > y0
+    )
+
+
+def _size(so: SmartObject) -> tuple[float, float] | None:
+    """The object's pixels ``(width, height)`` (its ``Sz``), else ``None``."""
+    size = so._config.data.get(b"Sz  ") if so._config is not None else None
+    if not isinstance(size, Descriptor):
+        return None
+    w, h = (get_scalar(size, k, float, math.nan) for k in (b"Wdth", b"Hght"))
+    return (w, h) if w > 0 and h > 0 else None  # NaN fails both
+
+
+def _level(size: tuple[float, float], quad: Quad | list[float]) -> float | None:
+    """The mip level a picture of *size* takes on *quad*.
+
+    ``log2(1 / scale) - 1.125``, the scale the square root of the quad's area
+    over the picture's. ``None`` when flat or past the horizon.
+    """
+    w, h = float(size[0]), float(size[1])
+    q = [float(v) for v in quad]
+    if not (w > 0 and h > 0) or len(q) != 8:
+        return None
+    area = _area(q)
+    if not area > 0 or _between([0.0, 0.0, w, 0.0, w, h, 0.0, h], q) is None:
+        return None
+    return 0.5 * _log2(w * h / area) - _LOD_BIAS
+
+
+def _area(q: list[float]) -> float:
+    """Quad *q*'s area (shoelace, a fixed order)."""
+    total = 0.0
+    for i in range(0, 8, 2):
+        total += q[i] * q[(i + 3) % 8] - q[(i + 2) % 8] * q[i + 1]
+    return 0.5 * abs(total)
+
+
+def _log2(x: float) -> float:
+    """log2 in decimal: the same on every CPU (libm's is not)."""
+    context = Context(prec=34)
+    return float(context.divide(context.ln(Decimal(x)), context.ln(Decimal(2))))
+
+
+def placeable(size: tuple[float, float], quad: Quad | list[float]) -> bool:
+    """Whether :py:func:`place` puts a picture of *size* on *quad* as proven.
+
+    Its level (:py:func:`_level`) in :py:data:`PLACED` and the quad near a
+    parallelogram: the levels at its corners within ``1/32`` of each other.
+    """
+    level = _level(size, quad)
+    if level is None or not PLACED[0] <= level < PLACED[1]:
+        return False
+    w, h = float(size[0]), float(size[1])
+    m = _between([0.0, 0.0, w, 0.0, w, h, 0.0, h], [float(v) for v in quad])
+    assert m is not None
+    ws = [m[6] * x + m[7] * y + m[8] for x, y in ((0, 0), (w, 0), (w, h), (0, h))]
+    return 1.5 * _log2(max(ws) / min(ws)) <= _SPREAD  # scale ~ w ** -1.5
+
+
+def place(rgba: np.ndarray, quad: Quad | list[float]) -> tuple[np.ndarray, Box]:
+    """A picture on *quad* as Photoshop 2023 places a reduction on a turned one.
+
+    Premultiplied, a mip pyramid of 2 x 2 means (an odd last row or column
+    dropped); each pixel centre goes back through the quad's map onto the
+    picture and samples levels ``floor(L)`` and the next bilinearly (clear
+    past them; a level's points ``0.5 - 0.5 / 2**level`` of its pixels up and
+    left), mixed by ``L``'s fraction; ``L`` the quad's :py:func:`_level`, at
+    least 0. Fitted on Photoshop's stored filter sources of the stars
+    (:py:func:`placeable`'s scales).
+
+    :param rgba: straight RGBA ``(h, w, 4)``, uint8 or float in 0..1
+    :param quad: TL TR BR BL on the canvas
+    :return: ``(straight float32 RGBA, canvas box)``, the box trimmed to the
+        pixels that show; ``(0, 0, 0, 0)`` with an empty array when none do
+    :raises ValueError: when the quad is flat
+    """
+    pic = np.asarray(rgba)
+    h, w = pic.shape[:2]
+    q = [float(v) for v in quad]
+    level = _level((w, h), q)
+    back = _between(q, [0.0, 0.0, float(w), 0.0, float(w), float(h), 0.0, float(h)])
+    if level is None or back is None:
+        raise ValueError("the quad is flat")
+    scale = math.sqrt(_area(q) / (w * h))  # canvas px per picture px
+    level = max(level, 0.0)
+    low = math.floor(level)
+    mix = level - low
+    levels = _mips(pic, low + 1)
+    reach = 2 + math.ceil(1.5 * (1 << (low + 1)) * scale)  # a tap's reach, canvas px
+    x0 = math.floor(min(q[0::2])) - reach
+    y0 = math.floor(min(q[1::2])) - reach
+    x1 = math.ceil(max(q[0::2])) + reach
+    y1 = math.ceil(max(q[1::2])) + reach
+    out = np.zeros((y1 - y0, x1 - x0, 4))
+    xs = np.arange(x0, x1) + 0.5
+    rows = max(1, _BAND // (x1 - x0))
+    for r0 in range(0, y1 - y0, rows):
+        r1 = min(r0 + rows, y1 - y0)
+        ys = np.arange(y0 + r0, y0 + r1)[:, None] + 0.5
+        d = back[6] * xs + back[7] * ys + back[8]
+        ok = d > 1e-12
+        d = np.where(ok, d, 1.0)
+        sx = np.where(ok, (back[0] * xs + back[1] * ys + back[2]) / d, -1e9).ravel()
+        sy = np.where(ok, (back[3] * xs + back[4] * ys + back[5]) / d, -1e9).ravel()
+        band = np.zeros((len(sx), 4))
+        for lv, weight in ((low, 1.0 - mix), (low + 1, mix)):
+            k, mip = float(1 << lv), levels[lv - low]
+            shift = 0.5 - 0.5 / k
+            at = (0, 0, mip.shape[1], mip.shape[0])
+            band = band + weight * _bilinear(mip, at, sx / k - shift, sy / k - shift)
+        out[r0:r1] = band.reshape(r1 - r0, x1 - x0, 4)
+    return _straight(out, (x0, y0, x1, y1))
+
+
+def _mips(rgba: np.ndarray, top: int) -> list[np.ndarray]:
+    """Premultiplied float64 levels ``top - 1`` and *top* of *rgba*.
+
+    Level 0 is the picture; each next one the means of its 2 x 2 pixels,
+    summed in a fixed order, an odd last row or column dropped. Level 1 is
+    made in bands: past it level 0 is never held whole.
+    """
+    scale = 255.0 if rgba.dtype == np.uint8 else 1.0
+
+    def premultiplied(part: np.ndarray) -> np.ndarray:
+        pre = part.astype(np.float64) / scale
+        pre[..., :3] *= pre[..., 3:]
+        return pre
+
+    def halved(pre: np.ndarray) -> np.ndarray:
+        h, w = pre.shape[0] // 2 * 2, pre.shape[1] // 2 * 2
+        p = pre[:h, :w]
+        return (p[0::2, 0::2] + p[1::2, 0::2] + p[0::2, 1::2] + p[1::2, 1::2]) / 4
+
+    h, w = rgba.shape[0] // 2 * 2, rgba.shape[1]
+    rows = max(2, _BAND // max(1, 4 * w) * 2)
+    mip = np.zeros((h // 2, w // 2, 4))
+    for r in range(0, h, rows):
+        mip[r // 2 : (r + rows) // 2] = halved(
+            premultiplied(rgba[r : min(r + rows, h)])
+        )
+    if top == 1:
+        return [premultiplied(rgba), mip]
+    for _ in range(top - 2):
+        mip = halved(mip)
+    return [mip, halved(mip)]
 
 
 def _sampling(so: SmartObject, fltr: Descriptor, mesh: Mesh) -> str:
