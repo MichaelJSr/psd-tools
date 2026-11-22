@@ -30,7 +30,6 @@ from psd_tools.constants import (
     BlendMode,
     ChannelID,
     ColorMode,
-    CompatibilityMode,
     Compression,
 )
 from psd_tools.psd.document import PSD
@@ -511,11 +510,6 @@ class PSDProtocol(GroupMixinProtocol, Protocol):
     @property
     def visible(self) -> bool:
         """Visibility of the document."""
-        ...
-
-    @property
-    def compatibility_mode(self) -> CompatibilityMode:
-        """Compatibility mode of the document."""
         ...
 
     @property

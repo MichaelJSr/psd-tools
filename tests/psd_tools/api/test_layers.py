@@ -24,7 +24,6 @@ from psd_tools.api.psd_image import PSDImage
 from psd_tools.constants import (
     BlendMode,
     ColorMode,
-    CompatibilityMode,
     ProtectedFlags,
     SectionDivider,
     SheetColorType,
@@ -241,32 +240,6 @@ def test_clip_adjustment() -> None:
     layer = psd[0]
     assert layer.kind == "type"
     assert len(layer.clip_layers) == 1
-
-
-def test_nested_clipping() -> None:
-    """Check if the nested clipping layers are correctly identified.
-
-    Structure of the PSD file `clipping-mask.psd` is as follows:
-
-        PSDImage(mode=3 size=360x200 depth=8 channels=3)
-        [0] PixelLayer('Background' size=360x200)
-        [1] Group('Group 2' size=238x219)
-          [0] Group('Group 1' size=185x219)
-            [0] PixelLayer('Shape 3' size=185x72)
-            [1] ShapeLayer('Shape 4' size=157x160)
-          [1] ShapeLayer('Shape 1' size=124x69)
-          [2] +ShapeLayer('Shape 2' size=69x75 clip)
-    """
-    psd = PSDImage.open(full_name("clipping-mask.psd"))
-    psd.compatibility_mode = CompatibilityMode.CLIP_STUDIO_PAINT
-    psd[1].blend_mode = BlendMode.NORMAL
-    psd[1].clipping = True
-    assert psd[1].clipping is True
-    group_1 = psd[1]
-    assert isinstance(group_1, Group)
-    assert group_1[1].has_clip_layers()
-    assert group_1[2].clipping
-    assert psd[0].has_clip_layers()
 
 
 def test_clip_stack() -> None:

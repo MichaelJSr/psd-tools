@@ -1,22 +1,6 @@
 """Various constants for psd_tools."""
 
-from enum import Enum, IntEnum, auto
-
-
-class CompatibilityMode(Enum):
-    """
-    Compatibility modes for compositing and layer control.
-
-    Each describes how those two should attempt to behave.
-    """
-
-    PHOTOSHOP = auto()
-    PAINT_TOOL_SAI = auto()
-    CLIP_STUDIO_PAINT = auto()
-    GIMP = auto()
-    KRITA = auto()
-
-    DEFAULT = PHOTOSHOP
+from enum import Enum, IntEnum
 
 
 class Knockout(IntEnum):

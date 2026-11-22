@@ -79,7 +79,6 @@ from psd_tools.constants import (
     TEXT_BLEND_GAMMA,
     ChannelID,
     ColorMode,
-    CompatibilityMode,
     Compression,
     Resource,
     SectionDivider,
@@ -145,7 +144,6 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             raise TypeError(f"Expected PSD instance, got {type(data).__name__}")
         self._record = data
         self._layers: list[layers.Layer] = []
-        self._compatibility_mode = CompatibilityMode.DEFAULT
         self._background_color: float | tuple[float, ...] | None = None
         self._updated: bool = False  # See mark_updated() for what this gates.
         self._max_alloc_bytes: AllocBudget | None = None  # See max_alloc_bytes.
@@ -1073,27 +1071,6 @@ class PSDImage(layers.GroupMixin, PSDProtocol):
             patterns = psd.tagged_blocks.get_data(Tag.PATTERNS1)
         """
         return self._record.layer_and_mask_information.tagged_blocks
-
-    @property
-    def compatibility_mode(self) -> CompatibilityMode:
-        """
-        Set the compositing and layer organization compatibility mode. Writable.
-
-        This property checks whether the PSD file is compatible with
-        specific authoring tools, such as Photoshop or CLIP Studio Paint.
-        Different authoring tools may have different ways of handling layers,
-        such as the use of clipping masks for groups.
-        Default is Photoshop compatibility mode.
-
-        :return: :py:class:`~psd_tools.constants.CompatibilityMode`
-        """
-        return self._compatibility_mode
-
-    @compatibility_mode.setter
-    def compatibility_mode(self, value: CompatibilityMode) -> None:
-        if self._compatibility_mode != value:
-            self.mark_updated()
-        self._compatibility_mode = value
 
     @property
     def background_color(self) -> float | tuple[float, ...] | None:

@@ -124,7 +124,6 @@ from psd_tools.constants import (
     ChannelID,
     Clipping,
     ColorMode,
-    CompatibilityMode,
     Compression,
     ProtectedFlags,
     Resource,
@@ -1083,10 +1082,7 @@ class Layer(LayerProtocol):
         _clip_layers = []
         for layer in parent[index + 1 :]:  # type: ignore
             if layer.clipping:
-                if (
-                    isinstance(layer, GroupMixin)
-                    and layer._psd.compatibility_mode == CompatibilityMode.PHOTOSHOP
-                ):
+                if isinstance(layer, GroupMixin):
                     # In Photoshop, clipping groups are not supported.
                     break
                 _clip_layers.append(layer)
@@ -1305,9 +1301,7 @@ class Layer(LayerProtocol):
         # shape's origination, and on a ``FillLayer`` to raise without a
         # document; ``has_effects()`` parses the effects descriptor. ``name``,
         # ``visible``, ``clipping`` and ``has_mask()`` read already-parsed
-        # record fields, so guarding them would guard nothing --
-        # ``Group.clipping`` being the one that reads further, for the
-        # document's compatibility mode, which is set before a group exists.
+        # record fields, so guarding them would guard nothing.
         return "{}({!r}{}{}{}{}{})".format(
             self.__class__.__name__,
             self.name,
@@ -2359,23 +2353,12 @@ class Group(GroupMixin, Layer):
 
         :return: `bool`
         """
-        if self._psd.compatibility_mode == CompatibilityMode.PHOTOSHOP:
-            # In Photoshop, clipping groups are not supported.
-            return False
-        return self._record.clipping == Clipping.NON_BASE
+        # In Photoshop, clipping groups are not supported.
+        return False
 
     @clipping.setter
     def clipping(self, value: bool) -> None:
-        if self._psd.compatibility_mode == CompatibilityMode.PHOTOSHOP:
-            logger.warning(
-                "Cannot set clipping flag on groups in Photoshop compatibility mode."
-            )
-            return
-        clipping = Clipping.NON_BASE if value else Clipping.BASE
-        if self._record.clipping != clipping:
-            self._psd.mark_updated()
-        self._record.clipping = clipping
-        self._invalidate_bbox()
+        logger.warning("Cannot set clipping flag on groups, as in Photoshop.")
 
     @property
     def open_folder(self) -> bool:
