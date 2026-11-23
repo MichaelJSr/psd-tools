@@ -71,8 +71,7 @@ Things to know when writing compositor tests:
   regression.
 - A fixture whose layer runs past the canvas measures the viewport clip, not
   the feature under test. Compare ``layer.bbox`` with ``psd.size`` first.
-- CI runs several Python versions, and behaviour differs between them. Check
-  type annotations and lock bumps on the newest one.
+- CI runs Python 3.14 on Linux and macOS.
 
 Acknowledgments
 ---------------

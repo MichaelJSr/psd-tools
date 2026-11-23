@@ -5,9 +5,8 @@ See also [the contributor documentation](docs/contributing.rst) for setup, test 
 ## Development Notes
 
 - Use `uv run python` / `uv run pytest` to use the development runtime.
-- Rendering and compositing need the optional `composite` extra: `uv sync --extra composite`
-  (`aggdraw`, `scipy`). It is optional because it is unavailable on some
-  platforms. Tests needing it skip via `pytest.importorskip`.
+- Rendering and compositing need the `composite` extra (`aggdraw`, `scipy`); there is no
+  fallback without it. `uv sync --group dev` installs it.
 - `uv run pytest path::test_name` runs one test.
 - Lint and types: `uv run ruff check`, `uv run ruff format`, `uv run mypy`.
 - Work merges into `main` and is tagged `cards-YYYYMMDD` for AutoCroissant; no upstream PRs.
