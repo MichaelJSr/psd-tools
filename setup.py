@@ -2,30 +2,16 @@
 """Build script for the Cython extension."""
 
 import sys
-import sysconfig
 
 from Cython.Build import cythonize
 from setuptools import Extension, setup
 
-# Free-threaded Python (cp314t) does not support the Limited API / stable ABI.
-# Each cp314t version needs its own version-specific wheel.
-_py_gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
-try:
-    is_free_threaded = int(_py_gil_disabled or 0) != 0
-except (TypeError, ValueError):
-    is_free_threaded = False
-# On Windows, the stable-ABI extension links against python3.dll which is absent
-# in many embedded Python environments (e.g. Substance Painter). Windows wheels
-# are already built per-version, so there is no benefit to the Limited API there.
-use_limited_api = (
-    sys.version_info >= (3, 13) and not is_free_threaded and sys.platform != "win32"
-)
+use_limited_api = sys.version_info >= (3, 13)
 
 extensions = [
     Extension(
         "psd_tools.compression._rle",
         ["src/psd_tools/compression/_rle.pyx"],
-        extra_compile_args=["/d2FH4-"] if sys.platform == "win32" else [],
         define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
         py_limited_api=use_limited_api,
     ),
@@ -51,14 +37,14 @@ extensions = [
     Extension(
         "psd_tools.composite._distance",
         ["src/psd_tools/composite/_distance.pyx"],
-        extra_compile_args=[] if sys.platform == "win32" else ["-ffp-contract=off"],
+        extra_compile_args=["-ffp-contract=off"],
         define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
         py_limited_api=use_limited_api,
     ),
     Extension(
         "psd_tools.composite._blend",
         ["src/psd_tools/composite/_blend.pyx"],
-        extra_compile_args=[] if sys.platform == "win32" else ["-ffp-contract=off"],
+        extra_compile_args=["-ffp-contract=off"],
         define_macros=[("Py_LIMITED_API", 0x030D0000)] if use_limited_api else [],
         py_limited_api=use_limited_api,
     ),

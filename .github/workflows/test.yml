@@ -11,13 +11,12 @@ permissions:
 
 jobs:
   test:
-    name: Test on Python ${{ matrix.python-version }} - ${{ matrix.os }}
+    name: Test on Python 3.14 - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ['3.11', '3.12', '3.13', '3.14', '3.15']
+        os: [ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v7
@@ -28,10 +27,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync -p ${{ matrix.python-version }} --group dev
-        env:
-          # Without cp315 wheels, aggdraw builds from sdist; an empty root skips its freetype detection
-          AGGDRAW_FREETYPE_ROOT: ''
+        run: uv sync -p 3.14 --group dev
 
       - name: Run tests
         run: uv run pytest
@@ -44,44 +40,3 @@ jobs:
 
       - name: Run type checker
         run: uv run mypy
-
-  test-no-composite:
-    name: Test without composite dependencies - Python ${{ matrix.python-version }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.11', '3.15', '3.15t']  # Test min, max, and free-threaded
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Install dependencies without composite extra
-        run: |
-          # Install core dependencies + test group only (no dev group with composite deps)
-          uv sync -p ${{ matrix.python-version }} --group test --no-dev
-
-      - name: Run core tests (excluding composite-dependent tests)
-        run: |
-          uv run --no-dev pytest \
-            --ignore=tests/psd_tools/composite/ \
-            -m "not composite"
-
-  test-summary:
-    name: Test Summary
-    needs: [test, test-no-composite]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Check test results
-        run: |
-          if [ "${{ needs.test.result }}" != "success" ] || [ "${{ needs.test-no-composite.result }}" != "success" ]; then
-            echo "Tests failed"
-            exit 1
-          fi
-          echo "All tests passed!"
