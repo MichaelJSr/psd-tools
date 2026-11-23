@@ -7,9 +7,7 @@ See also [the contributor documentation](docs/contributing.rst) for setup, test 
 - Use `uv run python` / `uv run pytest` to use the development runtime.
 - Rendering and compositing need the `composite` extra (`aggdraw`, `scipy`); there is no
   fallback without it. `uv sync --group dev` installs it.
-- CI (`.github/workflows/test.yml`): Python 3.11-3.15 on Linux, macOS and Windows; and on
-  3.11, 3.15 and 3.15t without the `composite` extra (`tests/psd_tools/composite/` and
-  `-m composite` left out, `pytest.importorskip` tests skipped).
+- CI (`.github/workflows/test.yml`): Python 3.14 on Linux and macOS (where the fork runs).
 - `uv run pytest path::test_name` runs one test.
 - Lint and types: `uv run ruff check`, `uv run ruff format`, `uv run mypy`.
 - Work merges into `main` and is tagged `cards-YYYYMMDD` for AutoCroissant; no upstream PRs.
