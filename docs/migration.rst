@@ -4,23 +4,22 @@ Migration Guide
 v1.12
 -----
 
-psd-tools 1.12 makes composite dependencies optional to support more platforms and Python versions.
+psd-tools 1.12 moves the composite dependencies into the ``composite`` extra.
 
-Breaking Change: Optional Composite Dependencies
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Breaking Change: Composite Extra
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The main breaking change in version 1.12 is that advanced compositing features now require
-optional dependencies that must be explicitly installed.
+The main breaking change in version 1.12 is that compositing needs the ``composite``
+extra, which must be explicitly installed; there is no fallback without it.
 
 **What changed:**
 
-- Dependencies ``aggdraw``, ``scipy``, and ``scikit-image`` are now optional
-- Basic compositing with NumPy continues to work without these dependencies
-- Advanced features (vector masks, gradients, patterns, effects) require the composite extra
+- Dependencies ``aggdraw``, ``scipy``, and ``scikit-image`` moved to the ``composite`` extra
+- Compositing requires the composite extra
 
 **Migration steps:**
 
-If you use advanced compositing features, install with the composite extra::
+If you composite, install with the composite extra::
 
     pip install 'psd-tools[composite]'
 
@@ -33,27 +32,12 @@ Or install the dependencies separately::
 - Reading and writing PSD files
 - Accessing layer information (names, dimensions, etc.)
 - Extracting raw pixel data with NumPy
-- Basic pixel layer compositing
-- Using cached layer previews
-
-**What requires composite dependencies:**
-
-- Vector shape and stroke rendering
-- Gradient fills
-- Pattern fills
-- Layer effects rendering (drop shadows, strokes, etc.)
 
 **Error handling:**
 
-If you try to use advanced features without the dependencies installed, you'll see a clear error::
+A render that needs a missing package raises ``ImportError`` naming it::
 
-    ImportError: Advanced compositing features require optional dependencies.
-    Install with: pip install 'psd-tools[composite]'
-
-**Why this change:**
-
-This change enables psd-tools to run on platforms where some composite dependencies
-are unavailable, particularly Python 3.14 on Windows where ``aggdraw`` is not yet available.
+    ModuleNotFoundError: No module named 'scipy'
 
 Module Structure Changes
 ~~~~~~~~~~~~~~~~~~~~~~~~

@@ -40,22 +40,14 @@ Use `pip` to install the package:
 pip install psd-tools
 ```
 
-For advanced layer compositing features, install with the `composite` extra:
+Compositing needs the `composite` extra (`aggdraw`, `scipy`); there is no
+fallback without it:
 
 ```bash
 pip install 'psd-tools[composite]'
 ```
 
-The composite extra provides optional dependencies (`aggdraw`, `scipy`)
-for advanced rendering features:
-
-- Vector shape and stroke rendering
-- Gradient and pattern fills
-- Layer effects rendering
-
-Basic compositing works without these dependencies using cached previews or simple
-pixel-based operations. Note that the composite extra may not be available on all
-platforms. Where aggdraw has no wheel and builds from source on Windows, a build that
+Where aggdraw has no wheel and builds from source on Windows, a build that
 fails to find FreeType succeeds with the environment variable `AGGDRAW_FREETYPE_ROOT`
 set to an empty value.
 

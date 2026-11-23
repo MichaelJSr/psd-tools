@@ -321,22 +321,10 @@ option::
 
 .. note::
 
-    Advanced compositing features require optional dependencies. Install with::
+    Compositing needs the ``composite`` extra (``aggdraw``, ``scipy``); there
+    is no fallback without it. Install with::
 
         pip install psd-tools[composite]
-
-    These dependencies (``aggdraw``, ``scipy``) are needed for:
-
-    - Vector strokes
-    - Gradient and pattern fills
-    - Layer effects
-
-    Basic compositing works without them by using cached previews or simple
-    pixel-based operations. If a feature requires missing dependencies, an
-    ``ImportError`` with installation instructions will be raised. The layer
-    effects that need ``scipy`` -- drop shadows, outer and inner glows, inner
-    shadows, satins and bevels -- are the exception: without it they are left
-    out with a warning.
 
     Layer effects are approximated, and some of their settings are not
     drawn: jitter, a gradient glow's noise, a gradient inner glow, and a
