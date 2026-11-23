@@ -5,8 +5,9 @@ the caller draws the new picture on the layer's quad and :py:func:`draw` draws
 the filters over it as Photoshop 2023 does: a Puppet Warp from its stored mesh,
 a Perspective Warp of one quad, an Invert, a Gaussian Blur, a Motion Blur at
 angle 0 of a distance :py:data:`MOTION` holds, a Mosaic, a Hue/Saturation
-(master only), a Black & White (no tint) and a Relative Selective Color of the
-six hues.
+(master only), a Black & White (no tint), a Relative Selective Color of the
+six hues and a Reduce Noise at Strength 10 alone
+(:py:mod:`~psd_tools.composite.reduce_noise`).
 Plain float64 numpy, element by element in a fixed order, and exactly rounded
 sums (no BLAS), so every CPU gives the same result.
 
@@ -33,7 +34,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 
 from psd_tools.api._descriptor import get_scalar
-from psd_tools.composite import adjustments
+from psd_tools.composite import adjustments, reduce_noise
 from psd_tools.constants import ColorMode
 from psd_tools.psd.descriptor import Descriptor, Double, List, UnitFloat
 
@@ -54,6 +55,7 @@ _MTNB = b"MtnB"  # Motion Blur
 _HSTR = b"HStr"  # Hue/Saturation
 _BANW = b"BanW"  # Black & White
 _SLCC = b"SlcC"  # Selective Color
+_DNOI = b"denoise"  # Reduce Noise
 _HUES = (b"Rds ", b"Ylws", b"Grns", b"Cyns", b"Bls ", b"Mgnt")  # Selective Color's
 _INKS = (b"Cyn ", b"Mgnt", b"Ylw ", b"Blck")
 _GREYS = (  # Black & White's sliders and defaults
@@ -103,6 +105,8 @@ def _kind(item: Descriptor) -> str | None:
         return "grey"
     if cls == _SLCC and _selective(fltr) is not None:
         return "selective"
+    if cls == _DNOI and _denoise(fltr):
+        return "denoise"
     return None
 
 
@@ -146,6 +150,33 @@ def _selective(fltr: Descriptor) -> list[tuple[int, list[float]]] | None:
         inks = [get_scalar(item, k, float, 0.0) / 100 for k in _INKS]
         found.append((_HUES.index(hue), inks))
     return found
+
+
+def _denoise(fltr: Descriptor) -> bool:
+    """A Reduce Noise as proven: Strength 10, Preserve Details 0%.
+
+    Reduce Color Noise and Sharpen Details 0%, no Remove JPEG Artifact and no
+    channel of its own (Advanced: Red, Green and Blue at 0).
+    """
+    if (
+        get_scalar(fltr, b"ClNs", float, 1.0) != 0
+        or get_scalar(fltr, b"Shrp", float, 1.0) != 0
+        or get_scalar(fltr, b"removeJPEGArtifact", bool, True)
+    ):
+        return False
+    found = {}
+    for item in fltr.get(b"channelDenoise") or []:
+        ref = item.get(b"Chnl") if isinstance(item, Descriptor) else None
+        channel = _enum(ref[0]) if isinstance(ref, List) and len(ref) == 1 else None
+        if channel not in (b"Cmps", b"Rd  ", b"Grn ", b"Bl  ") or channel in found:
+            return False
+        found[channel] = (
+            get_scalar(item, b"Amnt", int, -1),
+            get_scalar(item, b"EdgF", int, 0),
+        )
+    return found.pop(b"Cmps", None) == (10, 0) and all(
+        v == (0, 0) for v in found.values()
+    )
 
 
 def _cell(fltr: Descriptor) -> int | None:
@@ -264,8 +295,9 @@ def drawable(
     *size* :py:func:`placeable` there), an Invert, a Gaussian Blur, a Motion
     Blur at angle 0 of a distance :py:data:`MOTION` holds, a Mosaic on a
     canvas of whole cells and a quad not above or left of it, a
-    Hue/Saturation of the master alone, a Black & White without tint or a
-    Relative Selective Color of the six hues, Normal at 100%, in an RGB
+    Hue/Saturation of the master alone, a Black & White without tint, a
+    Relative Selective Color of the six hues or a Reduce Noise at Strength 10
+    alone (Preserve Details 0%, nothing else on), Normal at 100%, in an RGB
     document. A filter mask does not refuse. *corners*: the quad the new
     picture is drawn on, by default the layer's; *size*: its file's pixels
     ``(width, height)``, by default the object's.
@@ -315,6 +347,8 @@ def draw(
         return out, box
     if kind in ("hue", "grey", "selective"):
         return _adjusted(so, kind, item[b"Fltr"], out), box
+    if kind == "denoise":
+        return reduce_noise.reduce_noise(out), box
     if kind == "mosaic":
         cell = _cell(item[b"Fltr"])
         assert cell is not None
