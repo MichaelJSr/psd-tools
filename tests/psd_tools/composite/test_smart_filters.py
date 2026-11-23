@@ -10,14 +10,17 @@ from psd_tools import PSDImage
 from psd_tools.api._descriptor import get_scalar
 from psd_tools.api.layers import SmartObjectLayer
 from psd_tools.composite import smart_filters as sf
+from psd_tools.composite.reduce_noise import _lab
 from psd_tools.psd.descriptor import (
     Bool,
     Descriptor,
     Double,
     Enumerated,
+    EnumeratedReference,
     Integer,
     List,
     RawData,
+    Reference,
     UnitFloat,
 )
 from psd_tools.terminology import Unit
@@ -345,6 +348,96 @@ def test_colour_filters_past_the_proven_settings_refused() -> None:
     ):
         entry[b"Fltr"] = fltr
         assert not so.can_draw_filters()
+
+
+def _denoise(
+    strength: int = 10,
+    preserve: int = 0,
+    colour: float = 0.0,
+    sharpen: float = 0.0,
+    jpeg: bool = False,
+    red: int = 0,
+) -> Descriptor:
+    """Reduce Noise; by default Burly Bomb's (Strength 10, nothing else)."""
+    fltr = Descriptor(classID=b"denoise")
+    fltr[b"ClNs"] = UnitFloat(colour, Unit.Percent)
+    fltr[b"Shrp"] = UnitFloat(sharpen, Unit.Percent)
+    fltr[b"removeJPEGArtifact"] = Bool(jpeg)
+    items = []
+    for channel, amount in (
+        (b"Cmps", strength),
+        (b"Rd  ", red),
+        (b"Grn ", 0),
+        (b"Bl  ", 0),
+    ):
+        item = Descriptor(classID=b"channelDenoiseParams")
+        ref = Reference()
+        ref.append(EnumeratedReference("", b"Chnl", b"Chnl", channel))
+        item[b"Chnl"] = ref
+        item[b"Amnt"] = Integer(amount)
+        if channel == b"Cmps":
+            item[b"EdgF"] = Integer(preserve)
+        items.append(item)
+    fltr[b"channelDenoise"] = _list(items)
+    return fltr
+
+
+def test_reduce_noise_at_strength_10_alone() -> None:
+    layer, entry = _object()
+    so = layer.smart_object
+    entry[b"Fltr"] = _denoise()
+    assert so.can_draw_filters()
+    for fltr in (
+        _denoise(strength=9),
+        _denoise(preserve=25),
+        _denoise(colour=50),
+        _denoise(sharpen=25),
+        _denoise(jpeg=True),
+        _denoise(red=3),
+    ):
+        entry[b"Fltr"] = fltr
+        assert not so.can_draw_filters()
+
+
+def _lightness(rgb: np.ndarray) -> np.ndarray:
+    return _lab(np.rint(rgb * 255).astype(np.int64))[0]
+
+
+def test_reduce_noise_as_photoshop() -> None:
+    """Photoshop 2023's: grain to 0.27-0.29 of its L spread, edges kept.
+
+    Grey stays grey, alpha and box kept; a clear pixel's colour counts for
+    nothing (black or white under it, the same).
+    """
+    layer, entry = _object()
+    entry[b"Fltr"] = _denoise()
+    so = layer.smart_object
+    rng = np.random.default_rng(1122)
+    grain = np.full((64, 64, 4), 1.0, np.float32)
+    grey = np.clip(128 + rng.normal(0, 16, (64, 64)), 0, 255) / 255
+    grain[..., :3] = grey[..., None]
+    out, box = so.draw_filters(grain, (3, 4, 67, 68))
+    assert box == (3, 4, 67, 68)
+    assert np.array_equal(out[..., 3], grain[..., 3])
+    assert (out[..., :3] == out[..., :1]).all()
+    inner = (slice(8, 56), slice(8, 56))
+    kept = _lightness(out[inner][..., :3]).std()
+    assert 0.22 < kept / _lightness(grain[inner][..., :3]).std() < 0.34
+    step = np.ones((32, 32, 4), np.float32)
+    step[..., :3] = np.where(np.arange(32) < 16, 100, 132)[None, :, None] / 255
+    out, _ = so.draw_filters(step, (0, 0, 32, 32))
+    assert np.array_equal(np.rint(out * 255), np.rint(step * 255))
+    yy, xx = np.mgrid[0:48, 0:48] - 23.5
+    alpha = np.clip(16 - np.hypot(yy, xx), 0, 4) / 4
+    disk = np.zeros((48, 48, 4), np.float32)
+    disk[..., 0], disk[..., 3] = 0.8, alpha
+    disk[..., 1] = 0.3 + 0.05 * rng.random((48, 48))
+    drawn = []
+    for under in (0.0, 1.0):
+        pic = disk.copy()
+        pic[alpha == 0, :3] = under
+        drawn.append(np.rint(so.draw_filters(pic, (0, 0, 48, 48))[0] * 255))
+    assert np.abs(drawn[0] - drawn[1])[alpha > 0].max() <= 1
 
 
 def _mosaic(cell: float) -> Descriptor:
