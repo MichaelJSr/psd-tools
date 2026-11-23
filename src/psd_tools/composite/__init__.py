@@ -5,7 +5,8 @@ This subpackage provides the rendering engine for compositing PSD layers
 into raster images. It implements Photoshop's blend modes, layer effects,
 and vector shape rasterization.
 
-**Note**: This module requires optional dependencies. Install with::
+**Note**: This module needs the ``composite`` extra; there is no fallback
+without it. Install with::
 
     pip install 'psd-tools[composite]'
 
@@ -15,7 +16,7 @@ Or using uv::
 
 The composite extra includes:
 
-- ``aggdraw``: For drawing a vector stroke. A path is *filled* without it
+- ``aggdraw``: For drawing a vector stroke
 - ``scipy``: For advanced image processing operations, including the
   distance transform that places stroke effects
 
@@ -48,7 +49,6 @@ screen, overlay, soft light, and more.
 Performance considerations:
 
 - Compositing can be memory-intensive for large documents
-- A stroked vector shape requires aggdraw; filling one does not
 - Some effects have limited support compared to Photoshop
 """
 

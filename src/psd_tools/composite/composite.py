@@ -1678,7 +1678,7 @@ def composite_pil(
         PIL Image with composited result, or None if viewport is empty
 
     Note:
-        - Requires optional composite dependencies (aggdraw, scipy)
+        - Requires the ``composite`` extra (aggdraw, scipy)
         - LAB and Duotone color modes have limited blending support
         - Alpha channel handling varies by color mode
         - Multichannel documents come back single-channel. PIL has no
@@ -1923,8 +1923,7 @@ def composite(
         >>> color, shape, alpha = composite(psd, layer_filter=lambda l: l.visible)
 
     Note:
-        - Requires optional composite dependencies (aggdraw, scipy)
-          for vector shape rendering, gradient fills, and layer effects.
+        - Requires the ``composite`` extra (aggdraw, scipy).
         - Adjustment layers have limited support.
         - Text rendering is not supported (text layers show as raster if available).
           In an RGB document a type layer's stored raster is blended in

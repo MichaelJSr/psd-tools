@@ -14,19 +14,10 @@ Use `pip` to install the package::
 
     pip install psd-tools
 
-For advanced layer compositing features, install with the ``composite`` extra::
+Compositing needs the ``composite`` extra (``aggdraw``, ``scipy``); there is
+no fallback without it::
 
     pip install psd-tools[composite]
-
-This installs optional dependencies (``aggdraw``, ``scipy``)
-required for:
-
-- Vector shape and stroke rendering
-- Gradient and pattern fills
-- Layer effects rendering
-
-Basic compositing operations work without these dependencies by using cached
-previews or simple NumPy-based operations.
 
 .. note::
 

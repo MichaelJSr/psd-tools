@@ -5,7 +5,7 @@ psd\_tools\.composite
 
 This module provides layer rendering and compositing functionality.
 
-**Installation**: Requires optional dependencies::
+**Installation**: Requires the ``composite`` extra::
 
     pip install psd-tools[composite]
 
